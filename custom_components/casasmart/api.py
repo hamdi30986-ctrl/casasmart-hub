@@ -56,7 +56,11 @@ from .const import (
 from .auth_api import (
     CasaSmartChallengeView,
     CasaSmartEnrollView,
+    CasaSmartPairingCodesView,
+    CasaSmartPairingCodeView,
     CasaSmartTokenView,
+    CasaSmartUsersView,
+    CasaSmartUserView,
     authenticate_request,
 )
 from .entity_bridge import CommandError, validate_command
@@ -87,6 +91,10 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     hass.http.register_view(CasaSmartEnrollView(hass))
     hass.http.register_view(CasaSmartChallengeView(hass))
     hass.http.register_view(CasaSmartTokenView(hass))
+    hass.http.register_view(CasaSmartPairingCodesView(hass))
+    hass.http.register_view(CasaSmartPairingCodeView(hass))
+    hass.http.register_view(CasaSmartUsersView(hass))
+    hass.http.register_view(CasaSmartUserView(hass))
     domain_data["views_registered"] = True
     _LOGGER.debug("CasaSmart REST + WS views registered")
 

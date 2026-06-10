@@ -24,12 +24,14 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 import auth_engine  # noqa: E402
 import auth_keys  # noqa: E402
 import auth_tokens  # noqa: E402
+import throttle as throttle_mod  # noqa: E402
 from auth_engine import (  # noqa: E402
     AuthEngine,
     ChallengeError,
     EnrollError,
     ThrottledError,
     UnknownDeviceError,
+    UserManagementError,
 )
 from auth_tokens import TokenError  # noqa: E402
 from storage import HubStorage, JsonConfigStore  # noqa: E402
@@ -239,7 +241,7 @@ class EngineTests(unittest.TestCase):
 
     def test_throttle_locks_after_failures(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
-        for _ in range(auth_engine.THROTTLE_MAX_FAILURES):
+        for _ in range(throttle_mod.MAX_FAILURES):
             challenge = self.engine.create_challenge(device_id)
             with self.assertRaises(ChallengeError):
                 self.engine.redeem_challenge(
@@ -251,7 +253,7 @@ class EngineTests(unittest.TestCase):
 
     def test_success_resets_throttle(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
-        for _ in range(auth_engine.THROTTLE_MAX_FAILURES - 1):
+        for _ in range(throttle_mod.MAX_FAILURES - 1):
             challenge = self.engine.create_challenge(device_id)
             with self.assertRaises(ChallengeError):
                 self.engine.redeem_challenge(
@@ -272,6 +274,83 @@ class EngineTests(unittest.TestCase):
         engine2.warm_up()
         claims = engine2.validate_token(token)
         self.assertEqual(claims["sub"], device_id)
+
+    # -- B2: user management + instant revocation -----------------------------
+
+    def test_list_devices_has_no_keys(self):
+        device_id = self.engine.enroll_device("Phone", "admin", self.public_pem)
+        users = self.engine.list_devices()
+        self.assertEqual(len(users), 1)
+        self.assertEqual(users[0]["device_id"], device_id)
+        self.assertEqual(users[0]["role"], "admin")
+        self.assertNotIn("public_key", users[0])
+
+    def test_delete_kills_tokens_instantly(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self._login(device_id)["token"]
+        self.engine.validate_token(token)  # valid before
+        self.engine.delete_device(device_id)
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)  # dead after, no TTL wait
+        with self.assertRaises(UnknownDeviceError):
+            self.engine.delete_device(device_id)
+
+    def test_role_change_kills_tokens_instantly(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self._login(device_id)["token"]
+        updated = self.engine.update_device(device_id, role="sub-admin")
+        self.assertEqual(updated["role"], "sub-admin")
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)  # old privileges revoked
+        # Fresh login carries the new role.
+        claims = self.engine.validate_token(self._login(device_id)["token"])
+        self.assertEqual(claims["role"], "sub-admin")
+
+    def test_room_scope_edit(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        updated = self.engine.update_device(device_id, rooms=["area_kitchen"])
+        self.assertEqual(updated["rooms"], ["area_kitchen"])
+        claims = self.engine.validate_token(self._login(device_id)["token"])
+        self.assertEqual(claims["rooms"], ["area_kitchen"])
+        # Explicit None clears the scope; sentinel default leaves it alone.
+        self.assertEqual(
+            self.engine.update_device(device_id, rooms=None)["rooms"], None
+        )
+        self.assertEqual(
+            self.engine.update_device(device_id, role="user")["rooms"], None
+        )
+
+    def test_admin_is_untouchable(self):
+        device_id = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        with self.assertRaises(UserManagementError):
+            self.engine.update_device(device_id, role="user")
+        with self.assertRaises(UserManagementError):
+            self.engine.delete_device(device_id)
+        self.assertTrue(self.engine.has_admin())
+
+    def test_no_promotion_to_admin(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        with self.assertRaises(UserManagementError):
+            self.engine.update_device(device_id, role="admin")
+
+    def test_rooms_only_for_user_role(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        with self.assertRaises(UserManagementError):
+            self.engine.update_device(
+                device_id, role="sub-admin", rooms=["area_living"]
+            )
+
+    def test_revocation_survives_restart(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self._login(device_id)["token"]
+        self.engine.update_device(device_id, role="sub-admin")
+        engine2 = AuthEngine(
+            self.storage.table("auth_devices"),
+            JsonConfigStore(Path(self._tmp.name) / "cfg.json"),
+        )
+        engine2.warm_up()  # cache rebuilt from storage — ver came with it
+        with self.assertRaises(TokenError):
+            engine2.validate_token(token)
 
     def test_authorize_matrix(self):
         cases = [

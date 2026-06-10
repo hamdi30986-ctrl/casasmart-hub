@@ -22,6 +22,10 @@ Token shape (claims):
 - ``iat`` / ``exp`` — issued-at / expiry, epoch seconds. Validation
   allows ``CLOCK_SKEW`` seconds of slack both ways (plan: JWT expiry math
   must survive small clock drift; the real NTP gate is a separate block).
+- ``ver`` — the device record's auth version at issue time (B2). The
+  engine bumps a device's version on any role/room change and checks
+  ``ver`` on validation, so privilege edits invalidate outstanding
+  tokens immediately instead of riding out the TTL.
 - ``jti`` — unique token id (random), for future revocation lists.
 """
 
@@ -72,6 +76,7 @@ def issue_token(
     role: str,
     rooms: list[str] | None,
     ttl: int,
+    ver: int = 1,
     now: float | None = None,
 ) -> str:
     """Mint a signed token for an authenticated device."""
@@ -86,6 +91,7 @@ def issue_token(
         "sub": device_id,
         "role": role,
         "rooms": rooms,
+        "ver": int(ver),
         "iat": issued_at,
         "exp": issued_at + int(ttl),
         "jti": secrets.token_urlsafe(16),
@@ -143,6 +149,8 @@ def validate_token(
         or any(not isinstance(room, str) for room in rooms)
     ):
         raise TokenError("Malformed rooms claim")
+    if not isinstance(claims.get("ver"), int):
+        raise TokenError("Missing version claim")
 
     current = now if now is not None else time.time()
     exp = claims.get("exp")

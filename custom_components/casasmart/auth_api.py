@@ -1,16 +1,25 @@
-"""Auth endpoints + the request gate (Track B — B1.6).
+"""Auth + pairing + user-management endpoints (Track B — B1.6/B2).
 
-Three endpoints implement the plan's login chain:
+The plan's login chain:
 
 - ``POST /api/casasmart/auth/enroll`` — store a device's P-256 public key
-  + name + role. Gated by HA's bearer auth as the B1.6 provisioning
-  stopgap; B2 replaces that gate with single-use pairing codes (the
-  engine call does not change).
+  + name. B2: gated by a **single-use pairing code** (role + room scope
+  are baked into the code at generation — the phone never picks its own
+  privileges) and **LAN-only** (plan decision 2026-06-10: a leaked
+  pairing QR is useless remotely).
 - ``POST /api/casasmart/auth/challenge`` — hand out a one-time nonce.
 - ``POST /api/casasmart/auth/token`` — verify the signed nonce, mint the
   JWT. Failures are deliberately generic (don't reveal whether the
   device, the nonce, or the signature was the problem) and throttled
-  (HTTP 429 + Retry-After after 5 failures).
+  (HTTP 429 + Retry-After, escalating walls).
+
+B2 management surface (JWT-gated through the same engine):
+
+- ``POST/GET /api/casasmart/pairing/codes`` + ``DELETE .../{code_id}`` —
+  generate / list / revoke pairing codes (``pairing.generate``, admin).
+- ``GET /api/casasmart/users``, ``PATCH/DELETE .../{device_id}`` — list,
+  edit (role/room scope), unpair (``users.manage``, admin). Edits and
+  unpairs invalidate the target's outstanding JWTs instantly.
 
 ``authenticate_request`` is the gate every protected view calls: extracts
 the bearer token, validates it against the engine, checks the named
@@ -20,6 +29,7 @@ grant access to CasaSmart endpoints — the plan's "HA token must die").
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -30,15 +40,16 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .auth_engine import (
-    AdminExistsError,
     AuthEngine,
     ChallengeError,
     EnrollError,
-    ThrottledError,
     UnknownDeviceError,
+    UserManagementError,
 )
 from .auth_tokens import TokenError
 from .const import DOMAIN
+from .pairing import CodeInvalidError, PairingError, PairingManager
+from .throttle import ThrottledError
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
@@ -53,6 +64,60 @@ def get_engine(hass: HomeAssistant) -> AuthEngine | None:
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.auth
+
+
+def get_pairing(hass: HomeAssistant) -> PairingManager | None:
+    """The loaded entry's pairing manager, or None when not set up."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.pairing
+
+
+def is_lan_request(
+    request: web.Request, extra_cidrs: list[str] | None = None
+) -> bool:
+    """True when the request came from the hub's own network.
+
+    Plan decision 2026-06-10: initial pairing only completes on the LAN.
+    Loopback is deliberately EXCLUDED — tunnel traffic (cloudflared)
+    reaches HA from localhost, and the whole point is that a leaked
+    pairing QR is useless remotely. Link-local/private = LAN; everything
+    else (public, loopback, unparseable) is refused.
+
+    ``extra_cidrs`` (hub config ``pairing_extra_lan_cidrs``, default
+    unset) is a deployment knob for environments whose port proxy
+    rewrites the client source address — e.g. Docker Desktop presents
+    every inbound connection as its VM interface IP, which can land in
+    public space. Production (HAOS/LXC) sees real peer IPs and never
+    needs this.
+    """
+    try:
+        remote = ipaddress.ip_address(request.remote or "")
+    except ValueError:
+        return False
+    if (remote.is_private or remote.is_link_local) and not remote.is_loopback:
+        return True
+    for cidr in extra_cidrs or []:
+        try:
+            if remote in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            _LOGGER.error("Ignoring invalid pairing_extra_lan_cidrs entry %r", cidr)
+    return False
+
+
+def get_extra_lan_cidrs(hass: HomeAssistant) -> list[str]:
+    """The hub's configured extra pairing CIDRs ([] when unset/malformed)."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return []
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    cidrs = runtime_data.hub_config.get("pairing_extra_lan_cidrs")
+    if not isinstance(cidrs, list):
+        return []
+    return [cidr for cidr in cidrs if isinstance(cidr, str)]
 
 
 def authenticate_request(
@@ -103,21 +168,88 @@ async def _json_body(request: web.Request) -> dict[str, Any] | None:
 
 
 class CasaSmartEnrollView(HomeAssistantView):
-    """POST /api/casasmart/auth/enroll — register a device identity.
+    """POST /api/casasmart/auth/enroll — pair a device (B2 flow).
 
-    HA bearer auth is the provisioning gate until B2's pairing codes.
+    The pairing code IS the credential: role + room scope come from the
+    code, never from the request. LAN-only — see ``is_lan_request``.
     """
 
     url = f"/api/{DOMAIN}/auth/enroll"
     name = f"api:{DOMAIN}:auth:enroll"
-    requires_auth = True
+    requires_auth = False  # the pairing code is the gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
         engine = get_engine(self._hass)
-        if engine is None:
+        pairing = get_pairing(self._hass)
+        if engine is None or pairing is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
+            # Plan: a leaked/photographed pairing QR is useless remotely.
+            _LOGGER.warning(
+                "Pairing attempt refused (non-LAN source: %s)", request.remote
+            )
+            return self.json_message(
+                "Pairing is only available on the hub's own network",
+                HTTPStatus.FORBIDDEN,
+            )
+        payload = await _json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+
+        source = request.remote or "unknown"
+        try:
+            grant = await self._hass.async_add_executor_job(
+                pairing.redeem, payload.get("pairing_code", ""), source
+            )
+        except ThrottledError as err:
+            return _throttled_response(err)
+        except CodeInvalidError:
+            # One generic bucket: unknown vs expired vs used is not leaked.
+            return self.json_message(
+                "Invalid pairing code", HTTPStatus.UNAUTHORIZED
+            )
+
+        try:
+            device_id = await self._hass.async_add_executor_job(
+                lambda: engine.enroll_device(
+                    name=payload.get("name", ""),
+                    role=grant["role"],
+                    public_key_pem=payload.get("public_key", ""),
+                    rooms=grant["rooms"],
+                )
+            )
+        except EnrollError as err:
+            # The code was already consumed (single-use is non-negotiable);
+            # a bad name/key costs the code. The admin can mint another.
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        return self.json(
+            {"device_id": device_id, "role": grant["role"], "rooms": grant["rooms"]},
+            HTTPStatus.CREATED,
+        )
+
+
+class CasaSmartPairingCodesView(HomeAssistantView):
+    """POST/GET /api/casasmart/pairing/codes — mint + list pairing codes."""
+
+    url = f"/api/{DOMAIN}/pairing/codes"
+    name = f"api:{DOMAIN}:pairing:codes"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "pairing.generate")
+        if error is not None:
+            return error
+        pairing = get_pairing(self._hass)
+        if pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
         payload = await _json_body(request)
         if payload is None:
@@ -126,20 +258,144 @@ class CasaSmartEnrollView(HomeAssistantView):
             )
 
         try:
-            device_id = await self._hass.async_add_executor_job(
-                lambda: engine.enroll_device(
-                    name=payload.get("name", ""),
+            issued = await self._hass.async_add_executor_job(
+                lambda: pairing.generate_code(
                     role=payload.get("role", ""),
-                    public_key_pem=payload.get("public_key", ""),
                     rooms=payload.get("rooms"),
+                    expires_in=payload.get("expires_in", "1d"),
                 )
             )
-        except AdminExistsError as err:
-            return self.json_message(str(err), HTTPStatus.CONFLICT)
-        except EnrollError as err:
+        except PairingError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        return self.json({"device_id": device_id}, HTTPStatus.CREATED)
+        _LOGGER.info(
+            "Pairing code minted by %s (role=%s)", claims["sub"], issued["role"]
+        )
+        return self.json(issued, HTTPStatus.CREATED)
+
+    async def get(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "pairing.generate")
+        if error is not None:
+            return error
+        pairing = get_pairing(self._hass)
+        if pairing is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        codes = await self._hass.async_add_executor_job(pairing.list_codes)
+        return self.json({"codes": codes})
+
+
+class CasaSmartPairingCodeView(HomeAssistantView):
+    """DELETE /api/casasmart/pairing/codes/{code_id} — revoke a code."""
+
+    url = f"/api/{DOMAIN}/pairing/codes/{{code_id}}"
+    name = f"api:{DOMAIN}:pairing:code"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def delete(self, request: web.Request, code_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "pairing.generate")
+        if error is not None:
+            return error
+        pairing = get_pairing(self._hass)
+        if pairing is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        revoked = await self._hass.async_add_executor_job(
+            pairing.revoke_code, code_id
+        )
+        if not revoked:
+            return self.json_message("Unknown pairing code", HTTPStatus.NOT_FOUND)
+        return self.json({"revoked": code_id})
+
+
+class CasaSmartUsersView(HomeAssistantView):
+    """GET /api/casasmart/users — every paired device (admin only)."""
+
+    url = f"/api/{DOMAIN}/users"
+    name = f"api:{DOMAIN}:users"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        users = await self._hass.async_add_executor_job(engine.list_devices)
+        return self.json({"users": users})
+
+
+class CasaSmartUserView(HomeAssistantView):
+    """PATCH/DELETE /api/casasmart/users/{device_id} — edit or unpair.
+
+    Both paths invalidate the target's outstanding JWTs instantly (the
+    engine bumps/drops the device's auth version). The admin record is
+    untouchable here — factory reset is the only way out for the owner.
+    """
+
+    url = f"/api/{DOMAIN}/users/{{device_id}}"
+    name = f"api:{DOMAIN}:user"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def patch(self, request: web.Request, device_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        payload = await _json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        if "role" not in payload and "rooms" not in payload:
+            return self.json_message(
+                "Nothing to change: provide role and/or rooms",
+                HTTPStatus.BAD_REQUEST,
+            )
+
+        try:
+            updated = await self._hass.async_add_executor_job(
+                lambda: engine.update_device(
+                    device_id,
+                    role=payload.get("role"),
+                    rooms=payload["rooms"] if "rooms" in payload else ...,
+                )
+            )
+        except UnknownDeviceError:
+            return self.json_message("Unknown device", HTTPStatus.NOT_FOUND)
+        except UserManagementError as err:
+            return self.json_message(str(err), HTTPStatus.FORBIDDEN)
+
+        return self.json(updated)
+
+    async def delete(self, request: web.Request, device_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+
+        try:
+            await self._hass.async_add_executor_job(
+                engine.delete_device, device_id
+            )
+        except UnknownDeviceError:
+            return self.json_message("Unknown device", HTTPStatus.NOT_FOUND)
+        except UserManagementError as err:
+            return self.json_message(str(err), HTTPStatus.FORBIDDEN)
+
+        return self.json({"unpaired": device_id})
 
 
 class CasaSmartChallengeView(HomeAssistantView):

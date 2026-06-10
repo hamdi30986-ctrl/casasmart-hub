@@ -23,9 +23,18 @@ Flow (plan, "Phone Identity"):
    ``validate_token`` -> claims (role + room scope) -> ``authorize``.
 
 Brute-force posture (plan: "Every secret-guessing surface is throttled
-server-side"): failed redemptions are counted per device id; 5 failures
-inside the window = 30-minute lockout. Counters are in-memory — a hub
-reboot clears them, which costs an attacker their progress, not us.
+server-side"): failed redemptions are counted per device id through the
+shared ``FailureThrottle`` (B2 — 5 failures -> escalating lockout,
+1 min -> 5 -> 30 -> 1 hr). Counters are in-memory — a hub reboot clears
+them, which costs an attacker their progress, not us.
+
+B2 additions: user management (list / role + room edits / unpair) with
+the single-admin invariant enforced on every path, and **instant
+revocation** — the engine keeps an in-memory mirror of every device's
+{role, rooms, version}; ``validate_token`` checks the token's ``ver``
+claim against it, so deleting a device or editing its privileges kills
+outstanding JWTs on the very next request (plan: "Delete public key
+from hub = instant kill... no logout needed").
 
 No Home Assistant imports — the engine depends only on the dict-like
 storage table and config-store contracts (docs/STORAGE.md), so the whole
@@ -50,7 +59,9 @@ try:
         ROLE_SUB_ADMIN,
         ROLE_USER,
         VALID_ROLES,
+        TokenError,
     )
+    from .throttle import FailureThrottle, ThrottledError
 except ImportError:  # top-level import in the test env (no HA package init)
     import auth_keys  # type: ignore[no-redef]
     import auth_tokens  # type: ignore[no-redef]
@@ -59,7 +70,9 @@ except ImportError:  # top-level import in the test env (no HA package init)
         ROLE_SUB_ADMIN,
         ROLE_USER,
         VALID_ROLES,
+        TokenError,
     )
+    from throttle import FailureThrottle, ThrottledError  # type: ignore[no-redef]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,12 +81,6 @@ TOKEN_TTL = 45 * 60
 # One-time login nonces: short-lived, few outstanding per device.
 CHALLENGE_TTL = 60.0
 MAX_CHALLENGES_PER_DEVICE = 8
-# Plan: "5 tries before a 30-min wall" on every secret-guessing surface.
-THROTTLE_MAX_FAILURES = 5
-THROTTLE_LOCKOUT = 30 * 60.0
-# Failure counters are keyed by client-supplied device ids — cap the table
-# so id-spam can't grow hub memory unbounded (locked entries are kept).
-MAX_THROTTLE_ENTRIES = 1000
 
 # What each role may do. Every endpoint names a permission; the engine is
 # the only place the role->permission mapping lives (B2 extends the list,
@@ -106,12 +113,8 @@ class ChallengeError(AuthError):
     """Challenge missing, expired, already used, or signature invalid."""
 
 
-class ThrottledError(AuthError):
-    """Too many failures — locked out."""
-
-    def __init__(self, retry_after: float) -> None:
-        super().__init__(f"Too many failed attempts, retry in {int(retry_after)}s")
-        self.retry_after = retry_after
+class UserManagementError(AuthError):
+    """A user-management edit was refused (unknown id, admin protected...)."""
 
 
 class AuthEngine:
@@ -123,18 +126,30 @@ class AuthEngine:
         self._lock = threading.RLock()
         # challenge_id -> {device_id, nonce, expires}
         self._challenges: dict[str, dict[str, Any]] = {}
-        # device_id -> {failures, locked_until}
-        self._throttle: dict[str, dict[str, float]] = {}
+        self.throttle = FailureThrottle("login")
         self._secret: bytes | None = None
+        # In-memory mirror of every device's auth-relevant state:
+        # device_id -> {role, rooms, ver}. validate_token reads ONLY this
+        # (no DB hop on the event loop); enroll/update/delete keep it in
+        # sync, which is what makes revocation instant.
+        self._device_cache: dict[str, dict[str, Any]] = {}
 
     def warm_up(self) -> None:
-        """Load (or mint) the signing secret and touch the devices table.
+        """Load the signing secret + device cache from storage.
 
         Blocking file/DB I/O — called once via executor at setup so the
-        first ``validate_token`` on the event loop is pure HMAC math.
+        first ``validate_token`` on the event loop is pure CPU.
         """
         self._signing_secret()
-        len(self._devices)
+        with self._lock:
+            self._device_cache = {
+                device_id: {
+                    "role": record.get("role"),
+                    "rooms": record.get("rooms"),
+                    "ver": int(record.get("ver", 1)),
+                }
+                for device_id, record in self._devices.items()
+            }
 
     # -- signing secret ------------------------------------------------------
 
@@ -174,32 +189,131 @@ class AuthEngine:
         except auth_keys.KeyError_ as err:
             raise EnrollError(str(err)) from err
 
-        # Plan decision 2026-06-09: exactly one admin per hub, the hub
-        # rejects any attempt to create a second one.
-        if role == ROLE_ADMIN and any(
-            record.get("role") == ROLE_ADMIN for _, record in self._devices.items()
-        ):
-            raise AdminExistsError("This hub already has an admin")
+        with self._lock:
+            # Plan decision 2026-06-09: exactly one admin per hub, the hub
+            # rejects any attempt to create a second one.
+            if role == ROLE_ADMIN and self.has_admin():
+                raise AdminExistsError("This hub already has an admin")
 
-        device_id = f"dev-{secrets.token_urlsafe(12)}"
-        self._devices[device_id] = {
-            "name": name.strip(),
-            "role": role,
-            "public_key": canonical_pem,
-            "rooms": rooms,
-            "paired_at": time.time(),
-        }
+            device_id = f"dev-{secrets.token_urlsafe(12)}"
+            self._devices[device_id] = {
+                "name": name.strip(),
+                "role": role,
+                "public_key": canonical_pem,
+                "rooms": rooms,
+                "ver": 1,
+                "paired_at": time.time(),
+            }
+            self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
         return device_id
+
+    def has_admin(self) -> bool:
+        """True once the hub's single admin is enrolled (cache read — cheap)."""
+        with self._lock:
+            return any(
+                entry.get("role") == ROLE_ADMIN
+                for entry in self._device_cache.values()
+            )
+
+    # -- user management (storage — call via executor) ---------------------------
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        """Every enrolled device, public fields only (no keys)."""
+        return [
+            {
+                "device_id": device_id,
+                "name": record.get("name"),
+                "role": record.get("role"),
+                "rooms": record.get("rooms"),
+                "paired_at": int(record.get("paired_at", 0)),
+            }
+            for device_id, record in self._devices.items()
+        ]
+
+    def update_device(
+        self,
+        device_id: str,
+        role: str | None = None,
+        rooms: list[str] | None | object = ...,
+    ) -> dict[str, Any]:
+        """Edit a device's role and/or room scope; outstanding JWTs die.
+
+        The admin record is immutable here — there is no demotion path
+        (plan: factory reset is how an admin changes hands). Promotion
+        ceiling is sub-admin: ``role`` may only be sub-admin or user.
+        ``rooms=...`` (the sentinel) means "leave unchanged"; an explicit
+        None clears the scope. Room scope only applies to the user role.
+        """
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownDeviceError("Unknown device")
+            if record.get("role") == ROLE_ADMIN:
+                raise UserManagementError("The admin account cannot be modified")
+            new_role = role if role is not None else record.get("role")
+            if new_role not in (ROLE_SUB_ADMIN, ROLE_USER):
+                raise UserManagementError("Role must be sub-admin or user")
+            new_rooms = record.get("rooms") if rooms is ... else rooms
+            if new_rooms is not None and (
+                not isinstance(new_rooms, list)
+                or any(not isinstance(room, str) or not room for room in new_rooms)
+            ):
+                raise UserManagementError("rooms must be a list of area ids")
+            # Plan: room-scoping is a per-USER toggle; sub-admins see all rooms.
+            if new_rooms is not None and new_role != ROLE_USER:
+                raise UserManagementError("Room scope only applies to the user role")
+
+            record["role"] = new_role
+            record["rooms"] = new_rooms
+            record["ver"] = int(record.get("ver", 1)) + 1
+            self._devices[device_id] = record  # persist
+            self._device_cache[device_id] = {
+                "role": new_role,
+                "rooms": new_rooms,
+                "ver": record["ver"],
+            }
+        _LOGGER.info(
+            "Device %s updated (role=%s, rooms=%s) — outstanding tokens invalidated",
+            device_id,
+            new_role,
+            "all" if new_rooms is None else len(new_rooms),
+        )
+        return {
+            "device_id": device_id,
+            "name": record.get("name"),
+            "role": new_role,
+            "rooms": new_rooms,
+            "paired_at": int(record.get("paired_at", 0)),
+        }
+
+    def delete_device(self, device_id: str) -> None:
+        """Unpair a device — instant kill for all its tokens (plan B2).
+
+        The admin cannot be deleted through the API; factory reset is the
+        only way the owner identity leaves the hub.
+        """
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownDeviceError("Unknown device")
+            if record.get("role") == ROLE_ADMIN:
+                raise UserManagementError("The admin account cannot be unpaired")
+            del self._devices[device_id]
+            self._device_cache.pop(device_id, None)
+            # Their login surface resets too — stale lockouts shouldn't
+            # follow a re-pair of the same phone.
+            self.throttle.clear(device_id)
+        _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
 
     # -- challenge-response login ---------------------------------------------
 
     def create_challenge(self, device_id: str) -> dict[str, Any]:
         """Issue a one-time nonce for the device to sign."""
-        self._check_throttle(device_id)
+        self.throttle.check(device_id)
         if device_id not in self._devices:
             # Counts as a guess: unknown ids must not be a free probe.
-            self._record_failure(device_id)
+            self.throttle.record_failure(device_id)
             raise UnknownDeviceError("Unknown device")
 
         with self._lock:
@@ -231,7 +345,7 @@ class AuthEngine:
         self, device_id: str, challenge_id: str, signature_b64: str
     ) -> dict[str, Any]:
         """Verify the signed nonce; mint a JWT on success."""
-        self._check_throttle(device_id)
+        self.throttle.check(device_id)
 
         with self._lock:
             self._prune_challenges()
@@ -248,16 +362,17 @@ class AuthEngine:
         ):
             # One generic failure path — the error must not reveal WHICH
             # part was wrong (unknown device vs dead nonce vs bad signature).
-            self._record_failure(device_id)
+            self.throttle.record_failure(device_id)
             raise ChallengeError("Challenge verification failed")
 
-        self._clear_failures(device_id)
+        self.throttle.clear(device_id)
         token = auth_tokens.issue_token(
             self._signing_secret(),
             device_id=device_id,
             role=record["role"],
             rooms=record.get("rooms"),
             ttl=TOKEN_TTL,
+            ver=int(record.get("ver", 1)),
         )
         return {
             "token": token,
@@ -269,8 +384,20 @@ class AuthEngine:
     # -- validation + authorization (pure CPU — safe on the event loop) --------
 
     def validate_token(self, token: str) -> dict[str, Any]:
-        """Signature + claims check; returns claims or raises TokenError."""
-        return auth_tokens.validate_token(self._signing_secret(), token)
+        """Signature + claims + revocation check; claims or TokenError.
+
+        Beyond the cryptographic check, the token must point at a device
+        that is STILL enrolled with the SAME auth version — unpairing or
+        editing a device kills its outstanding JWTs here, on the next
+        request (plan B2: "Delete public key from hub = instant kill").
+        Pure in-memory work — safe on the event loop.
+        """
+        claims = auth_tokens.validate_token(self._signing_secret(), token)
+        with self._lock:
+            cached = self._device_cache.get(claims["sub"])
+        if cached is None or cached["ver"] != claims.get("ver"):
+            raise TokenError("Token revoked")
+        return claims
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
@@ -286,47 +413,6 @@ class AuthEngine:
     def allowed_rooms(claims: dict[str, Any]) -> list[str] | None:
         """The token's room scope: a list of area ids, or None = all rooms."""
         return claims.get("rooms")
-
-    # -- throttle ---------------------------------------------------------------
-
-    def _check_throttle(self, device_id: str) -> None:
-        with self._lock:
-            entry = self._throttle.get(device_id)
-            if entry is None:
-                return
-            remaining = entry.get("locked_until", 0.0) - time.monotonic()
-            if remaining > 0:
-                raise ThrottledError(remaining)
-
-    def _record_failure(self, device_id: str) -> None:
-        with self._lock:
-            # Attacker-supplied ids land here too — keep the table bounded
-            # by dropping unlocked counters first, oldest insertion first.
-            if len(self._throttle) >= MAX_THROTTLE_ENTRIES:
-                now = time.monotonic()
-                for key in [
-                    k
-                    for k, v in self._throttle.items()
-                    if v.get("locked_until", 0.0) <= now
-                ][: len(self._throttle) - MAX_THROTTLE_ENTRIES + 1]:
-                    del self._throttle[key]
-            entry = self._throttle.setdefault(
-                device_id, {"failures": 0.0, "locked_until": 0.0}
-            )
-            entry["failures"] += 1
-            if entry["failures"] >= THROTTLE_MAX_FAILURES:
-                entry["locked_until"] = time.monotonic() + THROTTLE_LOCKOUT
-                entry["failures"] = 0.0
-                _LOGGER.warning(
-                    "Auth lockout for %r after %d failures (%.0f min)",
-                    device_id,
-                    THROTTLE_MAX_FAILURES,
-                    THROTTLE_LOCKOUT / 60,
-                )
-
-    def _clear_failures(self, device_id: str) -> None:
-        with self._lock:
-            self._throttle.pop(device_id, None)
 
     # -- housekeeping -------------------------------------------------------------
 
