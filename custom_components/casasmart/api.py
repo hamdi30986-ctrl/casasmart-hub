@@ -23,6 +23,10 @@ Entity bridge (B1.4) — authenticated:
 Auth note: these use HA's built-in bearer-token auth (``requires_auth``)
 as a stopgap. B1.6 replaces it with the CasaSmart auth engine (device
 keypairs → JWT + role enforcement) — same endpoints, different gate.
+
+WebSocket (B1.5): ``/api/casasmart/ws`` is registered here too but lives
+in ``ws.py`` (first-frame auth, real-time push through the same
+``filtering`` code path as the views above).
 """
 
 from __future__ import annotations
@@ -37,11 +41,6 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import (
-    area_registry as ar,
-    device_registry as dr,
-    entity_registry as er,
-)
 
 from .const import (
     API_VERSION,
@@ -50,12 +49,9 @@ from .const import (
     MIN_APP_VERSION,
     SUPPORTED_API_VERSIONS,
 )
-from .entity_bridge import (
-    CommandError,
-    is_exposed,
-    serialize_state,
-    validate_command,
-)
+from .entity_bridge import CommandError, validate_command
+from .filtering import is_served, serialize_device
+from .ws import CasaSmartWebSocketView
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
@@ -77,8 +73,9 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     hass.http.register_view(CasaSmartDevicesView(hass))
     hass.http.register_view(CasaSmartDeviceView(hass))
     hass.http.register_view(CasaSmartCommandView(hass))
+    hass.http.register_view(CasaSmartWebSocketView(hass, hub_version))
     domain_data["views_registered"] = True
-    _LOGGER.debug("CasaSmart REST views registered")
+    _LOGGER.debug("CasaSmart REST + WS views registered")
 
 
 def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
@@ -175,35 +172,6 @@ class CasaSmartHealthView(HomeAssistantView):
 # -- B1.4 entity bridge views --------------------------------------------------
 
 
-def _area_name(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve an entity's area name (entity override first, then device)."""
-    entry = er.async_get(hass).async_get(entity_id)
-    if entry is None:
-        return None
-    area_id = entry.area_id
-    if area_id is None and entry.device_id is not None:
-        device = dr.async_get(hass).async_get(entry.device_id)
-        area_id = device.area_id if device else None
-    if area_id is None:
-        return None
-    area = ar.async_get(hass).async_get_area(area_id)
-    return area.name if area else None
-
-
-def _is_visible(hass: HomeAssistant, entity_id: str) -> bool:
-    """True when the entity should appear in the device list.
-
-    Filters out registry-hidden entities and config/diagnostic entities
-    (firmware sensors, restart buttons, ...) — the app shows devices,
-    not plumbing. Entities with no registry entry (template/MQTT-yaml)
-    are visible by default.
-    """
-    entry = er.async_get(hass).async_get(entity_id)
-    if entry is None:
-        return True
-    return entry.hidden_by is None and entry.entity_category is None
-
-
 class CasaSmartDevicesView(HomeAssistantView):
     """GET /api/casasmart/devices — the curated device list."""
 
@@ -218,10 +186,9 @@ class CasaSmartDevicesView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         """Return every exposed, visible entity as a CasaSmart device."""
         devices = [
-            serialize_state(state, area=_area_name(self._hass, state.entity_id))
+            serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
-            if is_exposed(state.entity_id)
-            and _is_visible(self._hass, state.entity_id)
+            if is_served(self._hass, state.entity_id)
         ]
         devices.sort(key=lambda device: device["entity_id"])
         return self.json({"devices": devices, "count": len(devices)})
@@ -240,17 +207,11 @@ class CasaSmartDeviceView(HomeAssistantView):
     async def get(self, request: web.Request, entity_id: str) -> web.Response:
         """Return a single device, 404 if unknown or outside the surface."""
         state = self._hass.states.get(entity_id)
-        if (
-            state is None
-            or not is_exposed(entity_id)
-            or not _is_visible(self._hass, entity_id)
-        ):
+        if state is None or not is_served(self._hass, entity_id):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        return self.json(
-            serialize_state(state, area=_area_name(self._hass, entity_id))
-        )
+        return self.json(serialize_device(self._hass, state))
 
 
 class CasaSmartCommandView(HomeAssistantView):
@@ -270,11 +231,7 @@ class CasaSmartCommandView(HomeAssistantView):
         probing can't distinguish "bad action" on entities that don't exist.
         """
         state = self._hass.states.get(entity_id)
-        if (
-            state is None
-            or not is_exposed(entity_id)
-            or not _is_visible(self._hass, entity_id)
-        ):
+        if state is None or not is_served(self._hass, entity_id):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -335,9 +292,7 @@ class CasaSmartCommandView(HomeAssistantView):
                 "ok": True,
                 "entity_id": entity_id,
                 "action": payload["action"],
-                "device": serialize_state(
-                    new_state, area=_area_name(self._hass, entity_id)
-                )
+                "device": serialize_device(self._hass, new_state)
                 if new_state
                 else None,
             }
