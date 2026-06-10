@@ -1,6 +1,6 @@
-"""CasaSmart REST API (Track B — B1.3 skeleton).
+"""CasaSmart REST API (Track B — B1.3 skeleton + B1.4 entity bridge).
 
-Two unauthenticated endpoints:
+Unauthenticated endpoints (the only two, both read-only):
 
 - ``GET /api/casasmart/handshake`` — the version contract between app and
   hub. The app sends ``X-CasaSmart-API-Version`` and decides from the
@@ -11,12 +11,23 @@ Two unauthenticated endpoints:
   (watchdog, restore LXC, uptime checks). Reports integration + storage
   state. No auth for the same reason a load-balancer health check has none.
 
-Everything else added in B1.4+ requires auth — these two are the only
-deliberate exceptions, and both are read-only.
+Entity bridge (B1.4) — authenticated:
+
+- ``GET /api/casasmart/devices`` — curated device list (exposed domains
+  only, allowlisted attributes, area names resolved).
+- ``GET /api/casasmart/devices/{entity_id}`` — one device.
+- ``POST /api/casasmart/devices/{entity_id}/command`` — whitelisted
+  control: ``{"action": "turn_on", "data": {...}}`` validated against
+  the per-domain command table before any service call.
+
+Auth note: these use HA's built-in bearer-token auth (``requires_auth``)
+as a stopgap. B1.6 replaces it with the CasaSmart auth engine (device
+keypairs → JWT + role enforcement) — same endpoints, different gate.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -24,7 +35,13 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
 
 from .const import (
     API_VERSION,
@@ -32,6 +49,12 @@ from .const import (
     DOMAIN,
     MIN_APP_VERSION,
     SUPPORTED_API_VERSIONS,
+)
+from .entity_bridge import (
+    CommandError,
+    is_exposed,
+    serialize_state,
+    validate_command,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +74,9 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
         return
     hass.http.register_view(CasaSmartHandshakeView(hub_version))
     hass.http.register_view(CasaSmartHealthView(hass, hub_version))
+    hass.http.register_view(CasaSmartDevicesView(hass))
+    hass.http.register_view(CasaSmartDeviceView(hass))
+    hass.http.register_view(CasaSmartCommandView(hass))
     domain_data["views_registered"] = True
     _LOGGER.debug("CasaSmart REST views registered")
 
@@ -144,3 +170,175 @@ class CasaSmartHealthView(HomeAssistantView):
         body["storage"] = "ok"
         body["schema_version"] = schema_version
         return self.json(body)
+
+
+# -- B1.4 entity bridge views --------------------------------------------------
+
+
+def _area_name(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Resolve an entity's area name (entity override first, then device)."""
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is None:
+        return None
+    area_id = entry.area_id
+    if area_id is None and entry.device_id is not None:
+        device = dr.async_get(hass).async_get(entry.device_id)
+        area_id = device.area_id if device else None
+    if area_id is None:
+        return None
+    area = ar.async_get(hass).async_get_area(area_id)
+    return area.name if area else None
+
+
+def _is_visible(hass: HomeAssistant, entity_id: str) -> bool:
+    """True when the entity should appear in the device list.
+
+    Filters out registry-hidden entities and config/diagnostic entities
+    (firmware sensors, restart buttons, ...) — the app shows devices,
+    not plumbing. Entities with no registry entry (template/MQTT-yaml)
+    are visible by default.
+    """
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is None:
+        return True
+    return entry.hidden_by is None and entry.entity_category is None
+
+
+class CasaSmartDevicesView(HomeAssistantView):
+    """GET /api/casasmart/devices — the curated device list."""
+
+    url = f"/api/{DOMAIN}/devices"
+    name = f"api:{DOMAIN}:devices"
+    # HA bearer-token auth for now; replaced by the CasaSmart auth engine in B1.6.
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return every exposed, visible entity as a CasaSmart device."""
+        devices = [
+            serialize_state(state, area=_area_name(self._hass, state.entity_id))
+            for state in self._hass.states.async_all()
+            if is_exposed(state.entity_id)
+            and _is_visible(self._hass, state.entity_id)
+        ]
+        devices.sort(key=lambda device: device["entity_id"])
+        return self.json({"devices": devices, "count": len(devices)})
+
+
+class CasaSmartDeviceView(HomeAssistantView):
+    """GET /api/casasmart/devices/{entity_id} — one device."""
+
+    url = f"/api/{DOMAIN}/devices/{{entity_id}}"
+    name = f"api:{DOMAIN}:device"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request, entity_id: str) -> web.Response:
+        """Return a single device, 404 if unknown or outside the surface."""
+        state = self._hass.states.get(entity_id)
+        if (
+            state is None
+            or not is_exposed(entity_id)
+            or not _is_visible(self._hass, entity_id)
+        ):
+            return self.json_message(
+                f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
+            )
+        return self.json(
+            serialize_state(state, area=_area_name(self._hass, entity_id))
+        )
+
+
+class CasaSmartCommandView(HomeAssistantView):
+    """POST /api/casasmart/devices/{entity_id}/command — whitelisted control."""
+
+    url = f"/api/{DOMAIN}/devices/{{entity_id}}/command"
+    name = f"api:{DOMAIN}:device:command"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request, entity_id: str) -> web.Response:
+        """Validate ``{"action", "data"}`` against the whitelist and execute.
+
+        Order matters: 404 (unknown device) before 400 (bad command), so
+        probing can't distinguish "bad action" on entities that don't exist.
+        """
+        state = self._hass.states.get(entity_id)
+        if (
+            state is None
+            or not is_exposed(entity_id)
+            or not _is_visible(self._hass, entity_id)
+        ):
+            return self.json_message(
+                f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
+            )
+
+        try:
+            payload = await request.json()
+        except ValueError:
+            return self.json_message("Invalid JSON body", HTTPStatus.BAD_REQUEST)
+        if not isinstance(payload, dict):
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+
+        try:
+            domain, service, service_data = validate_command(
+                entity_id, payload.get("action"), payload.get("data")
+            )
+        except CommandError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        # The service call returns before the device confirms over Zigbee/MQTT,
+        # so the state right after the call is usually stale. Listen for the
+        # entity's state_changed event (registered BEFORE the call) and give
+        # the device up to 2s to report — no event (e.g. turn_on on an
+        # already-on light) just means nothing changed.
+        changed = asyncio.Event()
+
+        @callback
+        def _on_state_changed(event: Event) -> None:
+            if event.data.get("entity_id") == entity_id:
+                changed.set()
+
+        unsub = self._hass.bus.async_listen("state_changed", _on_state_changed)
+        try:
+            await self._hass.services.async_call(
+                domain,
+                service,
+                {**service_data, "entity_id": entity_id},
+                blocking=True,
+            )
+            try:
+                async with asyncio.timeout(2.0):
+                    await changed.wait()
+            except TimeoutError:
+                pass
+        except HomeAssistantError as err:
+            _LOGGER.warning("Command %s on %s failed: %s", service, entity_id, err)
+            return self.json_message(
+                f"Command failed: {err}", HTTPStatus.BAD_GATEWAY
+            )
+        finally:
+            unsub()
+
+        # Post-command state — confirmed fresh if the device reported in time.
+        new_state = self._hass.states.get(entity_id)
+        return self.json(
+            {
+                "ok": True,
+                "entity_id": entity_id,
+                "action": payload["action"],
+                "device": serialize_state(
+                    new_state, area=_area_name(self._hass, entity_id)
+                )
+                if new_state
+                else None,
+            }
+        )
