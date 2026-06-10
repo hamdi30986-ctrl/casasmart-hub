@@ -135,6 +135,13 @@ def frame_state_changed(device: dict[str, Any]) -> dict[str, Any]:
     return {"type": "state_changed", "device": device}
 
 
+def frame_registry_changed(kind: str) -> dict[str, Any]:
+    """The home's organization changed (B17: floors/rooms/devices/scenes).
+    Deliberately content-free — the app re-fetches through its own scoped
+    registry GET, so the push can never leak what REST would hide."""
+    return {"type": "registry_changed", "kind": kind}
+
+
 def frame_pong() -> dict[str, Any]:
     """Reply to a client ping."""
     return {"type": "pong"}

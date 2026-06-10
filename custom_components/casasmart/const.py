@@ -30,6 +30,12 @@ TLS_PORT_DEFAULT = 8443
 # for tests, like the other pure modules).
 TLS_CERT_CHECK_INTERVAL_HOURS = 24
 
+# -- Device registry (B17) -------------------------------------------------------
+# Fired on the HA bus after any registry mutation (floors/rooms/devices/
+# scenes); the WS server forwards it to connected apps as a
+# `registry_changed` frame so they re-fetch through their scoped GET.
+EVENT_REGISTRY_CHANGED = "casasmart_registry_changed"
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

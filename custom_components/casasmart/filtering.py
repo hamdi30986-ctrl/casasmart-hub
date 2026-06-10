@@ -9,7 +9,7 @@ so WS can never leak what REST hides"). Do not duplicate this logic.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import (
@@ -18,11 +18,24 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
+from .const import DOMAIN
 from .entity_bridge import is_exposed, serialize_state
+from .registry import UNSET
+
+if TYPE_CHECKING:
+    from .registry import RegistryEngine
 
 
-def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve an entity's area id (entity override first, then device)."""
+def get_registry_engine(hass: HomeAssistant) -> "RegistryEngine | None":
+    """The loaded entry's registry engine, or None when not set up."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    return entries[0].runtime_data.registry
+
+
+def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
+    """HA's own area resolution (entity override first, then device)."""
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return None
@@ -33,11 +46,33 @@ def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
     return area_id
 
 
+def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Resolve an entity's room (B17: registry first, HA area fallback).
+
+    A registry assignment is the installer's word and wins outright —
+    including an explicit ``None`` ("Unassigned"), which must NOT snap
+    back to the HA area. Only entities with no registry record at all
+    fall through to HA's own area registry. Pure in-memory on both
+    paths — this runs on the event loop for every pushed state change.
+    """
+    registry = get_registry_engine(hass)
+    if registry is not None:
+        room = registry.room_of(entity_id)
+        if room is not UNSET:
+            return room
+    return ha_area_id_of(hass, entity_id)
+
+
 def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve an entity's area name (entity override first, then device)."""
+    """Resolve an entity's room name (registry room first, HA area fallback)."""
     area_id = area_id_of(hass, entity_id)
     if area_id is None:
         return None
+    registry = get_registry_engine(hass)
+    if registry is not None:
+        name = registry.room_name(area_id)
+        if name is not None:
+            return name
     area = ar.async_get(hass).async_get_area(area_id)
     return area.name if area else None
 
@@ -79,5 +114,13 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
-    """Serialize a state into the wire device dict, area resolved."""
-    return serialize_state(state, area=area_name(hass, state.entity_id))
+    """Serialize a state into the wire device dict — area resolved, and
+    the installer's registry display name (B17) overriding the HA
+    friendly name when one is set."""
+    device = serialize_state(state, area=area_name(hass, state.entity_id))
+    registry = get_registry_engine(hass)
+    if registry is not None:
+        display_name = registry.display_name_of(state.entity_id)
+        if display_name:
+            device["name"] = display_name
+    return device

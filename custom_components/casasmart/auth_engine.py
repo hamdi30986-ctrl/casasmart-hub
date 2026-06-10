@@ -90,6 +90,9 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "devices.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "users.manage": (ROLE_ADMIN,),
     "pairing.generate": (ROLE_ADMIN,),
+    # B17: organize the home (floors/rooms/assignments/scenes). Users are
+    # read-only — they see the layout through the registry GET, never edit it.
+    "registry.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
 }
 
 

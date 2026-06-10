@@ -48,6 +48,7 @@ from .auth_tokens import TokenError
 from .const import (
     API_VERSION,
     DOMAIN,
+    EVENT_REGISTRY_CHANGED,
     WS_AUTH_TIMEOUT,
     WS_CLOSE_AUTH_EXPIRED,
     WS_CLOSE_AUTH_FAILED,
@@ -101,6 +102,7 @@ class WsConnection:
         )
         self._sender_task: asyncio.Task | None = None
         self._unsub_state_changed: Any = None
+        self._unsub_registry_changed: Any = None
         self._token: str | None = None
         # Claims of the current token (role + room scope) — set on auth.
         self._claims: dict[str, Any] | None = None
@@ -118,6 +120,9 @@ class WsConnection:
         self._unsub_state_changed = self._hass.bus.async_listen(
             "state_changed", self._on_state_changed
         )
+        self._unsub_registry_changed = self._hass.bus.async_listen(
+            EVENT_REGISTRY_CHANGED, self._on_registry_changed
+        )
         recheck_task = asyncio.create_task(self._token_recheck_loop())
         try:
             await self._receive_loop()
@@ -129,6 +134,9 @@ class WsConnection:
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
+        if self._unsub_registry_changed is not None:
+            self._unsub_registry_changed()
+            self._unsub_registry_changed = None
         for task in (self._sender_task, self._reauth_deadline_task):
             if task is not None:
                 task.cancel()
@@ -314,6 +322,23 @@ class WsConnection:
         except asyncio.QueueFull:
             # Consumer is 256 frames behind: dead link or hopeless backlog.
             # Close instead of buffering unbounded; the app reconnects.
+            _LOGGER.warning("WS client too slow (queue full), disconnecting")
+            self._hass.async_create_task(
+                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
+            )
+
+    @callback
+    def _on_registry_changed(self, event: Event) -> None:
+        """B17: the home's organization changed — nudge the app to re-fetch.
+
+        The frame carries only the change kind, never content, so there
+        is nothing to room-scope here: the app's follow-up registry GET
+        is filtered to its own slice like every other read.
+        """
+        kind = event.data.get("kind", "registry")
+        try:
+            self._send_queue.put_nowait(ws_protocol.frame_registry_changed(kind))
+        except asyncio.QueueFull:
             _LOGGER.warning("WS client too slow (queue full), disconnecting")
             self._hass.async_create_task(
                 self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")

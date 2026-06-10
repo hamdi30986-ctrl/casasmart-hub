@@ -200,7 +200,7 @@ def authenticate_request(
     return claims, None
 
 
-async def _json_body(request: web.Request) -> dict[str, Any] | None:
+async def json_body(request: web.Request) -> dict[str, Any] | None:
     """The request body as a dict, or None when it isn't one."""
     try:
         payload = await request.json()
@@ -237,7 +237,7 @@ class CasaSmartEnrollView(HomeAssistantView):
                 "Pairing is only available on the hub's own network",
                 HTTPStatus.FORBIDDEN,
             )
-        payload = await _json_body(request)
+        payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
@@ -311,7 +311,7 @@ class CasaSmartRecoverView(HomeAssistantView):
                 "Recovery is only available on the hub's own network",
                 HTTPStatus.FORBIDDEN,
             )
-        payload = await _json_body(request)
+        payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
@@ -370,7 +370,7 @@ class CasaSmartPairingCodesView(HomeAssistantView):
         pairing = get_pairing(self._hass)
         if pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await _json_body(request)
+        payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
@@ -471,7 +471,7 @@ class CasaSmartUserView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await _json_body(request)
+        payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
@@ -531,7 +531,7 @@ class CasaSmartChallengeView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await _json_body(request)
+        payload = await json_body(request)
         device_id = (payload or {}).get("device_id")
         if not isinstance(device_id, str) or not device_id:
             return self.json_message("device_id is required", HTTPStatus.BAD_REQUEST)
@@ -562,7 +562,7 @@ class CasaSmartTokenView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await _json_body(request)
+        payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
