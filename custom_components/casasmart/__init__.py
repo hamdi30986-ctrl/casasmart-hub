@@ -1,8 +1,9 @@
-"""CasaSmart Hub integration (Track B — B1.2 scaffold).
+"""CasaSmart Hub integration (Track B — B1.3: storage + REST skeleton).
 
 Setup opens the B1.1 storage layer (SQLite+WAL + JSON config store) under
-<ha-config>/casasmart/ and parks it in runtime data. No API, no entities yet —
-those arrive in B1.3+. Unload closes storage cleanly.
+<ha-config>/casasmart/, parks it in runtime data, and registers the B1.3
+REST views (version handshake + health probe). Entities and the entity
+bridge arrive in B1.4+. Unload closes storage cleanly.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from pathlib import Path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.loader import async_get_integration
 
+from .api import async_register_views
 from .const import (
     BACKUP_DIR_NAME,
     DATA_DIR_NAME,
@@ -63,6 +66,12 @@ async def async_setup_entry(
         raise ConfigEntryNotReady(f"CasaSmart storage failed to open: {err}") from err
 
     entry.runtime_data = CasaSmartRuntimeData(storage=storage, hub_config=hub_config)
+
+    # Hub version = the integration's manifest version (single source of truth).
+    integration = await async_get_integration(hass, DOMAIN)
+    hub_version = str(integration.version) if integration.version else "0.0.0"
+    async_register_views(hass, hub_version=hub_version)
+
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
 
