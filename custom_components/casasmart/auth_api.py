@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -46,9 +47,11 @@ from .auth_engine import (
     UnknownDeviceError,
     UserManagementError,
 )
-from .auth_tokens import TokenError
+from .auth_tokens import ROLE_ADMIN, TokenError
 from .const import DOMAIN
 from .pairing import CodeInvalidError, PairingError, PairingManager
+from .recovery import CodeInvalidError as RecoveryCodeInvalidError
+from .recovery import RecoveryManager
 from .throttle import ThrottledError
 
 if TYPE_CHECKING:
@@ -73,6 +76,45 @@ def get_pairing(hass: HomeAssistant) -> PairingManager | None:
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.pairing
+
+
+def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
+    """The loaded entry's recovery manager, or None when not set up."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.recovery
+
+
+def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
+    """Surface a freshly minted recovery code to the HA admin (Hamdi).
+
+    The plaintext exists exactly once — here. Hamdi engraves it on the
+    metal card; dismissing the notification is the only copy gone.
+    """
+    persistent_notification.async_create(
+        hass,
+        f"Owner recovery code: **{code}**\n\n"
+        "Engrave this on the recovery card and store it with the owner. "
+        "It is single-use — redeeming it replaces the hub's admin and a "
+        "new code will be issued.",
+        title="CasaSmart Hub — recovery code",
+        notification_id=f"{DOMAIN}_recovery_code",
+    )
+
+
+def arm_recovery(hass: HomeAssistant) -> None:
+    """Mint the recovery code on a claimed hub (no-op when already armed).
+
+    Blocking storage write — call via executor.
+    """
+    recovery = get_recovery(hass)
+    if recovery is None:
+        return
+    code = recovery.ensure_armed()
+    if code is not None:
+        hass.loop.call_soon_threadsafe(notify_recovery_code, hass, code)
 
 
 def is_lan_request(
@@ -228,8 +270,85 @@ class CasaSmartEnrollView(HomeAssistantView):
             # a bad name/key costs the code. The admin can mint another.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
+        if grant["role"] == ROLE_ADMIN:
+            # The hub just got claimed — arm the B3 recovery code so the
+            # installer can engrave the card before leaving the site.
+            await self._hass.async_add_executor_job(arm_recovery, self._hass)
+
         return self.json(
             {"device_id": device_id, "role": grant["role"], "rooms": grant["rooms"]},
+            HTTPStatus.CREATED,
+        )
+
+
+class CasaSmartRecoverView(HomeAssistantView):
+    """POST /api/casasmart/auth/recover — metal-card admin recovery (B3).
+
+    Lost phone + no cloud backup: the owner presents the recovery code
+    plus a NEW keypair; the hub swaps its admin (old admin's JWTs die
+    instantly) and re-arms with a fresh code. Same posture as enroll:
+    the code is the credential, LAN-only, throttled per source.
+    """
+
+    url = f"/api/{DOMAIN}/auth/recover"
+    name = f"api:{DOMAIN}:auth:recover"
+    requires_auth = False  # the recovery code is the gate
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        engine = get_engine(self._hass)
+        recovery = get_recovery(self._hass)
+        if engine is None or recovery is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
+            # Plan: a photographed card is useless remotely.
+            _LOGGER.warning(
+                "Recovery attempt refused (non-LAN source: %s)", request.remote
+            )
+            return self.json_message(
+                "Recovery is only available on the hub's own network",
+                HTTPStatus.FORBIDDEN,
+            )
+        payload = await _json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+
+        source = request.remote or "unknown"
+        try:
+            await self._hass.async_add_executor_job(
+                recovery.redeem, payload.get("recovery_code", ""), source
+            )
+        except ThrottledError as err:
+            return _throttled_response(err)
+        except RecoveryCodeInvalidError:
+            # One generic bucket: wrong code vs not-armed is not leaked.
+            return self.json_message(
+                "Invalid recovery code", HTTPStatus.UNAUTHORIZED
+            )
+
+        try:
+            device_id = await self._hass.async_add_executor_job(
+                lambda: engine.replace_admin(
+                    name=payload.get("name", ""),
+                    public_key_pem=payload.get("public_key", ""),
+                )
+            )
+        except EnrollError as err:
+            # The code is spent (single-use is non-negotiable) but the old
+            # admin is untouched — replace_admin validates before swapping.
+            # Re-arm so the hub is never left without a recovery path.
+            await self._hass.async_add_executor_job(arm_recovery, self._hass)
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        # Fresh code for the next card — surfaced to the HA admin only.
+        await self._hass.async_add_executor_job(arm_recovery, self._hass)
+
+        return self.json(
+            {"device_id": device_id, "role": "admin", "rooms": None},
             HTTPStatus.CREATED,
         )
 

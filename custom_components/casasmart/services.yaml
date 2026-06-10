@@ -1,0 +1,8 @@
+factory_reset:
+  name: Factory reset (app layer)
+  description: >-
+    B3 nuclear tier — wipes the CasaSmart APP layer only: paired phones,
+    pairing codes and the recovery code. HA devices, automations and the
+    Zigbee mesh are untouched. The hub re-mints its bootstrap pairing code
+    so the owner can be re-onboarded (~5 minutes). Reachable only through
+    Home Assistant itself (Hamdi over Tailscale or on-site).

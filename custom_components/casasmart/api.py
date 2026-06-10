@@ -58,6 +58,7 @@ from .auth_api import (
     CasaSmartEnrollView,
     CasaSmartPairingCodesView,
     CasaSmartPairingCodeView,
+    CasaSmartRecoverView,
     CasaSmartTokenView,
     CasaSmartUsersView,
     CasaSmartUserView,
@@ -89,6 +90,7 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     hass.http.register_view(CasaSmartCommandView(hass))
     hass.http.register_view(CasaSmartWebSocketView(hass, hub_version))
     hass.http.register_view(CasaSmartEnrollView(hass))
+    hass.http.register_view(CasaSmartRecoverView(hass))
     hass.http.register_view(CasaSmartChallengeView(hass))
     hass.http.register_view(CasaSmartTokenView(hass))
     hass.http.register_view(CasaSmartPairingCodesView(hass))

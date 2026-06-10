@@ -208,6 +208,64 @@ class AuthEngine:
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
         return device_id
 
+    def replace_admin(self, name: str, public_key_pem: str) -> str:
+        """Swap the hub's admin for a new device (B3 owner recovery).
+
+        The ONE sanctioned path around "the admin record is immutable":
+        the caller has already proven ownership by redeeming the
+        single-use recovery code (LAN-only, throttled). Atomic under the
+        lock — the old admin device is unenrolled (its outstanding JWTs
+        die instantly via the ``ver`` cache, same as unpair) and the new
+        keypair becomes the admin. Inputs are validated BEFORE the old
+        admin is touched, so a bad key never leaves the hub adminless.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise EnrollError("Device name is required")
+        try:
+            canonical_pem = auth_keys.validate_public_key(public_key_pem)
+        except auth_keys.KeyError_ as err:
+            raise EnrollError(str(err)) from err
+
+        with self._lock:
+            old_admin_id = next(
+                (
+                    device_id
+                    for device_id, entry in self._device_cache.items()
+                    if entry.get("role") == ROLE_ADMIN
+                ),
+                None,
+            )
+            if old_admin_id is None:
+                # Unclaimed hub: recovery has nothing to replace — the
+                # bootstrap pairing code is the right door.
+                raise EnrollError("This hub has no admin to recover")
+
+            del self._devices[old_admin_id]
+            self._device_cache.pop(old_admin_id, None)
+            self.throttle.clear(old_admin_id)
+
+            device_id = f"dev-{secrets.token_urlsafe(12)}"
+            self._devices[device_id] = {
+                "name": name.strip(),
+                "role": ROLE_ADMIN,
+                "public_key": canonical_pem,
+                "rooms": None,
+                "ver": 1,
+                "paired_at": time.time(),
+            }
+            self._device_cache[device_id] = {
+                "role": ROLE_ADMIN,
+                "rooms": None,
+                "ver": 1,
+            }
+        _LOGGER.info(
+            "Owner recovery: admin %s replaced by %s (%s) — old admin tokens dead",
+            old_admin_id,
+            device_id,
+            name.strip(),
+        )
+        return device_id
+
     def has_admin(self) -> bool:
         """True once the hub's single admin is enrolled (cache read — cheap)."""
         with self._lock:
