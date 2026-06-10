@@ -20,6 +20,16 @@ MIN_APP_VERSION = "1.0.0"
 # Header the app sends to declare which API version it speaks.
 API_VERSION_HEADER = "X-CasaSmart-API-Version"
 
+# -- LAN TLS (B10) --------------------------------------------------------------
+# The CasaSmart API's own HTTPS port (hub_config "tls_port" overrides).
+# This — not HA's 8123 — is what the app talks to and what the tunnel routes to.
+TLS_PORT_DEFAULT = 8443
+# Leaf certs are re-minted inside their renewal margin — checked at startup
+# and on this cadence, so rotation needs no human and no fleet-wide expiry
+# date ever exists. File names + validity live in tls.py (flat-importable
+# for tests, like the other pure modules).
+TLS_CERT_CHECK_INTERVAL_HOURS = 24
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

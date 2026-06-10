@@ -3,23 +3,30 @@
 Setup opens the B1.1 storage layer (SQLite+WAL + JSON config store) under
 <ha-config>/casasmart/, parks it in runtime data, and registers the B1.3
 REST views (version handshake + health probe). Entities and the entity
-bridge arrive in B1.4+. Unload closes storage cleanly.
+bridge arrive in B1.4+. B10 adds the hub's permanent TLS identity and the
+dedicated HTTPS listener. Unload stops the listener and closes storage.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.loader import async_get_integration
 
 from homeassistant.components import persistent_notification
 
-from .api import async_register_views
+from .api import async_register_views, build_views
 from .auth_api import notify_recovery_code
 from .auth_engine import AuthEngine
 from .const import (
@@ -28,10 +35,13 @@ from .const import (
     DB_FILENAME,
     DOMAIN,
     HUB_CONFIG_FILENAME,
+    TLS_CERT_CHECK_INTERVAL_HOURS,
+    TLS_PORT_DEFAULT,
 )
 from .pairing import PairingManager
 from .recovery import RecoveryManager
 from .storage import HubStorage, JsonConfigStore, StorageError
+from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +57,8 @@ class CasaSmartRuntimeData:
     auth: AuthEngine
     pairing: PairingManager
     recovery: RecoveryManager
+    # B10 HTTPS listener; None only if the identity/cert layer failed setup.
+    tls: CasaSmartTlsServer | None = None
 
 
 def _open_storage(
@@ -132,8 +144,56 @@ async def async_setup_entry(
     hub_version = str(integration.version) if integration.version else "0.0.0"
     async_register_views(hass, hub_version=hub_version)
 
+    await _async_start_tls(hass, entry, data_dir, hub_version)
+
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
+
+
+async def _async_start_tls(
+    hass: HomeAssistant,
+    entry: CasaSmartConfigEntry,
+    data_dir: Path,
+    hub_version: str,
+) -> None:
+    """B10: bring up the dedicated HTTPS listener + the daily cert check.
+
+    A corrupt identity key aborts setup loudly (re-keying silently would
+    break every paired phone's pin — tls.py documents the recovery). A
+    port that won't bind does NOT abort: it's logged and retried on the
+    daily tick, and the plain views on HA's port keep working meanwhile.
+    """
+    runtime_data = entry.runtime_data
+    try:
+        material = await hass.async_add_executor_job(ensure_tls_material, data_dir)
+    except IdentityError as err:
+        # Non-transient by definition (corrupt identity key) — retrying
+        # can't fix it, a human must. ConfigEntryError, not NotReady.
+        raise ConfigEntryError(str(err)) from err
+
+    port = runtime_data.hub_config.get("tls_port")
+    if not isinstance(port, int):
+        port = TLS_PORT_DEFAULT
+
+    server = CasaSmartTlsServer(hass, port, material)
+    runtime_data.tls = server
+    await server.async_start(build_views(hass, hub_version))
+
+    async def _daily_cert_check(_now) -> None:
+        try:
+            fresh = await hass.async_add_executor_job(ensure_tls_material, data_dir)
+        except IdentityError:
+            _LOGGER.exception("Daily TLS check: identity key became unusable")
+            return
+        await server.async_refresh(fresh, build_views(hass, hub_version))
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            _daily_cert_check,
+            timedelta(hours=TLS_CERT_CHECK_INTERVAL_HOURS),
+        )
+    )
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
@@ -174,7 +234,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 async def async_unload_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
-    """Unload a config entry, closing storage cleanly."""
+    """Unload a config entry, stopping the TLS listener and closing storage."""
+    if entry.runtime_data.tls is not None:
+        await entry.runtime_data.tls.async_stop()
     await hass.async_add_executor_job(entry.runtime_data.storage.close)
     _LOGGER.info("CasaSmart Hub storage closed")
     return True

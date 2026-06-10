@@ -74,6 +74,32 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView]:
+    """Fresh instances of every CasaSmart view — THE canonical endpoint list.
+
+    Both listeners consume this: the plain views on HA's own port and the
+    B10 TLS listener on the hub's dedicated HTTPS port. One list means the
+    two surfaces can never drift (same endpoints, same auth gates, same
+    filtering).
+    """
+    return [
+        CasaSmartHandshakeView(hass, hub_version),
+        CasaSmartHealthView(hass, hub_version),
+        CasaSmartDevicesView(hass),
+        CasaSmartDeviceView(hass),
+        CasaSmartCommandView(hass),
+        CasaSmartWebSocketView(hass, hub_version),
+        CasaSmartEnrollView(hass),
+        CasaSmartRecoverView(hass),
+        CasaSmartChallengeView(hass),
+        CasaSmartTokenView(hass),
+        CasaSmartPairingCodesView(hass),
+        CasaSmartPairingCodeView(hass),
+        CasaSmartUsersView(hass),
+        CasaSmartUserView(hass),
+    ]
+
+
 def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     """Register the CasaSmart REST views (idempotent across entry reloads).
 
@@ -83,20 +109,8 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("views_registered"):
         return
-    hass.http.register_view(CasaSmartHandshakeView(hub_version))
-    hass.http.register_view(CasaSmartHealthView(hass, hub_version))
-    hass.http.register_view(CasaSmartDevicesView(hass))
-    hass.http.register_view(CasaSmartDeviceView(hass))
-    hass.http.register_view(CasaSmartCommandView(hass))
-    hass.http.register_view(CasaSmartWebSocketView(hass, hub_version))
-    hass.http.register_view(CasaSmartEnrollView(hass))
-    hass.http.register_view(CasaSmartRecoverView(hass))
-    hass.http.register_view(CasaSmartChallengeView(hass))
-    hass.http.register_view(CasaSmartTokenView(hass))
-    hass.http.register_view(CasaSmartPairingCodesView(hass))
-    hass.http.register_view(CasaSmartPairingCodeView(hass))
-    hass.http.register_view(CasaSmartUsersView(hass))
-    hass.http.register_view(CasaSmartUserView(hass))
+    for view in build_views(hass, hub_version):
+        hass.http.register_view(view)
     domain_data["views_registered"] = True
     _LOGGER.debug("CasaSmart REST + WS views registered")
 
@@ -110,13 +124,21 @@ def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
-    """GET /api/casasmart/handshake — the app↔hub version contract."""
+    """GET /api/casasmart/handshake — the app↔hub version contract.
+
+    B10 additions: the hub's permanent TLS identity public key (+ SPKI
+    SHA-256 fingerprint) and the HTTPS port. The app reads these AT
+    PAIRING (trust-on-first-use, on the LAN) and pins the identity key —
+    every later TLS connection must present a cert signed by it. Public
+    keys are public; serving them unauthenticated leaks nothing.
+    """
 
     url = f"/api/{DOMAIN}/handshake"
     name = f"api:{DOMAIN}:handshake"
     requires_auth = False
 
-    def __init__(self, hub_version: str) -> None:
+    def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
+        self._hass = hass
         self._hub_version = hub_version
 
     async def get(self, request: web.Request) -> web.Response:
@@ -127,6 +149,16 @@ class CasaSmartHandshakeView(HomeAssistantView):
             "hub_version": self._hub_version,
             "supported_api_versions": list(SUPPORTED_API_VERSIONS),
         }
+
+        runtime_data = _get_runtime_data(self._hass)
+        if runtime_data is not None and runtime_data.tls is not None:
+            body["tls"] = {
+                "port": runtime_data.tls.port,
+                "identity_key": runtime_data.tls.material.identity_public_pem,
+                "identity_fingerprint_sha256": (
+                    runtime_data.tls.material.identity_fingerprint
+                ),
+            }
 
         # Additive convenience: if the app declared its API version, tell it
         # outright whether we speak it. Malformed header -> 400, not a guess.
