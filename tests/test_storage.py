@@ -11,9 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "custom_components"))
+# Import the storage subpackage directly — the casasmart package __init__
+# imports homeassistant, which isn't installed in the test environment.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
+)
 
-from casasmart.storage import (  # noqa: E402
+from storage import (  # noqa: E402
     ConfigError,
     HubStorage,
     JsonConfigStore,
@@ -22,7 +26,7 @@ from casasmart.storage import (  # noqa: E402
     MigrationError,
     StorageError,
 )
-from casasmart.storage.migrations import MIGRATIONS, get_user_version  # noqa: E402
+from storage.migrations import MIGRATIONS, get_user_version  # noqa: E402
 
 
 class StorageTestCase(unittest.TestCase):

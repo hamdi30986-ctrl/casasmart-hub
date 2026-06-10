@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "CasaSmart Hub",
+        "description": "Set up the CasaSmart hub on this Home Assistant instance."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one CasaSmart hub is allowed per Home Assistant instance."
+    }
+  }
+}
