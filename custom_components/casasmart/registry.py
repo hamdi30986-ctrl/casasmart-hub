@@ -1,0 +1,558 @@
+"""CasaSmart device registry engine (Track B — B17 hub side).
+
+The hub-local source of truth for the home's *organization* — what
+Supabase used to hold (plan B17: "All device/room/floor data moves from
+Supabase to hub-local storage"):
+
+- **Floors** — name + sort order.
+- **Rooms** — name, floor, icon, sort order. A room's id doubles as the
+  area id used in room-scope JWT claims; rooms imported from HA keep
+  their HA area id so existing scoped tokens keep working.
+- **Device assignments** — entity_id -> room + display name + sort
+  order. ``room_id = None`` is an *explicit* "Unassigned" (it blocks the
+  HA-area fallback); an entity with no record at all falls back to HA's
+  own area registry in ``filtering``.
+- **Scenes** — name, icon, and a list of whitelisted device commands.
+  Every command is validated against the SAME entity-bridge whitelist
+  the command endpoint uses — a scene can never store an action the app
+  couldn't send directly.
+- **Favorites** — per user (= per enrolled device id, the only user
+  identity the hub has). One table, replacing the app's three sources
+  of truth (plan: SharedPreferences + two Supabase columns collapse
+  into this).
+
+Like ``auth_engine``: no Home Assistant imports — only the dict-like
+storage tables, so the whole thing unit-tests on a temp SQLite file.
+Storage-touching methods are synchronous (call via executor). The
+in-memory mirror (``room_of`` / ``room_name``) exists for the hot path:
+``filtering`` resolves a room on the event loop for EVERY pushed state
+change, and that must never hop to SQLite.
+"""
+
+from __future__ import annotations
+
+import logging
+import secrets
+import threading
+from typing import Any
+
+try:
+    from .entity_bridge import CommandError, validate_command
+except ImportError:  # top-level import in the test env (no HA package init)
+    from entity_bridge import CommandError, validate_command  # type: ignore[no-redef]
+
+_LOGGER = logging.getLogger(__name__)
+
+# room_of() return for "no assignment record" — distinct from None, which
+# means an explicit Unassigned that must NOT fall back to the HA area.
+UNSET = object()
+
+_NAME_MAX = 64
+_ICON_MAX = 64
+_MAX_FAVORITES = 200
+_MAX_SCENE_ENTITIES = 50
+
+
+class RegistryError(Exception):
+    """Registry input rejected (maps to HTTP 400)."""
+
+
+class UnknownItemError(RegistryError):
+    """No floor/room/scene/assignment under that id (maps to HTTP 404)."""
+
+
+class InUseError(RegistryError):
+    """Deletion refused because something still references the item."""
+
+
+def _clean_name(name: Any, what: str) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise RegistryError(f"{what} name is required")
+    cleaned = name.strip()
+    if len(cleaned) > _NAME_MAX:
+        raise RegistryError(f"{what} name is too long (max {_NAME_MAX})")
+    return cleaned
+
+
+def _lenient_name(name: Any, fallback: str) -> str:
+    """Import-only name cleaning: HA area/floor names are free user text
+    we don't control — truncate instead of rejecting, never raise. A
+    rejection here would abort integration setup (and keep aborting it
+    on every restart) over a name the user typed into HA years ago."""
+    if not isinstance(name, str) or not name.strip():
+        return fallback
+    return name.strip()[:_NAME_MAX]
+
+
+def _lenient_sort_order(sort_order: Any) -> int:
+    """Import-only: anything that isn't a plain int becomes 0."""
+    if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+        return 0
+    return sort_order
+
+
+def _clean_icon(icon: Any) -> str | None:
+    if icon is None:
+        return None
+    if not isinstance(icon, str) or len(icon) > _ICON_MAX:
+        raise RegistryError(f"icon must be a string of at most {_ICON_MAX} chars")
+    return icon or None
+
+
+def _clean_sort_order(sort_order: Any) -> int:
+    if sort_order is None:
+        return 0
+    # bool is an int subclass — reject it explicitly.
+    if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+        raise RegistryError("sort_order must be an integer")
+    return sort_order
+
+
+def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
+    """Validate a scene's command list against the entity-bridge whitelist."""
+    if not isinstance(entities, list) or not entities:
+        raise RegistryError("entities must be a non-empty list")
+    if len(entities) > _MAX_SCENE_ENTITIES:
+        raise RegistryError(
+            f"A scene may hold at most {_MAX_SCENE_ENTITIES} entities"
+        )
+    cleaned: list[dict[str, Any]] = []
+    for item in entities:
+        if not isinstance(item, dict):
+            raise RegistryError("Each scene entity must be an object")
+        entity_id = item.get("entity_id")
+        if not isinstance(entity_id, str) or "." not in entity_id:
+            raise RegistryError("Each scene entity needs an entity_id")
+        try:
+            validate_command(entity_id, item.get("action"), item.get("data"))
+        except CommandError as err:
+            raise RegistryError(f"{entity_id}: {err}") from err
+        cleaned.append(
+            {
+                "entity_id": entity_id,
+                "action": item["action"],
+                "data": item.get("data") or {},
+            }
+        )
+    return cleaned
+
+
+class RegistryEngine:
+    """Floors, rooms, device assignments, scenes, per-user favorites."""
+
+    def __init__(
+        self,
+        floors_table: Any,
+        rooms_table: Any,
+        devices_table: Any,
+        scenes_table: Any,
+        favorites_table: Any,
+    ) -> None:
+        self._floors = floors_table
+        self._rooms = rooms_table
+        self._devices = devices_table
+        self._scenes = scenes_table
+        self._favorites = favorites_table
+        # Serializes storage mutations (held across SQLite I/O).
+        self._lock = threading.RLock()
+        # Guards ONLY the in-memory mirrors below — held for dict ops,
+        # never across storage I/O, so the event-loop reads can never
+        # block behind a SQLite write (they run for every pushed state
+        # change). Mutations update the mirror AFTER the DB write lands,
+        # so the mirror never gets ahead of what's persisted.
+        self._mirror_lock = threading.Lock()
+        # Event-loop mirrors — kept in sync by every mutation below.
+        # entity_id -> (room_id|None, display_name|None); room None =
+        # explicit Unassigned.
+        self._assignment_cache: dict[str, tuple[str | None, str | None]] = {}
+        # room_id -> room name.
+        self._room_names: dict[str, str] = {}
+
+    def warm_up(self) -> None:
+        """Load the event-loop mirrors from storage (executor, at setup)."""
+        with self._lock:
+            assignments = {
+                entity_id: (record.get("room_id"), record.get("display_name"))
+                for entity_id, record in self._devices.items()
+            }
+            room_names = {
+                room_id: record.get("name", room_id)
+                for room_id, record in self._rooms.items()
+            }
+        with self._mirror_lock:
+            self._assignment_cache = assignments
+            self._room_names = room_names
+
+    def _mirror_assignment(self, entity_id: str, record: dict[str, Any]) -> None:
+        with self._mirror_lock:
+            self._assignment_cache[entity_id] = (
+                record.get("room_id"),
+                record.get("display_name"),
+            )
+
+    # -- event-loop reads (pure memory — used by filtering on every push) ------
+
+    def room_of(self, entity_id: str) -> Any:
+        """The entity's registry room: room_id, None (explicit Unassigned),
+        or the UNSET sentinel when no record exists (fall back to HA)."""
+        with self._mirror_lock:
+            cached = self._assignment_cache.get(entity_id)
+        return UNSET if cached is None else cached[0]
+
+    def display_name_of(self, entity_id: str) -> str | None:
+        """The installer-set display name, or None (use HA friendly name)."""
+        with self._mirror_lock:
+            cached = self._assignment_cache.get(entity_id)
+        return None if cached is None else cached[1]
+
+    def room_name(self, room_id: str) -> str | None:
+        """A room's display name, or None for an unknown room."""
+        with self._mirror_lock:
+            return self._room_names.get(room_id)
+
+    # -- floors (storage — call via executor) -----------------------------------
+
+    def list_floors(self) -> list[dict[str, Any]]:
+        return [
+            {"floor_id": floor_id, **record}
+            for floor_id, record in self._floors.items()
+        ]
+
+    def create_floor(self, name: Any, sort_order: Any = None) -> dict[str, Any]:
+        record = {
+            "name": _clean_name(name, "Floor"),
+            "sort_order": _clean_sort_order(sort_order),
+        }
+        with self._lock:
+            floor_id = f"floor-{secrets.token_urlsafe(8)}"
+            self._floors[floor_id] = record
+        _LOGGER.info("Registry: floor %s created (%s)", floor_id, record["name"])
+        return {"floor_id": floor_id, **record}
+
+    def update_floor(
+        self, floor_id: str, name: Any = ..., sort_order: Any = ...
+    ) -> dict[str, Any]:
+        """Edit a floor. ``...`` sentinels mean "leave unchanged" — an
+        explicit null is validated (and rejected) like any other value."""
+        with self._lock:
+            record = self._floors.get(floor_id)
+            if record is None:
+                raise UnknownItemError("Unknown floor")
+            if name is not ...:
+                record["name"] = _clean_name(name, "Floor")
+            if sort_order is not ...:
+                record["sort_order"] = _clean_sort_order(sort_order)
+            self._floors[floor_id] = record  # persist
+        return {"floor_id": floor_id, **record}
+
+    def delete_floor(self, floor_id: str) -> None:
+        """Refuse while rooms still reference the floor — explicit beats
+        a silent cascade for something the installer did by hand."""
+        with self._lock:
+            if floor_id not in self._floors:
+                raise UnknownItemError("Unknown floor")
+            in_use = [
+                room_id
+                for room_id, room in self._rooms.items()
+                if room.get("floor_id") == floor_id
+            ]
+            if in_use:
+                raise InUseError(
+                    f"Floor still has {len(in_use)} room(s) — move them first"
+                )
+            del self._floors[floor_id]
+        _LOGGER.info("Registry: floor %s deleted", floor_id)
+
+    # -- rooms (storage — call via executor) -------------------------------------
+
+    def list_rooms(self) -> list[dict[str, Any]]:
+        return [
+            {"room_id": room_id, **record}
+            for room_id, record in self._rooms.items()
+        ]
+
+    def create_room(
+        self,
+        name: Any,
+        floor_id: Any = None,
+        icon: Any = None,
+        sort_order: Any = None,
+    ) -> dict[str, Any]:
+        record = {
+            "name": _clean_name(name, "Room"),
+            "floor_id": self._checked_floor_id(floor_id),
+            "icon": _clean_icon(icon),
+            "sort_order": _clean_sort_order(sort_order),
+        }
+        with self._lock:
+            room_id = f"room-{secrets.token_urlsafe(8)}"
+            self._rooms[room_id] = record
+        with self._mirror_lock:
+            self._room_names[room_id] = record["name"]
+        _LOGGER.info("Registry: room %s created (%s)", room_id, record["name"])
+        return {"room_id": room_id, **record}
+
+    def update_room(
+        self,
+        room_id: str,
+        name: Any = ...,
+        floor_id: Any = ...,
+        icon: Any = ...,
+        sort_order: Any = ...,
+    ) -> dict[str, Any]:
+        """Edit a room. ``...`` sentinels mean "leave unchanged" — for
+        the nullable fields an explicit None clears them."""
+        with self._lock:
+            record = self._rooms.get(room_id)
+            if record is None:
+                raise UnknownItemError("Unknown room")
+            if name is not ...:
+                record["name"] = _clean_name(name, "Room")
+            if floor_id is not ...:
+                record["floor_id"] = self._checked_floor_id(floor_id)
+            if icon is not ...:
+                record["icon"] = _clean_icon(icon)
+            if sort_order is not ...:
+                record["sort_order"] = _clean_sort_order(sort_order)
+            self._rooms[room_id] = record  # persist
+        with self._mirror_lock:
+            self._room_names[room_id] = record["name"]
+        return {"room_id": room_id, **record}
+
+    def delete_room(self, room_id: str) -> int:
+        """Delete a room; its devices become explicitly Unassigned.
+        Returns how many assignments were cleared."""
+        with self._lock:
+            if room_id not in self._rooms:
+                raise UnknownItemError("Unknown room")
+            cleared = 0
+            for entity_id, record in list(self._devices.items()):
+                if record.get("room_id") == room_id:
+                    record["room_id"] = None
+                    self._devices[entity_id] = record
+                    # Mirror follows each landed write — a mid-loop
+                    # failure leaves mirror == DB for what was written.
+                    self._mirror_assignment(entity_id, record)
+                    cleared += 1
+            del self._rooms[room_id]
+        with self._mirror_lock:
+            self._room_names.pop(room_id, None)
+        _LOGGER.info(
+            "Registry: room %s deleted (%d device(s) unassigned)", room_id, cleared
+        )
+        return cleared
+
+    def _checked_floor_id(self, floor_id: Any) -> str | None:
+        if floor_id is None:
+            return None
+        if not isinstance(floor_id, str) or floor_id not in self._floors:
+            raise RegistryError("Unknown floor_id")
+        return floor_id
+
+    # -- device assignments (storage — call via executor) -------------------------
+
+    def list_assignments(self) -> dict[str, dict[str, Any]]:
+        """entity_id -> {room_id, display_name, sort_order}."""
+        return dict(self._devices.items())
+
+    def assign_device(
+        self,
+        entity_id: str,
+        room_id: Any = ...,
+        display_name: Any = ...,
+        sort_order: Any = ...,
+    ) -> dict[str, Any]:
+        """Create/update an assignment record. ``...`` = leave unchanged;
+        ``room_id=None`` is the explicit Unassigned pool; an empty/None
+        display_name falls back to the HA friendly name at read time."""
+        if not isinstance(entity_id, str) or "." not in entity_id:
+            raise RegistryError("entity_id is required")
+        with self._lock:
+            record = self._devices.get(entity_id) or {
+                "room_id": None,
+                "display_name": None,
+                "sort_order": 0,
+            }
+            if room_id is not ...:
+                if room_id is not None and (
+                    not isinstance(room_id, str) or room_id not in self._rooms
+                ):
+                    raise RegistryError("Unknown room_id")
+                record["room_id"] = room_id
+            if display_name is not ...:
+                if display_name is not None and not isinstance(display_name, str):
+                    raise RegistryError("display_name must be a string or null")
+                if display_name is not None:
+                    # Empty/whitespace = clear (fall back to HA friendly name).
+                    display_name = (
+                        _clean_name(display_name, "Device")
+                        if display_name.strip()
+                        else None
+                    )
+                record["display_name"] = display_name
+            if sort_order is not ...:
+                record["sort_order"] = _clean_sort_order(sort_order)
+            self._devices[entity_id] = record
+        self._mirror_assignment(entity_id, record)
+        return {"entity_id": entity_id, **record}
+
+    def remove_assignment(self, entity_id: str) -> None:
+        """Drop the record entirely — the entity reverts to the HA-area
+        fallback (vs ``room_id=None`` which pins it to Unassigned)."""
+        with self._lock:
+            try:
+                del self._devices[entity_id]
+            except KeyError:
+                raise UnknownItemError("No assignment for that entity") from None
+        with self._mirror_lock:
+            self._assignment_cache.pop(entity_id, None)
+
+    # -- scenes (storage — call via executor) -------------------------------------
+
+    def list_scenes(self) -> list[dict[str, Any]]:
+        return [
+            {"scene_id": scene_id, **record}
+            for scene_id, record in self._scenes.items()
+        ]
+
+    def get_scene(self, scene_id: str) -> dict[str, Any]:
+        record = self._scenes.get(scene_id)
+        if record is None:
+            raise UnknownItemError("Unknown scene")
+        return {"scene_id": scene_id, **record}
+
+    def create_scene(
+        self, name: Any, entities: Any, icon: Any = None
+    ) -> dict[str, Any]:
+        record = {
+            "name": _clean_name(name, "Scene"),
+            "icon": _clean_icon(icon),
+            "entities": _clean_scene_entities(entities),
+        }
+        with self._lock:
+            scene_id = f"scene-{secrets.token_urlsafe(8)}"
+            self._scenes[scene_id] = record
+        _LOGGER.info("Registry: scene %s created (%s)", scene_id, record["name"])
+        return {"scene_id": scene_id, **record}
+
+    def update_scene(
+        self,
+        scene_id: str,
+        name: Any = ...,
+        entities: Any = ...,
+        icon: Any = ...,
+    ) -> dict[str, Any]:
+        """Edit a scene. ``...`` sentinels mean "leave unchanged"."""
+        with self._lock:
+            record = self._scenes.get(scene_id)
+            if record is None:
+                raise UnknownItemError("Unknown scene")
+            if name is not ...:
+                record["name"] = _clean_name(name, "Scene")
+            if entities is not ...:
+                record["entities"] = _clean_scene_entities(entities)
+            if icon is not ...:
+                record["icon"] = _clean_icon(icon)
+            self._scenes[scene_id] = record  # persist
+        return {"scene_id": scene_id, **record}
+
+    def delete_scene(self, scene_id: str) -> None:
+        with self._lock:
+            try:
+                del self._scenes[scene_id]
+            except KeyError:
+                raise UnknownItemError("Unknown scene") from None
+        _LOGGER.info("Registry: scene %s deleted", scene_id)
+
+    # -- favorites (storage — call via executor) -----------------------------------
+
+    def get_favorites(self, user_device_id: str) -> list[str]:
+        record = self._favorites.get(user_device_id)
+        if record is None:
+            return []
+        return list(record.get("entity_ids", []))
+
+    def set_favorites(
+        self, user_device_id: str, entity_ids: Any
+    ) -> list[str]:
+        """Replace the user's favorites list (order is meaningful).
+        Stale rows for unpaired devices are harmless and die with the
+        app-layer wipe (factory reset clears this table)."""
+        if not isinstance(entity_ids, list) or any(
+            not isinstance(eid, str) or "." not in eid for eid in entity_ids
+        ):
+            raise RegistryError("entity_ids must be a list of entity_id strings")
+        if len(entity_ids) > _MAX_FAVORITES:
+            raise RegistryError(f"At most {_MAX_FAVORITES} favorites")
+        deduped = list(dict.fromkeys(entity_ids))  # preserve order, drop dupes
+        with self._lock:
+            self._favorites[user_device_id] = {"entity_ids": deduped}
+        return deduped
+
+    # -- first-run import (storage — call via executor) ------------------------------
+
+    def import_initial(
+        self,
+        floors: list[dict[str, Any]],
+        rooms: list[dict[str, Any]],
+        assignments: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Seed the registry from HA's own registries (B17: "Auto-populate
+        from HA entities on first setup").
+
+        Imported floors/rooms KEEP their HA ids — room-scope JWT claims
+        already use HA area ids, so imported layouts work with existing
+        scoped tokens unchanged. Existing records are never overwritten
+        (re-running an import can't clobber installer edits). Names are
+        cleaned LENIENTLY (truncate, fall back — never raise): a weird
+        HA name must not be able to abort integration setup.
+        """
+        counts = {"floors": 0, "rooms": 0, "assignments": 0}
+        with self._lock:
+            for floor in floors:
+                floor_id = floor["floor_id"]
+                if floor_id in self._floors:
+                    continue
+                self._floors[floor_id] = {
+                    "name": _lenient_name(floor.get("name"), floor_id),
+                    "sort_order": _lenient_sort_order(floor.get("sort_order")),
+                }
+                counts["floors"] += 1
+            for room in rooms:
+                room_id = room["room_id"]
+                if room_id in self._rooms:
+                    continue
+                floor_id = room.get("floor_id")
+                icon = room.get("icon")
+                record = {
+                    "name": _lenient_name(room.get("name"), room_id),
+                    "floor_id": floor_id if floor_id in self._floors else None,
+                    # Same lenient posture: a bad HA icon is dropped, not fatal.
+                    "icon": icon
+                    if isinstance(icon, str) and 0 < len(icon) <= _ICON_MAX
+                    else None,
+                    "sort_order": _lenient_sort_order(room.get("sort_order")),
+                }
+                self._rooms[room_id] = record
+                with self._mirror_lock:
+                    self._room_names[room_id] = record["name"]
+                counts["rooms"] += 1
+            for assignment in assignments:
+                entity_id = assignment["entity_id"]
+                room_id = assignment.get("room_id")
+                if entity_id in self._devices or room_id not in self._rooms:
+                    continue
+                record = {
+                    "room_id": room_id,
+                    "display_name": None,
+                    "sort_order": 0,
+                }
+                self._devices[entity_id] = record
+                self._mirror_assignment(entity_id, record)
+                counts["assignments"] += 1
+        _LOGGER.info(
+            "Registry import: %(floors)d floors, %(rooms)d rooms, "
+            "%(assignments)d assignments",
+            counts,
+        )
+        return counts

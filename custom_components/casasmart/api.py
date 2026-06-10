@@ -66,6 +66,18 @@ from .auth_api import (
 )
 from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
+from .registry_api import (
+    CasaSmartDeviceAssignmentView,
+    CasaSmartFavoritesView,
+    CasaSmartFloorsView,
+    CasaSmartFloorView,
+    CasaSmartRegistryView,
+    CasaSmartRoomsView,
+    CasaSmartRoomView,
+    CasaSmartSceneActivateView,
+    CasaSmartScenesView,
+    CasaSmartSceneView,
+)
 from .ws import CasaSmartWebSocketView
 
 if TYPE_CHECKING:
@@ -97,6 +109,16 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartPairingCodeView(hass),
         CasaSmartUsersView(hass),
         CasaSmartUserView(hass),
+        CasaSmartRegistryView(hass),
+        CasaSmartFloorsView(hass),
+        CasaSmartFloorView(hass),
+        CasaSmartRoomsView(hass),
+        CasaSmartRoomView(hass),
+        CasaSmartDeviceAssignmentView(hass),
+        CasaSmartScenesView(hass),
+        CasaSmartSceneView(hass),
+        CasaSmartSceneActivateView(hass),
+        CasaSmartFavoritesView(hass),
     ]
 
 

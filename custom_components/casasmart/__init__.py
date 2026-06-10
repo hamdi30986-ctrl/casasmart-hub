@@ -38,8 +38,17 @@ from .const import (
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
 )
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    floor_registry as fr,
+)
+
+from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .recovery import RecoveryManager
+from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
 
@@ -57,6 +66,7 @@ class CasaSmartRuntimeData:
     auth: AuthEngine
     pairing: PairingManager
     recovery: RecoveryManager
+    registry: RegistryEngine
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
 
@@ -69,10 +79,12 @@ def _open_storage(
     AuthEngine,
     PairingManager,
     RecoveryManager,
+    RegistryEngine,
     str | None,
     str | None,
 ]:
-    """Open storage + config + auth + pairing + recovery (blocking — executor only)."""
+    """Open storage + config + auth + pairing + recovery + registry
+    (blocking — executor only)."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -90,7 +102,24 @@ def _open_storage(
     # Claimed hub without a recovery code (hub claimed before B3 shipped,
     # or the previous code was redeemed mid-crash) -> arm one now.
     recovery_code = recovery.ensure_armed()
-    return storage, hub_config, auth, pairing, recovery, bootstrap_code, recovery_code
+    registry = RegistryEngine(
+        storage.table("registry_floors"),
+        storage.table("registry_rooms"),
+        storage.table("registry_devices"),
+        storage.table("registry_scenes"),
+        storage.table("registry_favorites"),
+    )
+    registry.warm_up()  # room/name mirrors loaded — event-loop reads stay pure CPU
+    return (
+        storage,
+        hub_config,
+        auth,
+        pairing,
+        recovery,
+        registry,
+        bootstrap_code,
+        recovery_code,
+    )
 
 
 async def async_setup_entry(
@@ -106,6 +135,7 @@ async def async_setup_entry(
             auth,
             pairing,
             recovery,
+            registry,
             bootstrap_code,
             recovery_code,
         ) = await hass.async_add_executor_job(_open_storage, data_dir)
@@ -118,7 +148,10 @@ async def async_setup_entry(
         auth=auth,
         pairing=pairing,
         recovery=recovery,
+        registry=registry,
     )
+
+    await _async_import_registry(hass, hub_config, registry)
 
     if bootstrap_code is not None:
         # Surfaced once, to the HA admin only — this is how the owner's
@@ -148,6 +181,76 @@ async def async_setup_entry(
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
+
+
+async def _async_import_registry(
+    hass: HomeAssistant,
+    hub_config: JsonConfigStore,
+    registry: RegistryEngine,
+) -> None:
+    """B17 first-run import: seed the registry from HA's own registries.
+
+    Floors/areas/entity-area assignments become registry floors/rooms/
+    assignments KEEPING their HA ids — existing room-scoped JWTs use HA
+    area ids, so imported layouts work with them unchanged. Runs once
+    (``registry_imported`` flag); the engine additionally never
+    overwrites existing records, so a re-run after a crash mid-import
+    completes the seed without clobbering installer edits.
+    """
+    if hub_config.get("registry_imported") is True:
+        return
+
+    floor_registry = fr.async_get(hass)
+    area_registry = ar.async_get(hass)
+    entity_registry = er.async_get(hass)
+
+    floors = [
+        {
+            "floor_id": floor.floor_id,
+            "name": floor.name,
+            "sort_order": floor.level or 0,
+        }
+        for floor in floor_registry.async_list_floors()
+    ]
+    rooms = [
+        {
+            "room_id": area.id,
+            "name": area.name,
+            "floor_id": area.floor_id,
+            "icon": area.icon,
+        }
+        for area in area_registry.async_list_areas()
+    ]
+    device_registry = dr.async_get(hass)
+    assignments = []
+    for entry in entity_registry.entities.values():
+        if not is_exposed(entry.entity_id):
+            continue
+        area_id = entry.area_id
+        if area_id is None and entry.device_id is not None:
+            device = device_registry.async_get(entry.device_id)
+            area_id = device.area_id if device else None
+        if area_id is not None:
+            assignments.append({"entity_id": entry.entity_id, "room_id": area_id})
+
+    def _seed() -> dict[str, int]:
+        counts = registry.import_initial(floors, rooms, assignments)
+        hub_config.set("registry_imported", True)
+        return counts
+
+    try:
+        counts = await hass.async_add_executor_job(_seed)
+    except Exception:  # noqa: BLE001 — a failed seed must never kill setup
+        # Flag stays unset -> retried next boot; import_initial never
+        # overwrites, so a partial seed just gets completed then.
+        _LOGGER.exception("Registry seed failed — will retry on next start")
+        return
+    _LOGGER.info(
+        "Registry seeded from HA: %d floors, %d rooms, %d assignments",
+        counts["floors"],
+        counts["rooms"],
+        counts["assignments"],
+    )
 
 
 async def _async_start_tls(
@@ -219,6 +322,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("auth_devices").clear()
             runtime_data.storage.table("pairing_codes").clear()
             runtime_data.storage.table("recovery_codes").clear()
+            # B17: favorites are phone/app-layer data — they die with the
+            # phones. Floors/rooms/scenes are HOUSE data and survive.
+            runtime_data.storage.table("registry_favorites").clear()
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
