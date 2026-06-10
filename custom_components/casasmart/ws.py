@@ -21,10 +21,14 @@ Every outgoing device passes through ``filtering.is_served`` /
 ``filtering.serialize_device`` — the exact same functions the REST views
 use, so the socket can never leak what REST hides.
 
-Auth note: tokens are HA bearer tokens for now, validated against HA's
-auth backend (same stopgap as the REST views). B1.6 swaps
-``_async_validate_token`` for the CasaSmart auth engine (device keypairs
--> JWT + role/room-scope enforcement) — the protocol does not change.
+Auth (B1.6): tokens are hub-issued CasaSmart JWTs, validated by the auth
+engine (``auth_engine.validate_token``). The connection keeps the token's
+claims; role is checked once (``devices.read``) and the ``rooms`` claim
+scopes BOTH the subscribe snapshot and every push — a room-scoped user
+receives ONLY their rooms' changes (plan B1.5 acceptance). The 60s
+recheck loop now also catches plain JWT expiry, which triggers the same
+``auth_required`` + 30s grace, so the app's silent re-auth (B9) slots in
+without a reconnect.
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Event, HomeAssistant, callback
 
 from . import ws_protocol
+from .auth_engine import AuthEngine
+from .auth_tokens import TokenError
 from .const import (
     API_VERSION,
     DOMAIN,
@@ -51,7 +57,7 @@ from .const import (
     WS_SEND_QUEUE_MAX,
     WS_TOKEN_RECHECK,
 )
-from .filtering import is_served, serialize_device
+from .filtering import in_scope, is_served, serialize_device
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +102,8 @@ class WsConnection:
         self._sender_task: asyncio.Task | None = None
         self._unsub_state_changed: Any = None
         self._token: str | None = None
+        # Claims of the current token (role + room scope) — set on auth.
+        self._claims: dict[str, Any] | None = None
         # Set while the connection is inside an `auth_required` grace window.
         self._reauth_deadline_task: asyncio.Task | None = None
 
@@ -168,13 +176,25 @@ class WsConnection:
         return True
 
     async def _async_validate_token(self, token: str) -> bool:
-        """Validate a bearer token against HA's auth backend.
+        """Validate a CasaSmart JWT and refresh the connection's claims.
 
-        B1.6 replaces this with the CasaSmart auth engine (JWT signature +
-        role/room-scope). Single seam on purpose.
+        The B1.6 auth engine: signature + expiry + role permission. Pure
+        HMAC math — no executor hop. Returns False (never raises) so the
+        callers' control flow stays identical to the B1.5 stopgap.
         """
-        refresh_token = self._hass.auth.async_validate_access_token(token)
-        return refresh_token is not None
+        from .auth_api import get_engine  # local: auth_api is sibling glue
+
+        engine = get_engine(self._hass)
+        if engine is None:
+            return False
+        try:
+            claims = engine.validate_token(token)
+        except TokenError:
+            return False
+        if not AuthEngine.authorize(claims, "devices.read"):
+            return False
+        self._claims = claims
+        return True
 
     async def _token_recheck_loop(self) -> None:
         """Catch mid-connection revocation/expiry (plan: auth_required + 30s).
@@ -238,11 +258,13 @@ class WsConnection:
             await self._enqueue(ws_protocol.frame_error(str(err)))
             return
         self._subscription.set(entity_ids)
+        rooms = (self._claims or {}).get("rooms")
         devices = [
             serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
             if is_served(self._hass, state.entity_id)
             and self._subscription.matches(state.entity_id)
+            and in_scope(self._hass, state.entity_id, rooms)
         ]
         devices.sort(key=lambda device: device["entity_id"])
         await self._enqueue(ws_protocol.frame_subscribed(devices))
@@ -282,6 +304,8 @@ class WsConnection:
             new_state is None  # entity removed — not a device update
             or not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
+            # Room scope (B1.6): scoped tokens only get their rooms' pushes.
+            or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
         ):
             return
         device = serialize_device(self._hass, new_state)

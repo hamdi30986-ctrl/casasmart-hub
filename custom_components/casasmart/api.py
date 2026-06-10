@@ -20,9 +20,13 @@ Entity bridge (B1.4) — authenticated:
   control: ``{"action": "turn_on", "data": {...}}`` validated against
   the per-domain command table before any service call.
 
-Auth note: these use HA's built-in bearer-token auth (``requires_auth``)
-as a stopgap. B1.6 replaces it with the CasaSmart auth engine (device
-keypairs → JWT + role enforcement) — same endpoints, different gate.
+Auth (B1.6): the device views are gated by the CasaSmart auth engine —
+``auth_api.authenticate_request`` validates the hub-issued JWT and checks
+the endpoint's permission; HA bearer tokens no longer grant access here.
+Room-scoped tokens additionally pass every device through
+``filtering.in_scope`` so a scoped user can't see or touch other rooms.
+The auth endpoints themselves (enroll / challenge / token) live in
+``auth_api.py``.
 
 WebSocket (B1.5): ``/api/casasmart/ws`` is registered here too but lives
 in ``ws.py`` (first-frame auth, real-time push through the same
@@ -49,8 +53,14 @@ from .const import (
     MIN_APP_VERSION,
     SUPPORTED_API_VERSIONS,
 )
+from .auth_api import (
+    CasaSmartChallengeView,
+    CasaSmartEnrollView,
+    CasaSmartTokenView,
+    authenticate_request,
+)
 from .entity_bridge import CommandError, validate_command
-from .filtering import is_served, serialize_device
+from .filtering import in_scope, is_served, serialize_device
 from .ws import CasaSmartWebSocketView
 
 if TYPE_CHECKING:
@@ -74,6 +84,9 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
     hass.http.register_view(CasaSmartDeviceView(hass))
     hass.http.register_view(CasaSmartCommandView(hass))
     hass.http.register_view(CasaSmartWebSocketView(hass, hub_version))
+    hass.http.register_view(CasaSmartEnrollView(hass))
+    hass.http.register_view(CasaSmartChallengeView(hass))
+    hass.http.register_view(CasaSmartTokenView(hass))
     domain_data["views_registered"] = True
     _LOGGER.debug("CasaSmart REST + WS views registered")
 
@@ -177,18 +190,23 @@ class CasaSmartDevicesView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/devices"
     name = f"api:{DOMAIN}:devices"
-    # HA bearer-token auth for now; replaced by the CasaSmart auth engine in B1.6.
-    requires_auth = True
+    # CasaSmart JWT gate (B1.6) — validated in-handler, not by HA's middleware.
+    requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """Return every exposed, visible entity as a CasaSmart device."""
+        """Return every exposed, visible, in-scope entity as a device."""
+        claims, error = authenticate_request(self._hass, request, "devices.read")
+        if error is not None:
+            return error
+        rooms = claims.get("rooms")
         devices = [
             serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
             if is_served(self._hass, state.entity_id)
+            and in_scope(self._hass, state.entity_id, rooms)
         ]
         devices.sort(key=lambda device: device["entity_id"])
         return self.json({"devices": devices, "count": len(devices)})
@@ -199,15 +217,26 @@ class CasaSmartDeviceView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}"
     name = f"api:{DOMAIN}:device"
-    requires_auth = True
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request, entity_id: str) -> web.Response:
-        """Return a single device, 404 if unknown or outside the surface."""
+        """Return a single device, 404 if unknown, unserved, or out of scope.
+
+        Out-of-scope is the SAME 404 as nonexistent — a room-scoped token
+        must not be able to enumerate what exists outside its rooms.
+        """
+        claims, error = authenticate_request(self._hass, request, "devices.read")
+        if error is not None:
+            return error
         state = self._hass.states.get(entity_id)
-        if state is None or not is_served(self._hass, entity_id):
+        if (
+            state is None
+            or not is_served(self._hass, entity_id)
+            or not in_scope(self._hass, entity_id, claims.get("rooms"))
+        ):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -219,7 +248,7 @@ class CasaSmartCommandView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}/command"
     name = f"api:{DOMAIN}:device:command"
-    requires_auth = True
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -228,10 +257,20 @@ class CasaSmartCommandView(HomeAssistantView):
         """Validate ``{"action", "data"}`` against the whitelist and execute.
 
         Order matters: 404 (unknown device) before 400 (bad command), so
-        probing can't distinguish "bad action" on entities that don't exist.
+        probing can't distinguish "bad action" on entities that don't
+        exist — and out-of-scope is the same 404 for the same reason.
         """
+        claims, error = authenticate_request(
+            self._hass, request, "devices.control"
+        )
+        if error is not None:
+            return error
         state = self._hass.states.get(entity_id)
-        if state is None or not is_served(self._hass, entity_id):
+        if (
+            state is None
+            or not is_served(self._hass, entity_id)
+            or not in_scope(self._hass, entity_id, claims.get("rooms"))
+        ):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )

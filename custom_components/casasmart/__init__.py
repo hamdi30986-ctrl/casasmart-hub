@@ -18,6 +18,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.loader import async_get_integration
 
 from .api import async_register_views
+from .auth_engine import AuthEngine
 from .const import (
     BACKUP_DIR_NAME,
     DATA_DIR_NAME,
@@ -38,10 +39,13 @@ class CasaSmartRuntimeData:
 
     storage: HubStorage
     hub_config: JsonConfigStore
+    auth: AuthEngine
 
 
-def _open_storage(data_dir: Path) -> tuple[HubStorage, JsonConfigStore]:
-    """Open the SQLite store + JSON config store (blocking — executor only)."""
+def _open_storage(
+    data_dir: Path,
+) -> tuple[HubStorage, JsonConfigStore, AuthEngine]:
+    """Open storage + config + auth engine (blocking — executor only)."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -49,7 +53,9 @@ def _open_storage(data_dir: Path) -> tuple[HubStorage, JsonConfigStore]:
     )
     storage.open()
     hub_config = JsonConfigStore(data_dir / HUB_CONFIG_FILENAME)
-    return storage, hub_config
+    auth = AuthEngine(storage.table("auth_devices"), hub_config)
+    auth.warm_up()  # secret loaded here so request-path validation is pure CPU
+    return storage, hub_config, auth
 
 
 async def async_setup_entry(
@@ -59,13 +65,15 @@ async def async_setup_entry(
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
 
     try:
-        storage, hub_config = await hass.async_add_executor_job(
+        storage, hub_config, auth = await hass.async_add_executor_job(
             _open_storage, data_dir
         )
     except StorageError as err:
         raise ConfigEntryNotReady(f"CasaSmart storage failed to open: {err}") from err
 
-    entry.runtime_data = CasaSmartRuntimeData(storage=storage, hub_config=hub_config)
+    entry.runtime_data = CasaSmartRuntimeData(
+        storage=storage, hub_config=hub_config, auth=auth
+    )
 
     # Hub version = the integration's manifest version (single source of truth).
     integration = await async_get_integration(hass, DOMAIN)
