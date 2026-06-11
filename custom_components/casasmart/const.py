@@ -30,6 +30,14 @@ TLS_PORT_DEFAULT = 8443
 # for tests, like the other pure modules).
 TLS_CERT_CHECK_INTERVAL_HOURS = 24
 
+# -- mDNS discovery (B6) -------------------------------------------------------
+# The hub advertises `_casasmart._tcp` (service type owned by discovery.py) so
+# the app auto-discovers it on the LAN regardless of DHCP. The advertiser
+# re-checks its LAN IP on this cadence and re-publishes if it moved.
+MDNS_REFRESH_INTERVAL_MINUTES = 5
+# Optional installer-set friendly hub name, surfaced in the mDNS TXT `name`.
+HUB_NAME_CONFIG_KEY = "hub_name"
+
 # -- Device registry (B17) -------------------------------------------------------
 # Fired on the HA bus after any registry mutation (floors/rooms/devices/
 # scenes); the WS server forwards it to connected apps as a
