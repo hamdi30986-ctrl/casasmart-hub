@@ -235,7 +235,47 @@ def is_exposed(entity_id: str) -> bool:
     return entity_domain(entity_id) in EXPOSED_DOMAINS
 
 
-def serialize_state(state: Any, area: str | None = None) -> dict[str, Any]:
+# B16 3c-4a: which registry-category entities cross the API at all.
+# Config entities are the app's settings-sheet surface (LED mode, child
+# lock, power-outage memory, operation mode) — read AND commanded, still
+# behind the per-domain command whitelist. Diagnostic entities are
+# read-only measurements the app actually renders (energy panel
+# voltage/current, device temperature) — sensors only, curated
+# device_class, so linkquality/firmware chatter never floods the feed.
+DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
+    {
+        "power",
+        "energy",
+        "voltage",
+        "current",
+        "temperature",
+        "humidity",
+        "battery",
+    }
+)
+
+
+def is_category_served(
+    category: str, entity_id: str, device_class: str | None
+) -> bool:
+    """Category-entity exposure policy (B16 3c-4a). Pure — unit-testable.
+
+    ``category`` is the registry entity_category value (``"config"`` /
+    ``"diagnostic"``); callers handle the no-category case themselves.
+    """
+    if category == "config":
+        return True
+    if category == "diagnostic":
+        return (
+            entity_domain(entity_id) == "sensor"
+            and device_class in DIAGNOSTIC_SENSOR_CLASSES
+        )
+    return False
+
+
+def serialize_state(
+    state: Any, area: str | None = None, entity_category: str | None = None
+) -> dict[str, Any]:
     """Serialize one HA state object into the CasaSmart device dict.
 
     ``state`` is duck-typed: needs ``entity_id``, ``state``, ``attributes``
@@ -255,6 +295,9 @@ def serialize_state(state: Any, area: str | None = None) -> dict[str, Any]:
         "area": area,
         "attributes": attributes,
         "last_updated": last_updated.isoformat() if last_updated else None,
+        # 3c-4a: the app classifies config entities (settings sheets) and
+        # diagnostic sensors (energy panel) by this — None for primaries.
+        "entity_category": entity_category,
     }
 
 

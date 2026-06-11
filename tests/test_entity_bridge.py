@@ -17,9 +17,11 @@ sys.path.insert(
 
 from entity_bridge import (  # noqa: E402
     CommandError,
+    DIAGNOSTIC_SENSOR_CLASSES,
     EXPOSED_DOMAINS,
     READ_ONLY_DOMAINS,
     entity_domain,
+    is_category_served,
     is_exposed,
     serialize_state,
     validate_command,
@@ -54,7 +56,57 @@ class TestExposure(unittest.TestCase):
         self.assertTrue(READ_ONLY_DOMAINS <= EXPOSED_DOMAINS)
 
 
+class TestCategoryPolicy(unittest.TestCase):
+    """B16 3c-4a: config/diagnostic exposure policy."""
+
+    def test_config_entities_served_any_domain(self):
+        self.assertTrue(is_category_served("config", "switch.plug_child_lock", None))
+        self.assertTrue(
+            is_category_served("config", "select.sw_operation_mode", None)
+        )
+        self.assertTrue(is_category_served("config", "number.sw_led_level", None))
+
+    def test_diagnostic_sensor_with_measurement_class_served(self):
+        for device_class in sorted(DIAGNOSTIC_SENSOR_CLASSES):
+            self.assertTrue(
+                is_category_served(
+                    "diagnostic", f"sensor.plug_{device_class}", device_class
+                ),
+                device_class,
+            )
+
+    def test_diagnostic_noise_stays_hidden(self):
+        # linkquality has no device_class — the classic Z2M chatter source.
+        self.assertFalse(is_category_served("diagnostic", "sensor.plug_lqi", None))
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_lqi", "signal_strength")
+        )
+        # Diagnostic NON-sensors never cross, whatever the class claims.
+        self.assertFalse(
+            is_category_served("diagnostic", "switch.plug_indicator", "power")
+        )
+        self.assertFalse(
+            is_category_served("diagnostic", "binary_sensor.plug_overload", "power")
+        )
+
+    def test_unknown_category_rejected(self):
+        self.assertFalse(is_category_served("system", "sensor.x", "power"))
+        self.assertFalse(is_category_served("", "sensor.x", "power"))
+
+
 class TestSerializeState(unittest.TestCase):
+    def test_entity_category_forwarded(self):
+        state = FakeState("switch.plug_child_lock", "off")
+        self.assertEqual(
+            serialize_state(state, entity_category="config")["entity_category"],
+            "config",
+        )
+
+    def test_entity_category_none_for_primaries(self):
+        self.assertIsNone(
+            serialize_state(FakeState("light.living1", "on"))["entity_category"]
+        )
+
     def test_basic_shape(self):
         ts = datetime(2026, 6, 10, 3, 0, 0, tzinfo=timezone.utc)
         state = FakeState(

@@ -19,7 +19,7 @@ from homeassistant.helpers import (
 )
 
 from .const import DOMAIN
-from .entity_bridge import is_exposed, serialize_state
+from .entity_bridge import is_category_served, is_exposed, serialize_state
 from .registry import UNSET
 
 if TYPE_CHECKING:
@@ -94,17 +94,32 @@ def in_scope(
 
 
 def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
-    """True when the entity should appear in the device list.
+    """True when the entity belongs on the CasaSmart feed.
 
-    Filters out registry-hidden entities and config/diagnostic entities
-    (firmware sensors, restart buttons, ...) — the app shows devices,
-    not plumbing. Entities with no registry entry (template/MQTT-yaml)
-    are visible by default.
+    Registry-hidden entities never cross. Category entities follow the
+    shared policy in ``entity_bridge.is_category_served`` (B16 3c-4a):
+    config entities are served (the app's settings sheets read and drive
+    them — LED mode, child lock, power-outage memory), and diagnostic
+    SENSORS with a curated measurement device_class are served (energy
+    panel voltage/current, device temperature). Everything else with a
+    category (linkquality chatter, firmware plumbing) stays hub-internal.
+    Entities with no registry entry (template/MQTT-yaml) are visible by
+    default.
     """
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return True
-    return entry.hidden_by is None and entry.entity_category is None
+    if entry.hidden_by is not None:
+        return False
+    if entry.entity_category is None:
+        return True
+    state = hass.states.get(entity_id)
+    device_class = (
+        state.attributes.get("device_class") if state is not None else None
+    ) or entry.original_device_class
+    return is_category_served(
+        str(entry.entity_category.value), entity_id, device_class
+    )
 
 
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
@@ -129,7 +144,16 @@ def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
     the installer's registry display name (B17) overriding the HA
     friendly name when one is set, and the HA device-registry id as
     the app's tile-grouping key (B16)."""
-    device = serialize_state(state, area=area_name(hass, state.entity_id))
+    entry = er.async_get(hass).async_get(state.entity_id)
+    device = serialize_state(
+        state,
+        area=area_name(hass, state.entity_id),
+        entity_category=(
+            str(entry.entity_category.value)
+            if entry is not None and entry.entity_category is not None
+            else None
+        ),
+    )
     device["device_id"] = device_id_of(hass, state.entity_id)
     registry = get_registry_engine(hass)
     if registry is not None:
