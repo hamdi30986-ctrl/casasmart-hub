@@ -17,6 +17,7 @@ sys.path.insert(
 
 from entity_bridge import (  # noqa: E402
     CommandError,
+    DIAGNOSTIC_BINARY_SENSOR_CLASSES,
     DIAGNOSTIC_SENSOR_CLASSES,
     EXPOSED_DOMAINS,
     READ_ONLY_DOMAINS,
@@ -75,18 +76,33 @@ class TestCategoryPolicy(unittest.TestCase):
                 device_class,
             )
 
+    def test_diagnostic_binary_sensor_alert_class_served(self):
+        # The app's satellite chips: tamper/problem/connectivity/running.
+        for device_class in sorted(DIAGNOSTIC_BINARY_SENSOR_CLASSES):
+            self.assertTrue(
+                is_category_served(
+                    "diagnostic", f"binary_sensor.door_{device_class}", device_class
+                ),
+                device_class,
+            )
+
     def test_diagnostic_noise_stays_hidden(self):
         # linkquality has no device_class — the classic Z2M chatter source.
         self.assertFalse(is_category_served("diagnostic", "sensor.plug_lqi", None))
         self.assertFalse(
             is_category_served("diagnostic", "sensor.plug_lqi", "signal_strength")
         )
-        # Diagnostic NON-sensors never cross, whatever the class claims.
+        # Diagnostic NON-sensor domains never cross, whatever the class claims.
         self.assertFalse(
             is_category_served("diagnostic", "switch.plug_indicator", "power")
         )
+        # binary_sensor crosses only on the alert classes — measurement
+        # classes belong to sensor, classless never passes.
         self.assertFalse(
             is_category_served("diagnostic", "binary_sensor.plug_overload", "power")
+        )
+        self.assertFalse(
+            is_category_served("diagnostic", "binary_sensor.plug_mystery", None)
         )
 
     def test_unknown_category_rejected(self):

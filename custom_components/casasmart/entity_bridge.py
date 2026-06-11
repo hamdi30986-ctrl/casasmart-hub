@@ -239,18 +239,31 @@ def is_exposed(entity_id: str) -> bool:
 # Config entities are the app's settings-sheet surface (LED mode, child
 # lock, power-outage memory, operation mode) — read AND commanded, still
 # behind the per-domain command whitelist. Diagnostic entities are
-# read-only measurements the app actually renders (energy panel
-# voltage/current, device temperature) — sensors only, curated
-# device_class, so linkquality/firmware chatter never floods the feed.
+# read-only signals the app actually renders as satellite chips —
+# curated device_class per domain, so linkquality/firmware chatter
+# never floods the feed.
 DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
     {
         "power",
         "energy",
         "voltage",
         "current",
+        "frequency",
         "temperature",
         "humidity",
         "battery",
+    }
+)
+
+# Diagnostic binary_sensors the app attaches as alert chips (tamper on
+# door sensors, problem on leak hardware, device connectivity/running).
+# signal_strength stays deliberately absent — that's linkquality.
+DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
+    {
+        "tamper",
+        "problem",
+        "connectivity",
+        "running",
     }
 )
 
@@ -266,10 +279,12 @@ def is_category_served(
     if category == "config":
         return True
     if category == "diagnostic":
-        return (
-            entity_domain(entity_id) == "sensor"
-            and device_class in DIAGNOSTIC_SENSOR_CLASSES
-        )
+        domain = entity_domain(entity_id)
+        if domain == "sensor":
+            return device_class in DIAGNOSTIC_SENSOR_CLASSES
+        if domain == "binary_sensor":
+            return device_class in DIAGNOSTIC_BINARY_SENSOR_CLASSES
+        return False
     return False
 
 
