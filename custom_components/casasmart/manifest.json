@@ -3,6 +3,7 @@
   "name": "CasaSmart Hub",
   "codeowners": ["@casasmart"],
   "config_flow": true,
+  "after_dependencies": ["recorder"],
   "dependencies": ["http", "zeroconf"],
   "documentation": "https://github.com/casasmart/casasmart-hub",
   "integration_type": "hub",
