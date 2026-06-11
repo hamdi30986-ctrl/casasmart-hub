@@ -110,6 +110,11 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # the device list — cameras are user-facing tiles; room scoping still
     # applies per-entity through ``in_scope`` like everything else.
     "cameras.view": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    # B16 3c-4b: the installer surface — Zigbee permit-join, raw HA
+    # registry reads + entity surgery (rename, switch_as_x swap), the
+    # whitelisted config-flow proxy (Broadlink/EasyIR) and IR blaster
+    # commands. Owner-only: these reshape the home's hardware.
+    "installer.manage": (ROLE_ADMIN,),
     # B16 3c-3 widgets: mint the long-lived, narrow widget token. Every
     # role may mint one FOR ITSELF — the minted token inherits the
     # caller's own role/rooms/ver, so it can never out-privilege the
