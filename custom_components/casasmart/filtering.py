@@ -113,11 +113,24 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
     return is_exposed(entity_id) and is_visible(hass, entity_id)
 
 
+def device_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
+    """HA device-registry id for an entity, or None when it has no
+    registry entry / no parent device (template/MQTT-yaml entities).
+
+    The app groups multi-entity hardware into one tile by this id —
+    it is an opaque grouping key on the wire, never an HA handle the
+    app can act on (commands stay entity_id + whitelisted action)."""
+    entry = er.async_get(hass).async_get(entity_id)
+    return entry.device_id if entry is not None else None
+
+
 def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
-    """Serialize a state into the wire device dict — area resolved, and
+    """Serialize a state into the wire device dict — area resolved,
     the installer's registry display name (B17) overriding the HA
-    friendly name when one is set."""
+    friendly name when one is set, and the HA device-registry id as
+    the app's tile-grouping key (B16)."""
     device = serialize_state(state, area=area_name(hass, state.entity_id))
+    device["device_id"] = device_id_of(hass, state.entity_id)
     registry = get_registry_engine(hass)
     if registry is not None:
         display_name = registry.display_name_of(state.entity_id)
