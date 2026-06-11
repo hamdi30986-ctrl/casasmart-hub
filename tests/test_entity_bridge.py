@@ -195,6 +195,39 @@ class TestStage3aWidening(unittest.TestCase):
         _, service, _ = validate_command("siren.alarm", "turn_off", None)
         self.assertEqual(service, "turn_off")
 
+    def test_light_color_mode_dialect(self):
+        # Every color key the sheet's per-bulb command modes emit.
+        for key, value in (
+            ("hs_color", [210.0, 85.0]),
+            ("xy_color", [0.31, 0.32]),
+            ("rgbw_color", [255, 200, 120, 0]),
+            ("rgbww_color", [255, 200, 120, 0, 0]),
+            ("color_temp", 300),
+        ):
+            with self.subTest(key=key):
+                _, service, data = validate_command(
+                    "light.living1", "turn_on", {key: value}
+                )
+                self.assertEqual((service, data), ("turn_on", {key: value}))
+
+    def test_climate_set_temperature_carries_hvac_mode(self):
+        # The goodnight quick action preserves the current mode.
+        _, service, data = validate_command(
+            "climate.bedroom", "set_temperature",
+            {"temperature": 22, "hvac_mode": "cool"},
+        )
+        self.assertEqual(service, "set_temperature")
+        self.assertEqual(data, {"temperature": 22, "hvac_mode": "cool"})
+
+    def test_media_player_turn_off(self):
+        # The app's "away" quick action powers media players down.
+        _, service, data = validate_command("media_player.tv", "turn_off", {})
+        self.assertEqual((service, data), ("turn_off", {}))
+
+    def test_media_player_turn_off_rejects_data(self):
+        with self.assertRaises(CommandError):
+            validate_command("media_player.tv", "turn_off", {"transition": 1})
+
     def test_siren_rejects_data(self):
         # No tone/duration keys until a sheet actually sends them.
         with self.assertRaises(CommandError):

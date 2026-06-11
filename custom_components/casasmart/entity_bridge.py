@@ -104,12 +104,20 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "light": {
         "turn_on": (
             "turn_on",
+            # Color keys mirror the sheet's per-bulb color command modes
+            # (light_capabilities.dart): hs/rgb/rgbw/rgbww/xy, plus mired
+            # color_temp for bulbs that don't report kelvin bounds.
             frozenset(
                 {
                     "brightness",
                     "brightness_pct",
                     "rgb_color",
+                    "hs_color",
+                    "xy_color",
+                    "rgbw_color",
+                    "rgbww_color",
                     "color_temp_kelvin",
+                    "color_temp",
                     "effect",
                     "transition",
                 }
@@ -138,7 +146,12 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "climate": {
         "set_temperature": (
             "set_temperature",
-            frozenset({"temperature", "target_temp_low", "target_temp_high"}),
+            # hvac_mode rides along — HA's set_temperature natively takes
+            # it, and the goodnight quick action sends it to preserve the
+            # current mode while changing the target.
+            frozenset(
+                {"temperature", "target_temp_low", "target_temp_high", "hvac_mode"}
+            ),
         ),
         "set_hvac_mode": ("set_hvac_mode", frozenset({"hvac_mode"})),
         "set_fan_mode": ("set_fan_mode", frozenset({"fan_mode"})),
@@ -153,6 +166,9 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "pause": ("media_pause", frozenset()),
         "set_volume": ("volume_set", frozenset({"volume_level"})),
         "mute": ("volume_mute", frozenset({"is_volume_muted"})),
+        # The app's "away" quick action powers media players down — the
+        # one non-transport verb this domain needs.
+        "turn_off": ("turn_off", frozenset()),
     },
     "select": {
         "select_option": ("select_option", frozenset({"option"})),
