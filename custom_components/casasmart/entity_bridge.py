@@ -36,6 +36,11 @@ EXPOSED_DOMAINS: frozenset[str] = frozenset(
         "media_player",
         "sensor",
         "binary_sensor",
+        # B16 stage 3a: domains the app's settings sheets and alarm engine
+        # actually drive — each ships with a strict per-action whitelist below.
+        "select",
+        "number",
+        "siren",
     }
 )
 
@@ -51,6 +56,8 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "color_temp_kelvin",
             "min_color_temp_kelvin",
             "max_color_temp_kelvin",
+            "effect",
+            "effect_list",
         }
     ),
     "switch": frozenset({"device_class"}),
@@ -68,7 +75,7 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "max_temp",
         }
     ),
-    "cover": frozenset({"current_position", "device_class"}),
+    "cover": frozenset({"current_position", "current_tilt_position", "device_class"}),
     "fan": frozenset({"percentage", "percentage_step", "preset_mode", "preset_modes"}),
     "lock": frozenset({}),
     "media_player": frozenset(
@@ -83,6 +90,9 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
     ),
     "sensor": frozenset({"unit_of_measurement", "device_class", "state_class"}),
     "binary_sensor": frozenset({"device_class"}),
+    "select": frozenset({"options"}),
+    "number": frozenset({"min", "max", "step", "unit_of_measurement"}),
+    "siren": frozenset({"device_class"}),
 }
 
 # -- Command whitelist ---------------------------------------------------------
@@ -94,7 +104,16 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "light": {
         "turn_on": (
             "turn_on",
-            frozenset({"brightness", "rgb_color", "color_temp_kelvin", "transition"}),
+            frozenset(
+                {
+                    "brightness",
+                    "brightness_pct",
+                    "rgb_color",
+                    "color_temp_kelvin",
+                    "effect",
+                    "transition",
+                }
+            ),
         ),
         "turn_off": ("turn_off", frozenset({"transition"})),
         "toggle": ("toggle", frozenset()),
@@ -114,6 +133,7 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "close": ("close_cover", frozenset()),
         "stop": ("stop_cover", frozenset()),
         "set_position": ("set_cover_position", frozenset({"position"})),
+        "set_tilt_position": ("set_cover_tilt_position", frozenset({"tilt_position"})),
     },
     "climate": {
         "set_temperature": (
@@ -133,6 +153,16 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "pause": ("media_pause", frozenset()),
         "set_volume": ("volume_set", frozenset({"volume_level"})),
         "mute": ("volume_mute", frozenset({"is_volume_muted"})),
+    },
+    "select": {
+        "select_option": ("select_option", frozenset({"option"})),
+    },
+    "number": {
+        "set_value": ("set_value", frozenset({"value"})),
+    },
+    "siren": {
+        "turn_on": ("turn_on", frozenset()),
+        "turn_off": ("turn_off", frozenset()),
     },
 }
 

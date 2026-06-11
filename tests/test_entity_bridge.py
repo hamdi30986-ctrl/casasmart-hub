@@ -156,5 +156,115 @@ class TestValidateCommand(unittest.TestCase):
         self.assertEqual(data, {"temperature": 22})
 
 
+class TestStage3aWidening(unittest.TestCase):
+    """B16 stage 3a: the dialect the app's sheets actually speak."""
+
+    def test_light_brightness_pct_and_effect(self):
+        # lighting_control_sheet sends percent sliders and effect taps.
+        _, service, data = validate_command(
+            "light.living1", "turn_on", {"brightness_pct": 60}
+        )
+        self.assertEqual((service, data), ("turn_on", {"brightness_pct": 60}))
+        _, _, data = validate_command(
+            "light.living1", "turn_on", {"effect": "colorloop", "transition": 1}
+        )
+        self.assertEqual(data, {"effect": "colorloop", "transition": 1})
+
+    def test_cover_tilt(self):
+        _, service, data = validate_command(
+            "cover.blinds", "set_tilt_position", {"tilt_position": 45}
+        )
+        self.assertEqual(service, "set_cover_tilt_position")
+        self.assertEqual(data, {"tilt_position": 45})
+
+    def test_select_option(self):
+        _, service, data = validate_command(
+            "select.sensitivity", "select_option", {"option": "high"}
+        )
+        self.assertEqual((service, data), ("select_option", {"option": "high"}))
+
+    def test_number_set_value(self):
+        _, service, data = validate_command(
+            "number.timeout", "set_value", {"value": 12.5}
+        )
+        self.assertEqual((service, data), ("set_value", {"value": 12.5}))
+
+    def test_siren_on_off_no_data(self):
+        _, service, data = validate_command("siren.alarm", "turn_on", {})
+        self.assertEqual((service, data), ("turn_on", {}))
+        _, service, _ = validate_command("siren.alarm", "turn_off", None)
+        self.assertEqual(service, "turn_off")
+
+    def test_siren_rejects_data(self):
+        # No tone/duration keys until a sheet actually sends them.
+        with self.assertRaises(CommandError):
+            validate_command("siren.alarm", "turn_on", {"duration": 600})
+
+    def test_select_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "select_option", {"entity_id": "x"})
+
+    def test_tilt_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command(
+                "cover.blinds", "set_tilt_position", {"position": 5}
+            )
+
+    def test_actions_dont_cross_domains(self):
+        # number can't borrow select's action and vice versa.
+        with self.assertRaises(CommandError):
+            validate_command("number.timeout", "select_option", {"option": "x"})
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "set_value", {"value": 1})
+
+    def test_new_domains_stay_locked_down(self):
+        # Widened ≠ open: anything outside the per-action table still dies.
+        with self.assertRaises(CommandError):
+            validate_command("number.timeout", "set_min", {"min": 0})
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "toggle", {})
+
+    def test_installer_ops_not_exposed(self):
+        # automation.reload / mqtt.publish are admin-scope, never app commands.
+        self.assertFalse(is_exposed("automation.athan"))
+        with self.assertRaises(CommandError):
+            validate_command("automation.athan", "reload", {})
+
+    def test_new_attribute_allowlists(self):
+        select_attrs = serialize_state(
+            FakeState("select.mode", "high", {"options": ["low", "high"], "icon": "x"})
+        )["attributes"]
+        self.assertEqual(select_attrs, {"options": ["low", "high"]})
+        number_attrs = serialize_state(
+            FakeState(
+                "number.timeout",
+                "12",
+                {"min": 0, "max": 60, "step": 1, "mode": "slider"},
+            )
+        )["attributes"]
+        self.assertEqual(number_attrs, {"min": 0, "max": 60, "step": 1})
+
+    def test_cover_tilt_attribute_forwarded(self):
+        attrs = serialize_state(
+            FakeState(
+                "cover.blinds",
+                "open",
+                {"current_position": 80, "current_tilt_position": 45},
+            )
+        )["attributes"]
+        self.assertEqual(attrs["current_tilt_position"], 45)
+
+    def test_light_effect_attributes_forwarded(self):
+        attrs = serialize_state(
+            FakeState(
+                "light.strip",
+                "on",
+                {"effect": "colorloop", "effect_list": ["colorloop", "fire"]},
+            )
+        )["attributes"]
+        self.assertEqual(attrs["effect"], "colorloop")
+        self.assertEqual(attrs["effect_list"], ["colorloop", "fire"])
+
+
 if __name__ == "__main__":
     unittest.main()
