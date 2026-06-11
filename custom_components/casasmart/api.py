@@ -69,6 +69,11 @@ from .auth_api import (
     authenticate_request,
 )
 from .automation_api import CasaSmartAutomationConfigView
+from .camera_api import (
+    CasaSmartCameraHlsProxyView,
+    CasaSmartCameraSnapshotView,
+    CasaSmartCameraStreamView,
+)
 from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
 from .history import (
@@ -113,6 +118,9 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartCommandView(hass),
         CasaSmartHistoryView(hass),
         CasaSmartAutomationConfigView(hass),
+        CasaSmartCameraSnapshotView(hass),
+        CasaSmartCameraStreamView(hass),
+        CasaSmartCameraHlsProxyView(hass),
         CasaSmartWebSocketView(hass, hub_version),
         CasaSmartEnrollView(hass),
         CasaSmartRecoverView(hass),

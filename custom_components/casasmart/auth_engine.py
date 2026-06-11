@@ -100,6 +100,10 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # automations.yaml). Same trust tier as registry.manage — family
     # members may toggle/trigger (devices.control), never rewrite.
     "automations.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    # B16 3c-3: camera snapshots + HLS stream minting. Same audience as
+    # the device list — cameras are user-facing tiles; room scoping still
+    # applies per-entity through ``in_scope`` like everything else.
+    "cameras.view": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
 
 
