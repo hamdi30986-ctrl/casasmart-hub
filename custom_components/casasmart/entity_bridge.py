@@ -53,6 +53,15 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "color_mode",
             "supported_color_modes",
             "rgb_color",
+            # B16 stage 3c-2: the lighting sheet's capability detection
+            # (light_capabilities.dart) reads hs/xy and the mired scale
+            # for bulbs that don't report kelvin bounds — state-side
+            # attributes only, the command whitelist already takes them.
+            "hs_color",
+            "xy_color",
+            "color_temp",
+            "min_mireds",
+            "max_mireds",
             "color_temp_kelvin",
             "min_color_temp_kelvin",
             "max_color_temp_kelvin",
