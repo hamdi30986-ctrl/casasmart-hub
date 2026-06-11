@@ -66,6 +66,7 @@ from .auth_api import (
 )
 from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
+from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 from .registry_api import (
     CasaSmartDeviceAssignmentView,
     CasaSmartFavoritesView,
@@ -162,6 +163,9 @@ class CasaSmartHandshakeView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
         self._hass = hass
         self._hub_version = hub_version
+        # The handshake doubles as the app's reachability probe, so a
+        # misconfigured tunnel_url would otherwise warn on every probe.
+        self._tunnel_warned = False
 
     async def get(self, request: web.Request) -> web.Response:
         """Return the version contract; echo compatibility if app sent its version."""
@@ -181,6 +185,24 @@ class CasaSmartHandshakeView(HomeAssistantView):
                     runtime_data.tls.material.identity_fingerprint
                 ),
             }
+
+        # B7: advertise the installer-configured remote path so the app
+        # captures it AT PAIRING (like the TLS pin above). Absent when not
+        # configured or unusable — a bad URL degrades to LAN-only, it is
+        # never "fixed up" and handed to phones.
+        if runtime_data is not None:
+            raw_tunnel = runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
+            tunnel_url = normalize_tunnel_url(raw_tunnel)
+            if tunnel_url is not None:
+                body["tunnel"] = {"url": tunnel_url}
+            elif raw_tunnel is not None and not self._tunnel_warned:
+                self._tunnel_warned = True
+                _LOGGER.warning(
+                    "Configured %s is not a usable https URL — "
+                    "tunnel not advertised: %r",
+                    TUNNEL_URL_CONFIG_KEY,
+                    raw_tunnel,
+                )
 
         # Additive convenience: if the app declared its API version, tell it
         # outright whether we speak it. Malformed header -> 400, not a guess.
