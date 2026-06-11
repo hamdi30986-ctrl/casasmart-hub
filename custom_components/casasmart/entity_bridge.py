@@ -41,6 +41,12 @@ EXPOSED_DOMAINS: frozenset[str] = frozenset(
         "select",
         "number",
         "siren",
+        # B16 stage 3c-3: the routines tab reads automation state (on/off,
+        # last_triggered) from the entities feed and toggles/triggers
+        # through the command endpoint. Config CRUD does NOT ride this
+        # surface — it lives in automation_api.py behind
+        # ``automations.manage`` (admin scope).
+        "automation",
     }
 )
 
@@ -102,6 +108,9 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
     "select": frozenset({"options"}),
     "number": frozenset({"min", "max", "step", "unit_of_measurement"}),
     "siren": frozenset({"device_class"}),
+    # ``id`` is the automations.yaml config key (the app's CRUD handle);
+    # ``last_triggered`` feeds the routines tab's "last ran" line.
+    "automation": frozenset({"id", "last_triggered", "mode", "current"}),
 }
 
 # -- Command whitelist ---------------------------------------------------------
@@ -188,6 +197,15 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "siren": {
         "turn_on": ("turn_on", frozenset()),
         "turn_off": ("turn_off", frozenset()),
+    },
+    # Enable / disable / run-now. Deliberately NO data keys: the app's
+    # routines tab sends bare commands, and ``trigger``'s
+    # ``skip_condition`` stays at HA's default (run unconditionally —
+    # a manual test is the user overriding the schedule on purpose).
+    "automation": {
+        "turn_on": ("turn_on", frozenset()),
+        "turn_off": ("turn_off", frozenset()),
+        "trigger": ("trigger", frozenset()),
     },
 }
 

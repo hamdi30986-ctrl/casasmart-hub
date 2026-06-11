@@ -96,6 +96,10 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # B17: organize the home (floors/rooms/assignments/scenes). Users are
     # read-only — they see the layout through the registry GET, never edit it.
     "registry.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    # B16 3c-3: automation config CRUD (create/edit/delete in
+    # automations.yaml). Same trust tier as registry.manage — family
+    # members may toggle/trigger (devices.control), never rewrite.
+    "automations.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
 }
 
 
