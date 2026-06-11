@@ -87,6 +87,33 @@ class TestSerializeState(unittest.TestCase):
             attrs, {"brightness": 200, "rgb_color": [255, 0, 0]}
         )
 
+    def test_light_color_state_attributes_forwarded(self):
+        # B16 stage 3c-2: the app's capability detection reads hs/xy and
+        # the mired scale — they must survive serialization.
+        state = FakeState(
+            "light.bedroom_left",
+            "on",
+            {
+                "hs_color": [210.0, 85.0],
+                "xy_color": [0.32, 0.41],
+                "color_temp": 350,
+                "min_mireds": 153,
+                "max_mireds": 500,
+                "supported_features": 63,  # still filtered
+            },
+        )
+        attrs = serialize_state(state)["attributes"]
+        self.assertEqual(
+            attrs,
+            {
+                "hs_color": [210.0, 85.0],
+                "xy_color": [0.32, 0.41],
+                "color_temp": 350,
+                "min_mireds": 153,
+                "max_mireds": 500,
+            },
+        )
+
     def test_name_falls_back_to_entity_id(self):
         device = serialize_state(FakeState("switch.plug", "off"))
         self.assertEqual(device["name"], "switch.plug")
