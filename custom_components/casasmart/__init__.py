@@ -29,12 +29,16 @@ from homeassistant.components import persistent_notification
 from .api import async_register_views, build_views
 from .auth_api import notify_recovery_code
 from .auth_engine import AuthEngine
+from .discovery import MdnsAdvertiser
 from .const import (
+    API_VERSION,
     BACKUP_DIR_NAME,
     DATA_DIR_NAME,
     DB_FILENAME,
     DOMAIN,
     HUB_CONFIG_FILENAME,
+    HUB_NAME_CONFIG_KEY,
+    MDNS_REFRESH_INTERVAL_MINUTES,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
 )
@@ -69,6 +73,9 @@ class CasaSmartRuntimeData:
     registry: RegistryEngine
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
+    # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
+    # or zeroconf wasn't ready — discovery degrades, the hub stays reachable.
+    mdns: MdnsAdvertiser | None = None
 
 
 def _open_storage(
@@ -178,6 +185,7 @@ async def async_setup_entry(
     async_register_views(hass, hub_version=hub_version)
 
     await _async_start_tls(hass, entry, data_dir, hub_version)
+    await _async_start_mdns(hass, entry)
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
@@ -299,6 +307,45 @@ async def _async_start_tls(
     )
 
 
+async def _async_start_mdns(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry
+) -> None:
+    """B6: advertise ``_casasmart._tcp`` so the app auto-discovers the hub.
+
+    The hub-id broadcast in the TXT record is the **permanent identity
+    fingerprint** (B10) — the same value the app pins — so discovery and
+    the TLS trust decision share one identity, and a spoofed TXT id can't
+    survive the pin. Needs that fingerprint, so it runs after TLS; if the
+    identity layer failed (``runtime_data.tls is None``) there's nothing
+    stable to advertise and discovery is skipped (the stored-IP/tunnel
+    chain still reaches the hub). Re-publishes on a slow tick to follow a
+    DHCP IP change. Failures degrade silently — mDNS is convenience.
+    """
+    runtime_data = entry.runtime_data
+    if runtime_data.tls is None:
+        _LOGGER.info("mDNS advertiser skipped — TLS identity unavailable")
+        return
+
+    hub_name = runtime_data.hub_config.get(HUB_NAME_CONFIG_KEY)
+    advertiser = MdnsAdvertiser(
+        hass,
+        hub_id=runtime_data.tls.material.identity_fingerprint,
+        hub_name=hub_name if isinstance(hub_name, str) else None,
+        api_version=API_VERSION,
+        port=runtime_data.tls.port,
+    )
+    await advertiser.async_start()
+    runtime_data.mdns = advertiser
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            advertiser.async_refresh,
+            timedelta(minutes=MDNS_REFRESH_INTERVAL_MINUTES),
+        )
+    )
+
+
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register hub services (idempotent across entry reloads).
 
@@ -340,7 +387,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 async def async_unload_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
-    """Unload a config entry, stopping the TLS listener and closing storage."""
+    """Unload a config entry, stopping the mDNS/TLS listeners and storage."""
+    if entry.runtime_data.mdns is not None:
+        await entry.runtime_data.mdns.async_stop()
     if entry.runtime_data.tls is not None:
         await entry.runtime_data.tls.async_stop()
     await hass.async_add_executor_job(entry.runtime_data.storage.close)
