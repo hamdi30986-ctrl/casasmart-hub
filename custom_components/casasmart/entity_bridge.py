@@ -47,6 +47,10 @@ EXPOSED_DOMAINS: frozenset[str] = frozenset(
         # surface — it lives in automation_api.py behind
         # ``automations.manage`` (admin scope).
         "automation",
+        # B16 stage 3c-3: camera tiles read state from the entities feed;
+        # snapshots and the HLS stream fallback ride camera_api.py. No
+        # commands — camera is read-only on this surface.
+        "camera",
     }
 )
 
@@ -111,6 +115,10 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
     # ``id`` is the automations.yaml config key (the app's CRUD handle);
     # ``last_triggered`` feeds the routines tab's "last ran" line.
     "automation": frozenset({"id", "last_triggered", "mode", "current"}),
+    # The go2rtc stream matcher reads brand/model as name candidates.
+    # ``entity_picture`` is deliberately ABSENT: it embeds an HA-signed
+    # camera_proxy token — thumbnails ride the hub snapshot endpoint.
+    "camera": frozenset({"brand", "model_name", "frontend_stream_type"}),
 }
 
 # -- Command whitelist ---------------------------------------------------------
@@ -210,7 +218,7 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
 }
 
 # Domains that are exposed read-only (no commands ever).
-READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor"})
+READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor", "camera"})
 
 
 class CommandError(Exception):
