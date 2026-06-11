@@ -352,6 +352,99 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(TokenError):
             engine2.validate_token(token)
 
+    def test_widget_token_mint_and_scope(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        issued = self.engine.mint_widget_token(device_id)
+        self.assertEqual(issued["scope"], "widget")
+        self.assertEqual(issued["expires_in"], auth_engine.WIDGET_TOKEN_TTL)
+        claims = self.engine.validate_token(issued["token"])
+        self.assertEqual(claims["scope"], "widget")
+        self.assertEqual(claims["sub"], device_id)
+        # The widget set, and ONLY the widget set.
+        self.assertTrue(AuthEngine.authorize(claims, "devices.read"))
+        self.assertTrue(AuthEngine.authorize(claims, "devices.control"))
+        for blocked in (
+            "history.read",
+            "cameras.view",
+            "automations.manage",
+            "users.manage",
+            "pairing.generate",
+            "registry.manage",
+            "widget.token",  # no self-renewal
+        ):
+            with self.subTest(permission=blocked):
+                self.assertFalse(AuthEngine.authorize(claims, blocked))
+
+    def test_widget_token_admin_still_capped(self):
+        # An ADMIN's widget token must not reach admin surfaces.
+        device_id = self.engine.enroll_device("Hamdi", "admin", self.public_pem)
+        claims = self.engine.validate_token(
+            self.engine.mint_widget_token(device_id)["token"]
+        )
+        self.assertFalse(AuthEngine.authorize(claims, "users.manage"))
+        self.assertFalse(AuthEngine.authorize(claims, "automations.manage"))
+        self.assertTrue(AuthEngine.authorize(claims, "devices.control"))
+
+    def test_widget_token_inherits_room_scope(self):
+        self.engine.enroll_device("Owner", "admin", self.public_pem)
+        _, user_pem = make_keypair()
+        user_id = self.engine.enroll_device(
+            "Kid", "user", user_pem, rooms=["bedroom"]
+        )
+        claims = self.engine.validate_token(
+            self.engine.mint_widget_token(user_id)["token"]
+        )
+        self.assertEqual(claims["rooms"], ["bedroom"])
+
+    def test_widget_token_revoked_on_edit(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self.engine.mint_widget_token(device_id)["token"]
+        self.engine.update_device(device_id, rooms=["living"])  # ver bump
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)
+
+    def test_widget_token_revoked_on_unpair(self):
+        self.engine.enroll_device("Owner", "admin", self.public_pem)
+        _, user_pem = make_keypair()
+        user_id = self.engine.enroll_device("Phone", "user", user_pem)
+        token = self.engine.mint_widget_token(user_id)["token"]
+        self.engine.delete_device(user_id)
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)
+
+    def test_widget_token_unknown_device(self):
+        with self.assertRaises(UnknownDeviceError):
+            self.engine.mint_widget_token("ghost-device")
+
+    def test_unknown_scope_claim_rejected(self):
+        # A token whose scope claim isn't in VALID_SCOPES must not
+        # validate into an unscoped (full) token.
+        token = auth_tokens.issue_token(SECRET, "dev-1", "user", None, ttl=60)
+        header_b64, claims_b64, _ = token.split(".")
+        import base64 as b64
+        import hmac as hmac_mod
+        import hashlib as hashlib_mod
+        import json as json_mod
+
+        claims = json_mod.loads(
+            b64.urlsafe_b64decode(claims_b64 + "=" * (-len(claims_b64) % 4))
+        )
+        claims["scope"] = "everything"
+        new_claims_b64 = (
+            b64.urlsafe_b64encode(
+                json_mod.dumps(claims, separators=(",", ":")).encode()
+            ).rstrip(b"=").decode()
+        )
+        signing_input = f"{header_b64}.{new_claims_b64}".encode()
+        signature = (
+            b64.urlsafe_b64encode(
+                hmac_mod.new(SECRET, signing_input, hashlib_mod.sha256).digest()
+            ).rstrip(b"=").decode()
+        )
+        forged = f"{header_b64}.{new_claims_b64}.{signature}"
+        with self.assertRaises(TokenError):
+            auth_tokens.validate_token(SECRET, forged)
+
     def test_authorize_matrix(self):
         cases = [
             ("admin", "users.manage", True),

@@ -27,6 +27,14 @@ Token shape (claims):
   ``ver`` on validation, so privilege edits invalidate outstanding
   tokens immediately instead of riding out the TTL.
 - ``jti`` — unique token id (random), for future revocation lists.
+- ``scope`` — OPTIONAL. Absent on normal session tokens. ``widget`` marks
+  the B16 3c-3 home-screen-widget token: long-lived, but the engine's
+  ``authorize`` only honors it for the narrow widget permission set
+  (device read + control), so a leaked widget token can never touch
+  cameras, history, automations CRUD, pairing, or user management.
+  Revocation rides the existing ``ver`` check — unpairing or editing the
+  issuing device kills its widget tokens the same instant as its session
+  tokens.
 """
 
 from __future__ import annotations
@@ -48,6 +56,10 @@ ROLE_ADMIN = "admin"
 ROLE_SUB_ADMIN = "sub-admin"
 ROLE_USER = "user"
 VALID_ROLES = (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER)
+
+# The only non-default scope a hub token can carry (B16 3c-3 widgets).
+SCOPE_WIDGET = "widget"
+VALID_SCOPES = (SCOPE_WIDGET,)
 
 
 class TokenError(Exception):
@@ -78,12 +90,15 @@ def issue_token(
     ttl: int,
     ver: int = 1,
     now: float | None = None,
+    scope: str | None = None,
 ) -> str:
     """Mint a signed token for an authenticated device."""
     if not secret:
         raise ValueError("Empty signing secret")
     if role not in VALID_ROLES:
         raise ValueError(f"Unknown role {role!r}")
+    if scope is not None and scope not in VALID_SCOPES:
+        raise ValueError(f"Unknown scope {scope!r}")
     issued_at = int(now if now is not None else time.time())
     header = {"alg": ALGORITHM, "typ": "JWT"}
     claims = {
@@ -96,6 +111,8 @@ def issue_token(
         "exp": issued_at + int(ttl),
         "jti": secrets.token_urlsafe(16),
     }
+    if scope is not None:
+        claims["scope"] = scope
     signing_input = (
         _b64url_encode(json.dumps(header, separators=(",", ":")).encode())
         + "."
@@ -151,6 +168,10 @@ def validate_token(
         raise TokenError("Malformed rooms claim")
     if not isinstance(claims.get("ver"), int):
         raise TokenError("Missing version claim")
+    if "scope" in claims and claims["scope"] not in VALID_SCOPES:
+        # A forged/garbled scope must never validate into "no scope" —
+        # an unknown scope claim is rejected outright, not ignored.
+        raise TokenError("Unknown scope claim")
 
     current = now if now is not None else time.time()
     exp = claims.get("exp")
