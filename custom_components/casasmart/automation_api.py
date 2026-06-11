@@ -69,12 +69,28 @@ _LOGGER = logging.getLogger(__name__)
 # -- File I/O (executor-side) ----------------------------------------------------
 
 
+class AutomationFileError(Exception):
+    """automations.yaml exists but isn't the list HA mandates."""
+
+
 def _read_yaml(path: str) -> list[dict[str, Any]]:
-    """Load automations.yaml; a missing or empty file is an empty list."""
+    """Load automations.yaml; a missing or empty file is an empty list.
+
+    A present-but-non-list file (hand-edited into a dict/scalar) raises
+    instead of coercing to ``[]`` — silently treating corrupt content as
+    empty would DISCARD it on the next write (audit finding, 3c-3).
+    """
     if not os.path.isfile(path):
         return []
     content = load_yaml(path)
-    return content if isinstance(content, list) else []
+    if content is None:
+        # All-comments / empty file — legitimately no automations.
+        return []
+    if not isinstance(content, list):
+        raise AutomationFileError(
+            f"automations.yaml is {type(content).__name__}, expected a list"
+        )
+    return content
 
 
 def _write_yaml(path: str, data: list[dict[str, Any]]) -> None:
@@ -130,6 +146,23 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
     def _config_path(self) -> str:
         return self._hass.config.path(AUTOMATION_CONFIG_PATH)
 
+    async def _load(
+        self,
+    ) -> tuple[list[dict[str, Any]] | None, web.Response | None]:
+        """Read automations.yaml off-loop; a corrupt file is a 500, never
+        an empty list a later write would clobber."""
+        try:
+            data = await self._hass.async_add_executor_job(
+                _read_yaml, self._config_path
+            )
+        except AutomationFileError as err:
+            _LOGGER.error("automations.yaml unusable: %s", err)
+            return None, self.json_message(
+                f"automations.yaml unusable: {err}",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return data, None
+
     async def get(self, request: web.Request, config_key: str) -> web.Response:
         """One automation's stored config (the editor's lazy load)."""
         _, error = self._gate(request)
@@ -138,9 +171,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         if (bad := self._check_key(config_key)) is not None:
             return bad
         async with self._mutation_lock:
-            data = await self._hass.async_add_executor_job(
-                _read_yaml, self._config_path
-            )
+            data, error = await self._load()
+            if error is not None:
+                return error
         value = get_automation(data, config_key)
         if value is None:
             return self.json_message(
@@ -172,9 +205,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             )
 
         async with self._mutation_lock:
-            data = await self._hass.async_add_executor_job(
-                _read_yaml, self._config_path
-            )
+            data, load_error = await self._load()
+            if load_error is not None:
+                return load_error
             upsert_automation(data, config_key, payload)
             try:
                 await self._hass.async_add_executor_job(
@@ -198,9 +231,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return bad
 
         async with self._mutation_lock:
-            data = await self._hass.async_add_executor_job(
-                _read_yaml, self._config_path
-            )
+            data, load_error = await self._load()
+            if load_error is not None:
+                return load_error
             if not delete_automation(data, config_key):
                 return self.json_message(
                     f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
