@@ -69,6 +69,15 @@ from .auth_api import (
     CasaSmartWidgetTokenView,
     authenticate_request,
 )
+from .admin_api import (
+    CasaSmartAdminConfigFlowsView,
+    CasaSmartAdminConfigFlowView,
+    CasaSmartAdminEntityView,
+    CasaSmartAdminPermitJoinView,
+    CasaSmartAdminRegistryView,
+    CasaSmartAdminRemoteCommandView,
+    CasaSmartAdminStatesView,
+)
 from .automation_api import CasaSmartAutomationConfigView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
@@ -142,6 +151,13 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartSceneView(hass),
         CasaSmartSceneActivateView(hass),
         CasaSmartFavoritesView(hass),
+        CasaSmartAdminPermitJoinView(hass),
+        CasaSmartAdminRegistryView(hass),
+        CasaSmartAdminStatesView(hass),
+        CasaSmartAdminEntityView(hass),
+        CasaSmartAdminConfigFlowsView(hass),
+        CasaSmartAdminConfigFlowView(hass),
+        CasaSmartAdminRemoteCommandView(hass),
     ]
 
 
