@@ -37,14 +37,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 
 from .const import (
     API_VERSION,
@@ -66,6 +70,11 @@ from .auth_api import (
 )
 from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
+from .history import (
+    HistoryQueryError,
+    parse_history_query,
+    serialize_history,
+)
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 from .registry_api import (
     CasaSmartDeviceAssignmentView,
@@ -101,6 +110,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartDevicesView(hass),
         CasaSmartDeviceView(hass),
         CasaSmartCommandView(hass),
+        CasaSmartHistoryView(hass),
         CasaSmartWebSocketView(hass, hub_version),
         CasaSmartEnrollView(hass),
         CasaSmartRecoverView(hass),
@@ -422,3 +432,84 @@ class CasaSmartCommandView(HomeAssistantView):
                 else None,
             }
         )
+
+
+class CasaSmartHistoryView(HomeAssistantView):
+    """GET /api/casasmart/history — recorded state history (B16 3c-3).
+
+    Replaces the app's raw-token ``GET /api/history/period/<ts>`` call
+    (the energy screen's weekly sampling). Query string:
+
+    ``?entities=a,b&start=<iso>&end=<iso>&significant=0|1``
+
+    Every requested entity passes the SAME gates as the device views
+    (``is_served`` + ``in_scope``); ids that fail are silently omitted
+    from the response — a room-scoped token can't use history to
+    enumerate what exists outside its rooms, and "unknown" and
+    "out-of-scope" stay indistinguishable. Allowed entities always get a
+    key, ``[]`` when the window holds no rows.
+    """
+
+    url = f"/api/{DOMAIN}/history"
+    name = f"api:{DOMAIN}:history"
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Validate the query, run the recorder read off-loop, serialize."""
+        claims, error = authenticate_request(self._hass, request, "history.read")
+        if error is not None:
+            return error
+
+        try:
+            entity_ids, start, end, significant = parse_history_query(
+                request.query, now=dt_util.utcnow()
+            )
+        except HistoryQueryError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        rooms = claims.get("rooms")
+        # Existence is checked too: `is_served` alone passes any id in an
+        # exposed domain (the live proof caught sensor.does_not_exist
+        # getting a key) — the gate must mirror the device views, where
+        # a missing state IS "not found".
+        allowed = [
+            entity_id
+            for entity_id in entity_ids
+            if self._hass.states.get(entity_id) is not None
+            and is_served(self._hass, entity_id)
+            and in_scope(self._hass, entity_id, rooms)
+        ]
+        if not allowed:
+            # Every id was filtered — same empty shape, nothing leaked.
+            return self.json({"history": {}})
+
+        try:
+            recorder = get_instance(self._hass)
+        except (KeyError, AttributeError):
+            # No recorder on this hub — history simply doesn't exist.
+            return self.json_message(
+                "History unavailable: recorder not running",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+
+        # The recorder read is a SQLite query — run it in the recorder's
+        # own executor, never on the event loop. minimal_response +
+        # no_attributes keeps the payload to {state, last_changed} rows,
+        # which is all the energy math reads.
+        states = await recorder.async_add_executor_job(
+            partial(
+                get_significant_states,
+                self._hass,
+                start,
+                end,
+                allowed,
+                include_start_time_state=True,
+                significant_changes_only=significant,
+                minimal_response=True,
+                no_attributes=True,
+            )
+        )
+        return self.json({"history": serialize_history(allowed, states)})

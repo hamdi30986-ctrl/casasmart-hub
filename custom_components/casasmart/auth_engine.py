@@ -88,6 +88,9 @@ MAX_CHALLENGES_PER_DEVICE = 8
 PERMISSIONS: dict[str, tuple[str, ...]] = {
     "devices.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "devices.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    # B16 3c-3: recorded state history — read-only, same audience as the
+    # device list (the energy screen is a user-facing surface).
+    "history.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "users.manage": (ROLE_ADMIN,),
     "pairing.generate": (ROLE_ADMIN,),
     # B17: organize the home (floors/rooms/assignments/scenes). Users are
