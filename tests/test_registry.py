@@ -153,8 +153,9 @@ class SceneTests(RegistryTestCase):
         cases = [
             [{"entity_id": "light.sofa", "action": "explode", "data": {}}],
             [{"entity_id": "sensor.temp", "action": "turn_on", "data": {}}],
+            # 'effect' became legal in stage 3a — 'flash' is still banned.
             [{"entity_id": "light.sofa", "action": "turn_on",
-              "data": {"effect": "strobe"}}],
+              "data": {"flash": "long"}}],
             [],
             "not-a-list",
         ]
