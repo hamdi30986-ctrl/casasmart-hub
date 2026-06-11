@@ -590,6 +590,49 @@ class CasaSmartTokenView(HomeAssistantView):
         return self.json(issued)
 
 
+class CasaSmartWidgetTokenView(HomeAssistantView):
+    """POST /api/casasmart/auth/widget-token — mint the widget token.
+
+    B16 3c-3 widgets (option A): home-screen widgets can't run the
+    challenge-response login, so the app trades its REGULAR session token
+    for a long-lived ``scope: widget`` token and hands THAT to native
+    widget storage — the raw HA token never leaves the app process again.
+
+    ``widget.token`` is outside ``WIDGET_SCOPE_PERMISSIONS``, so a widget
+    token presented here is refused by ``authorize`` — widget tokens
+    cannot self-renew; only a live app session can mint one.
+    """
+
+    url = f"/api/{DOMAIN}/auth/widget-token"
+    name = f"api:{DOMAIN}:auth:widget-token"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "widget.token")
+        if error is not None:
+            return error
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+
+        try:
+            issued = await self._hass.async_add_executor_job(
+                engine.mint_widget_token, claims["sub"]
+            )
+        except UnknownDeviceError:
+            # The device vanished between validate and mint — same bucket
+            # as an invalid token, nothing to enumerate.
+            return self.json_message(
+                "Invalid or expired token", HTTPStatus.UNAUTHORIZED
+            )
+
+        _LOGGER.info("Widget token minted for %s", claims["sub"])
+        return self.json(issued, HTTPStatus.CREATED)
+
+
 def _throttled_response(err: ThrottledError) -> web.Response:
     return web.json_response(
         {"message": str(err), "retry_after": int(err.retry_after)},

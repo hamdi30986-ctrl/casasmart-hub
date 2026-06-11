@@ -78,6 +78,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # Token lifetime — middle of the plan's 30-60 min band.
 TOKEN_TTL = 45 * 60
+# Widget token lifetime (B16 3c-3). Long-lived on purpose: a home-screen
+# widget can't run the challenge-response login, and the app re-mints a
+# fresh one on every widget credential sync, so 30 days is the OUTER
+# bound, not the rotation cadence. Revocation doesn't wait for expiry —
+# the ``ver`` check kills it the moment the device is edited/unpaired.
+WIDGET_TOKEN_TTL = 30 * 24 * 3600
 # One-time login nonces: short-lived, few outstanding per device.
 CHALLENGE_TTL = 60.0
 MAX_CHALLENGES_PER_DEVICE = 8
@@ -104,7 +110,20 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # the device list — cameras are user-facing tiles; room scoping still
     # applies per-entity through ``in_scope`` like everything else.
     "cameras.view": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    # B16 3c-3 widgets: mint the long-lived, narrow widget token. Every
+    # role may mint one FOR ITSELF — the minted token inherits the
+    # caller's own role/rooms/ver, so it can never out-privilege the
+    # session that requested it.
+    "widget.token": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
+
+# What a ``scope: widget`` token may do — and the COMPLETE list of it.
+# Read states for tiles, send whitelisted device commands. No history,
+# no cameras, no automation CRUD, no pairing/user management, and no
+# minting further widget tokens (so a leaked one can't self-renew).
+WIDGET_SCOPE_PERMISSIONS: frozenset[str] = frozenset(
+    {"devices.read", "devices.control"}
+)
 
 
 class AuthError(Exception):
@@ -473,13 +492,50 @@ class AuthEngine:
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
-        """True when the token's role grants the named permission."""
+        """True when the token's role grants the named permission.
+
+        A ``scope: widget`` token is additionally capped to
+        ``WIDGET_SCOPE_PERMISSIONS`` — the scope check runs FIRST so a
+        widget token held by an admin still can't reach admin surfaces.
+        """
+        if (
+            claims.get("scope") == auth_tokens.SCOPE_WIDGET
+            and permission not in WIDGET_SCOPE_PERMISSIONS
+        ):
+            return False
         allowed_roles = PERMISSIONS.get(permission)
         if allowed_roles is None:
             # Unknown permission = programming error; fail closed, loudly.
             _LOGGER.error("authorize() called with unknown permission %r", permission)
             return False
         return claims.get("role") in allowed_roles
+
+    def mint_widget_token(self, device_id: str) -> dict[str, Any]:
+        """Mint the long-lived, widget-scoped token for an enrolled device.
+
+        Role/rooms/ver come from the device's CURRENT record — never from
+        the requesting token — so the widget token always reflects the
+        latest privilege edit and dies with the next one (``ver`` bump).
+        Raises ``UnknownDeviceError`` when the device is gone.
+        """
+        with self._lock:
+            cached = self._device_cache.get(device_id)
+        if cached is None:
+            raise UnknownDeviceError(f"Unknown device {device_id!r}")
+        token = auth_tokens.issue_token(
+            self._signing_secret(),
+            device_id=device_id,
+            role=cached["role"],
+            rooms=cached.get("rooms"),
+            ttl=WIDGET_TOKEN_TTL,
+            ver=cached["ver"],
+            scope=auth_tokens.SCOPE_WIDGET,
+        )
+        return {
+            "token": token,
+            "expires_in": WIDGET_TOKEN_TTL,
+            "scope": auth_tokens.SCOPE_WIDGET,
+        }
 
     @staticmethod
     def allowed_rooms(claims: dict[str, Any]) -> list[str] | None:
