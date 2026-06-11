@@ -100,9 +100,10 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
     shared policy in ``entity_bridge.is_category_served`` (B16 3c-4a):
     config entities are served (the app's settings sheets read and drive
     them — LED mode, child lock, power-outage memory), and diagnostic
-    SENSORS with a curated measurement device_class are served (energy
-    panel voltage/current, device temperature). Everything else with a
-    category (linkquality chatter, firmware plumbing) stays hub-internal.
+    sensors/binary_sensors with a curated device_class are served (energy
+    panel voltage/current, device temperature, tamper/problem alert
+    chips). Everything else with a category (linkquality chatter,
+    firmware plumbing) stays hub-internal.
     Entities with no registry entry (template/MQTT-yaml) are visible by
     default.
     """
