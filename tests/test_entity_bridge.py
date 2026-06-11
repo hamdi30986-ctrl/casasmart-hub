@@ -44,7 +44,8 @@ class TestExposure(unittest.TestCase):
     def test_exposed_domains(self):
         self.assertTrue(is_exposed("light.living1"))
         self.assertTrue(is_exposed("climate.bedroom"))
-        self.assertFalse(is_exposed("automation.athan"))
+        # 3c-3: automation joined the surface (routines tab state feed).
+        self.assertTrue(is_exposed("automation.athan"))
         self.assertFalse(is_exposed("persistent_notification.x"))
         self.assertFalse(is_exposed("update.core"))
 
@@ -151,7 +152,7 @@ class TestValidateCommand(unittest.TestCase):
 
     def test_rejects_unexposed_domain(self):
         with self.assertRaises(CommandError):
-            validate_command("automation.athan", "turn_off", {})
+            validate_command("camera.front_door", "turn_off", {})
 
     def test_rejects_read_only_domain(self):
         with self.assertRaises(CommandError):
@@ -285,10 +286,55 @@ class TestStage3aWidening(unittest.TestCase):
             validate_command("select.sensitivity", "toggle", {})
 
     def test_installer_ops_not_exposed(self):
-        # automation.reload / mqtt.publish are admin-scope, never app commands.
-        self.assertFalse(is_exposed("automation.athan"))
+        # 3c-3: automation is exposed for state + toggle/trigger, but the
+        # installer verbs (reload) are still never app commands.
+        self.assertTrue(is_exposed("automation.athan"))
         with self.assertRaises(CommandError):
             validate_command("automation.athan", "reload", {})
+
+    def test_automation_toggle_and_trigger(self):
+        # 3c-3: the routines tab's three verbs, no data ever.
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "turn_on", {}),
+            ("automation", "turn_on", {}),
+        )
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "turn_off", None),
+            ("automation", "turn_off", {}),
+        )
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "trigger", {}),
+            ("automation", "trigger", {}),
+        )
+        # skip_condition must not be smuggled in from the wire.
+        with self.assertRaises(CommandError):
+            validate_command(
+                "automation.casa_automation_x", "trigger", {"skip_condition": False}
+            )
+
+    def test_automation_attribute_allowlist(self):
+        attrs = serialize_state(
+            FakeState(
+                "automation.casa_automation_x",
+                "on",
+                {
+                    "id": "casa_automation_20260303_143022",
+                    "last_triggered": "2026-06-11T07:00:00+00:00",
+                    "mode": "single",
+                    "current": 0,
+                    "icon": "mdi:robot",  # HA internal — must drop
+                },
+            )
+        )["attributes"]
+        self.assertEqual(
+            attrs,
+            {
+                "id": "casa_automation_20260303_143022",
+                "last_triggered": "2026-06-11T07:00:00+00:00",
+                "mode": "single",
+                "current": 0,
+            },
+        )
 
     def test_new_attribute_allowlists(self):
         select_attrs = serialize_state(
