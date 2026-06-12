@@ -92,6 +92,16 @@ dead weight. Migration = **wipe, not re-claim**:
    immediately; pairing codes proven single-use.
 2. **Supabase migration:** slim `claim_pairing_code` → routing-only (or
    retire it), drop token columns. Staged: columns dropped last.
+   **RPC SLIM DONE 2026-06-12** — applied to prod
+   (`slim_claim_pairing_code_routing_only`), live-proven: payload keys are
+   now `id`/`code`/`ha_local_url`/`client_name`, no `ha_token`; bad code →
+   `code_not_found` unchanged. Mirror file:
+   `CSv1/supabase/migrations/20260612_slim_claim_pairing_code_routing_only.sql`.
+   Token columns (`pairing_codes.ha_token`, `homes.cloud_ha_token`,
+   `homes.cloud_ha_url`) still present — drop AFTER the app half ships and
+   no app version reads them. NOTE: until the app half lands, fresh pairing
+   via the current app is intentionally broken (it expects `ha_token`);
+   existing installs unaffected (already on hub sessions).
 3. **App half (background agent, design locked):** mDNS discovery flow,
    enroll exchange, probe replacement, config-check slim, onboarding/setup/
    settings screens flipped, stored-token wipe, `ha_reachability_probe.dart`
