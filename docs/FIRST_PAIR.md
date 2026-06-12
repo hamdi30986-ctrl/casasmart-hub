@@ -42,6 +42,13 @@ Every step above leaks the house key through Supabase. All three go.
 3. **App → hub directly:** `POST /auth/enroll` `{pairing_code, name, public_key}`
    → hub mints the device cred (same hub_auth sessions 3c-1→4 ride).
    Supabase never sees it.
+   **Transport (audit M1 fix, 2026-06-12):** two-phase. The handshake —
+   secretless TOFU pin read — is the ONLY request on the plain routing URL.
+   The moment the pin exists, health + enroll move to
+   `https://host:tls.port` through the B10 pinned client
+   (`HubClientFactory.pinnedLanClient`), so the pairing code never crosses
+   the LAN in cleartext. Both listeners serve the same canonical view list
+   (`api.py build_views`), proven live over :8443.
 4. **Reachability:** replace the HA websocket probe with hub `/health` +
    `/handshake`. `ha_reachability_probe.dart` is deleted.
 5. **Supabase keeps only routing:** home record + tunnel URL for
