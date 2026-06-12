@@ -54,7 +54,9 @@ from .pairing import PairingManager
 from .recovery import RecoveryManager
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
+from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
+from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +73,8 @@ class CasaSmartRuntimeData:
     pairing: PairingManager
     recovery: RecoveryManager
     registry: RegistryEngine
+    tanks: TankEngine
+    user_settings: UserSettingsEngine
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -87,11 +91,13 @@ def _open_storage(
     PairingManager,
     RecoveryManager,
     RegistryEngine,
+    TankEngine,
+    UserSettingsEngine,
     str | None,
     str | None,
 ]:
-    """Open storage + config + auth + pairing + recovery + registry
-    (blocking — executor only)."""
+    """Open storage + config + auth + pairing + recovery + registry +
+    tanks + user settings (blocking — executor only)."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -117,6 +123,11 @@ def _open_storage(
         storage.table("registry_favorites"),
     )
     registry.warm_up()  # room/name mirrors loaded — event-loop reads stay pure CPU
+    tanks = TankEngine(
+        storage.table("tank_devices"),
+        storage.table("tank_readings"),
+    )
+    user_settings = UserSettingsEngine(storage.table("user_settings"))
     return (
         storage,
         hub_config,
@@ -124,6 +135,8 @@ def _open_storage(
         pairing,
         recovery,
         registry,
+        tanks,
+        user_settings,
         bootstrap_code,
         recovery_code,
     )
@@ -143,6 +156,8 @@ async def async_setup_entry(
             pairing,
             recovery,
             registry,
+            tanks,
+            user_settings,
             bootstrap_code,
             recovery_code,
         ) = await hass.async_add_executor_job(_open_storage, data_dir)
@@ -156,6 +171,8 @@ async def async_setup_entry(
         pairing=pairing,
         recovery=recovery,
         registry=registry,
+        tanks=tanks,
+        user_settings=user_settings,
     )
 
     await _async_import_registry(hass, hub_config, registry)
@@ -372,6 +389,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # B17: favorites are phone/app-layer data — they die with the
             # phones. Floors/rooms/scenes are HOUSE data and survive.
             runtime_data.storage.table("registry_favorites").clear()
+            # MB-2: per-user settings are phone-layer too, same fate.
+            # Tank devices/readings are HOUSE data (the Shelly keeps
+            # posting through an ownership transfer) and survive.
+            runtime_data.storage.table("user_settings").clear()
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
