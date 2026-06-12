@@ -104,6 +104,14 @@ from .registry_api import (
     CasaSmartScenesView,
     CasaSmartSceneView,
 )
+from .settings_api import CasaSmartUserSettingsView
+from .tank_api import (
+    CasaSmartTankDevicesView,
+    CasaSmartTankDeviceView,
+    CasaSmartTankProvisionView,
+    CasaSmartTankReadingsView,
+    CasaSmartTankReadingView,
+)
 from .ws import CasaSmartWebSocketView
 
 if TYPE_CHECKING:
@@ -151,6 +159,12 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartSceneView(hass),
         CasaSmartSceneActivateView(hass),
         CasaSmartFavoritesView(hass),
+        CasaSmartUserSettingsView(hass),
+        CasaSmartTankProvisionView(hass),
+        CasaSmartTankReadingView(hass),
+        CasaSmartTankDevicesView(hass),
+        CasaSmartTankDeviceView(hass),
+        CasaSmartTankReadingsView(hass),
         CasaSmartAdminPermitJoinView(hass),
         CasaSmartAdminRegistryView(hass),
         CasaSmartAdminStatesView(hass),
