@@ -106,6 +106,13 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # automations.yaml). Same trust tier as registry.manage — family
     # members may toggle/trigger (devices.control), never rewrite.
     "automations.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    # B13 alarm: read arm state + history, arm/disarm, configure zones.
+    # Plan roles table — admin + sub-admin only; a plain user has NO alarm
+    # access (not even read). Split into three verbs so a future read-only
+    # tier is a one-line change, not a redesign.
+    "alarm.read": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    "alarm.arm": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    "alarm.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     # B16 3c-3: camera snapshots + HLS stream minting. Same audience as
     # the device list — cameras are user-facing tiles; room scoping still
     # applies per-entity through ``in_scope`` like everything else.

@@ -78,6 +78,14 @@ from .admin_api import (
     CasaSmartAdminRemoteCommandView,
     CasaSmartAdminStatesView,
 )
+from .alarm_api import (
+    CasaSmartAlarmArmView,
+    CasaSmartAlarmDisarmView,
+    CasaSmartAlarmHistoryView,
+    CasaSmartAlarmStateView,
+    CasaSmartAlarmZonesView,
+    CasaSmartAlarmZoneView,
+)
 from .automation_api import CasaSmartAutomationConfigView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
@@ -160,6 +168,12 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartSceneActivateView(hass),
         CasaSmartFavoritesView(hass),
         CasaSmartUserSettingsView(hass),
+        CasaSmartAlarmStateView(hass),
+        CasaSmartAlarmArmView(hass),
+        CasaSmartAlarmDisarmView(hass),
+        CasaSmartAlarmZonesView(hass),
+        CasaSmartAlarmZoneView(hass),
+        CasaSmartAlarmHistoryView(hass),
         CasaSmartTankProvisionView(hass),
         CasaSmartTankReadingView(hass),
         CasaSmartTankDevicesView(hass),

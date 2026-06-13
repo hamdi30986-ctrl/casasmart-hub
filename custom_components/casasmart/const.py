@@ -44,6 +44,19 @@ HUB_NAME_CONFIG_KEY = "hub_name"
 # `registry_changed` frame so they re-fetch through their scoped GET.
 EVENT_REGISTRY_CHANGED = "casasmart_registry_changed"
 
+# -- Alarm (B13) ----------------------------------------------------------------
+# Fired on the HA bus after any arm-state transition (arm/disarm/pending/
+# triggered/tamper). The WS server forwards a content-free `alarm_changed`
+# frame to alarm-authorized connections, which re-fetch the gated state GET;
+# the alarm adapter also listens to re-sync its entry-delay timer.
+EVENT_ALARM_CHANGED = "casasmart_alarm_changed"
+# Fired ONLY when an armed zone or a life-safety sensor actually trips the
+# alarm (`triggered` / `life_safety`). This is the installer's automation
+# hook — siren, lights flash, "whatever Hamdi configures per client" (plan
+# B13). Tamper does NOT fire it (offline battery must not sound the house).
+# Carries the alarm event dict so an automation can branch on the cause.
+EVENT_ALARM_TRIGGERED = "casasmart_alarm_triggered"
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

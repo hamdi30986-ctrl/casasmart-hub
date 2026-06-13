@@ -48,6 +48,7 @@ from .auth_tokens import TokenError
 from .const import (
     API_VERSION,
     DOMAIN,
+    EVENT_ALARM_CHANGED,
     EVENT_REGISTRY_CHANGED,
     WS_AUTH_TIMEOUT,
     WS_CLOSE_AUTH_EXPIRED,
@@ -103,6 +104,7 @@ class WsConnection:
         self._sender_task: asyncio.Task | None = None
         self._unsub_state_changed: Any = None
         self._unsub_registry_changed: Any = None
+        self._unsub_alarm_changed: Any = None
         self._token: str | None = None
         # Claims of the current token (role + room scope) — set on auth.
         self._claims: dict[str, Any] | None = None
@@ -123,6 +125,9 @@ class WsConnection:
         self._unsub_registry_changed = self._hass.bus.async_listen(
             EVENT_REGISTRY_CHANGED, self._on_registry_changed
         )
+        self._unsub_alarm_changed = self._hass.bus.async_listen(
+            EVENT_ALARM_CHANGED, self._on_alarm_changed
+        )
         recheck_task = asyncio.create_task(self._token_recheck_loop())
         try:
             await self._receive_loop()
@@ -137,6 +142,9 @@ class WsConnection:
         if self._unsub_registry_changed is not None:
             self._unsub_registry_changed()
             self._unsub_registry_changed = None
+        if self._unsub_alarm_changed is not None:
+            self._unsub_alarm_changed()
+            self._unsub_alarm_changed = None
         for task in (self._sender_task, self._reauth_deadline_task):
             if task is not None:
                 task.cancel()
@@ -338,6 +346,26 @@ class WsConnection:
         kind = event.data.get("kind", "registry")
         try:
             self._send_queue.put_nowait(ws_protocol.frame_registry_changed(kind))
+        except asyncio.QueueFull:
+            _LOGGER.warning("WS client too slow (queue full), disconnecting")
+            self._hass.async_create_task(
+                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
+            )
+
+    @callback
+    def _on_alarm_changed(self, event: Event) -> None:
+        """B13: arm state changed — nudge alarm-authorized apps to re-fetch.
+
+        Gated by role: the socket only authorized on ``devices.read``, but a
+        plain user has NO alarm access (plan roles table). Pushing even a
+        content-free nudge to them would leak the timing of alarm activity,
+        so connections whose claims lack ``alarm.read`` are skipped entirely.
+        The frame carries no state — the app re-reads the gated state GET.
+        """
+        if not AuthEngine.authorize(self._claims or {}, "alarm.read"):
+            return
+        try:
+            self._send_queue.put_nowait(ws_protocol.frame_alarm_changed())
         except asyncio.QueueFull:
             _LOGGER.warning("WS client too slow (queue full), disconnecting")
             self._hass.async_create_task(

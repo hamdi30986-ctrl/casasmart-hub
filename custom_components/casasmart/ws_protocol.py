@@ -142,6 +142,15 @@ def frame_registry_changed(kind: str) -> dict[str, Any]:
     return {"type": "registry_changed", "kind": kind}
 
 
+def frame_alarm_changed() -> dict[str, Any]:
+    """The arm state changed (B13: arm/disarm/pending/triggered/tamper).
+    Content-free like ``registry_changed`` — the app re-fetches through the
+    permission-gated alarm state GET, so the push leaks nothing even though
+    the socket authorized only on ``devices.read``. The server additionally
+    only sends this to connections whose role carries ``alarm.read``."""
+    return {"type": "alarm_changed"}
+
+
 def frame_pong() -> dict[str, Any]:
     """Reply to a client ping."""
     return {"type": "pong"}
