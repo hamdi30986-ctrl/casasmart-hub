@@ -57,6 +57,14 @@ EVENT_ALARM_CHANGED = "casasmart_alarm_changed"
 # Carries the alarm event dict so an automation can branch on the cause.
 EVENT_ALARM_TRIGGERED = "casasmart_alarm_triggered"
 
+# -- Audio (B14) ----------------------------------------------------------------
+# Fired on the HA bus whenever the hub's live view of the speakers moves — a
+# speaker announces, a retained status/state lands, or one is enrolled/removed.
+# The WS server forwards a content-free `audio_changed` frame to audio-
+# authorized connections, which re-fetch the gated speaker GET (same pattern as
+# `registry_changed` / `alarm_changed`).
+EVENT_AUDIO_CHANGED = "casasmart_audio_changed"
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

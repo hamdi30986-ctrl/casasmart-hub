@@ -54,6 +54,8 @@ from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
+from .audio import AudioEngine
+from .audio_adapter import AudioAdapter
 from .recovery import RecoveryManager
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
@@ -84,9 +86,16 @@ class CasaSmartRuntimeData:
     user_settings: UserSettingsEngine
     # B13 hub-side alarm state machine (push leg stubbed until B8).
     alarm: AlarmEngine
+    # B14 hub-side audio engine: broker/PA/athan config + speaker registry +
+    # live-status mirror. The single source of truth the phone reads over REST.
+    audio: AudioEngine
     # B13 alarm HA glue: drives the engine off state_changed + the entry-delay
     # timer. None only if setup failed before it was started.
     alarm_adapter: AlarmAdapter | None = None
+    # B14 audio MQTT glue: the hub's only broker connection. None if setup
+    # failed before it started, or while audio is unprovisioned (still set,
+    # just inert — the object exists so the API can publish through it).
+    audio_adapter: AudioAdapter | None = None
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -106,11 +115,12 @@ def _open_storage(
     TankEngine,
     UserSettingsEngine,
     AlarmEngine,
+    AudioEngine,
     str | None,
     str | None,
 ]:
     """Open storage + config + auth + pairing + recovery + registry +
-    tanks + user settings (blocking — executor only)."""
+    tanks + user settings + audio (blocking — executor only)."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -151,6 +161,14 @@ def _open_storage(
         storage.table("alarm_settings"),
     )
     alarm.warm_up()  # arm state + zones loaded — event-loop reads stay pure CPU
+    # B14 audio: broker/PA/athan config + enrolled-speaker registry. The live
+    # per-speaker status mirror is NOT loaded here — it is rebuilt from the
+    # broker's retained topics when the adapter connects.
+    audio = AudioEngine(
+        storage.table("audio_config"),
+        storage.table("audio_speakers"),
+    )
+    audio.warm_up()  # config + registry loaded — event-loop reads stay pure CPU
     return (
         storage,
         hub_config,
@@ -161,6 +179,7 @@ def _open_storage(
         tanks,
         user_settings,
         alarm,
+        audio,
         bootstrap_code,
         recovery_code,
     )
@@ -183,6 +202,7 @@ async def async_setup_entry(
             tanks,
             user_settings,
             alarm,
+            audio,
             bootstrap_code,
             recovery_code,
         ) = await hass.async_add_executor_job(_open_storage, data_dir)
@@ -199,6 +219,7 @@ async def async_setup_entry(
         tanks=tanks,
         user_settings=user_settings,
         alarm=alarm,
+        audio=audio,
     )
 
     await _async_import_registry(hass, hub_config, registry)
@@ -235,6 +256,13 @@ async def async_setup_entry(
     alarm_adapter = AlarmAdapter(hass, alarm)
     alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
+
+    # B14: bring up the hub's single MQTT client. Inert (logged) when no broker
+    # is provisioned yet — never aborts setup. connect_async/loop_start don't
+    # block the loop; the network thread owns connect + reconnect.
+    audio_adapter = AudioAdapter(hass, audio)
+    await audio_adapter.async_start()
+    entry.runtime_data.audio_adapter = audio_adapter
 
     # B13: expose the alarm panel as a native HA entity (runtime_data — its
     # engine source — is already set above, so the platform can read it).
@@ -448,6 +476,8 @@ async def async_unload_entry(
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
+    if entry.runtime_data.audio_adapter is not None:
+        await entry.runtime_data.audio_adapter.async_stop()
     if entry.runtime_data.mdns is not None:
         await entry.runtime_data.mdns.async_stop()
     if entry.runtime_data.tls is not None:
