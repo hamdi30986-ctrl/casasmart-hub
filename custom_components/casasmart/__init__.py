@@ -52,6 +52,7 @@ from homeassistant.helpers import (
 from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .alarm import AlarmEngine
+from .alarm_adapter import AlarmAdapter
 from .recovery import RecoveryManager
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
@@ -78,6 +79,9 @@ class CasaSmartRuntimeData:
     user_settings: UserSettingsEngine
     # B13 hub-side alarm state machine (push leg stubbed until B8).
     alarm: AlarmEngine
+    # B13 alarm HA glue: drives the engine off state_changed + the entry-delay
+    # timer. None only if setup failed before it was started.
+    alarm_adapter: AlarmAdapter | None = None
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -219,6 +223,12 @@ async def async_setup_entry(
 
     await _async_start_tls(hass, entry, data_dir, hub_version)
     await _async_start_mdns(hass, entry)
+
+    # B13: wire the alarm engine to live HA events (sensor edges + the
+    # entry-delay timer). Pure event subscription — no blocking work.
+    alarm_adapter = AlarmAdapter(hass, alarm)
+    alarm_adapter.async_start()
+    entry.runtime_data.alarm_adapter = alarm_adapter
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
@@ -425,6 +435,8 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
     """Unload a config entry, stopping the mDNS/TLS listeners and storage."""
+    if entry.runtime_data.alarm_adapter is not None:
+        entry.runtime_data.alarm_adapter.async_stop()
     if entry.runtime_data.mdns is not None:
         await entry.runtime_data.mdns.async_stop()
     if entry.runtime_data.tls is not None:
