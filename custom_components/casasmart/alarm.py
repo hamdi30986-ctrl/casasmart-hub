@@ -100,6 +100,7 @@ _HISTORY_RETENTION_SECONDS = 90 * 24 * 3600
 # Storage keys.
 _STATE_KEY = "current"  # single-row arm-state blob
 _HISTORY_KEY = "events"  # single-row {"entries": [...]} blob
+_SETTINGS_KEY = "defaults"  # single-row {"entry_delay", "exit_delay"} blob
 
 
 class AlarmError(Exception):
@@ -164,6 +165,7 @@ class AlarmEngine:
         state_table: Any,
         zones_table: Any,
         history_table: Any,
+        settings_table: Any,
         *,
         alert_sink: Optional[Callable[[dict[str, Any]], None]] = None,
         clock: Callable[[], float] = time.time,
@@ -171,6 +173,7 @@ class AlarmEngine:
         self._state_table = state_table
         self._zones_table = zones_table
         self._history_table = history_table
+        self._settings_table = settings_table
         self._alert_sink = alert_sink or self._default_alert_sink
         self._clock = clock
         # Held across SQLite I/O — same posture as RegistryEngine.
@@ -178,6 +181,10 @@ class AlarmEngine:
         # In-memory mirrors so the per-sensor-edge hot path is pure CPU.
         self._state: dict[str, Any] = self._default_state()
         self._zones: dict[str, dict[str, Any]] = {}
+        # Hub-owned default delays the app reads/edits. Holding these on the
+        # hub (not the phone) is what lets a fresh/swapped phone arm with the
+        # home's configured delays instead of falling back to the constants.
+        self._settings: dict[str, Any] = self._default_settings()
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -191,6 +198,7 @@ class AlarmEngine:
         with self._lock:
             stored = self._state_table.get(_STATE_KEY)
             self._state = self._coerce_state(stored)
+            self._settings = self._coerce_settings(self._settings_table.get(_SETTINGS_KEY))
             self._zones = {
                 entity_id: dict(record)
                 for entity_id, record in self._zones_table.items()
@@ -244,6 +252,57 @@ class AlarmEngine:
                 if isinstance(stored.get(key), str):
                     state[key] = stored[key]
         return state
+
+    @staticmethod
+    def _default_settings() -> dict[str, Any]:
+        return {
+            "entry_delay": DEFAULT_ENTRY_DELAY_SECONDS,
+            "exit_delay": DEFAULT_EXIT_DELAY_SECONDS,
+        }
+
+    def _coerce_settings(self, stored: Any) -> dict[str, Any]:
+        """Merge a persisted settings blob onto defaults, dropping bad values."""
+        settings = self._default_settings()
+        if isinstance(stored, dict):
+            for key in ("entry_delay", "exit_delay"):
+                value = stored.get(key)
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 0 <= value <= _MAX_DELAY_SECONDS
+                ):
+                    settings[key] = value
+        return settings
+
+    # -- default-delay settings (storage — call via executor) ------------------
+
+    def get_settings(self) -> dict[str, Any]:
+        """The hub-owned default entry/exit delays the app's settings screen
+        renders (copy of the in-memory mirror — pure CPU)."""
+        with self._lock:
+            return dict(self._settings)
+
+    def set_settings(
+        self, *, entry_delay: Any = None, exit_delay: Any = None
+    ) -> dict[str, Any]:
+        """Update one or both default delays (omitted fields keep their value).
+
+        Validated and clamped exactly like the per-arm delays. Returns the new
+        full settings dict.
+        """
+        with self._lock:
+            updated = dict(self._settings)
+            if entry_delay is not None:
+                updated["entry_delay"] = _validate_delay(
+                    entry_delay, field="entry_delay", default=updated["entry_delay"]
+                )
+            if exit_delay is not None:
+                updated["exit_delay"] = _validate_delay(
+                    exit_delay, field="exit_delay", default=updated["exit_delay"]
+                )
+            self._settings = updated
+            self._settings_table[_SETTINGS_KEY] = dict(updated)
+            return dict(updated)
 
     # -- zone configuration (storage — call via executor) ----------------------
 
@@ -300,11 +359,16 @@ class AlarmEngine:
             raise AlarmError(
                 f"Cannot arm to {mode!r} (expected one of {ARMABLE_MODES})"
             )
+        # An omitted delay falls back to the hub's stored default (not the
+        # module constant) so every phone arms with the home's configuration.
+        with self._lock:
+            default_exit = self._settings["exit_delay"]
+            default_entry = self._settings["entry_delay"]
         exit_seconds = _validate_delay(
-            exit_delay, field="exit_delay", default=DEFAULT_EXIT_DELAY_SECONDS
+            exit_delay, field="exit_delay", default=default_exit
         )
         entry_seconds = _validate_delay(
-            entry_delay, field="entry_delay", default=DEFAULT_ENTRY_DELAY_SECONDS
+            entry_delay, field="entry_delay", default=default_entry
         )
         now = self._clock()
         with self._lock:

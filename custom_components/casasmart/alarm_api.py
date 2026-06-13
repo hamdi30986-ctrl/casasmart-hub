@@ -13,6 +13,8 @@ Endpoints (one panel with zone attributes — plan B13):
 - ``GET    /api/casasmart/alarm/zones``            — sensor -> zone map
 - ``PUT    /api/casasmart/alarm/zones/{entity_id}``— assign a sensor's zone
 - ``DELETE /api/casasmart/alarm/zones/{entity_id}``— unassign a sensor
+- ``GET    /api/casasmart/alarm/settings``         — default entry/exit delays
+- ``PUT    /api/casasmart/alarm/settings``         — edit default delays
 - ``GET    /api/casasmart/alarm/history``          — event history
 
 Role gates (plan roles table — a plain user has NO alarm access):
@@ -252,6 +254,55 @@ class CasaSmartAlarmHistoryView(_AlarmView):
         return self.json({"history": history})
 
 
+class CasaSmartAlarmSettingsView(_AlarmView):
+    """GET/PUT /api/casasmart/alarm/settings — hub-owned default delays.
+
+    The app's settings screen reads these on open and writes edits here, so
+    they live on the hub (phone-independent) like everything else. ``read``
+    to view, ``manage`` to change.
+
+    PUT body: ``{"entry_delay"?: int, "exit_delay"?: int}`` (seconds). Omitted
+    fields keep their current value; both are clamped by the engine.
+    """
+
+    url = f"/api/{DOMAIN}/alarm/settings"
+    name = f"api:{DOMAIN}:alarm:settings"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "alarm.read")
+        if error is not None:
+            return error
+        alarm, not_ready = self._alarm_or_503()
+        if not_ready is not None:
+            return not_ready
+        # get_settings() copies the in-memory mirror — pure CPU, no executor hop.
+        return self.json({"settings": alarm.get_settings()})
+
+    async def put(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "alarm.manage")
+        if error is not None:
+            return error
+        alarm, not_ready = self._alarm_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            settings = await self._hass.async_add_executor_job(
+                _set_settings_job,
+                alarm,
+                payload.get("entry_delay"),
+                payload.get("exit_delay"),
+            )
+        except AlarmError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        self._notify_change()
+        return self.json({"settings": settings})
+
+
 # -- executor jobs (storage-touching engine calls) -----------------------------
 # Small module-level helpers so async_add_executor_job gets a plain callable
 # instead of a closure capturing request state.
@@ -269,3 +320,7 @@ def _disarm_job(alarm, actor):
 
 def _set_zone_job(alarm, entity_id, zone, name):
     return alarm.set_zone(entity_id, zone, name)
+
+
+def _set_settings_job(alarm, entry_delay, exit_delay):
+    return alarm.set_settings(entry_delay=entry_delay, exit_delay=exit_delay)
