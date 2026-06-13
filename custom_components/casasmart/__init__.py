@@ -143,6 +143,7 @@ def _open_storage(
         storage.table("alarm_state"),
         storage.table("alarm_zones"),
         storage.table("alarm_history"),
+        storage.table("alarm_settings"),
     )
     alarm.warm_up()  # arm state + zones loaded — event-loop reads stay pure CPU
     return (

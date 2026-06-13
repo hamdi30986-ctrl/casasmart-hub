@@ -232,6 +232,7 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.storage.table("alarm_state"),
             self.storage.table("alarm_zones"),
             self.storage.table("alarm_history"),
+            self.storage.table("alarm_settings"),
             alert_sink=self.alerts.append,
             clock=self.clock,
         )

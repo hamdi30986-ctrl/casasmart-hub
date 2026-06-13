@@ -16,6 +16,7 @@ sys.path.insert(
 from storage import HubStorage  # noqa: E402
 from alarm import (  # noqa: E402
     DEFAULT_ENTRY_DELAY_SECONDS,
+    DEFAULT_EXIT_DELAY_SECONDS,
     EVENT_ARMED,
     EVENT_DISARMED,
     EVENT_ENTRY_DELAY,
@@ -68,6 +69,7 @@ class AlarmTestCase(unittest.TestCase):
             self.storage.table("alarm_state"),
             self.storage.table("alarm_zones"),
             self.storage.table("alarm_history"),
+            self.storage.table("alarm_settings"),
             alert_sink=self.alerts.append,
             clock=self.clock,
         )
@@ -293,6 +295,58 @@ class AlarmTestCase(unittest.TestCase):
         self.assertEqual(revived.snapshot()["mode"], MODE_TRIGGERED)
         self.assertEqual(len(self.alerts), 1)
 
+    # -- default-delay settings ------------------------------------------------
+
+    def test_settings_default_to_constants(self):
+        self.assertEqual(
+            self.engine.get_settings(),
+            {
+                "entry_delay": DEFAULT_ENTRY_DELAY_SECONDS,
+                "exit_delay": DEFAULT_EXIT_DELAY_SECONDS,
+            },
+        )
+
+    def test_set_settings_updates_both(self):
+        result = self.engine.set_settings(entry_delay=15, exit_delay=45)
+        self.assertEqual(result, {"entry_delay": 15, "exit_delay": 45})
+        self.assertEqual(self.engine.get_settings(), {"entry_delay": 15, "exit_delay": 45})
+
+    def test_set_settings_partial_keeps_other(self):
+        self.engine.set_settings(entry_delay=15, exit_delay=45)
+        self.engine.set_settings(exit_delay=90)
+        self.assertEqual(
+            self.engine.get_settings(), {"entry_delay": 15, "exit_delay": 90}
+        )
+
+    def test_set_settings_rejects_bad_value(self):
+        with self.assertRaises(AlarmError):
+            self.engine.set_settings(entry_delay=-5)
+        with self.assertRaises(AlarmError):
+            self.engine.set_settings(exit_delay=99999)
+        # A rejected write leaves the stored value untouched.
+        self.assertEqual(
+            self.engine.get_settings()["entry_delay"], DEFAULT_ENTRY_DELAY_SECONDS
+        )
+
+    def test_settings_survive_reboot(self):
+        self.engine.set_settings(entry_delay=12, exit_delay=34)
+        revived = self._make_engine()
+        self.assertEqual(
+            revived.get_settings(), {"entry_delay": 12, "exit_delay": 34}
+        )
+
+    def test_arm_falls_back_to_stored_defaults(self):
+        self.engine.set_settings(entry_delay=12, exit_delay=0)
+        self._seed_zones()
+        # No delays passed -> the engine uses the stored defaults, not the
+        # module constants. exit_delay=0 means the arm is live immediately, so
+        # an entry trip starts the 12s countdown we configured.
+        self.engine.arm(MODE_AWAY)
+        self.engine.process_sensor("binary_sensor.front_door", True)
+        snap = self.engine.snapshot()
+        self.assertEqual(snap["mode"], MODE_PENDING)
+        self.assertEqual(snap["pending_until"], self.clock.t + 12)
+
     # -- history ---------------------------------------------------------------
 
     def test_history_newest_first_and_limited(self):
@@ -318,6 +372,7 @@ class AlarmTestCase(unittest.TestCase):
             self.storage.table("alarm_state2"),
             self.storage.table("alarm_zones2"),
             self.storage.table("alarm_history2"),
+            self.storage.table("alarm_settings2"),
             alert_sink=boom,
             clock=self.clock,
         )
