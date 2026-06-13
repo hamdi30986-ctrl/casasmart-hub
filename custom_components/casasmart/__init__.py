@@ -51,6 +51,7 @@ from homeassistant.helpers import (
 
 from .entity_bridge import is_exposed
 from .pairing import PairingManager
+from .alarm import AlarmEngine
 from .recovery import RecoveryManager
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
@@ -75,6 +76,8 @@ class CasaSmartRuntimeData:
     registry: RegistryEngine
     tanks: TankEngine
     user_settings: UserSettingsEngine
+    # B13 hub-side alarm state machine (push leg stubbed until B8).
+    alarm: AlarmEngine
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -93,6 +96,7 @@ def _open_storage(
     RegistryEngine,
     TankEngine,
     UserSettingsEngine,
+    AlarmEngine,
     str | None,
     str | None,
 ]:
@@ -128,6 +132,15 @@ def _open_storage(
         storage.table("tank_readings"),
     )
     user_settings = UserSettingsEngine(storage.table("user_settings"))
+    # B13 alarm: persisted arm state + zone map + bounded event history. The
+    # push leg (alert_sink) is left at its no-op default until B8 wires the
+    # relay; the HA adapter that drives process_sensor/tick is a later piece.
+    alarm = AlarmEngine(
+        storage.table("alarm_state"),
+        storage.table("alarm_zones"),
+        storage.table("alarm_history"),
+    )
+    alarm.warm_up()  # arm state + zones loaded — event-loop reads stay pure CPU
     return (
         storage,
         hub_config,
@@ -137,6 +150,7 @@ def _open_storage(
         registry,
         tanks,
         user_settings,
+        alarm,
         bootstrap_code,
         recovery_code,
     )
@@ -158,6 +172,7 @@ async def async_setup_entry(
             registry,
             tanks,
             user_settings,
+            alarm,
             bootstrap_code,
             recovery_code,
         ) = await hass.async_add_executor_job(_open_storage, data_dir)
@@ -173,6 +188,7 @@ async def async_setup_entry(
         registry=registry,
         tanks=tanks,
         user_settings=user_settings,
+        alarm=alarm,
     )
 
     await _async_import_registry(hass, hub_config, registry)
