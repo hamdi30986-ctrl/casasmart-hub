@@ -453,6 +453,12 @@ class EngineTests(unittest.TestCase):
             ("sub-admin", "devices.control", True),
             ("user", "pairing.generate", False),
             ("user", "devices.read", True),
+            # B14 audio: read+control are household-wide, manage is admin tier.
+            ("user", "audio.read", True),
+            ("user", "audio.control", True),
+            ("user", "audio.manage", False),
+            ("sub-admin", "audio.manage", True),
+            ("admin", "audio.manage", True),
         ]
         for role, permission, expected in cases:
             with self.subTest(role=role, permission=permission):
