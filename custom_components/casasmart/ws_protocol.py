@@ -151,6 +151,15 @@ def frame_alarm_changed() -> dict[str, Any]:
     return {"type": "alarm_changed"}
 
 
+def frame_audio_changed() -> dict[str, Any]:
+    """The hub's speaker view changed (B14: enroll/rename/drop or a live
+    status/state ingest off the bus). Content-free like ``alarm_changed`` —
+    the app re-fetches through the ``audio.read`` gated speakers GET, so the
+    push leaks nothing. The server only sends this to connections whose role
+    carries ``audio.read``."""
+    return {"type": "audio_changed"}
+
+
 def frame_pong() -> dict[str, Any]:
     """Reply to a client ping."""
     return {"type": "pong"}
