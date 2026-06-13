@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     ConfigEntryError,
@@ -61,6 +62,10 @@ from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
 from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
+
+# B13: the hub's only HA entity platform — the alarm panel mirroring the
+# hub-authoritative AlarmEngine. Everything else is REST/WS, not HA entities.
+PLATFORMS: list[Platform] = [Platform.ALARM_CONTROL_PANEL]
 
 type CasaSmartConfigEntry = ConfigEntry[CasaSmartRuntimeData]
 
@@ -230,6 +235,10 @@ async def async_setup_entry(
     alarm_adapter = AlarmAdapter(hass, alarm)
     alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
+
+    # B13: expose the alarm panel as a native HA entity (runtime_data — its
+    # engine source — is already set above, so the platform can read it).
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
@@ -436,6 +445,7 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
     """Unload a config entry, stopping the mDNS/TLS listeners and storage."""
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
     if entry.runtime_data.mdns is not None:

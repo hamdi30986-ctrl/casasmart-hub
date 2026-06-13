@@ -195,6 +195,19 @@ class AlarmTestCase(unittest.TestCase):
         event = self.engine.process_sensor("binary_sensor.window", True)
         self.assertEqual(event["kind"], EVENT_TRIGGERED)
 
+    def test_arming_until_exposed_during_exit_grace(self):
+        # Option A countdown: a freshly armed mode exposes its exit-grace
+        # deadline so the app can render the arming countdown locally.
+        snap = self.engine.arm(MODE_AWAY, exit_delay=60)
+        self.assertEqual(snap["arming_until"], self.clock.t + 60)
+        # Disarmed has no arming window.
+        self.assertIsNone(self.engine.disarm()["arming_until"])
+        # Zero exit-delay still exposes the deadline (== arm time), so the app
+        # computes remaining == 0 and shows no countdown.
+        snap = self.engine.arm(MODE_HOME, exit_delay=0)
+        self.assertEqual(snap["arming_until"], self.clock.t)
+        self.assertEqual(max(0, snap["arming_until"] - self.clock.t), 0)
+
     # -- entry delay countdown -------------------------------------------------
 
     def test_entry_delay_then_disarm_no_alarm(self):
