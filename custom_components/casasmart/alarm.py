@@ -615,6 +615,14 @@ class AlarmEngine:
                 "mode": s["mode"],
                 "since": s["since"],
                 "active_zones": sorted(active_zones_for_mode(s["mode"])),
+                # Exit-delay grace deadline (option A countdown): the absolute
+                # time a freshly armed mode goes live. The app renders the arming
+                # countdown as ``max(0, arming_until - now)`` — no extra endpoint,
+                # no hub-side ticking; a value already in the past simply means
+                # the grace is spent. Null in any non-armed mode.
+                "arming_until": s["active_at"]
+                if s["mode"] in ARMABLE_MODES
+                else None,
                 "pending_until": s["trigger_deadline"] or None
                 if s["mode"] == MODE_PENDING
                 else None,
