@@ -117,6 +117,15 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # the device list — cameras are user-facing tiles; room scoping still
     # applies per-entity through ``in_scope`` like everything else.
     "cameras.view": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    # B14 audio: the speaker stack. ``read`` (see the speaker list + athan
+    # config) and ``control`` (volume/stop/play/PA broadcast) mirror the
+    # device tiers — speakers are a user-facing surface the whole household
+    # uses. ``manage`` (enroll/remove speakers, edit athan, set broker/PA
+    # creds) is admin+sub-admin only: it reshapes the audio hardware + holds
+    # the broker credentials, same trust tier as ``registry.manage``.
+    "audio.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    "audio.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    "audio.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     # B16 3c-4b: the installer surface — Zigbee permit-join, raw HA
     # registry reads + entity surgery (rename, switch_as_x swap), the
     # whitelisted config-flow proxy (Broadlink/EasyIR) and IR blaster

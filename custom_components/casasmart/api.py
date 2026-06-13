@@ -87,6 +87,18 @@ from .alarm_api import (
     CasaSmartAlarmZonesView,
     CasaSmartAlarmZoneView,
 )
+from .audio_api import (
+    CasaSmartAudioAthanView,
+    CasaSmartAudioBroadcastView,
+    CasaSmartAudioBrokerView,
+    CasaSmartAudioCommandView,
+    CasaSmartAudioDiscoverView,
+    CasaSmartAudioPaConfigView,
+    CasaSmartAudioPaView,
+    CasaSmartAudioProvisionView,
+    CasaSmartAudioSpeakersView,
+    CasaSmartAudioSpeakerView,
+)
 from .automation_api import CasaSmartAutomationConfigView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
@@ -181,6 +193,16 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartTankDevicesView(hass),
         CasaSmartTankDeviceView(hass),
         CasaSmartTankReadingsView(hass),
+        CasaSmartAudioSpeakersView(hass),
+        CasaSmartAudioSpeakerView(hass),
+        CasaSmartAudioDiscoverView(hass),
+        CasaSmartAudioCommandView(hass),
+        CasaSmartAudioBroadcastView(hass),
+        CasaSmartAudioPaView(hass),
+        CasaSmartAudioAthanView(hass),
+        CasaSmartAudioBrokerView(hass),
+        CasaSmartAudioPaConfigView(hass),
+        CasaSmartAudioProvisionView(hass),
         CasaSmartAdminPermitJoinView(hass),
         CasaSmartAdminRegistryView(hass),
         CasaSmartAdminStatesView(hass),
