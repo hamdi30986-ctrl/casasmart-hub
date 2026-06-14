@@ -131,6 +131,12 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # whitelisted config-flow proxy (Broadlink/EasyIR) and IR blaster
     # commands. Owner-only: these reshape the home's hardware.
     "installer.manage": (ROLE_ADMIN,),
+    # B5 self-update. ``read`` (current vs latest version + changelog) is a
+    # user-facing surface — every role sees the red dot. ``install`` triggers
+    # the hub to self-replace and restart, so it is owner-only, the same trust
+    # tier as users.manage / installer.manage.
+    "update.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    "update.install": (ROLE_ADMIN,),
     # B16 3c-3 widgets: mint the long-lived, narrow widget token. Every
     # role may mint one FOR ITSELF — the minted token inherits the
     # caller's own role/rooms/ver, so it can never out-privilege the

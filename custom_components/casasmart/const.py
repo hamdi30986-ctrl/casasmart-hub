@@ -65,6 +65,17 @@ EVENT_ALARM_TRIGGERED = "casasmart_alarm_triggered"
 # `registry_changed` / `alarm_changed`).
 EVENT_AUDIO_CHANGED = "casasmart_audio_changed"
 
+# -- Self-update (B5) ----------------------------------------------------------
+# The hub checks this GitHub repo's latest release to tell the app an update
+# exists. ``owner/name`` form — the installer can repoint it per-fleet via the
+# hub_config key below without a code change.
+UPDATE_GITHUB_REPO = "casasmart/casasmart-hub"
+UPDATE_REPO_CONFIG_KEY = "update_repo"
+# Latest-release lookups are cached this long. The status endpoint serves the
+# cache and refreshes lazily past this age — GitHub is polled at most once per
+# window, never once per request (and never on the hot path of a tile refresh).
+UPDATE_CHECK_TTL_SECONDS = 6 * 3600
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0
