@@ -17,8 +17,12 @@ owns the aiohttp fetch + caching and leans on these for the decisions.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # A release tag is the version, with an optional leading "v" (v1.2.3).
@@ -29,12 +33,18 @@ _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)(?:[-+](.+))?$")
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    """The fields the app's update UI needs, distilled from a release."""
+    """The fields the app's update UI needs, distilled from a release.
+
+    ``download_url`` is the artifact the installer (Piece 3) pulls: a
+    ``.zip`` release asset if the release ships one, otherwise GitHub's
+    source ``zipball_url``. ``None`` only if the payload has neither.
+    """
 
     version: str
     changelog: str | None
     published_at: str | None
     release_url: str | None
+    download_url: str | None
 
 
 def _split(raw: Any) -> tuple[tuple[int, ...], str | None] | None:
@@ -121,4 +131,115 @@ def parse_release(payload: Any) -> ReleaseInfo | None:
         changelog=body.strip() if isinstance(body, str) and body.strip() else None,
         published_at=published if isinstance(published, str) else None,
         release_url=url if isinstance(url, str) else None,
+        download_url=_pick_download_url(payload),
     )
+
+
+def _pick_download_url(payload: dict) -> str | None:
+    """The best artifact to install from: a ``.zip`` asset, else the zipball.
+
+    A release that ships a packaged integration ``.zip`` is preferred (it
+    holds just what the hub needs); failing that we fall back to GitHub's
+    auto-generated source ``zipball_url``. ``None`` if neither is present.
+    """
+    assets = payload.get("assets")
+    if isinstance(assets, list):
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            name = asset.get("name")
+            href = asset.get("browser_download_url")
+            if (
+                isinstance(name, str)
+                and name.lower().endswith(".zip")
+                and isinstance(href, str)
+                and href.strip()
+            ):
+                return href.strip()
+    zipball = payload.get("zipball_url")
+    return zipball.strip() if isinstance(zipball, str) and zipball.strip() else None
+
+
+# --- Piece 3: install-side filesystem logic (pure, no HA / no network) -------
+#
+# The installer in update_install.py owns the aiohttp download + the HA
+# restart; everything that touches only the filesystem lives here so it can
+# be unit-tested with temp dirs (same pure/IO split as the version math).
+
+
+class InstallError(Exception):
+    """A self-update step failed in a way the caller should surface verbatim."""
+
+
+def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
+    """Find ``custom_components/<domain>`` (with a manifest) in an extracted release.
+
+    A GitHub source zipball extracts under a single top-level folder
+    (``owner-repo-<sha>/``), so the integration sits some levels deep. A
+    packaged asset may put it at the root. We search for the manifest and
+    take the shallowest hit, ignoring any nested test fixtures.
+    """
+    root = Path(extracted_root)
+    matches = sorted(
+        root.rglob(f"custom_components/{domain}/manifest.json"),
+        key=lambda p: len(p.parts),
+    )
+    return matches[0].parent if matches else None
+
+
+def read_manifest_version(integration_dir: Any) -> str | None:
+    """Read ``version`` from an integration dir's ``manifest.json``, or None."""
+    manifest = Path(integration_dir) / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) and version.strip() else None
+
+
+def versions_match(tag: Any, manifest_version: Any) -> bool:
+    """True if a release tag and a manifest version are the same release.
+
+    Tolerates a leading ``v`` and trailing-zero differences (``v1.2`` ==
+    ``1.2.0``) but requires an exact numeric+prerelease match — a guard
+    against installing a payload whose code doesn't match the tag we
+    fetched.
+    """
+    a = _split(tag)
+    b = _split(manifest_version)
+    if a is None or b is None:
+        return False
+    a_release, a_pre = a
+    b_release, b_pre = b
+    a_release, b_release = _pad(a_release, b_release)
+    return a_release == b_release and a_pre == b_pre
+
+
+def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
+    """Atomically replace ``current_dir`` with ``new_source_dir``; return the backup.
+
+    The live integration dir is moved aside to ``<name>.bak`` (an atomic
+    same-filesystem rename), then the new tree is copied into place. If the
+    copy fails partway, the partial dir is removed and the backup restored
+    so the hub is never left without its integration. The caller is
+    responsible for pruning the returned backup once the restart succeeds.
+    """
+    current = Path(current_dir)
+    new_source = Path(new_source_dir)
+    if not new_source.is_dir():
+        raise InstallError(f"replacement source is not a directory: {new_source}")
+
+    backup = current.with_name(current.name + ".bak")
+    if backup.exists():
+        shutil.rmtree(backup)
+
+    os.rename(current, backup)  # atomic on the same filesystem
+    try:
+        shutil.copytree(new_source, current)
+    except OSError as err:
+        if current.exists():
+            shutil.rmtree(current, ignore_errors=True)
+        os.rename(backup, current)  # roll back to the known-good tree
+        raise InstallError(f"failed to install new integration tree: {err}") from err
+    return backup
