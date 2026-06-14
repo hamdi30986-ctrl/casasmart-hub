@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .dev/
+
+# operator fleet data — not code
+tools/fleet-registry/fleet.json
+tools/fleet-registry/fleet.json.lock
