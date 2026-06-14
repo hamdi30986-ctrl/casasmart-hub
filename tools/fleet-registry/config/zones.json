@@ -1,0 +1,9 @@
+{
+  "domain": "casasmart.sa",
+  "zones": {
+    "north-jeddah": { "label": "North Jeddah", "prefix": "njed" },
+    "east-jeddah": { "label": "East Jeddah", "prefix": "ejed" },
+    "central-jeddah": { "label": "Central Jeddah", "prefix": "cjed" },
+    "riyadh": { "label": "Riyadh", "prefix": "ryd" }
+  }
+}
