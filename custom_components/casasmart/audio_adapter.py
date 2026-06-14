@@ -46,7 +46,12 @@ from typing import Any, Callable, Optional
 
 from homeassistant.core import HomeAssistant, callback
 
-from .audio import AudioEngine
+from .audio import (
+    AudioEngine,
+    TOPIC_ATHAN_CONFIG,
+    speaker_state_topic,
+    speaker_status_topic,
+)
 from .const import EVENT_AUDIO_CHANGED
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,7 +205,24 @@ class AudioAdapter:
             [(_TOPIC_ANNOUNCE, 0), (_SUB_STATUS, 1), (_SUB_STATE, 0)]
         )
         client.publish(_TOPIC_PING, "", qos=0)
+        # Re-push the stored athan config retained on every (re)connect (M4).
+        # The PUT relays it once when the bus is up, but a config saved while
+        # the bus was down — or a scheduler that restarted and lost its retained
+        # copy — would otherwise silently never see it. Re-publishing here makes
+        # the hub the durable source of truth: connect == scheduler is current.
+        self._republish_athan(client)
         _LOGGER.info("CasaSmart audio: MQTT connected, subscribed to speaker topics")
+
+    def _republish_athan(self, client: Any) -> None:
+        """Publish the engine's stored athan config retained (best-effort)."""
+        try:
+            athan = self._engine.get_athan()
+            if athan:
+                client.publish(
+                    TOPIC_ATHAN_CONFIG, json.dumps(athan), qos=1, retain=True
+                )
+        except Exception:  # noqa: BLE001 — a relay failure must not break connect
+            _LOGGER.exception("CasaSmart audio: failed to re-publish athan config")
 
     def _on_disconnect(self, _client: Any, _userdata: Any, rc: Any) -> None:
         # rc 0 = our own disconnect(); anything else = unexpected drop, paho's
@@ -280,6 +302,20 @@ class AudioAdapter:
             raise AudioAdapterNotReady("Audio MQTT client is not connected")
         body = json.dumps(payload) if not isinstance(payload, (str, bytes)) else payload
         self._client.publish(topic, body, qos=qos, retain=retain)
+
+    def clear_speaker_retained(self, mac6: str) -> None:
+        """Wipe a removed speaker's retained ``status``/``state`` topics (M3).
+
+        Publishing an empty retained payload tells the broker to drop the
+        retained message, so a deleted speaker can't resurrect as a discovery
+        ghost the next time the hub reconnects and the broker replays retained
+        state. Raises ``AudioAdapterNotReady`` if the bus is down — the DELETE
+        handler treats that as a non-fatal best-effort cleanup.
+        """
+        if not self._started or self._client is None:
+            raise AudioAdapterNotReady("Audio MQTT client is not connected")
+        for topic in (speaker_status_topic(mac6), speaker_state_topic(mac6)):
+            self._client.publish(topic, "", qos=1, retain=True)
 
     async def async_discover(self) -> list[dict[str, Any]]:
         """Provoke a fresh announce round and return un-enrolled speakers.

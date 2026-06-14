@@ -224,6 +224,55 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.client.fire_connect(rc=5)  # auth rejected
         self.assertEqual(self.client.subscriptions, [])
 
+    # -- M4: stored athan re-published retained on every (re)connect ----------
+
+    async def test_on_connect_republishes_stored_athan_retained(self):
+        self.engine.set_broker(host="h", port=1883)
+        self.engine.set_athan(
+            {"enabled": True, "lat": 21.3, "lon": 39.8, "method": "makkah"}
+        )
+        await self.adapter.async_start()
+        self.client.fire_connect(rc=0)
+        athan_pubs = [p for p in self.client.published if p[0] == "athan/config"]
+        self.assertEqual(len(athan_pubs), 1)
+        topic, body, qos, retain = athan_pubs[0]
+        self.assertTrue(retain)
+        self.assertEqual(qos, 1)
+        self.assertEqual(json.loads(body)["method"], "makkah")
+
+    async def test_on_connect_no_athan_publishes_nothing(self):
+        self.engine.set_broker(host="h", port=1883)
+        await self.adapter.async_start()
+        self.client.fire_connect(rc=0)
+        self.assertFalse(any(p[0] == "athan/config" for p in self.client.published))
+
+    async def test_failed_connect_does_not_republish_athan(self):
+        self.engine.set_broker(host="h", port=1883)
+        self.engine.set_athan({"enabled": True, "lat": 21.3, "lon": 39.8})
+        await self.adapter.async_start()
+        self.client.fire_connect(rc=5)
+        self.assertFalse(any(p[0] == "athan/config" for p in self.client.published))
+
+    # -- M3: clearing a removed speaker's retained ghosts ---------------------
+
+    async def test_clear_speaker_retained_wipes_status_and_state(self):
+        await self._started()
+        self.adapter.clear_speaker_retained("965cb9")
+        cleared = {
+            p[0]: p for p in self.client.published if p[0].startswith("speakers/965cb9/")
+        }
+        self.assertIn("speakers/965cb9/status", cleared)
+        self.assertIn("speakers/965cb9/state", cleared)
+        for topic in ("speakers/965cb9/status", "speakers/965cb9/state"):
+            _t, body, _qos, retain = cleared[topic]
+            self.assertEqual(body, "")  # empty payload clears the retained msg
+            self.assertTrue(retain)
+
+    async def test_clear_speaker_retained_raises_when_bus_down(self):
+        # No start() — client never connected.
+        with self.assertRaises(AudioAdapterNotReady):
+            self.adapter.clear_speaker_retained("965cb9")
+
     # -- ingest paths ----------------------------------------------------------
 
     async def _started(self):

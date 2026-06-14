@@ -104,6 +104,11 @@ _PORT_MAX = 65535
 # unbounded payload that then gets republished retained forever.
 _ATHAN_MAX_KEYS = 64
 _ATHAN_MAX_BYTES = 8192
+# A discovered (un-enrolled) speaker that announced once then died must not
+# clutter the add-flow forever. Entries not heard from within this window are
+# dropped from ``discovered()`` (M6). Generous enough that a healthy speaker
+# pinged on every ``/audio/discover`` never ages out between refreshes.
+_DISCOVERY_TTL_SECONDS = 600
 # A mac6 is the last 6 hex of the speaker's MAC, lower-case (matches the
 # agent's ``self.mac6``). Accept colons / 12-hex input and normalise.
 _MAC6_RE = re.compile(r"^[0-9a-f]{6}$")
@@ -175,6 +180,11 @@ def _opt_str(value: Any, *, field: str) -> Optional[str]:
     if not isinstance(value, str):
         raise AudioError(f"{field} must be a string")
     return value
+
+
+def _is_number(value: Any) -> bool:
+    """True for a real numeric coordinate — int/float but NOT bool/None."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class AudioEngine:
@@ -363,6 +373,17 @@ class AudioEngine:
         for key in config:
             if not isinstance(key, str):
                 raise AudioError("athan config keys must be strings")
+        # Backstop (M2): the scheduler can't compute prayer times without
+        # coordinates, so an "enabled" athan with no lat/lon would show ON in
+        # the UI yet silently never fire. This is the one field-level
+        # assumption the hub makes about the otherwise-opaque blob, and it
+        # mirrors the app-side "pick a city" guard — a defence in depth, not a
+        # schema. ``enabled`` falsey (off) is always allowed through.
+        if config.get("enabled"):
+            if not _is_number(config.get("lat")) or not _is_number(config.get("lon")):
+                raise AudioError(
+                    "athan cannot be enabled without numeric lat/lon coordinates"
+                )
         try:
             import json
 
@@ -516,21 +537,33 @@ class AudioEngine:
             if isinstance(room, str) and room.strip():
                 live["room"] = room.strip()
 
-    def discovered(self) -> list[dict[str, Any]]:
+    def discovered(self, *, ttl: Optional[float] = _DISCOVERY_TTL_SECONDS) -> list[dict[str, Any]]:
         """Speakers the hub has heard from that are NOT yet enrolled.
 
         This is the source for the add-speaker flow: a speaker shows up here
         (from an announce / retained status / state) once it is on the LAN and
         talking to the broker, and moves out of this list into ``speakers()``
         the moment it is enrolled. Id-sorted; each entry is ``{mac6, ...live}``.
+
+        Stale ghosts are filtered out (M6): an entry whose ``last_seen`` is
+        older than ``ttl`` seconds is dropped, so a speaker that announced once
+        then died stops cluttering the add list. ``ttl=None`` disables the
+        filter (returns everything ever seen). An entry with no ``last_seen``
+        is kept (it predates the stamp / can't be judged stale).
         """
         with self._lock:
+            now = self._clock()
             result = []
             for mac6 in sorted(self._live):
                 if mac6 in self._speakers:
                     continue
+                live = self._live[mac6]
+                if ttl is not None:
+                    last_seen = live.get("last_seen")
+                    if isinstance(last_seen, (int, float)) and now - last_seen > ttl:
+                        continue
                 entry = {"mac6": mac6}
-                entry.update(self._live[mac6])
+                entry.update(live)
                 result.append(entry)
             return result
 
