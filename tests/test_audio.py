@@ -138,7 +138,13 @@ class PaConfigTests(AudioTestCase):
 
 class AthanConfigTests(AudioTestCase):
     def test_set_and_persist_athan(self):
-        cfg = {"enabled": True, "method": "makkah", "volume": 60}
+        cfg = {
+            "enabled": True,
+            "method": "makkah",
+            "volume": 60,
+            "lat": 21.3891,
+            "lon": 39.8579,
+        }
         self.engine.set_athan(cfg)
         fresh = self._make_engine()
         self.assertEqual(fresh.get_athan(), cfg)
@@ -150,6 +156,38 @@ class AthanConfigTests(AudioTestCase):
     def test_rejects_non_serialisable(self):
         with self.assertRaises(AudioError):
             self.engine.set_athan({"bad": {1, 2, 3}})  # a set isn't JSON
+
+    # -- M2: enabled athan needs real coordinates -----------------------------
+
+    def test_enabled_without_coords_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "method": "makkah"})
+
+    def test_enabled_with_null_coords_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan(
+                {"enabled": True, "lat": None, "lon": None, "method": "makkah"}
+            )
+
+    def test_enabled_with_bool_coords_rejected(self):
+        # bool is an int subclass — must not pass as a coordinate.
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "lat": True, "lon": True})
+
+    def test_enabled_with_one_missing_coord_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "lat": 21.3})
+
+    def test_disabled_without_coords_allowed(self):
+        # Turning athan OFF must always persist, coords or not.
+        cfg = {"enabled": False, "method": "makkah"}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan(), cfg)
+
+    def test_enabled_with_int_coords_allowed(self):
+        cfg = {"enabled": True, "lat": 21, "lon": 39}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan(), cfg)
 
     def test_rejects_oversized(self):
         with self.assertRaises(AudioError):
@@ -282,6 +320,32 @@ class DiscoveryTests(AudioTestCase):
         discovered = self.engine.discovered()
         self.assertEqual(discovered[0]["volume"], 55)
         self.assertTrue(discovered[0]["online"])
+
+    # -- M6: stale ghosts age out of the discover list ------------------------
+
+    def test_stale_ghost_filtered_out(self):
+        self.engine.ingest_announce("965cb9", "Work Room")  # seen at t=1000
+        self.clock.advance(601)  # past the 600s TTL
+        self.assertEqual(self.engine.discovered(), [])
+
+    def test_fresh_ghost_kept(self):
+        self.engine.ingest_announce("965cb9", "Work Room")
+        self.clock.advance(599)  # still inside the TTL
+        self.assertEqual([s["mac6"] for s in self.engine.discovered()], ["965cb9"])
+
+    def test_ttl_none_keeps_everything(self):
+        self.engine.ingest_announce("965cb9", "Work Room")
+        self.clock.advance(10_000)
+        self.assertEqual(
+            [s["mac6"] for s in self.engine.discovered(ttl=None)], ["965cb9"]
+        )
+
+    def test_recent_announce_refreshes_freshness(self):
+        self.engine.ingest_announce("965cb9", "Work Room")  # t=1000
+        self.clock.advance(500)
+        self.engine.ingest_announce("965cb9", "Work Room")  # re-seen at t=1500
+        self.clock.advance(400)  # 400s since last seen, < TTL
+        self.assertEqual([s["mac6"] for s in self.engine.discovered()], ["965cb9"])
 
 
 class CommandTests(AudioTestCase):

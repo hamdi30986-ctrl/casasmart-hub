@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -62,7 +63,9 @@ from .audio import (
     AudioEngine,
     AudioError,
     UnknownSpeakerError,
+    CMD_RESET,
     TOPIC_ATHAN_CONFIG,
+    normalize_mac6,
 )
 from .audio_adapter import AudioAdapter, AudioAdapterNotReady
 from .auth_api import (
@@ -232,14 +235,40 @@ class CasaSmartAudioSpeakerView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
+        # Build the reset command while the speaker is still enrolled — this
+        # also doubles as the existence check (404 for an unknown id). Then drop
+        # it from the registry and, best-effort, tell the Pi to wipe + re-enter
+        # setup and clear its retained topics so it can't resurrect as a
+        # discovery ghost on the next reconnect (M3).
         try:
+            reset_topic, reset_msg = audio.build_command(mac6, CMD_RESET)
+            norm_mac6 = normalize_mac6(mac6)
             await self._hass.async_add_executor_job(audio.remove_speaker, mac6)
         except UnknownSpeakerError as err:
             return self.json_message(str(err), HTTPStatus.NOT_FOUND)
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        self._deprovision_speaker(norm_mac6, reset_topic, reset_msg)
         self._notify_change()
-        return self.json({"deleted": mac6})
+        return self.json({"deleted": norm_mac6})
+
+    def _deprovision_speaker(
+        self, mac6: str, reset_topic: str, reset_msg: Any
+    ) -> None:
+        """Reset the Pi + clear retained ghosts (best-effort, bus-down safe)."""
+        adapter = get_audio_adapter(self._hass)
+        if adapter is None:
+            return
+        try:
+            adapter.publish(reset_topic, reset_msg, qos=1)
+            adapter.clear_speaker_retained(mac6)
+        except AudioAdapterNotReady:
+            _LOGGER.info(
+                "Speaker %s removed from registry but bus is down — reset/retain"
+                " clear skipped (it may briefly reappear as a ghost until it is"
+                " power-cycled)",
+                mac6,
+            )
 
 
 class CasaSmartAudioDiscoverView(_AudioView):
@@ -378,7 +407,7 @@ class CasaSmartAudioPaView(_AudioView):
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
 
-        filename, content_type, data, read_error = await self._read_audio_part(
+        filename, content_type, data, targets, read_error = await self._read_pa_parts(
             request
         )
         if read_error is not None:
@@ -389,6 +418,12 @@ class CasaSmartAudioPaView(_AudioView):
         form.add_field(
             "audio", data, filename=filename, content_type=content_type
         )
+        # H1: thread the selected speakers through to the PA service so the
+        # clip plays ONLY to those speakers. Empty/absent targets => the PA
+        # service broadcasts to everyone (the historical behaviour), so this is
+        # backward compatible with an app that doesn't send a selection.
+        if targets:
+            form.add_field("targets", ",".join(targets))
         headers = {}
         if pa.get("api_key"):
             headers["X-API-Key"] = pa["api_key"]
@@ -410,22 +445,33 @@ class CasaSmartAudioPaView(_AudioView):
             status=status,
         )
 
-    async def _read_audio_part(
+    async def _read_pa_parts(
         self, request: web.Request
-    ) -> tuple[str, str, bytes, web.Response | None]:
-        """Pull the ``audio`` part out of the multipart body, bounded.
+    ) -> tuple[str, str, bytes, list[str], web.Response | None]:
+        """Pull the ``audio`` (bounded) + optional ``targets`` parts.
 
-        Returns ``(filename, content_type, data, None)`` or
-        ``("", "", b"", error_response)``.
+        ``targets`` is an optional text field — a JSON array or comma-separated
+        list of speaker ids — naming the speakers the clip should play on. It is
+        normalised to canonical mac6s (invalid entries dropped); an empty list
+        means "broadcast to all".
+
+        Returns ``(filename, content_type, data, targets, None)`` or
+        ``("", "", b"", [], error_response)``.
         """
         try:
             reader = await request.multipart()
         except (AssertionError, ValueError):
-            return "", "", b"", self.json_message(
+            return "", "", b"", [], self.json_message(
                 "Body must be multipart/form-data with an 'audio' file",
                 HTTPStatus.BAD_REQUEST,
             )
+        filename = content_type = ""
+        data: bytes | None = None
+        targets: list[str] = []
         async for part in reader:
+            if part.name == "targets":
+                targets = _parse_targets(await part.text())
+                continue
             if part.name != "audio":
                 continue
             filename = part.filename or "pa.mp3"
@@ -438,15 +484,17 @@ class CasaSmartAudioPaView(_AudioView):
                     break
                 size += len(chunk)
                 if size > _PA_MAX_BYTES:
-                    return "", "", b"", self.json_message(
+                    return "", "", b"", [], self.json_message(
                         f"Audio too large (max {_PA_MAX_BYTES} bytes)",
                         HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                     )
                 chunks.append(chunk)
-            return filename, content_type, b"".join(chunks), None
-        return "", "", b"", self.json_message(
-            "Missing 'audio' file part", HTTPStatus.BAD_REQUEST
-        )
+            data = b"".join(chunks)
+        if data is None:
+            return "", "", b"", [], self.json_message(
+                "Missing 'audio' file part", HTTPStatus.BAD_REQUEST
+            )
+        return filename, content_type, data, targets, None
 
 
 # -- athan config -------------------------------------------------------------
@@ -625,6 +673,38 @@ class CasaSmartAudioProvisionView(_AudioView):
 
 
 # -- helpers ------------------------------------------------------------------
+
+
+def _parse_targets(raw: Any) -> list[str]:
+    """Normalise a PA ``targets`` field to a de-duped list of canonical mac6s.
+
+    Accepts a JSON array (``["aabbcc", ...]``) or a comma/space-separated
+    string. Invalid ids are dropped silently — a bad selection must never block
+    the announcement, it just falls back toward broadcast. Order preserved.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    items: list[Any]
+    text = raw.strip()
+    if text.startswith("["):
+        import json
+
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            parsed = []
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        items = re.split(r"[,\s]+", text)
+    result: list[str] = []
+    for item in items:
+        try:
+            mac6 = normalize_mac6(item)
+        except AudioError:
+            continue
+        if mac6 not in result:
+            result.append(mac6)
+    return result
 
 
 def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
