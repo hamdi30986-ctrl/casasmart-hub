@@ -98,6 +98,12 @@ class UpdateChecker:
             await self._async_refresh()
         return self._build_status()
 
+    async def async_download_url(self) -> str | None:
+        """The latest release's install artifact URL (Piece 3), refreshing if stale."""
+        if not self._is_fresh():
+            await self._async_refresh()
+        return self._latest.download_url if self._latest is not None else None
+
     async def _async_refresh(self) -> None:
         """Fetch the latest release once; concurrent callers share the result."""
         async with self._lock:
@@ -185,3 +191,44 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
         if error is not None:
             return error
         return self.json(await self._checker.async_status())
+
+
+class CasaSmartUpdateInstallView(HomeAssistantView):
+    """POST /api/casasmart/update/install — owner-only self-update (Piece 3).
+
+    Gated ``update.install`` (admin only). On success the integration tree
+    is already swapped and an HA restart is scheduled; the app gets a 202
+    "installing" before the connection drops, then reconnects on the new
+    code. A "nothing newer" or a bad payload is a clean 409, never a 500.
+    """
+
+    url = f"/api/{DOMAIN}/update/install"
+    name = f"api:{DOMAIN}:update:install"
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
+
+    def __init__(self, hass: HomeAssistant, checker: UpdateChecker) -> None:
+        self._hass = hass
+        self._checker = checker
+
+    async def post(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "update.install")
+        if error is not None:
+            return error
+
+        # Imported here to keep update_api importable without the installer
+        # (and to avoid any import-order coupling at module load).
+        from .update import InstallError
+        from .update_install import perform_install
+
+        try:
+            result = await perform_install(self._hass, self._checker)
+        except InstallError as err:
+            _LOGGER.warning("Self-update refused/failed: %s", err)
+            return self.json({"error": str(err)}, status_code=HTTPStatus.CONFLICT)
+        except Exception:  # noqa: BLE001 — surface any unexpected failure as 500
+            _LOGGER.exception("Self-update crashed")
+            return self.json(
+                {"error": "internal error during install"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return self.json(result, status_code=HTTPStatus.ACCEPTED)
