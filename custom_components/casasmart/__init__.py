@@ -58,7 +58,7 @@ from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .push import PushTokenStore
 from .push_crypto import PushIdentityError, ensure_push_identity
-from .push_dispatcher import PushDispatcher
+from .push_dispatcher import PushDispatcher, TankPushMonitor
 from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
 from .audio import AudioEngine
@@ -108,6 +108,9 @@ class CasaSmartRuntimeData:
     # B8 push dispatcher: alarm/lock events -> signed relay pushes. None if the
     # TLS identity (its hub-id source) or the push key was unavailable at setup.
     push_dispatcher: PushDispatcher | None = None
+    # B8 Piece 4b tank monitor: timer-driven low-water + offline pushes. Shares
+    # the dispatcher's relay path, so None whenever push_dispatcher is None.
+    tank_push_monitor: TankPushMonitor | None = None
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -488,6 +491,15 @@ async def _async_start_push(
     dispatcher.async_start()
     runtime_data.push_dispatcher = dispatcher
 
+    # B8 Piece 4b: the tank monitor pushes through the dispatcher, so it only
+    # comes up once push is up (no notifier, no monitor). Timer-driven — pure
+    # scheduling, no blocking work.
+    tank_monitor = TankPushMonitor(
+        hass, tanks=runtime_data.tanks, notifier=dispatcher
+    )
+    tank_monitor.async_start()
+    runtime_data.tank_push_monitor = tank_monitor
+
 
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register hub services (idempotent across entry reloads).
@@ -540,6 +552,8 @@ async def async_unload_entry(
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
+    if entry.runtime_data.tank_push_monitor is not None:
+        entry.runtime_data.tank_push_monitor.async_stop()
     if entry.runtime_data.push_dispatcher is not None:
         entry.runtime_data.push_dispatcher.async_stop()
     if entry.runtime_data.audio_adapter is not None:

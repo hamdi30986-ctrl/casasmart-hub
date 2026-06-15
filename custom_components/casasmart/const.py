@@ -92,6 +92,20 @@ PUSH_RELAY_PUSH_PATH = "/push"
 # loop's alarm/lock reaction longer than this — the send is fire-and-forget.
 PUSH_RELAY_TIMEOUT_SECONDS = 10
 
+# -- Water tank (B8 Piece 4b) --------------------------------------------------
+# The hub owns the voltage→percent calibration AND the user-tunable low-water
+# threshold (the app is pure UI now — it sends inputs, reads computed values
+# back). These two bus events are the installer-automation hooks, the same role
+# EVENT_ALARM_TRIGGERED plays for the alarm: the daily 18:00-AST low-level sweep
+# fires EVENT_TANK_LOW, the 20-minute-silence watchdog fires EVENT_TANK_OFFLINE,
+# each carrying the device id + the relevant levels so an automation can branch.
+EVENT_TANK_LOW = "casasmart_tank_low"
+EVENT_TANK_OFFLINE = "casasmart_tank_offline"
+# Carried in the plaintext push payload's ``data.type`` so the app localizes and
+# routes the notification (mirrors PUSH_TYPE_SECURITY / PUSH_TYPE_LOCK).
+PUSH_TYPE_TANK_LOW = "tank_low"
+PUSH_TYPE_TANK_OFFLINE = "tank_offline"
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

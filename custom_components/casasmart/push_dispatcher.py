@@ -15,7 +15,13 @@ What it listens to:
   ``unavailable``/``unknown`` (or an intermediate ``locking``/``unlocking``
   that never settles) never fires; only the settled edge does.
 
-Water/tank events are deliberately NOT here — that is Piece 4b.
+Piece 4b adds ``TankPushMonitor`` alongside the dispatcher: a timer-driven (not
+event-driven) watcher that pushes water-tank low-level and offline alerts. It
+does not subscribe to the bus — it polls the hub-authoritative ``TankEngine`` on
+a schedule (a daily 18:00-AST low sweep + a 5-minute offline watchdog) and
+dispatches through the dispatcher's public ``async_send``, so both legs sign and
+relay identically. Each alert is also fired on the HA bus (EVENT_TANK_LOW /
+EVENT_TANK_OFFLINE) as the installer-automation hook.
 
 The wire payload is plaintext (the relay reads ``data.title``/``data.body`` to
 build the visible alert), so the canonical JSON that gets signed MUST be
@@ -37,6 +43,7 @@ import logging
 import secrets
 import time
 from base64 import b64encode
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -49,11 +56,19 @@ from homeassistant.const import (
 )
 from homeassistant.core import Event, HomeAssistant, callback
 
-from .const import EVENT_ALARM_TRIGGERED, PUSH_RELAY_TIMEOUT_SECONDS
+from .const import (
+    EVENT_ALARM_TRIGGERED,
+    EVENT_TANK_LOW,
+    EVENT_TANK_OFFLINE,
+    PUSH_RELAY_TIMEOUT_SECONDS,
+    PUSH_TYPE_TANK_LOW,
+    PUSH_TYPE_TANK_OFFLINE,
+)
 
 if TYPE_CHECKING:
     from .push import PushTokenStore
     from .push_crypto import PushSigner
+    from .tank import TankEngine
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -206,6 +221,16 @@ class PushDispatcher:
 
     # -- dispatch --------------------------------------------------------------
 
+    async def async_send(self, data: dict[str, str], priority: str) -> None:
+        """Sign + relay one notification to every registered token.
+
+        The public entry a sibling monitor (``TankPushMonitor``) uses so its
+        tank pushes ride the exact same signed-batch relay path as the
+        dispatcher's own alarm/lock events — one signing implementation, one
+        wire contract. Never raises (``_dispatch`` swallows + logs).
+        """
+        await self._dispatch(data, priority)
+
     async def _dispatch(self, data: dict[str, str], priority: str) -> None:
         """Sign + send one notification to every registered device token."""
         try:
@@ -324,3 +349,223 @@ class PushDispatcher:
             if rec.get("fcm_token") in dead and self._push_store.unregister(device_id):
                 removed += 1
         return removed
+
+
+# -- Tank monitor (B8 Piece 4b) ------------------------------------------------
+# The low-water sweep runs at 15:00 UTC == 18:00 AST (KSA is UTC+3, no DST), so
+# the schedule is timezone-independent of however HA itself is configured.
+TANK_LOW_CHECK_UTC_HOUR = 15
+# A tank silent this long (the script POSTs every 5 min) counts as offline.
+TANK_OFFLINE_TIMEOUT_SECONDS = 20 * 60
+# The offline watchdog cadence — well under the 20-minute threshold so an
+# outage is caught within one poll of crossing it.
+TANK_OFFLINE_POLL = timedelta(minutes=5)
+# AST day bucketing for the once-per-device-per-day dedup.
+_SECONDS_PER_DAY = 86400
+_AST_OFFSET_SECONDS = 3 * 3600
+
+
+class TankPushMonitor:
+    """Water-tank low-level + offline push notifications (B8 Piece 4b).
+
+    Unlike the alarm/lock dispatcher this is **timer-driven, not event-driven**:
+    tank readings arrive on a 5-minute REST cadence, and "low at 6pm" / "silent
+    for 20 minutes" are time questions, not state edges. Two timers:
+
+    - a daily 18:00-AST sweep: for every calibrated tank, compute the current
+      percent and push once if it's below the tank's ``low_percent``;
+    - a 5-minute watchdog: push once when a tank that *was* reporting has gone
+      silent for 20+ minutes.
+
+    Both are deduped to at most one push per device per **AST calendar day** (so
+    the offline watchdog can't fire every 5 minutes). Each alert also fires its
+    HA bus event (EVENT_TANK_LOW / EVENT_TANK_OFFLINE) as the installer
+    automation hook, then dispatches the phone push through the shared signed
+    relay path (``PushDispatcher.async_send``).
+
+    The decision methods (``async_check_low_water`` / ``async_check_offline``)
+    take their "now" from an injectable ``clock`` and read the engine via the
+    executor, so they're unit-testable without HA timers or a live relay.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        *,
+        tanks: "TankEngine",
+        notifier: PushDispatcher,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._hass = hass
+        self._tanks = tanks
+        self._notifier = notifier
+        self._clock = clock
+        self._unsub_daily: Optional[Callable[[], None]] = None
+        self._unsub_offline: Optional[Callable[[], None]] = None
+        # device_id -> AST day index of the last push, one map per channel so a
+        # low-water push and an offline push don't suppress each other.
+        self._low_pushed_day: dict[str, int] = {}
+        self._offline_pushed_day: dict[str, int] = {}
+
+    # -- lifecycle -------------------------------------------------------------
+
+    @callback
+    def async_start(self) -> None:
+        """Wire the two timers. Imported lazily so the module stays importable
+        (the dispatcher unit tests stub only ``homeassistant.const``/``core``).
+        """
+        from homeassistant.helpers.event import (
+            async_track_time_interval,
+            async_track_utc_time_change,
+        )
+
+        self._unsub_daily = async_track_utc_time_change(
+            self._hass,
+            self._handle_daily_check,
+            hour=TANK_LOW_CHECK_UTC_HOUR,
+            minute=0,
+            second=0,
+        )
+        self._unsub_offline = async_track_time_interval(
+            self._hass, self._handle_offline_check, TANK_OFFLINE_POLL
+        )
+        _LOGGER.info(
+            "Tank push monitor started (low-water sweep 18:00 AST, "
+            "offline watchdog every %s)",
+            TANK_OFFLINE_POLL,
+        )
+
+    @callback
+    def async_stop(self) -> None:
+        """Release both timers (idempotent — safe on any unload)."""
+        if self._unsub_daily is not None:
+            self._unsub_daily()
+            self._unsub_daily = None
+        if self._unsub_offline is not None:
+            self._unsub_offline()
+            self._unsub_offline = None
+
+    # -- timer adapters --------------------------------------------------------
+
+    async def _handle_daily_check(self, _now: Any = None) -> None:
+        await self.async_check_low_water()
+
+    async def _handle_offline_check(self, _now: Any = None) -> None:
+        await self.async_check_offline()
+
+    # -- checks (testable; clock-driven) ---------------------------------------
+
+    async def async_check_low_water(self) -> None:
+        """Push once for each calibrated tank currently below its threshold."""
+        now = self._clock()
+        day = self._ast_day(now)
+        devices = await self._list_devices()
+        for device in devices:
+            device_id = device.get("device_id")
+            if not device_id or not device.get("is_calibrated"):
+                continue
+            if self._low_pushed_day.get(device_id) == day:
+                continue
+            last = device.get("last_reading")
+            # A dead sensor must not raise a "low" alert off a stale reading —
+            # that's the offline watchdog's job. Skip when the latest reading is
+            # already past the offline threshold.
+            if not last or now - last.get("t", 0) >= TANK_OFFLINE_TIMEOUT_SECONDS:
+                continue
+            try:
+                status = await self._hass.async_add_executor_job(
+                    self._tanks.status, device_id
+                )
+            except Exception:  # noqa: BLE001 — one bad tank must not stop the sweep
+                _LOGGER.exception("Tank %s: status read failed", device_id)
+                continue
+            if status.get("percent") is None or not status.get("is_low"):
+                continue
+            self._low_pushed_day[device_id] = day
+            await self._emit_low(device, status)
+
+    async def async_check_offline(self) -> None:
+        """Push once for each previously-reporting tank now silent 20+ min."""
+        now = self._clock()
+        day = self._ast_day(now)
+        devices = await self._list_devices()
+        for device in devices:
+            device_id = device.get("device_id")
+            if not device_id:
+                continue
+            last = device.get("last_reading")
+            # "previously reporting": a tank with no reading at all (freshly
+            # provisioned, never POSTed) is not offline, it's pending.
+            if not last:
+                continue
+            if now - last.get("t", 0) < TANK_OFFLINE_TIMEOUT_SECONDS:
+                continue
+            if self._offline_pushed_day.get(device_id) == day:
+                continue
+            self._offline_pushed_day[device_id] = day
+            await self._emit_offline(device, last)
+
+    # -- emit ------------------------------------------------------------------
+
+    async def _emit_low(
+        self, device: dict[str, Any], status: dict[str, Any]
+    ) -> None:
+        device_id = device["device_id"]
+        name = device.get("name") or "Water tank"
+        percent = int(round(status["percent"]))
+        self._hass.bus.async_fire(
+            EVENT_TANK_LOW,
+            {
+                "device_id": device_id,
+                "name": name,
+                "percent": status["percent"],
+                "low_percent": status.get("low_percent"),
+            },
+        )
+        await self._notifier.async_send(
+            {
+                "type": PUSH_TYPE_TANK_LOW,
+                "title": "Water tank low",
+                "body": f"{name} level is low ({percent}%)",
+                "device_id": device_id,
+                "percent": str(percent),
+            },
+            PRIORITY_NORMAL,
+        )
+
+    async def _emit_offline(
+        self, device: dict[str, Any], last: dict[str, Any]
+    ) -> None:
+        device_id = device["device_id"]
+        name = device.get("name") or "Water tank"
+        self._hass.bus.async_fire(
+            EVENT_TANK_OFFLINE,
+            {
+                "device_id": device_id,
+                "name": name,
+                "last_reading_at": last.get("t"),
+            },
+        )
+        await self._notifier.async_send(
+            {
+                "type": PUSH_TYPE_TANK_OFFLINE,
+                "title": "Water tank offline",
+                "body": f"{name} — no readings for 20+ minutes",
+                "device_id": device_id,
+            },
+            PRIORITY_NORMAL,
+        )
+
+    # -- internals -------------------------------------------------------------
+
+    async def _list_devices(self) -> list[dict[str, Any]]:
+        try:
+            return await self._hass.async_add_executor_job(self._tanks.list_devices)
+        except Exception:  # noqa: BLE001 — a storage hiccup skips this tick only
+            _LOGGER.exception("Tank monitor: listing devices failed")
+            return []
+
+    @staticmethod
+    def _ast_day(now: float) -> int:
+        """The AST (UTC+3) calendar-day index for the once-per-day dedup."""
+        return int((now + _AST_OFFSET_SECONDS) // _SECONDS_PER_DAY)

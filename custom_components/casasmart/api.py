@@ -133,11 +133,13 @@ from .update_api import (
     get_or_create_checker,
 )
 from .tank_api import (
+    CasaSmartTankCalibrationView,
     CasaSmartTankDevicesView,
     CasaSmartTankDeviceView,
     CasaSmartTankProvisionView,
     CasaSmartTankReadingsView,
     CasaSmartTankReadingView,
+    CasaSmartTankStatusView,
 )
 from .ws import CasaSmartWebSocketView
 
@@ -202,6 +204,11 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartTankDevicesView(hass),
         CasaSmartTankDeviceView(hass),
         CasaSmartTankReadingsView(hass),
+        # Calibration/status are device sub-resources (3-segment) with a
+        # literal trailing segment, so they never collide with the 2-segment
+        # provision/reading routes or the literal `tank/devices/...` family.
+        CasaSmartTankCalibrationView(hass),
+        CasaSmartTankStatusView(hass),
         CasaSmartAudioSpeakersView(hass),
         CasaSmartAudioSpeakerView(hass),
         CasaSmartAudioDiscoverView(hass),

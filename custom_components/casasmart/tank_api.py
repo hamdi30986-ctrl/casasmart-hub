@@ -28,6 +28,7 @@ provision endpoint must not be usable as an SSRF proxy.
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import logging
 import time
@@ -519,8 +520,9 @@ class CasaSmartTankReadingsView(_TankView):
     """GET /api/casasmart/tank/devices/{device_id}/readings?days=N.
 
     The 24/7 history the phone-local log can't have — newest first,
-    ``{"t": unix_seconds, "v": voltage}`` (calibration voltage→percent
-    stays the app's job, exactly as with its own log).
+    ``{"t": unix_seconds, "v": voltage, "p": percent}``. The hub computes
+    ``p`` from the device's calibration (B8 Piece 4b — the app no longer does
+    the math; ``p`` is null for an uncalibrated tank).
     """
 
     url = f"/api/{DOMAIN}/tank/devices/{{device_id}}/readings"
@@ -549,3 +551,85 @@ class CasaSmartTankReadingsView(_TankView):
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json({"device_id": device_id, "readings": readings})
+
+
+# Fields the calibration PATCH accepts — anything else in the body is ignored,
+# so a future app can add keys without this endpoint 400-ing old hubs.
+_CALIBRATION_FIELDS = (
+    "calibration_voltage",
+    "calibration_depth",
+    "max_height",
+    "low_percent",
+)
+
+
+class CasaSmartTankCalibrationView(_TankView):
+    """PATCH /api/casasmart/tank/{device_id}/calibration.
+
+    The hub owns the voltage→percent calibration and the low-water threshold
+    (B8 Piece 4b — the app is pure UI). Body carries any subset of
+    ``{"calibration_voltage", "calibration_depth", "max_height",
+    "low_percent"}``; omitted fields are left unchanged, so the calibration
+    dialog (the three calibration inputs) and the notification slider
+    (``low_percent`` alone) share one endpoint. ``low_percent`` is validated to
+    the 1-30 range and the rest to be positive numbers — the engine is the one
+    that says no. ``registry.manage`` gated, like provision/delete.
+    """
+
+    url = f"/api/{DOMAIN}/tank/{{device_id}}/calibration"
+    name = f"api:{DOMAIN}:tank:calibration"
+
+    async def patch(self, request: web.Request, device_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        tanks, not_ready = self._tanks_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        kwargs = {key: payload[key] for key in _CALIBRATION_FIELDS if key in payload}
+        if not kwargs:
+            return self.json_message(
+                "No calibration fields provided", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            record = await self._hass.async_add_executor_job(
+                functools.partial(tanks.set_calibration, device_id, **kwargs)
+            )
+        except UnknownTankError:
+            return self.json_message("Unknown tank device", HTTPStatus.NOT_FOUND)
+        except TankError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        return self.json(record)
+
+
+class CasaSmartTankStatusView(_TankView):
+    """GET /api/casasmart/tank/{device_id}/status.
+
+    The computed live status the app displays instead of doing the math
+    itself (B8 Piece 4b): ``{voltage, percent, low_percent, is_low,
+    last_reading}``. ``voltage``/``percent`` are null with no reading yet or an
+    uncalibrated tank. ``devices.read`` gated, like the device/readings GETs.
+    """
+
+    url = f"/api/{DOMAIN}/tank/{{device_id}}/status"
+    name = f"api:{DOMAIN}:tank:status"
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "devices.read")
+        if error is not None:
+            return error
+        tanks, not_ready = self._tanks_or_503()
+        if not_ready is not None:
+            return not_ready
+        try:
+            status = await self._hass.async_add_executor_job(
+                tanks.status, device_id
+            )
+        except UnknownTankError:
+            return self.json_message("Unknown tank device", HTTPStatus.NOT_FOUND)
+        return self.json(status)
