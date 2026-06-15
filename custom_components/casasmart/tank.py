@@ -66,6 +66,71 @@ _NAME_MAX = 64
 _MAX_READINGS = 9000
 _RETENTION_SECONDS = 31 * 24 * 3600
 
+# -- Calibration (B8 Piece 4b) -------------------------------------------------
+# The voltage→percent math + the low-water threshold moved off the app and onto
+# the hub. Per device the hub stores the three calibration inputs the installer
+# captures (calibration voltage auto-read from the Shelly, calibration depth and
+# the tank's max height in metres) plus the user's low-water threshold percent.
+TANK_MAX_HEIGHT_DEFAULT = 3.0
+TANK_LOW_PERCENT_DEFAULT = 20
+# The notification slider's range — the hub is the one that says no, so a phone
+# (or a stale UI, or a hand-rolled request) can never store an out-of-band value.
+TANK_LOW_PERCENT_MIN = 1
+TANK_LOW_PERCENT_MAX = 30
+
+
+def _coerce_positive(value: Any, field: str) -> float:
+    """A finite, strictly-positive float, or a TankError naming the field."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TankError(f"{field} must be a number")
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise TankError(f"{field} must be a finite number")
+    if number <= 0:
+        raise TankError(f"{field} must be greater than 0")
+    return number
+
+
+def _compute_percent(
+    voltage: float, cal_v: float, cal_d: float, height: float
+) -> float | None:
+    """The voltage→percent equation, isolated so the live path and the
+    per-reading history path share one implementation (no drift).
+
+        slope = cal_v / cal_d ; max_voltage = height * slope ;
+        percent = clamp((voltage / max_voltage) * 100, 0, 100)
+
+    Returns ``None`` when the calibration can't define a positive full-tank
+    voltage (uncalibrated / nonsensical inputs)."""
+    if cal_v <= 0 or cal_d <= 0 or height <= 0:
+        return None
+    max_voltage = height * (cal_v / cal_d)
+    if max_voltage <= 0:
+        return None
+    return max(0.0, min(100.0, (float(voltage) / max_voltage) * 100.0))
+
+
+def _coerce_low_percent(value: Any) -> int:
+    """An int in [TANK_LOW_PERCENT_MIN, TANK_LOW_PERCENT_MAX], else TankError.
+
+    A float that is exactly integral (e.g. the slider sends ``20.0``) is
+    accepted; a genuine fraction is not — a threshold of 20.5% is meaningless.
+    """
+    if isinstance(value, bool):
+        raise TankError("low_percent must be an integer")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise TankError("low_percent must be a whole number")
+        value = int(value)
+    if not isinstance(value, int):
+        raise TankError("low_percent must be an integer")
+    if not TANK_LOW_PERCENT_MIN <= value <= TANK_LOW_PERCENT_MAX:
+        raise TankError(
+            f"low_percent must be between {TANK_LOW_PERCENT_MIN} and "
+            f"{TANK_LOW_PERCENT_MAX}"
+        )
+    return value
+
 
 class TankError(Exception):
     """Tank input rejected (maps to HTTP 400)."""
@@ -187,14 +252,23 @@ class TankEngine:
         token = secrets.token_hex(16)
         now = int(time.time())
         with self._lock:
-            existing = self._devices.get(device_id)
+            existing = self._devices.get(device_id) or {}
             record = {
                 "name": _clean_name(name),
                 "ip": ip.strip(),
                 "model": model if isinstance(model, str) and model else None,
                 "token_sha256": _hash_token(token),
-                "created_at": (existing or {}).get("created_at", now),
+                "created_at": existing.get("created_at", now),
                 "provisioned_at": now,
+                # Calibration survives a re-provision (token rotation / hub-IP
+                # change re-pushes the script but the physical tank is the same
+                # one). Brand-new devices start uncalibrated with sane defaults.
+                "calibration_voltage": existing.get("calibration_voltage", 0.0),
+                "calibration_depth": existing.get("calibration_depth", 0.0),
+                "max_height": existing.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
+                "low_percent": existing.get(
+                    "low_percent", TANK_LOW_PERCENT_DEFAULT
+                ),
             }
             self._devices[device_id] = record
         _LOGGER.info("Tank %s provisioned (%s @ %s)", device_id, record["name"], ip)
@@ -223,6 +297,134 @@ class TankEngine:
                 raise UnknownTankError("Unknown tank device") from None
             self._readings.pop(device_id, None)
         _LOGGER.info("Tank %s deleted", device_id)
+
+    # -- calibration (storage — call via executor) -----------------------------
+
+    def set_calibration(
+        self,
+        device_id: str,
+        *,
+        calibration_voltage: Any = None,
+        calibration_depth: Any = None,
+        max_height: Any = None,
+        low_percent: Any = None,
+    ) -> dict[str, Any]:
+        """Merge calibration / low-water settings onto a tank record.
+
+        Every field is optional (a ``None`` leaves the stored value alone) so
+        the app's calibration dialog (voltage+depth+height together) and its
+        notification slider (``low_percent`` alone) both ride this one path.
+        Each supplied value is validated here — the hub is authoritative, the
+        app sends raw user numbers. The full calibration is only "complete"
+        once both calibration_voltage and calibration_depth are positive
+        (see ``voltage_to_percent``). Raises ``UnknownTankError`` for an
+        unknown device, ``TankError`` for a bad value.
+        """
+        updates: dict[str, Any] = {}
+        if calibration_voltage is not None:
+            updates["calibration_voltage"] = _coerce_positive(
+                calibration_voltage, "calibration_voltage"
+            )
+        if calibration_depth is not None:
+            updates["calibration_depth"] = _coerce_positive(
+                calibration_depth, "calibration_depth"
+            )
+        if max_height is not None:
+            updates["max_height"] = _coerce_positive(max_height, "max_height")
+        if low_percent is not None:
+            updates["low_percent"] = _coerce_low_percent(low_percent)
+        if not updates:
+            raise TankError("No calibration fields provided")
+
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownTankError("Unknown tank device")
+            merged = {**record, **updates}
+            # The water column can't be deeper than the tank is tall — catch a
+            # transposed depth/height pair before it skews every percentage.
+            depth = merged.get("calibration_depth", 0.0) or 0.0
+            height = merged.get("max_height", 0.0) or 0.0
+            if depth > 0 and height > 0 and depth > height:
+                raise TankError("calibration_depth cannot exceed max_height")
+            self._devices[device_id] = merged
+        _LOGGER.info("Tank %s calibration updated: %s", device_id, sorted(updates))
+        return self._public(device_id, merged)
+
+    def voltage_to_percent(
+        self, device_id: str, voltage: Any
+    ) -> float | None:
+        """A raw voltage → 0-100 water-level percent via stored calibration.
+
+        The equation that used to live in the app's ``tank.dart``::
+
+            slope       = calibration_voltage / calibration_depth
+            max_voltage = max_height * slope
+            percent     = clamp((voltage / max_voltage) * 100, 0, 100)
+
+        Returns ``None`` when the device isn't calibrated yet, or the stored
+        calibration can't define a positive full-tank voltage — the app then
+        shows "—", never a fabricated 0%. Raises ``UnknownTankError`` for an
+        unknown device and ``TankError`` for a non-numeric voltage. Edge cases
+        fall out of the clamp: 0 V → 0%, a voltage above full → 100%.
+        """
+        if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
+            raise TankError("voltage must be a number")
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownTankError("Unknown tank device")
+            cal_v = record.get("calibration_voltage", 0.0) or 0.0
+            cal_d = record.get("calibration_depth", 0.0) or 0.0
+            height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
+        return _compute_percent(float(voltage), cal_v, cal_d, height)
+
+    def get_current_percent(self, device_id: str) -> float | None:
+        """The latest reading run through ``voltage_to_percent``.
+
+        ``None`` when the tank has no reading yet or isn't calibrated; raises
+        ``UnknownTankError`` for an unknown device.
+        """
+        with self._lock:
+            if device_id not in self._devices:
+                raise UnknownTankError("Unknown tank device")
+            entries = (self._readings.get(device_id) or {}).get("entries", [])
+        last = entries[-1] if entries else None
+        if last is None:
+            return None
+        return self.voltage_to_percent(device_id, last["v"])
+
+    def status(self, device_id: str) -> dict[str, Any]:
+        """Live status for the app's GET status endpoint + the push monitor.
+
+        ``{voltage, percent, low_percent, is_low, last_reading}`` — ``voltage``
+        / ``percent`` are ``None`` with no reading (or uncalibrated), ``is_low``
+        is true only when a real computed percent sits below the threshold.
+        Raises ``UnknownTankError`` for an unknown device.
+        """
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownTankError("Unknown tank device")
+            low_percent = int(
+                record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
+            )
+            entries = (self._readings.get(device_id) or {}).get("entries", [])
+        last = entries[-1] if entries else None
+        voltage = float(last["v"]) if last else None
+        percent = (
+            self.voltage_to_percent(device_id, voltage)
+            if voltage is not None
+            else None
+        )
+        return {
+            "device_id": device_id,
+            "voltage": voltage,
+            "percent": percent,
+            "low_percent": low_percent,
+            "is_low": percent is not None and percent < low_percent,
+            "last_reading": last,
+        }
 
     # -- ingest (storage — call via executor) ----------------------------------
 
@@ -257,15 +459,32 @@ class TankEngine:
     def recent_readings(self, device_id: str, days: Any = 7) -> list[dict[str, Any]]:
         """Readings from the last ``days`` days, NEWEST first (the app's
         ``fetchRecentReadings`` contract). Raises on an unknown device —
-        "no tank" and "no data yet" must stay distinguishable."""
+        "no tank" and "no data yet" must stay distinguishable.
+
+        Each entry is ``{"t": unix_seconds, "v": voltage, "p": percent}`` — the
+        hub computes the percent for every reading from the same calibration so
+        the app's history charts read it instead of doing the math (B8 Piece
+        4b). ``p`` is ``None`` for an uncalibrated tank."""
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             raise TankError("days must be a positive integer")
         with self._lock:
-            if device_id not in self._devices:
+            record = self._devices.get(device_id)
+            if record is None:
                 raise UnknownTankError("Unknown tank device")
+            cal_v = record.get("calibration_voltage", 0.0) or 0.0
+            cal_d = record.get("calibration_depth", 0.0) or 0.0
+            height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
             entries = (self._readings.get(device_id) or {}).get("entries", [])
         cutoff = time.time() - days * 24 * 3600
-        return [entry for entry in reversed(entries) if entry["t"] >= cutoff]
+        return [
+            {
+                "t": entry["t"],
+                "v": entry["v"],
+                "p": _compute_percent(entry["v"], cal_v, cal_d, height),
+            }
+            for entry in reversed(entries)
+            if entry["t"] >= cutoff
+        ]
 
     def last_reading(self, device_id: str) -> dict[str, Any] | None:
         """The newest reading, or None (also None for unknown devices —
@@ -278,6 +497,8 @@ class TankEngine:
 
     def _public(self, device_id: str, record: dict[str, Any]) -> dict[str, Any]:
         entries = (self._readings.get(device_id) or {}).get("entries", [])
+        cal_v = record.get("calibration_voltage", 0.0) or 0.0
+        cal_d = record.get("calibration_depth", 0.0) or 0.0
         return {
             "device_id": device_id,
             "name": record.get("name"),
@@ -285,6 +506,16 @@ class TankEngine:
             "model": record.get("model"),
             "created_at": record.get("created_at", 0),
             "provisioned_at": record.get("provisioned_at", 0),
+            # Calibration is read back by the app so its inputs survive a
+            # reinstall (the hub is the memory). is_calibrated mirrors the
+            # voltage_to_percent precondition so the app needn't re-derive it.
+            "calibration_voltage": cal_v,
+            "calibration_depth": cal_d,
+            "max_height": record.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
+            "low_percent": int(
+                record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
+            ),
+            "is_calibrated": cal_v > 0 and cal_d > 0,
             "last_reading": entries[-1] if entries else None,
         }
 
