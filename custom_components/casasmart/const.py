@@ -76,6 +76,22 @@ UPDATE_REPO_CONFIG_KEY = "update_repo"
 # window, never once per request (and never on the hot path of a tile refresh).
 UPDATE_CHECK_TTL_SECONDS = 6 * 3600
 
+# -- Push relay (B8) ------------------------------------------------------------
+# The hub signs each push batch with its permanent Ed25519 push-identity key
+# (push_crypto.py) and POSTs it to the relay; the relay authenticates the
+# signature against the hub's out-of-band-registered public key and fans the
+# batch out to FCM. The relay base URL is installer-overridable per fleet via
+# the hub_config key below — repointing a fleet needs no code change. The
+# default targets the production Deno Deploy relay (the ``casasmart-relay``
+# project on console.deno.com).
+PUSH_RELAY_URL_DEFAULT = "https://casasmart-relay.deno.dev"
+PUSH_RELAY_URL_CONFIG_KEY = "push_relay_url"
+# Path appended to the relay base URL for the push endpoint.
+PUSH_RELAY_PUSH_PATH = "/push"
+# Outbound POST timeout (seconds). A wedged relay must never block the event
+# loop's alarm/lock reaction longer than this — the send is fire-and-forget.
+PUSH_RELAY_TIMEOUT_SECONDS = 10
+
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
 WS_AUTH_TIMEOUT = 30.0

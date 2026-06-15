@@ -40,6 +40,9 @@ from .const import (
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
+    PUSH_RELAY_PUSH_PATH,
+    PUSH_RELAY_URL_CONFIG_KEY,
+    PUSH_RELAY_URL_DEFAULT,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
 )
@@ -49,10 +52,13 @@ from homeassistant.helpers import (
     entity_registry as er,
     floor_registry as fr,
 )
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .push import PushTokenStore
+from .push_crypto import PushIdentityError, ensure_push_identity
+from .push_dispatcher import PushDispatcher
 from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
 from .audio import AudioEngine
@@ -99,6 +105,9 @@ class CasaSmartRuntimeData:
     # failed before it started, or while audio is unprovisioned (still set,
     # just inert — the object exists so the API can publish through it).
     audio_adapter: AudioAdapter | None = None
+    # B8 push dispatcher: alarm/lock events -> signed relay pushes. None if the
+    # TLS identity (its hub-id source) or the push key was unavailable at setup.
+    push_dispatcher: PushDispatcher | None = None
     # B10 HTTPS listener; None only if the identity/cert layer failed setup.
     tls: CasaSmartTlsServer | None = None
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
@@ -258,6 +267,7 @@ async def async_setup_entry(
 
     await _async_start_tls(hass, entry, data_dir, hub_version)
     await _async_start_mdns(hass, entry)
+    await _async_start_push(hass, entry, data_dir)
 
     # B13: wire the alarm engine to live HA events (sensor edges + the
     # entry-delay timer). Pure event subscription — no blocking work.
@@ -435,6 +445,50 @@ async def _async_start_mdns(
     )
 
 
+async def _async_start_push(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
+) -> None:
+    """B8: wire alarm/lock events to signed relay pushes.
+
+    The dispatcher signs every batch with the hub's Ed25519 push-identity key
+    and authenticates to the relay as the hub's permanent identity fingerprint
+    — the same id the app pins and the relay knows out-of-band. It therefore
+    needs the TLS identity for its hub-id, so it runs after TLS; if that layer
+    failed (``runtime_data.tls is None``) there is nothing stable to sign as and
+    push is skipped — the rest of the hub stays up. A corrupt push key degrades
+    the same way (logged, never fatal): notifications are one feature, not the
+    hub.
+    """
+    runtime_data = entry.runtime_data
+    if runtime_data.tls is None:
+        _LOGGER.info("Push dispatcher skipped — TLS identity unavailable")
+        return
+
+    try:
+        signer = await hass.async_add_executor_job(
+            ensure_push_identity, data_dir, runtime_data.hub_config
+        )
+    except PushIdentityError:
+        _LOGGER.exception("Push dispatcher skipped — push-identity key unusable")
+        return
+
+    relay_base = runtime_data.hub_config.get(PUSH_RELAY_URL_CONFIG_KEY)
+    if not isinstance(relay_base, str) or not relay_base.strip():
+        relay_base = PUSH_RELAY_URL_DEFAULT
+    relay_url = relay_base.rstrip("/") + PUSH_RELAY_PUSH_PATH
+
+    dispatcher = PushDispatcher(
+        hass,
+        push_store=runtime_data.push,
+        signer=signer,
+        hub_id=runtime_data.tls.material.identity_fingerprint,
+        relay_url=relay_url,
+        session=async_get_clientsession(hass),
+    )
+    dispatcher.async_start()
+    runtime_data.push_dispatcher = dispatcher
+
+
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register hub services (idempotent across entry reloads).
 
@@ -486,6 +540,8 @@ async def async_unload_entry(
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
+    if entry.runtime_data.push_dispatcher is not None:
+        entry.runtime_data.push_dispatcher.async_stop()
     if entry.runtime_data.audio_adapter is not None:
         await entry.runtime_data.audio_adapter.async_stop()
     if entry.runtime_data.mdns is not None:
