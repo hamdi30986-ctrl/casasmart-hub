@@ -60,6 +60,15 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _get_push_store(hass: HomeAssistant):
+    """The loaded entry's push-token store, or None when not set up."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.push
+
+
 def get_engine(hass: HomeAssistant) -> AuthEngine | None:
     """The loaded entry's auth engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
@@ -513,6 +522,13 @@ class CasaSmartUserView(HomeAssistantView):
             return self.json_message("Unknown device", HTTPStatus.NOT_FOUND)
         except UserManagementError as err:
             return self.json_message(str(err), HTTPStatus.FORBIDDEN)
+
+        # B8: remove the unpaired device's push token (if any).
+        push = _get_push_store(self._hass)
+        if push is not None:
+            await self._hass.async_add_executor_job(
+                push.unregister, device_id
+            )
 
         return self.json({"unpaired": device_id})
 
