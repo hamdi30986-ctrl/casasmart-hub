@@ -52,6 +52,7 @@ from homeassistant.helpers import (
 
 from .entity_bridge import is_exposed
 from .pairing import PairingManager
+from .push import PushTokenStore
 from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
 from .audio import AudioEngine
@@ -84,6 +85,8 @@ class CasaSmartRuntimeData:
     registry: RegistryEngine
     tanks: TankEngine
     user_settings: UserSettingsEngine
+    # B8 push-token store: FCM tokens for encrypted relay dispatch.
+    push: PushTokenStore
     # B13 hub-side alarm state machine (push leg stubbed until B8).
     alarm: AlarmEngine
     # B14 hub-side audio engine: broker/PA/athan config + speaker registry +
@@ -114,6 +117,7 @@ def _open_storage(
     RegistryEngine,
     TankEngine,
     UserSettingsEngine,
+    PushTokenStore,
     AlarmEngine,
     AudioEngine,
     str | None,
@@ -151,6 +155,7 @@ def _open_storage(
         storage.table("tank_readings"),
     )
     user_settings = UserSettingsEngine(storage.table("user_settings"))
+    push = PushTokenStore(storage.table("push_tokens"))
     # B13 alarm: persisted arm state + zone map + bounded event history. The
     # push leg (alert_sink) is left at its no-op default until B8 wires the
     # relay; the HA adapter that drives process_sensor/tick is a later piece.
@@ -178,6 +183,7 @@ def _open_storage(
         registry,
         tanks,
         user_settings,
+        push,
         alarm,
         audio,
         bootstrap_code,
@@ -201,6 +207,7 @@ async def async_setup_entry(
             registry,
             tanks,
             user_settings,
+            push,
             alarm,
             audio,
             bootstrap_code,
@@ -218,6 +225,7 @@ async def async_setup_entry(
         registry=registry,
         tanks=tanks,
         user_settings=user_settings,
+        push=push,
         alarm=alarm,
         audio=audio,
     )
@@ -457,6 +465,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # Tank devices/readings are HOUSE data (the Shelly keeps
             # posting through an ownership transfer) and survive.
             runtime_data.storage.table("user_settings").clear()
+            # B8: push tokens are phone-layer data — wipe on reset.
+            runtime_data.storage.table("push_tokens").clear()
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(

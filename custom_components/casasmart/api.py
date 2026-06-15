@@ -100,6 +100,7 @@ from .audio_api import (
     CasaSmartAudioSpeakerView,
 )
 from .automation_api import CasaSmartAutomationConfigView
+from .push_api import CasaSmartPushTokenView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
     CasaSmartCameraSnapshotView,
@@ -175,6 +176,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartPairingCodeView(hass),
         CasaSmartUsersView(hass),
         CasaSmartUserView(hass),
+        CasaSmartPushTokenView(hass),
         CasaSmartRegistryView(hass),
         CasaSmartFloorsView(hass),
         CasaSmartFloorView(hass),
