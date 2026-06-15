@@ -55,6 +55,10 @@ class RegisterTests(PushTokenTestCase):
         with self.assertRaises(ValueError):
             self.store.register("dev-1", "", "ios")
 
+    def test_register_rejects_whitespace_token(self):
+        with self.assertRaises(ValueError):
+            self.store.register("dev-1", "   ", "ios")
+
     def test_register_rejects_oversized_token(self):
         with self.assertRaises(ValueError):
             self.store.register("dev-1", "x" * 5000, "ios")

@@ -40,8 +40,8 @@ class PushTokenStore:
         """
         if platform not in VALID_PLATFORMS:
             raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}")
-        if not fcm_token or len(fcm_token) > MAX_TOKEN_LENGTH:
-            raise ValueError("fcm_token is empty or too long")
+        if not fcm_token or not fcm_token.strip() or len(fcm_token) > MAX_TOKEN_LENGTH:
+            raise ValueError("fcm_token is empty, blank, or too long")
 
         record = {
             "fcm_token": fcm_token,
