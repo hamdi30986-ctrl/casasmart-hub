@@ -21,7 +21,7 @@ from homeassistant.core import HomeAssistant
 
 from .auth_api import authenticate_request
 from .const import DOMAIN
-from .push import VALID_PLATFORMS
+from .push import MAX_TOKEN_LENGTH, VALID_PLATFORMS
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
@@ -72,6 +72,16 @@ class CasaSmartPushTokenView(HomeAssistantView):
                 {"message": "fcm_token is required (string)"},
                 status=HTTPStatus.BAD_REQUEST,
             )
+        if not fcm_token.strip():
+            return web.json_response(
+                {"message": "fcm_token must not be blank"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if len(fcm_token) > MAX_TOKEN_LENGTH:
+            return web.json_response(
+                {"message": f"fcm_token exceeds maximum length of {MAX_TOKEN_LENGTH}"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
         if platform not in VALID_PLATFORMS:
             return web.json_response(
                 {"message": f"platform must be one of {sorted(VALID_PLATFORMS)}"},
@@ -87,7 +97,7 @@ class CasaSmartPushTokenView(HomeAssistantView):
 
         device_id = claims["sub"]
 
-        record = await self._hass.async_add_executor_job(
+        await self._hass.async_add_executor_job(
             store.register, device_id, fcm_token, platform
         )
 
