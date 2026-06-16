@@ -56,9 +56,11 @@ from homeassistant.util.yaml import dump, load_yaml
 
 from .auth_api import authenticate_request, json_body
 from .automations import (
+    CASA_AUTOMATION_PREFIX,
     delete_automation,
     get_automation,
     is_casa_automation_key,
+    is_valid_casa_automation_key,
     upsert_automation,
 )
 from .const import DOMAIN
@@ -138,6 +140,16 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         if not is_casa_automation_key(config_key):
             return self.json_message(
                 f"Not a CasaSmart automation id: {config_key!r}",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if not is_valid_casa_automation_key(config_key):
+            # Owns the prefix but carries an illegal character — a key the
+            # app would never generate. Refuse before it can reach
+            # automations.yaml.
+            return self.json_message(
+                f"Invalid automation id {config_key!r}: only letters, digits "
+                "and underscores are allowed after the "
+                f"{CASA_AUTOMATION_PREFIX!r} prefix",
                 HTTPStatus.BAD_REQUEST,
             )
         return None

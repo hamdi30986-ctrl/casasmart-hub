@@ -18,6 +18,7 @@ from automations import (  # noqa: E402
     delete_automation,
     get_automation,
     is_casa_automation_key,
+    is_valid_casa_automation_key,
     upsert_automation,
 )
 
@@ -53,6 +54,46 @@ class TestIsCasaAutomationKey(unittest.TestCase):
         ):
             with self.subTest(bad=bad):
                 self.assertFalse(is_casa_automation_key(bad))
+
+
+class TestIsValidCasaAutomationKey(unittest.TestCase):
+    def test_accepts_well_formed_keys(self):
+        for good in (
+            CASA_ID,  # the app's timestamp ids
+            "casa_automation_20260303_143022015",
+            "casa_automation_abc123",
+            "casa_automation_ABC_123",
+            "casa_automation_x",  # single char suffix
+        ):
+            with self.subTest(good=good):
+                self.assertTrue(is_valid_casa_automation_key(good))
+
+    def test_rejects_illegal_charset_after_prefix(self):
+        for bad in (
+            "casa_automation_foo-bar",  # dash
+            "casa_automation_foo.bar",  # dot
+            "casa_automation_foo bar",  # space
+            "casa_automation_foo/bar",  # slash
+            "casa_automation_../etc",  # path traversal
+            "casa_automation_foo:bar",  # colon
+            "casa_automation_foo\nbar",  # newline
+            "casa_automation_café",  # non-ASCII letter
+        ):
+            with self.subTest(bad=bad):
+                self.assertFalse(is_valid_casa_automation_key(bad))
+
+    def test_rejects_what_ownership_gate_already_rejects(self):
+        # A malformed/foreign key is never "valid" either.
+        for bad in (
+            "athan_reminder",  # installer automation
+            "casa_automation_",  # bare prefix, no id
+            "casa_automation",  # prefix minus underscore
+            "",  # empty
+            None,  # not a string
+            42,  # not a string
+        ):
+            with self.subTest(bad=bad):
+                self.assertFalse(is_valid_casa_automation_key(bad))
 
 
 class TestGetAutomation(unittest.TestCase):
