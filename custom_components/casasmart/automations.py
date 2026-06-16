@@ -10,6 +10,7 @@ HA's own config API treats ``id`` as the primary key and so do we.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # The app's automation ids look like "casa_automation_20260303_143022015"
@@ -18,15 +19,44 @@ from typing import Any
 # in either direction.
 CASA_AUTOMATION_PREFIX = "casa_automation_"
 
+# A well-formed key is the prefix followed by one-or-more characters drawn
+# ONLY from [A-Za-z0-9_]. The app's generator (CasaAutomation.generateId)
+# only ever emits a timestamp — digits and underscores — so this rejects
+# nothing real. What it slams the door on is a hand-crafted key smuggling
+# in dashes, dots, slashes, spaces or other characters that have no
+# business landing in an automations.yaml ``id``.
+CASA_AUTOMATION_KEY_RE = re.compile(
+    r"^" + re.escape(CASA_AUTOMATION_PREFIX) + r"[A-Za-z0-9_]+$"
+)
+
 CONF_ID = "id"
 
 
 def is_casa_automation_key(config_key: Any) -> bool:
-    """True when the config key is one of the app's own automations."""
+    """True when the config key is one of the app's own automations.
+
+    Ownership gate only — the ``casa_automation_`` prefix plus a non-empty
+    suffix. Charset validity is a separate, stricter check
+    (:func:`is_valid_casa_automation_key`).
+    """
     return (
         isinstance(config_key, str)
         and config_key.startswith(CASA_AUTOMATION_PREFIX)
         and len(config_key) > len(CASA_AUTOMATION_PREFIX)
+    )
+
+
+def is_valid_casa_automation_key(config_key: Any) -> bool:
+    """True when the key is one of ours AND well-formed.
+
+    Stricter than :func:`is_casa_automation_key`: the prefix must be
+    followed by letters, digits or underscores only. A key that owns the
+    prefix but carries any other character (dash, dot, space, path
+    separator, ...) is ours-but-malformed and must be refused, not written
+    into automations.yaml.
+    """
+    return isinstance(config_key, str) and bool(
+        CASA_AUTOMATION_KEY_RE.match(config_key)
     )
 
 
