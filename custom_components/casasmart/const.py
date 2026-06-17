@@ -38,6 +38,13 @@ MDNS_REFRESH_INTERVAL_MINUTES = 5
 # Optional installer-set friendly hub name, surfaced in the mDNS TXT `name`.
 HUB_NAME_CONFIG_KEY = "hub_name"
 
+# -- Auth / enrollment (B2) -----------------------------------------------------
+# Fired on the HA bus whenever the enrolled-device set changes — a device
+# pairs, gets its role/rooms edited, is unpaired, the admin is recovered, or
+# the pairing code is regenerated. The `sensor` platform listens to reconcile
+# its per-user entities live (add on pair, drop on revoke, repaint on edit).
+EVENT_AUTH_CHANGED = "casasmart_auth_changed"
+
 # -- Device registry (B17) -------------------------------------------------------
 # Fired on the HA bus after any registry mutation (floors/rooms/devices/
 # scenes); the WS server forwards it to connected apps as a

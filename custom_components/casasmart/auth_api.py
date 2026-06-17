@@ -48,7 +48,7 @@ from .auth_engine import (
     UserManagementError,
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_AUTH_CHANGED
 from .pairing import CodeInvalidError, PairingError, PairingManager
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
@@ -272,6 +272,7 @@ class CasaSmartEnrollView(HomeAssistantView):
                     role=grant["role"],
                     public_key_pem=payload.get("public_key", ""),
                     rooms=grant["rooms"],
+                    enrolled_via=grant.get("code_id"),
                 )
             )
         except EnrollError as err:
@@ -283,6 +284,9 @@ class CasaSmartEnrollView(HomeAssistantView):
             # The hub just got claimed — arm the B3 recovery code so the
             # installer can engrave the card before leaving the site.
             await self._hass.async_add_executor_job(arm_recovery, self._hass)
+
+        # A new device joined — refresh the per-user sensors.
+        self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json(
             {"device_id": device_id, "role": grant["role"], "rooms": grant["rooms"]},
@@ -355,6 +359,9 @@ class CasaSmartRecoverView(HomeAssistantView):
 
         # Fresh code for the next card — surfaced to the HA admin only.
         await self._hass.async_add_executor_job(arm_recovery, self._hass)
+
+        # The admin device changed identity — refresh the per-user sensors.
+        self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json(
             {"device_id": device_id, "role": "admin", "rooms": None},
@@ -504,6 +511,9 @@ class CasaSmartUserView(HomeAssistantView):
         except UserManagementError as err:
             return self.json_message(str(err), HTTPStatus.FORBIDDEN)
 
+        # Role/room edit landed — repaint the device's sensor.
+        self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
+
         return self.json(updated)
 
     async def delete(self, request: web.Request, device_id: str) -> web.Response:
@@ -529,6 +539,9 @@ class CasaSmartUserView(HomeAssistantView):
             await self._hass.async_add_executor_job(
                 push.unregister, device_id
             )
+
+        # Device gone — drop its sensor.
+        self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json({"unpaired": device_id})
 
