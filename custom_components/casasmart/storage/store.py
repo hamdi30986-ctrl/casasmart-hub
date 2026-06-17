@@ -4,7 +4,7 @@ The abstraction is the contract: nothing above this module ever touches
 SQLite directly. Callers get named tables that behave like dicts of
 JSON-serializable values:
 
-    storage = HubStorage(Path("/config/casasmart/casasmart.db"))
+    storage = HubStorage(Path("/config/casasmart/hub.db"))
     storage.open()
     users = storage.table("users")
     users["u-123"] = {"name": "Hamdi", "role": "admin"}
