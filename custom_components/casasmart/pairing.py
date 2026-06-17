@@ -173,6 +173,41 @@ class PairingManager:
         _LOGGER.info("Pairing code %s revoked", code_id)
         return True
 
+    def clear_user_codes(self) -> int:
+        """Delete every outstanding NON-bootstrap pairing code; return count.
+
+        The "Regenerate pairing code" button wipes pending invites before
+        minting a fresh one. The bootstrap admin code (if any) is preserved:
+        it belongs to the unclaimed-hub onboarding path, not the admin's
+        guest-access management.
+        """
+        with self._lock:
+            targets = [cid for cid in self._codes if cid != BOOTSTRAP_CODE_ID]
+            for code_id in targets:
+                del self._codes[code_id]
+        if targets:
+            _LOGGER.info("Wiped %d unused pairing code(s)", len(targets))
+        return len(targets)
+
+    def clear_all_codes(self) -> int:
+        """Delete EVERY pairing code, the bootstrap admin code included; count.
+
+        The factory-reset counterpart to :meth:`clear_user_codes`: that one
+        spares the bootstrap admin code, this wipes it too. Afterwards no code
+        exists at all. The "Regenerate pairing code" button calls this as part
+        of a full pairing reset, then re-mints a fresh bootstrap admin code on
+        the now-unclaimed hub via :meth:`ensure_bootstrap_code`.
+        """
+        with self._lock:
+            count = len(self._codes)
+            for code_id in list(self._codes):
+                del self._codes[code_id]
+        if count:
+            _LOGGER.info(
+                "Wiped all %d pairing code(s) — pairing factory reset", count
+            )
+        return count
+
     # -- enrollment gate ---------------------------------------------------------
 
     def redeem(self, code: str, source_key: str) -> dict[str, Any]:
@@ -212,7 +247,11 @@ class PairingManager:
 
         self.throttle.clear(source_key)
         _LOGGER.info("Pairing code %s redeemed (role=%s)", code_id, record["role"])
-        return {"role": record["role"], "rooms": record.get("rooms")}
+        # ``code_id`` lets the enroll path record which code a device used
+        # (``enrolled_via``), so the regenerate button can later revoke that
+        # device. The bootstrap code is single-per-hub and never regenerated,
+        # so its id flows through harmlessly.
+        return {"role": record["role"], "rooms": record.get("rooms"), "code_id": code_id}
 
     # -- bootstrap ---------------------------------------------------------------
 
