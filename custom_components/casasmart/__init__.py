@@ -16,7 +16,7 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -37,6 +37,7 @@ from .const import (
     DATA_DIR_NAME,
     DB_FILENAME,
     DOMAIN,
+    EVENT_AUTH_CHANGED,
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
@@ -54,6 +55,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .dev_enroll import ensure_dev_devices
 from .entity_bridge import is_exposed
 from .pairing import PairingManager
 from .push import PushTokenStore
@@ -252,6 +254,14 @@ async def async_setup_entry(
 
     await _async_import_registry(hass, hub_config, registry)
 
+    # DEV-ONLY auto-enrollment: re-provision trusted dev keys (mint_token.py et
+    # al.) so the dev tooling survives every factory reset with zero manual
+    # steps. Inert on client hubs — no dev_devices.json manifest, no effect.
+    # Runs now (covers boot + the service-reset reload) and on every
+    # EVENT_AUTH_CHANGED (covers the button reset, which wipes in place without
+    # a reload). See dev_enroll.py.
+    await _async_setup_dev_enroll(hass, entry, data_dir)
+
     if bootstrap_code is not None:
         # Surfaced once, to the HA admin only — this is how the owner's
         # phone claims an unclaimed hub (B2 bootstrap; card QR later).
@@ -368,6 +378,35 @@ async def _async_import_registry(
         counts["floors"],
         counts["rooms"],
         counts["assignments"],
+    )
+
+
+async def _async_setup_dev_enroll(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
+) -> None:
+    """DEV-ONLY: keep the trusted dev keys enrolled across factory resets.
+
+    Provisions the ``dev_devices.json`` manifest now (boot / service-reset
+    reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the BUTTON reset
+    — which wipes the auth tables in place without reloading the entry — also
+    re-provisions. A no-op on any hub without the manifest (every client hub).
+    The seam is idempotent and never fires ``EVENT_AUTH_CHANGED`` itself, so the
+    listener can't feed itself. The listener is torn down with the entry via
+    ``async_on_unload``.
+    """
+    auth = entry.runtime_data.auth
+
+    async def _provision() -> None:
+        await hass.async_add_executor_job(ensure_dev_devices, data_dir, auth)
+
+    await _provision()
+
+    @callback
+    def _on_auth_changed(_event) -> None:
+        entry.async_create_task(hass, _provision())
+
+    entry.async_on_unload(
+        hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed)
     )
 
 
