@@ -649,6 +649,55 @@ class CasaSmartWidgetTokenView(HomeAssistantView):
         return self.json(issued, HTTPStatus.CREATED)
 
 
+class CasaSmartWhoamiView(HomeAssistantView):
+    """GET /api/casasmart/auth/whoami — is this token still a live session?
+
+    The app calls this on resume to shake off a stale "connected" state. The
+    answer reflects the CALLER's own device only (the bearer token IS the
+    identity — no enumeration), and is freshness-agnostic on purpose: an
+    expired or privilege-bumped token whose device is still paired still
+    reports ``enrolled: true`` with the device's CURRENT role/name, so the
+    app re-authenticates (gets a fresh token) rather than wrongly dropping to
+    re-pairing. ``enrolled: false`` means the token no longer maps to a paired
+    device (unpaired, or forged/garbage) — that, and only that, sends the app
+    back to pairing.
+
+    Always HTTP 200 so the client reads a single boolean; an unreachable hub
+    is a transport-level failure the app already treats as "offline, keep
+    state", never as "not enrolled".
+    """
+
+    url = f"/api/{DOMAIN}/auth/whoami"
+    name = f"api:{DOMAIN}:auth:whoami"
+    requires_auth = False  # the bearer token is read + checked in-handler
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+
+        authorization = request.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            return self.json({"enrolled": False})
+
+        device = await self._hass.async_add_executor_job(
+            engine.device_for_token, authorization.removeprefix("Bearer ")
+        )
+        if device is None:
+            return self.json({"enrolled": False})
+        return self.json(
+            {
+                "enrolled": True,
+                "role": device["role"],
+                "device_id": device["device_id"],
+                "name": device.get("name"),
+            }
+        )
+
+
 def _throttled_response(err: ThrottledError) -> web.Response:
     return web.json_response(
         {"message": str(err), "retry_after": int(err.retry_after)},
