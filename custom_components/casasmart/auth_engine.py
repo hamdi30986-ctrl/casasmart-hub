@@ -276,6 +276,92 @@ class AuthEngine:
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
         return device_id
 
+    def ensure_enrolled(
+        self,
+        device_id: str,
+        name: str,
+        role: str,
+        public_key_pem: str,
+        rooms: list[str] | None = None,
+    ) -> bool:
+        """Idempotently enroll a device under a CALLER-CHOSEN id.
+
+        The stable-id sibling of :meth:`enroll_device` (which mints a random,
+        unguessable id). Here the caller names the id, so declarative
+        provisioning — a manifest of trusted keys re-applied after every
+        factory reset — can pin an id that OUTLIVES the reset, instead of a
+        fresh random id breaking any tooling that hardcoded the old one.
+
+        Sub-admin / user only: the single-admin invariant means an admin
+        identity is never minted from a static manifest (same ceiling as
+        :meth:`update_device`). Returns True when it actually wrote a record,
+        False when the id is already enrolled with the SAME key/role/rooms — so
+        it is safe to call on every boot and every auth-changed event and only
+        ever writes on a real diff. If the id exists with DIFFERENT material the
+        record is rewritten and its ``ver`` bumped, killing any stale tokens
+        (same instant-revocation contract as :meth:`update_device`), so the
+        manifest stays authoritative. The write keeps the in-memory cache in
+        sync under the lock, so a freshly provisioned device can log in on the
+        very next request — no :meth:`warm_up` needed.
+        """
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise EnrollError("device_id is required")
+        if not isinstance(name, str) or not name.strip():
+            raise EnrollError("Device name is required")
+        # Never admin: the dev/provisioning path must not be able to mint an
+        # owner identity around the single-admin invariant.
+        if role not in (ROLE_SUB_ADMIN, ROLE_USER):
+            raise EnrollError("Provisioned role must be sub-admin or user")
+        if rooms is not None and (
+            not isinstance(rooms, list)
+            or any(not isinstance(room, str) or not room for room in rooms)
+        ):
+            raise EnrollError("rooms must be a list of area ids")
+        try:
+            canonical_pem = auth_keys.validate_public_key(public_key_pem)
+        except auth_keys.KeyError_ as err:
+            raise EnrollError(str(err)) from err
+
+        device_id = device_id.strip()
+        with self._lock:
+            existing = self._devices.get(device_id)
+            if (
+                existing is not None
+                and existing.get("public_key") == canonical_pem
+                and existing.get("role") == role
+                and existing.get("rooms") == rooms
+            ):
+                return False  # already correct — idempotent no-op
+
+            if existing is not None:
+                ver = int(existing.get("ver", 1)) + 1
+                paired_at = existing.get("paired_at") or time.time()
+            else:
+                ver = 1
+                paired_at = time.time()
+            self._devices[device_id] = {
+                "name": name.strip(),
+                "role": role,
+                "public_key": canonical_pem,
+                "rooms": rooms,
+                "ver": ver,
+                "paired_at": paired_at,
+                "enrolled_via": None,
+            }
+            self._device_cache[device_id] = {
+                "role": role,
+                "rooms": rooms,
+                "ver": ver,
+            }
+        _LOGGER.info(
+            "Provisioned device %s (%s, role=%s, ver=%d)",
+            device_id,
+            name.strip(),
+            role,
+            ver,
+        )
+        return True
+
     def replace_admin(self, name: str, public_key_pem: str) -> str:
         """Swap the hub's admin for a new device (B3 owner recovery).
 
