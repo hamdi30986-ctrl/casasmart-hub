@@ -49,10 +49,8 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import aiohttp
 
 from homeassistant.const import (
-    STATE_LOCKED,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
-    STATE_UNLOCKED,
 )
 from homeassistant.core import Event, HomeAssistant, callback
 
@@ -80,6 +78,13 @@ PUSH_TYPE_LOCK = "lock"
 # Relay priority buckets (must match the relay's accepted values).
 PRIORITY_CRITICAL = "critical"
 PRIORITY_NORMAL = "normal"
+
+# Lock states. STATE_LOCKED/STATE_UNLOCKED were removed from
+# homeassistant.const (they live on lock.LockState now, HA 2025.x+); the wire
+# values are stable, so pin the literals here to stay compatible across HA
+# versions without depending on the lock component being importable.
+STATE_LOCKED = "locked"
+STATE_UNLOCKED = "unlocked"
 
 # Lock state machine: the only two states that count as a settled lock, and the
 # "old" states that mark a flap rather than a real user action.

@@ -3,6 +3,9 @@ __pycache__/
 .DS_Store
 .dev/
 
+# runtime hub database (holds device secrets / tokens) — never commit
+*.db
+
 # operator fleet data — not code
 tools/fleet-registry/fleet.json
 tools/fleet-registry/fleet.json.lock
