@@ -72,9 +72,17 @@ from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
 
-# B13: the hub's only HA entity platform — the alarm panel mirroring the
-# hub-authoritative AlarmEngine. Everything else is REST/WS, not HA entities.
-PLATFORMS: list[Platform] = [Platform.ALARM_CONTROL_PANEL]
+# HA entity platforms the hub exposes:
+#  - ALARM_CONTROL_PANEL (B13): the panel mirroring the hub-authoritative
+#    AlarmEngine.
+#  - BUTTON: the owner's "regenerate pairing code" access-management control.
+#  - SENSOR: one per enrolled device — role as state, paired/last-seen detail.
+# Everything else is REST/WS, not HA entities.
+PLATFORMS: list[Platform] = [
+    Platform.ALARM_CONTROL_PANEL,
+    Platform.BUTTON,
+    Platform.SENSOR,
+]
 
 type CasaSmartConfigEntry = ConfigEntry[CasaSmartRuntimeData]
 
