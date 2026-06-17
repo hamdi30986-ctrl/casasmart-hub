@@ -66,6 +66,7 @@ from .auth_api import (
     CasaSmartTokenView,
     CasaSmartUsersView,
     CasaSmartUserView,
+    CasaSmartWhoamiView,
     CasaSmartWidgetTokenView,
     authenticate_request,
 )
@@ -173,6 +174,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartRecoverView(hass),
         CasaSmartChallengeView(hass),
         CasaSmartTokenView(hass),
+        CasaSmartWhoamiView(hass),
         CasaSmartWidgetTokenView(hass),
         CasaSmartPairingCodesView(hass),
         CasaSmartPairingCodeView(hass),

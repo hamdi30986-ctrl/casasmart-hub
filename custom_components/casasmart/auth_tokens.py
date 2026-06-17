@@ -186,6 +186,44 @@ def validate_token(
     return claims
 
 
+def unverified_subject(secret: bytes, token: str) -> str | None:
+    """Signature-verified device id (``sub``), IGNORING expiry/version.
+
+    Returns the subject of a token the hub genuinely issued (HMAC verified,
+    our issuer, well-formed claims), or ``None`` for anything forged or
+    garbled. Unlike :func:`validate_token` it does NOT enforce ``exp`` — the
+    sole caller is the ``/auth/whoami`` enrollment probe, which answers "is
+    this device still paired?" and must treat a merely-stale token the same
+    as a fresh one (a stale token still proves the device's identity; whether
+    to refresh it is a separate question the app handles via re-auth). It is
+    NOT an authorization gate — never grant access off this.
+    """
+    if not secret or not isinstance(token, str):
+        return None
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    header_b64, claims_b64, signature_b64 = parts
+    signing_input = f"{header_b64}.{claims_b64}".encode("ascii")
+    try:
+        if not hmac.compare_digest(
+            _sign(secret, signing_input), _b64url_decode(signature_b64)
+        ):
+            return None
+        header = json.loads(_b64url_decode(header_b64))
+        claims = json.loads(_b64url_decode(claims_b64))
+    except (TokenError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(header, dict) or header.get("alg") != ALGORITHM:
+        return None
+    if not isinstance(claims, dict) or claims.get("iss") != ISSUER:
+        return None
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub:
+        return None
+    return sub
+
+
 def generate_secret() -> str:
     """A fresh 256-bit signing secret, hex-encoded for the config store."""
     return secrets.token_hex(32)
