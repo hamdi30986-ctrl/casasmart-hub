@@ -233,8 +233,15 @@ class AuthEngine:
         role: str,
         public_key_pem: str,
         rooms: list[str] | None = None,
+        enrolled_via: str | None = None,
     ) -> str:
-        """Store a device's identity; returns the new device id."""
+        """Store a device's identity; returns the new device id.
+
+        ``enrolled_via`` records the pairing code id the device redeemed (None
+        for paths that don't go through one). It is the link the "Regenerate
+        pairing code" button follows to revoke whoever joined through the code
+        being rotated — see :meth:`revoke_by_pairing_code`.
+        """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
         if role not in VALID_ROLES:
@@ -263,6 +270,7 @@ class AuthEngine:
                 "rooms": rooms,
                 "ver": 1,
                 "paired_at": time.time(),
+                "enrolled_via": enrolled_via,
             }
             self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
@@ -337,7 +345,18 @@ class AuthEngine:
     # -- user management (storage — call via executor) ---------------------------
 
     def list_devices(self) -> list[dict[str, Any]]:
-        """Every enrolled device, public fields only (no keys)."""
+        """Every enrolled device, public fields only (no keys).
+
+        ``last_seen`` is the in-memory clock from the last successful token
+        validation (None until the device makes its first authenticated call
+        this boot — like the throttle counters, it is deliberately not
+        persisted; a reboot just resets the liveness clock).
+        """
+        with self._lock:
+            last_seen = {
+                device_id: entry.get("last_seen")
+                for device_id, entry in self._device_cache.items()
+            }
         return [
             {
                 "device_id": device_id,
@@ -345,9 +364,58 @@ class AuthEngine:
                 "role": record.get("role"),
                 "rooms": record.get("rooms"),
                 "paired_at": int(record.get("paired_at", 0)),
+                "enrolled_via": record.get("enrolled_via"),
+                "last_seen": last_seen.get(device_id),
             }
             for device_id, record in self._devices.items()
         ]
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        """Public fields for one enrolled device, or None when not enrolled.
+
+        Cheap DB + cache read (call via executor). Used by ``/auth/whoami`` to
+        report the device's CURRENT role/name and by the sensor platform.
+        """
+        record = self._devices.get(device_id)
+        if record is None:
+            return None
+        with self._lock:
+            cached = self._device_cache.get(device_id, {})
+            last_seen = cached.get("last_seen")
+        return {
+            "device_id": device_id,
+            "name": record.get("name"),
+            "role": record.get("role"),
+            "rooms": record.get("rooms"),
+            "paired_at": int(record.get("paired_at", 0)),
+            "enrolled_via": record.get("enrolled_via"),
+            "last_seen": last_seen,
+        }
+
+    def last_seen(self, device_id: str) -> float | None:
+        """The device's last-validated-token timestamp, or None this boot.
+
+        Pure in-memory read (no DB) — cheap enough for the user sensors to
+        poll on the event loop. None until the device makes its first
+        authenticated call since the last hub restart.
+        """
+        with self._lock:
+            cached = self._device_cache.get(device_id)
+            return cached.get("last_seen") if cached else None
+
+    def device_for_token(self, token: str) -> dict[str, Any] | None:
+        """Public device info for ``token``'s subject if STILL enrolled.
+
+        Signature-verified but freshness-agnostic (see
+        ``auth_tokens.unverified_subject``): an expired or version-bumped
+        token whose device is still paired returns the device — the app's
+        ``/auth/whoami`` resume check wants enrollment status, not token
+        validity. Returns None for a forged token or an unpaired device.
+        """
+        device_id = auth_tokens.unverified_subject(self._signing_secret(), token)
+        if device_id is None:
+            return None
+        return self.get_device(device_id)
 
     def update_device(
         self,
@@ -423,6 +491,63 @@ class AuthEngine:
             # follow a re-pair of the same phone.
             self.throttle.clear(device_id)
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
+
+    def revoke_by_pairing_code(self, code_id: str | None) -> list[str]:
+        """Unpair every NON-admin device that enrolled via ``code_id``.
+
+        The "Regenerate pairing code" button calls this so rotating the guest
+        code also cuts off whoever joined through the previous one — their
+        outstanding JWTs die instantly via the ``ver`` cache, same as
+        :meth:`delete_device`. The admin is never touched (it never comes
+        through a regenerable code), and a falsy ``code_id`` matches nothing.
+        Returns the revoked device ids.
+        """
+        if not code_id:
+            return []
+        revoked: list[str] = []
+        with self._lock:
+            targets = [
+                device_id
+                for device_id, record in self._devices.items()
+                if record.get("enrolled_via") == code_id
+                and record.get("role") != ROLE_ADMIN
+            ]
+            for device_id in targets:
+                del self._devices[device_id]
+                self._device_cache.pop(device_id, None)
+                self.throttle.clear(device_id)
+                revoked.append(device_id)
+        if revoked:
+            _LOGGER.info(
+                "Revoked %d device(s) enrolled via pairing code %s",
+                len(revoked),
+                code_id,
+            )
+        return revoked
+
+    def wipe_all_devices(self) -> list[str]:
+        """Unpair EVERY device — admin included. The pairing factory reset.
+
+        Unlike :meth:`delete_device` and :meth:`update_device`, there is NO
+        admin guard here: wiping the owner IS the point. This hands the hub
+        back to the unclaimed state, so the next :meth:`has_admin` is False and
+        a fresh bootstrap admin code can be minted (the "Regenerate pairing
+        code" button does exactly that). Every device's outstanding JWTs die
+        instantly — its ``ver`` cache entry vanishes, same kill as an unpair —
+        and each device's login-throttle counter is cleared so a re-pair of the
+        same phone starts clean. Returns the wiped device ids.
+        """
+        with self._lock:
+            wiped = list(self._devices.keys())
+            for device_id in wiped:
+                del self._devices[device_id]
+                self.throttle.clear(device_id)
+            self._device_cache.clear()
+        if wiped:
+            _LOGGER.info(
+                "Wiped all %d device(s) — hub reset to unclaimed", len(wiped)
+            )
+        return wiped
 
     # -- challenge-response login ---------------------------------------------
 
@@ -513,8 +638,12 @@ class AuthEngine:
         claims = auth_tokens.validate_token(self._signing_secret(), token)
         with self._lock:
             cached = self._device_cache.get(claims["sub"])
-        if cached is None or cached["ver"] != claims.get("ver"):
-            raise TokenError("Token revoked")
+            if cached is None or cached["ver"] != claims.get("ver"):
+                raise TokenError("Token revoked")
+            # Liveness clock for the per-user sensors — in-memory, updated on
+            # the same lock+read we already do, so no extra cost on the hot
+            # path and no DB write per request.
+            cached["last_seen"] = time.time()
         return claims
 
     @staticmethod

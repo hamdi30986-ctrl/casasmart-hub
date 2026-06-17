@@ -285,6 +285,134 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(users[0]["role"], "admin")
         self.assertNotIn("public_key", users[0])
 
+    def test_enrolled_via_recorded(self):
+        device_id = self.engine.enroll_device(
+            "Guest", "user", self.public_pem, enrolled_via="pair-abc"
+        )
+        listed = next(
+            u for u in self.engine.list_devices() if u["device_id"] == device_id
+        )
+        self.assertEqual(listed["enrolled_via"], "pair-abc")
+        self.assertEqual(
+            self.engine.get_device(device_id)["enrolled_via"], "pair-abc"
+        )
+
+    def test_last_seen_tracked_on_validate(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        # No authenticated traffic yet -> no liveness clock.
+        self.assertIsNone(self.engine.get_device(device_id)["last_seen"])
+        self.assertIsNone(self.engine.last_seen(device_id))
+        self.engine.validate_token(self._login(device_id)["token"])
+        self.assertIsInstance(
+            self.engine.get_device(device_id)["last_seen"], float
+        )
+        self.assertIsInstance(self.engine.last_seen(device_id), float)
+        # Unknown device -> None, never a KeyError.
+        self.assertIsNone(self.engine.last_seen("dev-nope"))
+
+    def test_revoke_by_pairing_code(self):
+        admin = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        _, pem_a = make_keypair()
+        _, pem_b = make_keypair()
+        guest_a = self.engine.enroll_device(
+            "A", "sub-admin", pem_a, enrolled_via="pair-1"
+        )
+        guest_b = self.engine.enroll_device(
+            "B", "user", pem_b, enrolled_via="pair-2"
+        )
+        self.assertEqual(self.engine.revoke_by_pairing_code("pair-1"), [guest_a])
+        remaining = {u["device_id"] for u in self.engine.list_devices()}
+        self.assertEqual(remaining, {admin, guest_b})
+
+    def test_revoke_by_pairing_code_never_touches_admin(self):
+        admin = self.engine.enroll_device(
+            "Owner", "admin", self.public_pem, enrolled_via="bootstrap-admin"
+        )
+        self.assertEqual(self.engine.revoke_by_pairing_code("bootstrap-admin"), [])
+        self.assertIsNotNone(self.engine.get_device(admin))
+
+    def test_revoke_by_pairing_code_empty_is_noop(self):
+        self.engine.enroll_device("Owner", "admin", self.public_pem)
+        self.assertEqual(self.engine.revoke_by_pairing_code(None), [])
+        self.assertEqual(self.engine.revoke_by_pairing_code(""), [])
+        self.assertEqual(self.engine.revoke_by_pairing_code("pair-nope"), [])
+
+    def test_wipe_all_devices(self):
+        admin = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        _, pem_a = make_keypair()
+        _, pem_b = make_keypair()
+        sub = self.engine.enroll_device("Helper", "sub-admin", pem_a)
+        user = self.engine.enroll_device("Kid", "user", pem_b)
+        # The wipe spares no one — admin included (this IS the reset).
+        self.assertEqual(set(self.engine.wipe_all_devices()), {admin, sub, user})
+        self.assertEqual(self.engine.list_devices(), [])
+        self.assertFalse(self.engine.has_admin())
+
+    def test_wipe_all_devices_kills_tokens_instantly(self):
+        device_id = self.engine.enroll_device("Phone", "admin", self.public_pem)
+        token = self._login(device_id)["token"]
+        self.engine.validate_token(token)  # valid before
+        self.engine.wipe_all_devices()
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)  # dead after, no TTL wait
+
+    def test_wipe_all_devices_clears_throttle(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        self.engine.throttle.record_failure(device_id)
+        self.assertIn(device_id, self.engine.throttle._entries)
+        self.engine.wipe_all_devices()
+        self.assertNotIn(device_id, self.engine.throttle._entries)
+
+    def test_wipe_all_devices_resets_to_unclaimed(self):
+        self.engine.enroll_device("Owner", "admin", self.public_pem)
+        self.assertTrue(self.engine.has_admin())
+        self.engine.wipe_all_devices()
+        # Hub is unclaimed again -> a fresh admin can enroll (invariant reset).
+        self.assertFalse(self.engine.has_admin())
+        _, new_pem = make_keypair()
+        self.engine.enroll_device("New Owner", "admin", new_pem)
+        self.assertTrue(self.engine.has_admin())
+
+    def test_wipe_all_devices_empty_is_noop(self):
+        self.assertEqual(self.engine.wipe_all_devices(), [])
+
+    def test_device_for_token_enrolled(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        info = self.engine.device_for_token(self._login(device_id)["token"])
+        self.assertEqual(info["device_id"], device_id)
+        self.assertEqual(info["role"], "user")
+
+    def test_device_for_token_ignores_expiry(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        expired = auth_tokens.issue_token(
+            self.engine._signing_secret(), device_id, "user", None, ttl=-100
+        )
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(expired)  # validate rejects it...
+        # ...but the enrollment probe still recognizes the still-paired device.
+        self.assertEqual(
+            self.engine.device_for_token(expired)["device_id"], device_id
+        )
+
+    def test_device_for_token_unpaired_and_forged(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self._login(device_id)["token"]
+        self.engine.delete_device(device_id)
+        self.assertIsNone(self.engine.device_for_token(token))  # unpaired
+        self.assertIsNone(self.engine.device_for_token("a.b.c"))  # forged
+
+    def test_get_device_unknown(self):
+        self.assertIsNone(self.engine.get_device("dev-nope"))
+
+    def test_unverified_subject_requires_our_signature(self):
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        token = self._login(device_id)["token"]
+        secret = self.engine._signing_secret()
+        self.assertEqual(auth_tokens.unverified_subject(secret, token), device_id)
+        # A token signed with a different secret must not be recognized.
+        self.assertIsNone(auth_tokens.unverified_subject(b"\x00" * 32, token))
+        self.assertIsNone(auth_tokens.unverified_subject(secret, "garbage"))
+
     def test_delete_kills_tokens_instantly(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
         token = self._login(device_id)["token"]

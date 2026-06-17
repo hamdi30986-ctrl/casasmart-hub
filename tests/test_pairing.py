@@ -92,7 +92,16 @@ class PairingTests(unittest.TestCase):
         issued = self.manager.generate_code("user", rooms=["area_living"])
         self.assertRegex(issued["code"], r"^\d{6}$")
         grant = self.manager.redeem(issued["code"], "ip-1")
-        self.assertEqual(grant, {"role": "user", "rooms": ["area_living"]})
+        # redeem echoes the consumed code id (used as enrolled_via) alongside
+        # the baked-in role + room scope.
+        self.assertEqual(
+            grant,
+            {
+                "role": "user",
+                "rooms": ["area_living"],
+                "code_id": issued["code_id"],
+            },
+        )
 
     def test_single_use(self):
         issued = self.manager.generate_code("user")
@@ -131,6 +140,32 @@ class PairingTests(unittest.TestCase):
         self.assertFalse(self.manager.revoke_code(issued["code_id"]))
         with self.assertRaises(CodeInvalidError):
             self.manager.redeem(issued["code"], "ip-1")
+
+    def test_clear_user_codes(self):
+        self.manager.generate_code("user")
+        self.manager.generate_code("sub-admin")
+        self.assertEqual(self.manager.clear_user_codes(), 2)
+        self.assertEqual(self.manager.list_codes(), [])
+
+    def test_clear_user_codes_preserves_bootstrap(self):
+        self.manager.ensure_bootstrap_code()  # unclaimed hub -> bootstrap minted
+        self.manager.generate_code("user")
+        # Only the user code is wiped; the bootstrap admin code survives.
+        self.assertEqual(self.manager.clear_user_codes(), 1)
+        codes = self.manager.list_codes()
+        self.assertEqual(len(codes), 1)
+        self.assertTrue(codes[0]["bootstrap"])
+
+    def test_clear_all_codes_includes_bootstrap(self):
+        self.manager.ensure_bootstrap_code()  # unclaimed hub -> bootstrap minted
+        self.manager.generate_code("user")
+        self.manager.generate_code("sub-admin")
+        # Unlike clear_user_codes, the bootstrap admin code is wiped too.
+        self.assertEqual(self.manager.clear_all_codes(), 3)
+        self.assertEqual(self.manager.list_codes(), [])
+
+    def test_clear_all_codes_empty_is_noop(self):
+        self.assertEqual(self.manager.clear_all_codes(), 0)
 
     def test_guessing_gets_throttled(self):
         self.manager.generate_code("user")
