@@ -10,6 +10,7 @@ dedicated HTTPS listener. Unload stops the listener and closes storage.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -259,7 +260,8 @@ async def async_setup_entry(
     # steps. Inert on client hubs — no dev_devices.json manifest, no effect.
     # Runs now (covers boot + the service-reset reload) and on every
     # EVENT_AUTH_CHANGED (covers the button reset, which wipes in place without
-    # a reload). See dev_enroll.py.
+    # a reload). Off unless the CASASMART_DEV_ENROLL env flag is set, so a
+    # stray/deployed manifest never auto-creates a shadow user. See dev_enroll.py.
     await _async_setup_dev_enroll(hass, entry, data_dir)
 
     if bootstrap_code is not None:
@@ -381,19 +383,47 @@ async def _async_import_registry(
     )
 
 
+# DEV-ONLY auto-enrollment opt-in. The ``dev_devices.json`` manifest alone no
+# longer auto-creates a shadow sub-admin user: that surprised owners on dev
+# hubs because the seam re-provisions on every EVENT_AUTH_CHANGED, so the device
+# reappeared after every delete / factory reset. Enrollment now ALSO requires
+# this env flag, so the seam is off by default even when a manifest is present —
+# defence-in-depth on top of "no manifest ships to clients", and a clean
+# single-admin hub unless a developer explicitly opts in
+# (``CASASMART_DEV_ENROLL=1``).
+_DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
+
+
+def _dev_enroll_enabled() -> bool:
+    """True only when the dev auto-enroll env flag is explicitly truthy."""
+    return os.environ.get(_DEV_ENROLL_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def _async_setup_dev_enroll(
     hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
 ) -> None:
     """DEV-ONLY: keep the trusted dev keys enrolled across factory resets.
 
-    Provisions the ``dev_devices.json`` manifest now (boot / service-reset
-    reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the BUTTON reset
-    — which wipes the auth tables in place without reloading the entry — also
-    re-provisions. A no-op on any hub without the manifest (every client hub).
-    The seam is idempotent and never fires ``EVENT_AUTH_CHANGED`` itself, so the
-    listener can't feed itself. The listener is torn down with the entry via
-    ``async_on_unload``.
+    Gated behind [_DEV_ENROLL_ENV] (default OFF): without the opt-in the dev
+    manifest never auto-enrolls anyone, so dev/test hubs — and any hub that
+    accidentally ships a manifest — stay clean single-admin by default.
+
+    When enabled, provisions the ``dev_devices.json`` manifest now (boot /
+    service-reset reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the
+    BUTTON reset — which wipes the auth tables in place without reloading the
+    entry — also re-provisions. A no-op on any hub without the manifest (every
+    client hub). The seam is idempotent and never fires ``EVENT_AUTH_CHANGED``
+    itself, so the listener can't feed itself. The listener is torn down with
+    the entry via ``async_on_unload``.
     """
+    if not _dev_enroll_enabled():
+        return
+
     auth = entry.runtime_data.auth
 
     async def _provision() -> None:
