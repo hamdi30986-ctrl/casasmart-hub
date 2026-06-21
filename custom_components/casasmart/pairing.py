@@ -56,7 +56,13 @@ DEFAULT_EXPIRY = "1d"
 # the hub-generated bootstrap code (single-admin invariant stays with the
 # auth engine either way — this is just the earlier, clearer refusal).
 ISSUABLE_ROLES = (ROLE_SUB_ADMIN, ROLE_USER)
-CODE_DIGITS = 6
+# 8 chars from an unambiguous alphabet (no 0/O, 1/I/L). The admin code is
+# printed on the hub sticker and read by humans, so every character must be
+# unmistakable. Mixed letters+digits, uppercase; redemption is normalized so it
+# is case- and formatting-insensitive. ~2^38 space; the escalating per-IP
+# throttle keeps it brute-force-proof despite the never-expiring bootstrap code.
+CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+CODE_LEN = 8
 # Storage key for the one bootstrap code (fixed id — there is only ever one).
 BOOTSTRAP_CODE_ID = "bootstrap-admin"
 
@@ -69,12 +75,20 @@ class CodeInvalidError(PairingError):
     """Code unknown, expired, or already used — deliberately one bucket."""
 
 
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode("ascii")).hexdigest()
+def normalize_code(code: str) -> str:
+    """Canonical form: uppercase, alphanumerics only (spaces/dashes dropped),
+    so a code typed with stray spacing or lowercase still matches."""
+    return "".join(ch for ch in code.upper() if ch.isalnum())
+
+
+def hash_code(code: str) -> str:
+    """SHA-256 of the NORMALIZED code — the single hashing path used by mint,
+    redeem, and the stored permanent-code hash, so all three always agree."""
+    return hashlib.sha256(normalize_code(code).encode("ascii")).hexdigest()
 
 
 def _new_code() -> str:
-    return f"{secrets.randbelow(10 ** CODE_DIGITS):0{CODE_DIGITS}d}"
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
 
 
 class PairingManager:
@@ -126,7 +140,7 @@ class PairingManager:
             code_id = f"pair-{secrets.token_urlsafe(8)}"
             now = time.time()
             self._codes[code_id] = {
-                "code_hash": _hash_code(code),
+                "code_hash": hash_code(code),
                 "role": role,
                 "rooms": rooms,
                 "created_at": now,
@@ -222,7 +236,7 @@ class PairingManager:
         if not isinstance(code, str) or not code.strip():
             self.throttle.record_failure(source_key)
             raise CodeInvalidError("Invalid pairing code")
-        code_hash = _hash_code(code.strip())
+        code_hash = hash_code(code)
 
         with self._lock:
             self._purge_expired()
@@ -272,7 +286,7 @@ class PairingManager:
                 return None
             code = _new_code()
             self._codes[BOOTSTRAP_CODE_ID] = {
-                "code_hash": _hash_code(code),
+                "code_hash": hash_code(code),
                 "role": ROLE_ADMIN,
                 "rooms": None,
                 "created_at": time.time(),
@@ -280,6 +294,28 @@ class PairingManager:
             }
         _LOGGER.info("Bootstrap admin pairing code generated")
         return code
+
+    def install_bootstrap_hash(self, code_hash: str) -> None:
+        """Install the hub's PERMANENT bootstrap admin code from a stored hash.
+
+        The acquire code is printed on a sticker once and must survive factory
+        reset, so its hash is persisted in hub_config and re-installed here on
+        every boot (instead of minting a fresh random code each time). Idempotent;
+        mirrors :meth:`ensure_bootstrap_code`'s claimed-state gate — drops the
+        code once an admin is enrolled, (re)installs it while the hub is unclaimed.
+        """
+        with self._lock:
+            if self._admin_exists():
+                if BOOTSTRAP_CODE_ID in self._codes:
+                    del self._codes[BOOTSTRAP_CODE_ID]
+                return
+            self._codes[BOOTSTRAP_CODE_ID] = {
+                "code_hash": code_hash,
+                "role": ROLE_ADMIN,
+                "rooms": None,
+                "created_at": time.time(),
+                "expires_at": None,  # redeemable until an admin exists
+            }
 
     # -- housekeeping --------------------------------------------------------------
 

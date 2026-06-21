@@ -47,7 +47,8 @@ class RecoveryManagerTests(unittest.TestCase):
         self.assertRegex(code, r"^[2-9A-HJKMNP-Z]{5}-[2-9A-HJKMNP-Z]{5}$")
         self.assertTrue(self.manager.is_armed())
         self.manager.redeem(code, "ip-1")  # no raise = success
-        self.assertFalse(self.manager.is_armed())
+        # PERMANENT (decision 3a): the engraved card stays valid after redeem.
+        self.assertTrue(self.manager.is_armed())
 
     def test_arm_is_idempotent(self):
         code = self.manager.ensure_armed()
@@ -65,11 +66,31 @@ class RecoveryManagerTests(unittest.TestCase):
         with self.assertRaises(CodeInvalidError):
             self.manager.redeem(code, "ip-1")  # previous owner's card is dead
 
-    def test_single_use(self):
+    def test_permanent_reusable(self):
+        # PERMANENT (decision 3a): the recovery card is reusable, not single-use —
+        # a second redeem of the same code succeeds and the code stays armed.
         code = self.manager.ensure_armed()
         self.manager.redeem(code, "ip-1")
-        with self.assertRaises(CodeInvalidError):
-            self.manager.redeem(code, "ip-1")
+        self.manager.redeem(code, "ip-1")  # no raise = still valid
+        self.assertTrue(self.manager.is_armed())
+
+    def test_mint_permanent_is_reusable(self):
+        # First-provisioning mint returns plaintext once; the code is permanent.
+        code = self.manager.mint_permanent()
+        self.assertRegex(code, r"^[2-9A-HJKMNP-Z]{5}-[2-9A-HJKMNP-Z]{5}$")
+        self.manager.redeem(code, "ip-1")
+        self.manager.redeem(code, "ip-1")  # reusable
+        self.assertTrue(self.manager.is_armed())
+
+    def test_install_recovery_hash_makes_code_redeemable(self):
+        # On every boot the permanent code is re-installed from its stored hash;
+        # the original card then validates against the re-installed record.
+        from recovery import hash_code  # noqa: PLC0415
+
+        code = "ABCDE-23456"
+        self.manager.install_recovery_hash(hash_code(code))
+        self.assertTrue(self.manager.is_armed())
+        self.manager.redeem(code, "ip-1")  # installed hash validates the card
 
     def test_redeem_normalizes_input(self):
         code = self.manager.ensure_armed()

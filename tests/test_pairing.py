@@ -90,7 +90,7 @@ class PairingTests(unittest.TestCase):
 
     def test_generate_and_redeem(self):
         issued = self.manager.generate_code("user", rooms=["area_living"])
-        self.assertRegex(issued["code"], r"^\d{6}$")
+        self.assertRegex(issued["code"], r"^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$")
         grant = self.manager.redeem(issued["code"], "ip-1")
         # redeem echoes the consumed code id (used as enrolled_via) alongside
         # the baked-in role + room scope.
@@ -180,7 +180,7 @@ class PairingTests(unittest.TestCase):
 
     def test_bootstrap_lifecycle(self):
         code = self.manager.ensure_bootstrap_code()
-        self.assertRegex(code, r"^\d{6}$")
+        self.assertRegex(code, r"^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$")
         # Idempotent while outstanding.
         self.assertIsNone(self.manager.ensure_bootstrap_code())
         grant = self.manager.redeem(code, "ip-1")
