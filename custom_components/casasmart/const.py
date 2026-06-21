@@ -38,6 +38,13 @@ MDNS_REFRESH_INTERVAL_MINUTES = 5
 # Optional installer-set friendly hub name, surfaced in the mDNS TXT `name`.
 HUB_NAME_CONFIG_KEY = "hub_name"
 
+# Permanent printed-code hashes (B2/B3): the admin "acquire" code and the owner
+# recovery code are minted once at provisioning, their hashes stored here so the
+# printed sticker + metal card survive a factory reset (the storage tables are
+# wiped on reset, this JSON config file is not). Re-installed from these on boot.
+BOOTSTRAP_CODE_HASH_CONFIG_KEY = "bootstrap_code_hash"
+RECOVERY_CODE_HASH_CONFIG_KEY = "recovery_code_hash"
+
 # -- Auth / enrollment (B2) -----------------------------------------------------
 # Fired on the HA bus whenever the enrolled-device set changes — a device
 # pairs, gets its role/rooms edited, is unpaired, the admin is recovered, or

@@ -35,7 +35,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, EVENT_AUTH_CHANGED
+from .const import BOOTSTRAP_CODE_HASH_CONFIG_KEY, DOMAIN, EVENT_AUTH_CHANGED
+from .pairing import hash_code as pairing_hash_code
 
 if TYPE_CHECKING:
     from . import CasaSmartConfigEntry
@@ -48,8 +49,13 @@ async def async_setup_entry(
     entry: CasaSmartConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Register the single regenerate-pairing-code button for this hub."""
-    async_add_entities([CasaSmartRegeneratePairingButton(hass, entry)])
+    """Register the hub's owner-control buttons (regenerate pairing + factory reset)."""
+    async_add_entities(
+        [
+            CasaSmartRegeneratePairingButton(hass, entry),
+            CasaSmartFactoryResetButton(hass, entry),
+        ]
+    )
 
 
 class CasaSmartRegeneratePairingButton(ButtonEntity):
@@ -88,6 +94,13 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             # No admin remains after the wipe, so this mints a fresh ADMIN
             # bootstrap code and returns its plaintext.
             code = pairing.ensure_bootstrap_code()
+            # ROTATE the permanent sticker code: persist the new hash so it
+            # survives factory reset and is the one the boot path re-installs.
+            # The OLD printed sticker is now dead — the hub must be re-stickered.
+            if code is not None:
+                data.hub_config.set(
+                    BOOTSTRAP_CODE_HASH_CONFIG_KEY, pairing_hash_code(code)
+                )
             return {
                 "code": code,
                 "wiped_devices": wiped_devices,
@@ -102,7 +115,9 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         if code is not None:
             body = (
                 f"New owner pairing code: **{code}**\n\n"
-                "Role: admin · never expires · single-use, LAN-only.\n"
+                "Role: admin · never expires · LAN-only · valid while unclaimed.\n"
+                "⚠️ This ROTATES the permanent code — the OLD printed sticker is "
+                "now dead. Re-sticker the hub with this new code.\n\n"
                 f"Pairing was reset: {device_count} device(s) unpaired, "
                 f"{code_count} code(s) cleared.\n\n"
                 "Pair the owner's phone in the CasaSmart app on this network. "
@@ -133,3 +148,52 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             code_count,
             "yes" if code is not None else "no",
         )
+
+
+class CasaSmartFactoryResetButton(ButtonEntity):
+    """Nuclear reset (B3 tier 3) — wipes the CasaSmart APP layer only.
+
+    Unpaired phones, pairing codes, recovery codes, favorites, per-user settings
+    and push tokens are cleared; HOUSE data (rooms, scenes, tanks, the HA
+    devices/automations/Zigbee mesh) survives. The PERMANENT codes survive too —
+    their hashes live in hub_config, so after the reset the SAME printed sticker
+    and metal card re-onboard the owner. Operator-only: reachable through Home
+    Assistant (admin login / on-site / Tailscale), never the CasaSmart API.
+    """
+
+    _attr_has_entity_name = False
+    _attr_name = "CasaSmart Factory Reset"
+    _attr_icon = "mdi:alert-octagon"  # danger: wipes the app layer
+
+    def __init__(
+        self, hass: HomeAssistant, entry: CasaSmartConfigEntry
+    ) -> None:
+        self._hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_factory_reset"
+        self.entity_id = ENTITY_ID_FORMAT.format("casasmart_factory_reset")
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="CasaSmart Hub",
+            manufacturer="CasaSmart",
+        )
+
+    async def async_press(self) -> None:
+        """Trigger casasmart.factory_reset (wipe app layer + reload).
+
+        Non-blocking: the service reloads this very config entry, so awaiting it
+        would wait on our own platform unloading. The permanent sticker + metal
+        card still re-onboard the owner after the reset.
+        """
+        _LOGGER.warning("CasaSmart factory reset requested via button")
+        persistent_notification.async_create(
+            self._hass,
+            "Factory reset triggered — the CasaSmart app layer (paired phones, "
+            "codes, favorites, settings, push tokens) is being wiped. House data "
+            "(rooms, scenes, tanks) is kept. Re-onboard the owner with the "
+            "**printed sticker** code on this network; the metal recovery card "
+            "still works too.",
+            title="CasaSmart Hub — factory reset",
+            notification_id=f"{DOMAIN}_factory_reset",
+        )
+        await self._hass.services.async_call(DOMAIN, "factory_reset", blocking=False)

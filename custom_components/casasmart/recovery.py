@@ -78,6 +78,12 @@ def normalize_code(code: str) -> str:
     return "".join(ch for ch in code.upper() if ch.isalnum())
 
 
+def hash_code(code: str) -> str:
+    """SHA-256 of the normalized code — one hashing path for mint, redeem, and
+    the stored permanent-code hash, so all three always agree."""
+    return _hash_code(normalize_code(code))
+
+
 class RecoveryManager:
     """Mint / redeem the hub's single owner-recovery code."""
 
@@ -119,6 +125,37 @@ class RecoveryManager:
         _LOGGER.info("Owner recovery code armed")
         return code
 
+    def install_recovery_hash(self, code_hash: str) -> None:
+        """Install the hub's PERMANENT recovery code from a stored hash.
+
+        Like the bootstrap admin code, the recovery code is engraved once and
+        must survive factory reset, so its hash is persisted in hub_config and
+        re-installed here on every boot. Idempotent; always armed (even on an
+        unclaimed hub) — redeem is inert until an admin exists (replace_admin
+        needs one), so the printed card is ready the moment the owner claims.
+        """
+        with self._lock:
+            self._codes[RECOVERY_CODE_ID] = {
+                "code_hash": code_hash,
+                "created_at": time.time(),
+            }
+
+    def mint_permanent(self) -> str:
+        """Mint a fresh permanent recovery code, install it, return the plaintext
+        — the ONLY time it exists in the clear, surfaced once for engraving.
+
+        Used at first provisioning; thereafter the stored hash is re-installed
+        via :meth:`install_recovery_hash`.
+        """
+        code = _new_code()
+        with self._lock:
+            self._codes[RECOVERY_CODE_ID] = {
+                "code_hash": hash_code(code),
+                "created_at": time.time(),
+            }
+        _LOGGER.info("Permanent owner recovery code minted")
+        return code
+
     def is_armed(self) -> bool:
         """True while an unredeemed recovery code exists."""
         with self._lock:
@@ -138,14 +175,17 @@ class RecoveryManager:
         if not isinstance(code, str) or not code.strip():
             self.throttle.record_failure(source_key)
             raise CodeInvalidError("Invalid recovery code")
-        code_hash = _hash_code(normalize_code(code))
+        code_hash = hash_code(code)
 
         with self._lock:
             record = self._codes.get(RECOVERY_CODE_ID)
             if record is None or record["code_hash"] != code_hash:
                 self.throttle.record_failure(source_key)
                 raise CodeInvalidError("Invalid recovery code")
-            del self._codes[RECOVERY_CODE_ID]  # single-use, consumed up front
+            # PERMANENT (decision): NOT deleted — the engraved card stays valid.
+            # The guard is LAN-only presence + the escalating throttle + the
+            # card's physical secrecy; replace_admin (the caller) additionally
+            # requires an existing admin, so the code is inert on an unclaimed hub.
 
         self.throttle.clear(source_key)
-        _LOGGER.info("Owner recovery code redeemed")
+        _LOGGER.info("Owner recovery code redeemed (permanent — card stays valid)")

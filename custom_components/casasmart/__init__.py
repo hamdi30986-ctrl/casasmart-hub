@@ -35,6 +35,7 @@ from .discovery import MdnsAdvertiser
 from .const import (
     API_VERSION,
     BACKUP_DIR_NAME,
+    BOOTSTRAP_CODE_HASH_CONFIG_KEY,
     DATA_DIR_NAME,
     DB_FILENAME,
     DOMAIN,
@@ -45,6 +46,7 @@ from .const import (
     PUSH_RELAY_PUSH_PATH,
     PUSH_RELAY_URL_CONFIG_KEY,
     PUSH_RELAY_URL_DEFAULT,
+    RECOVERY_CODE_HASH_CONFIG_KEY,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
 )
@@ -58,7 +60,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .dev_enroll import ensure_dev_devices
 from .entity_bridge import is_exposed
-from .pairing import PairingManager
+from .pairing import PairingManager, hash_code as pairing_hash_code
 from .push import PushTokenStore
 from .push_crypto import PushIdentityError, ensure_push_identity
 from .push_dispatcher import PushDispatcher, TankPushMonitor
@@ -66,7 +68,7 @@ from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
 from .audio import AudioEngine
 from .audio_adapter import AudioAdapter
-from .recovery import RecoveryManager
+from .recovery import RecoveryManager, hash_code as recovery_hash_code
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tank import TankEngine
@@ -158,13 +160,35 @@ def _open_storage(
     auth = AuthEngine(storage.table("auth_devices"), hub_config)
     auth.warm_up()  # secret loaded here so request-path validation is pure CPU
     pairing = PairingManager(storage.table("pairing_codes"), auth.has_admin)
-    # Unclaimed hub -> mint the initial admin pairing code (plan B2/B3:
-    # the install card's QR; redeemable only while no admin exists).
-    bootstrap_code = pairing.ensure_bootstrap_code()
     recovery = RecoveryManager(storage.table("recovery_codes"), auth.has_admin)
-    # Claimed hub without a recovery code (hub claimed before B3 shipped,
-    # or the previous code was redeemed mid-crash) -> arm one now.
-    recovery_code = recovery.ensure_armed()
+    # PERMANENT printed codes (B2/B3): the admin "acquire" code and the owner
+    # recovery code are minted ONCE at first provisioning; their hashes are
+    # persisted in hub_config so the printed sticker + metal card survive a
+    # factory reset (the storage tables are wiped, this JSON file is not) and are
+    # re-installed from those hashes on every boot. Plaintext exists exactly
+    # once — surfaced only the first time each is minted, for printing.
+    bootstrap_hash = hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
+    if bootstrap_hash:
+        pairing.install_bootstrap_hash(bootstrap_hash)
+        bootstrap_code = None
+    else:
+        bootstrap_code = pairing.ensure_bootstrap_code()
+        if bootstrap_code is not None:
+            hub_config.set(
+                BOOTSTRAP_CODE_HASH_CONFIG_KEY, pairing_hash_code(bootstrap_code)
+            )
+    recovery_hash = hub_config.get(RECOVERY_CODE_HASH_CONFIG_KEY)
+    if recovery_hash:
+        recovery.install_recovery_hash(recovery_hash)
+        recovery_code = None
+    else:
+        # Minted at first provisioning regardless of claim state, so the owner's
+        # metal card can be engraved alongside the admin sticker. Inert until an
+        # admin exists (replace_admin needs one); permanent + reusable thereafter.
+        recovery_code = recovery.mint_permanent()
+        hub_config.set(
+            RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code)
+        )
     registry = RegistryEngine(
         storage.table("registry_floors"),
         storage.table("registry_rooms"),
