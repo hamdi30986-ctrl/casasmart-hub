@@ -106,8 +106,9 @@ def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
         hass,
         f"Owner recovery code: **{code}**\n\n"
         "Engrave this on the recovery card and store it with the owner. "
-        "It is single-use — redeeming it replaces the hub's admin and a "
-        "new code will be issued.",
+        "It is permanent and reusable (LAN-only) — redeeming it re-installs "
+        "the owner's phone as admin, the same card keeps working, and it "
+        "survives factory reset.",
         title="CasaSmart Hub — recovery code",
         notification_id=f"{DOMAIN}_recovery_code",
     )

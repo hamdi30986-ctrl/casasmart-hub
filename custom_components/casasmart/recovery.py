@@ -6,10 +6,11 @@ Plan ("B3. Owner Recovery" + "Recovery Layers", Layer 1):
   restored key just logs in. THIS module is tier 2: the laser-engraved
   metal card for when digital recovery is gone (lost phone + no backup
   + new Apple ID).
-- The code is **single-use** — consumed on redemption, the hub re-arms
-  with a FRESH code right after (surfaced to the installer via HA
-  notification so a new card can be engraved). A photographed card is
-  spent the first time it's used.
+- The code is **permanent and reusable** — the printed metal card keeps
+  working. Redeeming it does NOT consume it, and its hash is persisted in
+  hub_config so the same card survives factory reset (the storage tables
+  wipe, the JSON config does not). Security rests on LAN presence + the
+  escalating throttle + the card's physical secrecy, not on single-use.
 - Redemption **requires LAN presence** (enforced at the API layer, same
   check as pairing) — a photo taken remotely is useless.
 - Redemption replaces the hub's single admin: the old admin device is
@@ -20,10 +21,11 @@ Plan ("B3. Owner Recovery" + "Recovery Layers", Layer 1):
 
 Code format: 10 characters from an unambiguous alphabet (no 0/O, 1/I/L),
 grouped ``XXXXX-XXXXX`` for engraving. ~49 bits — unguessable through
-the escalating throttle, unlike the 6-digit pairing codes this one never
-expires. Stored SHA-256-hashed (same posture as pairing codes: plaintext
-exists exactly once, at mint). Redemption input is normalized (case,
-dashes, spaces) so reading the card aloud can't fail on formatting.
+the escalating throttle, and like the 8-char pairing codes it never
+expires. Stored SHA-256-hashed (plaintext exists exactly once, at mint;
+re-installed from the stored hash on every boot). Redemption input is
+normalized (case, dashes, spaces) so reading the card aloud can't fail
+on formatting.
 
 No HA imports — storage-table contract only, unit-testable on a temp
 SQLite file. Storage-touching methods are synchronous: call via executor.
