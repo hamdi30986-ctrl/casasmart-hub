@@ -88,6 +88,12 @@ WIDGET_TOKEN_TTL = 30 * 24 * 3600
 CHALLENGE_TTL = 60.0
 MAX_CHALLENGES_PER_DEVICE = 8
 
+# Upper bound on a device/member name. Enroll is pre-auth (the pairing code is
+# the only gate), so the name is attacker-influenced input — cap it so a single
+# enrollment can't store an unbounded blob. Over-length names are truncated, not
+# rejected: a long name must never cost the user their one-shot pairing code.
+MAX_DEVICE_NAME_LENGTH = 64
+
 # What each role may do. Every endpoint names a permission; the engine is
 # the only place the role->permission mapping lives (B2 extends the list,
 # it never gets duplicated into views).
@@ -244,6 +250,10 @@ class AuthEngine:
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
+        # Pre-auth input — cap the stored length (truncate, never reject; see
+        # MAX_DEVICE_NAME_LENGTH). strip() again below so the cap can't leave a
+        # trailing space.
+        name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
         if rooms is not None and (
