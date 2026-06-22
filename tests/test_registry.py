@@ -149,6 +149,42 @@ class SceneTests(RegistryTestCase):
         with self.assertRaises(UnknownItemError):
             self.engine.get_scene(scene["scene_id"])
 
+    def test_favorite_defaults_false_persists_and_validates(self):
+        scene = self.engine.create_scene("Movie", self.GOOD)
+        # New scenes default to not-favorite.
+        self.assertIs(scene["favorite"], False)
+        self.assertIs(
+            self.engine.get_scene(scene["scene_id"])["favorite"], False
+        )
+        # PATCHing favorite=True persists and echoes the flag.
+        updated = self.engine.update_scene(scene["scene_id"], favorite=True)
+        self.assertIs(updated["favorite"], True)
+        self.assertIs(
+            self.engine.get_scene(scene["scene_id"])["favorite"], True
+        )
+        # Sentinel default leaves favorite untouched.
+        kept = self.engine.update_scene(scene["scene_id"], name="Movie Night")
+        self.assertIs(kept["favorite"], True)
+        # And it can be turned back off.
+        self.assertIs(
+            self.engine.update_scene(scene["scene_id"], favorite=False)[
+                "favorite"
+            ],
+            False,
+        )
+        # Non-bool favorite is rejected (1 is not True; bool only).
+        for bad in (1, 0, "true", None):
+            with self.assertRaises(RegistryError, msg=repr(bad)):
+                self.engine.update_scene(scene["scene_id"], favorite=bad)
+
+    def test_favorite_survives_reload(self):
+        scene = self.engine.create_scene("Movie", self.GOOD)
+        self.engine.update_scene(scene["scene_id"], favorite=True)
+        reloaded = make_engine(self.storage)
+        self.assertIs(
+            reloaded.get_scene(scene["scene_id"])["favorite"], True
+        )
+
     def test_commands_validated_against_the_bridge_whitelist(self):
         cases = [
             [{"entity_id": "light.sofa", "action": "explode", "data": {}}],
