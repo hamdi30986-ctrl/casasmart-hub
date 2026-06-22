@@ -406,6 +406,9 @@ class AuthEngine:
                 "rooms": None,
                 "ver": 1,
                 "paired_at": time.time(),
+                # Recovery is replace_admin, not a code redemption — no code id.
+                # Mirror the enroll record shape, which carries enrolled_via.
+                "enrolled_via": None,
             }
             self._device_cache[device_id] = {
                 "role": ROLE_ADMIN,
