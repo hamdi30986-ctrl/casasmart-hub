@@ -108,6 +108,13 @@ def _clean_sort_order(sort_order: Any) -> int:
     return sort_order
 
 
+def _clean_favorite(favorite: Any) -> bool:
+    """House-wide scene-favorite flag. Must be a real bool when present."""
+    if not isinstance(favorite, bool):
+        raise RegistryError("favorite must be a boolean")
+    return favorite
+
+
 def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
     """Validate a scene's command list against the entity-bridge whitelist."""
     if not isinstance(entities, list) or not entities:
@@ -409,9 +416,19 @@ class RegistryEngine:
 
     # -- scenes (storage — call via executor) -------------------------------------
 
+    @staticmethod
+    def _scene_out(scene_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Public scene shape. ``favorite`` defaults False for legacy
+        records that predate the house-wide favorites flag."""
+        return {
+            "scene_id": scene_id,
+            **record,
+            "favorite": bool(record.get("favorite", False)),
+        }
+
     def list_scenes(self) -> list[dict[str, Any]]:
         return [
-            {"scene_id": scene_id, **record}
+            self._scene_out(scene_id, record)
             for scene_id, record in self._scenes.items()
         ]
 
@@ -419,7 +436,7 @@ class RegistryEngine:
         record = self._scenes.get(scene_id)
         if record is None:
             raise UnknownItemError("Unknown scene")
-        return {"scene_id": scene_id, **record}
+        return self._scene_out(scene_id, record)
 
     def create_scene(
         self, name: Any, entities: Any, icon: Any = None
@@ -428,12 +445,13 @@ class RegistryEngine:
             "name": _clean_name(name, "Scene"),
             "icon": _clean_icon(icon),
             "entities": _clean_scene_entities(entities),
+            "favorite": False,
         }
         with self._lock:
             scene_id = f"scene-{secrets.token_urlsafe(8)}"
             self._scenes[scene_id] = record
         _LOGGER.info("Registry: scene %s created (%s)", scene_id, record["name"])
-        return {"scene_id": scene_id, **record}
+        return self._scene_out(scene_id, record)
 
     def update_scene(
         self,
@@ -441,6 +459,7 @@ class RegistryEngine:
         name: Any = ...,
         entities: Any = ...,
         icon: Any = ...,
+        favorite: Any = ...,
     ) -> dict[str, Any]:
         """Edit a scene. ``...`` sentinels mean "leave unchanged"."""
         with self._lock:
@@ -453,8 +472,10 @@ class RegistryEngine:
                 record["entities"] = _clean_scene_entities(entities)
             if icon is not ...:
                 record["icon"] = _clean_icon(icon)
+            if favorite is not ...:
+                record["favorite"] = _clean_favorite(favorite)
             self._scenes[scene_id] = record  # persist
-        return {"scene_id": scene_id, **record}
+        return self._scene_out(scene_id, record)
 
     def delete_scene(self, scene_id: str) -> None:
         with self._lock:

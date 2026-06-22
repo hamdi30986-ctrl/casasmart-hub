@@ -547,6 +547,7 @@ class CasaSmartSceneView(_RegistryView):
                     name=payload.get("name", ...),
                     entities=payload.get("entities", ...),
                     icon=payload.get("icon", ...),
+                    favorite=payload.get("favorite", ...),
                 )
             )
         except RegistryError as err:
