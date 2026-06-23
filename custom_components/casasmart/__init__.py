@@ -73,6 +73,7 @@ from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
+from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
@@ -615,6 +616,34 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, "factory_reset"):
         return
 
+    async def _handle_set_tunnel_url(call) -> None:
+        """Persist the hub's public tunnel URL into hub_config (plan B7).
+
+        The installer dashboard calls this over the HA API at onboarding,
+        after creating the Cloudflare tunnel + DNS, so the version handshake
+        re-advertises the remote path to the app AT PAIRING (no manual URL
+        entry on the phone). ``normalize_tunnel_url`` fails closed — an
+        invalid/non-https URL is rejected here rather than handed to phones.
+        Reloading the entry rebuilds the handshake with the stored URL.
+        """
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            raise HomeAssistantError("CasaSmart hub is not loaded")
+        runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+
+        url = normalize_tunnel_url(call.data.get("url"))
+        if url is None:
+            raise HomeAssistantError(
+                "Invalid tunnel URL — must be a plain https origin "
+                "(no userinfo/query/fragment)"
+            )
+
+        await hass.async_add_executor_job(
+            runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
+        )
+        _LOGGER.info("CasaSmart tunnel URL set; reloading to re-advertise it")
+        await hass.config_entries.async_reload(entries[0].entry_id)
+
     async def _handle_factory_reset(call) -> None:
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
@@ -644,6 +673,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await hass.config_entries.async_reload(entries[0].entry_id)
 
     hass.services.async_register(DOMAIN, "factory_reset", _handle_factory_reset)
+    hass.services.async_register(DOMAIN, "set_tunnel_url", _handle_set_tunnel_url)
 
 
 async def async_unload_entry(
