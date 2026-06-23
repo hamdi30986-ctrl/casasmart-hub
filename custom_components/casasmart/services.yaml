@@ -6,3 +6,19 @@ factory_reset:
     Zigbee mesh are untouched. The hub re-mints its bootstrap pairing code
     so the owner can be re-onboarded (~5 minutes). Reachable only through
     Home Assistant itself (Hamdi over Tailscale or on-site).
+set_tunnel_url:
+  name: Set tunnel URL
+  description: >-
+    B7 onboarding — record the hub's public Cloudflare tunnel URL in
+    hub_config so the version handshake advertises the remote path to the
+    app AT PAIRING (no manual URL entry on the phone). The URL is validated
+    (https origin only) and the entry is reloaded to re-advertise it.
+    Called by the installer dashboard over the HA API.
+  fields:
+    url:
+      name: Tunnel URL
+      description: The hub's public https tunnel origin (e.g. https://abc123.mazinus.com).
+      required: true
+      example: https://abc123.mazinus.com
+      selector:
+        text:
