@@ -48,6 +48,15 @@ class UserSettingsTests(UserSettingsTestCase):
         self.assertIsNone(doc["display_name"])
         self.assertEqual(doc["widget_tiles"], [TILE])  # untouched
 
+    def test_delete_drops_the_row(self):
+        self.engine.update("dev-1", {"display_name": "Hamdi"})
+        self.engine.delete("dev-1")
+        self.assertEqual(
+            self.engine.get("dev-1"),
+            {"display_name": None, "widget_tiles": None},
+        )
+        self.engine.delete("dev-1")  # no-op when already absent
+
     def test_empty_string_clears_like_null(self):
         self.engine.update("dev-1", {"display_name": "Hamdi"})
         doc = self.engine.update("dev-1", {"display_name": "   "})

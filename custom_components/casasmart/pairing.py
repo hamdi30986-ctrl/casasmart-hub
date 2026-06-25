@@ -116,8 +116,19 @@ class PairingManager:
         role: str,
         rooms: list[str] | None = None,
         expires_in: str = DEFAULT_EXPIRY,
+        member_id: str | None = None,
     ) -> dict[str, Any]:
-        """Mint a single-use code; the plaintext is returned ONLY here."""
+        """Mint a single-use code; the plaintext is returned ONLY here.
+
+        ``member_id``, when given, is an EXISTING member's id — the device that
+        redeems this code joins that person (shares their favorites/settings)
+        instead of becoming a new one-device member. The caller passes the
+        member's own role/rooms so the new device matches.
+        """
+        if member_id is not None and (
+            not isinstance(member_id, str) or not member_id
+        ):
+            raise PairingError("member_id must be a non-empty string")
         if role not in ISSUABLE_ROLES:
             raise PairingError(
                 f"Pairing role must be one of {', '.join(ISSUABLE_ROLES)}"
@@ -145,6 +156,7 @@ class PairingManager:
                 "code_hash": hash_code(code),
                 "role": role,
                 "rooms": rooms,
+                "member_id": member_id,
                 "created_at": now,
                 "expires_at": now + ttl,
             }
@@ -159,6 +171,7 @@ class PairingManager:
             "code": code,
             "role": role,
             "rooms": rooms,
+            "member_id": member_id,
             "expires_at": int(now + ttl),
         }
 
@@ -267,7 +280,12 @@ class PairingManager:
         # (``enrolled_via``), so the regenerate button can later revoke that
         # device. The bootstrap code is single-per-hub and never regenerated,
         # so its id flows through harmlessly.
-        return {"role": record["role"], "rooms": record.get("rooms"), "code_id": code_id}
+        return {
+            "role": record["role"],
+            "rooms": record.get("rooms"),
+            "code_id": code_id,
+            "member_id": record.get("member_id"),
+        }
 
     # -- bootstrap ---------------------------------------------------------------
 

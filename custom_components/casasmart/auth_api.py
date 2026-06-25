@@ -274,6 +274,7 @@ class CasaSmartEnrollView(HomeAssistantView):
                     public_key_pem=payload.get("public_key", ""),
                     rooms=grant["rooms"],
                     enrolled_via=grant.get("code_id"),
+                    member_id=grant.get("member_id"),
                 )
             )
         except EnrollError as err:
@@ -393,19 +394,45 @@ class CasaSmartPairingCodesView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
+        # "Add a device to [member]": the code joins an EXISTING person, so the
+        # new device inherits that member's CURRENT role/rooms — the admin picks
+        # the member, the hub fills the rest, so a mismatched scope can't be
+        # forged through the payload.
+        role = payload.get("role", "")
+        rooms = payload.get("rooms")
+        member_id = payload.get("member_id")
+        if member_id is not None:
+            engine = get_engine(self._hass)
+            if engine is None:
+                return self.json_message(
+                    "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
+                )
+            members = await self._hass.async_add_executor_job(engine.list_members)
+            member = next(
+                (m for m in members if m["member_id"] == member_id), None
+            )
+            if member is None:
+                return self.json_message("Unknown member", HTTPStatus.BAD_REQUEST)
+            role = member["role"]
+            rooms = member["rooms"]
+
         try:
             issued = await self._hass.async_add_executor_job(
                 lambda: pairing.generate_code(
-                    role=payload.get("role", ""),
-                    rooms=payload.get("rooms"),
+                    role=role,
+                    rooms=rooms,
                     expires_in=payload.get("expires_in", "1d"),
+                    member_id=member_id,
                 )
             )
         except PairingError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         _LOGGER.info(
-            "Pairing code minted by %s (role=%s)", claims["sub"], issued["role"]
+            "Pairing code minted by %s (role=%s%s)",
+            claims["sub"],
+            issued["role"],
+            " add-device" if member_id else "",
         )
         return self.json(issued, HTTPStatus.CREATED)
 
@@ -526,7 +553,7 @@ class CasaSmartUserView(HomeAssistantView):
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
 
         try:
-            await self._hass.async_add_executor_job(
+            member_id = await self._hass.async_add_executor_job(
                 engine.delete_device, device_id
             )
         except UnknownDeviceError:
@@ -540,6 +567,23 @@ class CasaSmartUserView(HomeAssistantView):
             await self._hass.async_add_executor_job(
                 push.unregister, device_id
             )
+
+        # Phase 5: prune the person's favorites + settings IFF that was their
+        # LAST device — otherwise the member_id-keyed rows orphan (the leak the
+        # audit found). A member with another paired device keeps the shared
+        # rows. runtime_data is fetched on the loop; the count + prunes run in
+        # the executor.
+        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
+        runtime = entries[0].runtime_data if entries else None
+        if runtime is not None:
+
+            def _prune_orphaned_member() -> None:
+                if engine.member_device_count(member_id) != 0:
+                    return
+                runtime.registry.delete_favorites(member_id)
+                runtime.user_settings.delete(member_id)
+
+            await self._hass.async_add_executor_job(_prune_orphaned_member)
 
         # Device gone — drop its sensor.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})

@@ -528,22 +528,26 @@ class RegistryEngine:
 
     # -- favorites (storage — call via executor) -----------------------------------
 
-    def get_favorites(self, user_device_id: str) -> list[str]:
-        record = self._favorites.get(user_device_id)
+    def get_favorites(self, member_id: str) -> list[str]:
+        record = self._favorites.get(member_id)
         if record is None:
             return []
         return list(record.get("entity_ids", []))
 
-    def set_favorites(
-        self, user_device_id: str, entity_ids: Any
-    ) -> list[str]:
-        """Replace the user's favorites list (order is meaningful).
-        Stale rows for unpaired devices are harmless and die with the
-        app-layer wipe (factory reset clears this table)."""
+    def set_favorites(self, member_id: str, entity_ids: Any) -> list[str]:
+        """Replace a member's favorites list (order is meaningful). Keyed by
+        member_id so a person's devices share one list; the unpair path prunes
+        it when the member's last device leaves (see delete_favorites)."""
         deduped = _clean_entity_ids(entity_ids, "favorites", _MAX_FAVORITES)
         with self._lock:
-            self._favorites[user_device_id] = {"entity_ids": deduped}
+            self._favorites[member_id] = {"entity_ids": deduped}
         return deduped
+
+    def delete_favorites(self, member_id: str) -> None:
+        """Drop a member's favorites row — called when their last device is
+        unpaired so the row can't orphan. No-op when the row is absent."""
+        with self._lock:
+            self._favorites.pop(member_id, None)
 
     # -- grouped user-devices (storage — call via executor) --------------------
     # The hub-side source of truth for a physical device's STRUCTURE: which

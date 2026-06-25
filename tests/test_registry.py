@@ -325,6 +325,12 @@ class FavoritesTests(RegistryTestCase):
         with self.assertRaises(RegistryError):
             self.engine.set_favorites("dev-a", [f"light.l{i}" for i in range(201)])
 
+    def test_delete_favorites_drops_the_row(self):
+        self.engine.set_favorites("mem-a", ["light.a", "light.b"])
+        self.engine.delete_favorites("mem-a")
+        self.assertEqual(self.engine.get_favorites("mem-a"), [])
+        self.engine.delete_favorites("mem-a")  # no-op when already absent
+
 
 class ImportTests(RegistryTestCase):
     FLOORS = [{"floor_id": "first_floor", "name": "First", "sort_order": 1}]

@@ -1,12 +1,12 @@
 """Per-user settings store (post-funeral mini-block MB-2) — the pure half.
 
 Replaces Phase 5's phone-local interim for the two pieces of personal
-state that should roam across a user's phones: the display name (the
-greeting/profile name) and the home-screen widget layout. Keyed by the
-JWT's ``sub`` — the enrolled device id, the only user identity the hub
-has — exactly like B17 favorites; one table, partial updates, schema
-deliberately open for whatever rides along later (the plan names
-favorites-style extensions).
+state that roam across a user's phones: the display name (the
+greeting/profile name) and the home-screen widget layout. Keyed by
+``member_id`` (the PERSON, resolved from the request's device ``sub``)
+so a member's devices share one row — exactly like B17 favorites; one
+table, partial updates, schema deliberately open for whatever rides
+along later (the plan names favorites-style extensions).
 
 Flat-importable engine like ``registry.py``: no HA imports, dict-like
 storage table in, unit-tests on a temp SQLite file. Storage-touching
@@ -95,12 +95,12 @@ class UserSettingsEngine:
         self._table = table
         self._lock = threading.RLock()
 
-    def get(self, user_device_id: str) -> dict[str, Any]:
-        """The user's full settings doc — every known field, None when unset."""
-        record = self._table.get(user_device_id) or {}
+    def get(self, member_id: str) -> dict[str, Any]:
+        """A member's full settings doc — every known field, None when unset."""
+        record = self._table.get(member_id) or {}
         return {field: record.get(field) for field in _KNOWN_FIELDS}
 
-    def update(self, user_device_id: str, changes: Any) -> dict[str, Any]:
+    def update(self, member_id: str, changes: Any) -> dict[str, Any]:
         """Partial update: only the fields present in ``changes`` move;
         an explicit null clears. Unknown fields are rejected so a typo'd
         key can't silently store garbage forever. Returns the full doc."""
@@ -117,11 +117,17 @@ class UserSettingsEngine:
             field: _VALIDATORS[field](value) for field, value in changes.items()
         }
         with self._lock:
-            record = self._table.get(user_device_id) or {}
+            record = self._table.get(member_id) or {}
             record.update(validated)
             # Fully cleared rows are deleted, not kept as tombstones.
             if all(record.get(field) is None for field in record):
-                self._table.pop(user_device_id, None)
+                self._table.pop(member_id, None)
             else:
-                self._table[user_device_id] = record
+                self._table[member_id] = record
         return {field: record.get(field) for field in _KNOWN_FIELDS}
+
+    def delete(self, member_id: str) -> None:
+        """Drop a member's settings row — called when their last device is
+        unpaired so the row can't orphan. No-op when the row is absent."""
+        with self._lock:
+            self._table.pop(member_id, None)

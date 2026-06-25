@@ -100,8 +100,23 @@ class PairingTests(unittest.TestCase):
                 "role": "user",
                 "rooms": ["area_living"],
                 "code_id": issued["code_id"],
+                "member_id": None,  # a new-member code mints one at enroll
             },
         )
+
+    def test_member_id_rides_the_code_for_add_device(self):
+        # An "add device to member" code carries the existing member_id through
+        # generate -> the redeemed grant, so the new device joins that person.
+        issued = self.manager.generate_code(
+            "user", rooms=["area_living"], member_id="mem-abc"
+        )
+        self.assertEqual(issued["member_id"], "mem-abc")
+        grant = self.manager.redeem(issued["code"], "ip-1")
+        self.assertEqual(grant["member_id"], "mem-abc")
+
+    def test_generate_rejects_blank_member_id(self):
+        with self.assertRaises(PairingError):
+            self.manager.generate_code("user", member_id="")
 
     def test_single_use(self):
         issued = self.manager.generate_code("user")
