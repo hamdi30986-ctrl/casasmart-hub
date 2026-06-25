@@ -88,5 +88,49 @@ class IsAssignableTests(unittest.TestCase):
             self.assertFalse(filtering.is_assignable(hass, "weather.home"))
 
 
+@unittest.skipIf(
+    filtering is None, f"casasmart.filtering unimportable: {_IMPORT_ERROR}"
+)
+class WeatherServiceTests(unittest.TestCase):
+    @mock.patch.object(filtering, "er")
+    def test_weather_service_sensor_is_excluded(self, er_mod):
+        # A forecast sensor whose device also hosts a weather.* entity is a
+        # service, not a home device.
+        registry = mock.Mock()
+        registry.async_get.return_value = mock.Mock(device_id="owm-dev")
+        er_mod.async_get.return_value = registry
+        er_mod.async_entries_for_device.return_value = [
+            mock.Mock(entity_id="weather.openweathermap"),
+            mock.Mock(entity_id="sensor.openweathermap_temperature"),
+        ]
+        self.assertTrue(
+            filtering.is_weather_service_entity(
+                _hass(), "sensor.openweathermap_temperature"
+            )
+        )
+
+    @mock.patch.object(filtering, "er")
+    def test_real_sensor_is_not_weather_service(self, er_mod):
+        # A physical temp/humidity sensor — no weather.* sibling.
+        registry = mock.Mock()
+        registry.async_get.return_value = mock.Mock(device_id="aqara-dev")
+        er_mod.async_get.return_value = registry
+        er_mod.async_entries_for_device.return_value = [
+            mock.Mock(entity_id="sensor.bedroom_temperature"),
+            mock.Mock(entity_id="sensor.bedroom_humidity"),
+        ]
+        self.assertFalse(
+            filtering.is_weather_service_entity(
+                _hass(), "sensor.bedroom_temperature"
+            )
+        )
+
+    def test_non_sensor_short_circuits(self):
+        # Non-sensor domains never hit the registry lookup.
+        self.assertFalse(
+            filtering.is_weather_service_entity(_hass(), "switch.kitchen")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

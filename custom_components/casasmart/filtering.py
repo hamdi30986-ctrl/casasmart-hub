@@ -123,10 +123,38 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
     )
 
 
+def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
+    """True when a sensor/binary_sensor belongs to a weather SERVICE rather
+    than a physical device — its device also hosts a ``weather.*`` entity
+    (OpenWeatherMap, met.no, AccuWeather…). Forecast sensors are not home
+    devices and must never become device cards. Gated to sensor domains so the
+    per-entity device lookup stays off the hot path for everything else."""
+    if not (
+        entity_id.startswith("sensor.")
+        or entity_id.startswith("binary_sensor.")
+    ):
+        return False
+    registry = er.async_get(hass)
+    entry = registry.async_get(entity_id)
+    if entry is None or entry.device_id is None:
+        return False
+    return any(
+        sibling.entity_id.startswith("weather.")
+        for sibling in er.async_entries_for_device(
+            registry, entry.device_id, include_disabled_entities=True
+        )
+    )
+
+
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
     """True when the entity is part of the CasaSmart API surface at all:
-    exposed domain AND visible. The single gate for REST and WS alike."""
-    return is_exposed(entity_id) and is_visible(hass, entity_id)
+    exposed domain AND visible AND not a weather-service sensor. The single
+    gate for REST and WS alike."""
+    return (
+        is_exposed(entity_id)
+        and is_visible(hass, entity_id)
+        and not is_weather_service_entity(hass, entity_id)
+    )
 
 
 def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
