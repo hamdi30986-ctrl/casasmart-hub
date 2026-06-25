@@ -460,7 +460,7 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
     name = f"api:{DOMAIN}:registry:device"
 
     async def patch(self, request: web.Request, entity_id: str) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -469,8 +469,16 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
         # ORGANIZE surface (not the feed): a device the integration has since
         # hidden (e.g. a secondary gang switch, hidden_by='integration') must
         # still be re-assignable/clearable. is_served would 404 it — see
-        # is_assignable. DELETE has no gate, so clears already work.
+        # is_assignable.
         if not is_assignable(self._hass, entity_id):
+            return self.json_message(
+                f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
+            )
+        # A room-scoped caller may only (re)assign entities inside its own
+        # rooms — mirror the in_scope guard every sibling write enforces, so a
+        # scoped sub-admin can't move a device in a room it doesn't own.
+        scope = claims.get("rooms") if claims else None
+        if scope is not None and not in_scope(self._hass, entity_id, scope):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -496,12 +504,17 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
         return self.json(assignment)
 
     async def delete(self, request: web.Request, entity_id: str) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
+        scope = claims.get("rooms") if claims else None
+        if scope is not None and not in_scope(self._hass, entity_id, scope):
+            return self.json_message(
+                f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
+            )
         try:
             await self._hass.async_add_executor_job(
                 registry.remove_assignment, entity_id
