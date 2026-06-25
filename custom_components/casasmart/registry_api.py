@@ -44,7 +44,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .auth_api import authenticate_request, json_body
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .entity_bridge import CommandError, validate_command
-from .filtering import area_id_of, ha_area_id_of, in_scope, is_served
+from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
 from .registry import (
     UNSET,
     InUseError,
@@ -435,9 +435,11 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        if self._hass.states.get(entity_id) is None or not is_served(
-            self._hass, entity_id
-        ):
+        # ORGANIZE surface (not the feed): a device the integration has since
+        # hidden (e.g. a secondary gang switch, hidden_by='integration') must
+        # still be re-assignable/clearable. is_served would 404 it — see
+        # is_assignable. DELETE has no gate, so clears already work.
+        if not is_assignable(self._hass, entity_id):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
