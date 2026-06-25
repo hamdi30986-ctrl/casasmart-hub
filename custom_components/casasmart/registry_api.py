@@ -218,14 +218,32 @@ class CasaSmartRegistryView(_RegistryView):
 
         user_devices = registry.list_user_devices()
         if scope is not None:
-            user_devices = [
-                device
-                for device in user_devices
-                if any(
-                    in_scope(self._hass, entity_id, scope)
+            # Project each grouped record to the caller's scope: keep only the
+            # in-scope entity_ids / config_entity_ids and drop a record with no
+            # in-scope primary. A room-scoped token must never receive the
+            # entity ids of gangs in rooms it can't see — parity with the
+            # per-entity `devices` list above.
+            scoped = []
+            for device in user_devices:
+                primaries = [
+                    entity_id
                     for entity_id in device.get("entity_ids", [])
+                    if in_scope(self._hass, entity_id, scope)
+                ]
+                if not primaries:
+                    continue
+                scoped.append(
+                    {
+                        **device,
+                        "entity_ids": primaries,
+                        "config_entity_ids": [
+                            entity_id
+                            for entity_id in device.get("config_entity_ids", [])
+                            if in_scope(self._hass, entity_id, scope)
+                        ],
+                    }
                 )
-            ]
+            user_devices = scoped
 
         return self.json(
             {
