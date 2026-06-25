@@ -218,32 +218,21 @@ class CasaSmartRegistryView(_RegistryView):
 
         user_devices = registry.list_user_devices()
         if scope is not None:
-            # Project each grouped record to the caller's scope: keep only the
-            # in-scope entity_ids / config_entity_ids and drop a record with no
-            # in-scope primary. A room-scoped token must never receive the
-            # entity ids of gangs in rooms it can't see — parity with the
-            # per-entity `devices` list above.
-            scoped = []
-            for device in user_devices:
-                primaries = [
-                    entity_id
+            # Serve a grouped record only when EVERY primary is in the caller's
+            # scope. A partial projection (keep in-scope gangs, spread the rest)
+            # leaked the suffix-keyed gang_types/gang_names + custom_name of
+            # out-of-scope gangs, so this is all-or-nothing instead. Multi-gang
+            # devices live on one wall = one room, so this drops only the rare
+            # genuinely cross-room device for a room-scoped user.
+            user_devices = [
+                device
+                for device in user_devices
+                if device.get("entity_ids")
+                and all(
+                    in_scope(self._hass, entity_id, scope)
                     for entity_id in device.get("entity_ids", [])
-                    if in_scope(self._hass, entity_id, scope)
-                ]
-                if not primaries:
-                    continue
-                scoped.append(
-                    {
-                        **device,
-                        "entity_ids": primaries,
-                        "config_entity_ids": [
-                            entity_id
-                            for entity_id in device.get("config_entity_ids", [])
-                            if in_scope(self._hass, entity_id, scope)
-                        ],
-                    }
                 )
-            user_devices = scoped
+            ]
 
         return self.json(
             {
@@ -525,10 +514,34 @@ class CasaSmartUserDeviceView(_RegistryView):
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}"
     name = f"api:{DOMAIN}:registry:user-device"
 
+    def _scope_reject(self, claims, *entity_lists, require_assignable=True):
+        """Reject a write touching an entity outside the caller's scope (or,
+        for grabs, not assignable) — same no-enumeration message as the
+        favorites/assignment writes. An admin (rooms=None) passes the scope
+        test. DELETE passes require_assignable=False so an all-dead device
+        stays removable. Returns an error response, or None to proceed."""
+        scope = claims.get("rooms")
+        for entity_ids in entity_lists:
+            if not isinstance(entity_ids, list):
+                continue
+            for entity_id in entity_ids:
+                if (
+                    not isinstance(entity_id, str)
+                    or not in_scope(self._hass, entity_id, scope)
+                    or (require_assignable
+                        and not is_assignable(self._hass, entity_id))
+                ):
+                    return self.json_message(
+                        f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
+                    )
+        return None
+
     async def put(
         self, request: web.Request, ha_device_id: str
     ) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -539,6 +552,11 @@ class CasaSmartUserDeviceView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
+        reject = self._scope_reject(
+            claims, payload.get("entity_ids"), payload.get("config_entity_ids")
+        )
+        if reject is not None:
+            return reject
         try:
             device = await self._hass.async_add_executor_job(
                 lambda: registry.upsert_user_device(
@@ -562,7 +580,9 @@ class CasaSmartUserDeviceView(_RegistryView):
     async def patch(
         self, request: web.Request, ha_device_id: str
     ) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -573,6 +593,11 @@ class CasaSmartUserDeviceView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
+        reject = self._scope_reject(
+            claims, payload.get("entity_ids"), payload.get("config_entity_ids")
+        )
+        if reject is not None:
+            return reject
         try:
             device = await self._hass.async_add_executor_job(
                 lambda: registry.patch_user_device(
@@ -596,12 +621,32 @@ class CasaSmartUserDeviceView(_RegistryView):
     async def delete(
         self, request: web.Request, ha_device_id: str
     ) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
+        # A scoped caller may only un-grab a device whose entities are all in
+        # its scope; load the record first so an out-of-scope delete is refused
+        # (admin passes). require_assignable=False — a dead-entity device must
+        # stay removable.
+        try:
+            existing = await self._hass.async_add_executor_job(
+                registry.get_user_device, ha_device_id
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        reject = self._scope_reject(
+            claims,
+            existing.get("entity_ids"),
+            existing.get("config_entity_ids"),
+            require_assignable=False,
+        )
+        if reject is not None:
+            return reject
         try:
             await self._hass.async_add_executor_job(
                 registry.delete_user_device, ha_device_id
