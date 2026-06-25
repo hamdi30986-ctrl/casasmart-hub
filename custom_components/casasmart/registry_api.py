@@ -905,10 +905,11 @@ class CasaSmartSceneActivateView(_RegistryView):
 class CasaSmartFavoritesView(_RegistryView):
     """GET/PUT /api/casasmart/me/favorites — the caller's own list.
 
-    Keyed by the JWT's ``sub`` (the enrolled device id) — the only user
-    identity the hub has. PUT replaces the whole list; order is the
-    display order. The ONE source of truth replacing the app's three
-    (plan B17, audit 2026-06-10).
+    Keyed by ``member_id`` (the PERSON, resolved from the request's device
+    ``sub`` — Phase 5), so a member's devices share one list. PUT replaces the
+    whole list; order is the display order. GET drops gone/unserved + out-of-
+    scope ids and self-heals the stored list (Phase 6) — the ONE source of
+    truth for device favorites (plan B17).
     """
 
     url = f"/api/{DOMAIN}/me/favorites"
@@ -926,14 +927,36 @@ class CasaSmartFavoritesView(_RegistryView):
         # one-device member, so it falls back to the sub.
         engine = get_engine(self._hass)
         sub = claims["sub"]
+        scope = claims.get("rooms")
+
+        def _load() -> tuple[str, list[str]]:
+            mid = engine.member_id_for(sub) if engine else sub
+            return mid, registry.get_favorites(mid)
+
         try:
-            favorites = await self._hass.async_add_executor_job(
-                lambda: registry.get_favorites(
-                    engine.member_id_for(sub) if engine else sub
-                )
-            )
+            member_id, stored = await self._hass.async_add_executor_job(_load)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
+        # Phantom favorites must not linger or paint a dead card: drop ids whose
+        # entity is GONE or unserved — mirror the PUT write-guard's gate exactly
+        # (states.get is None catches a deleted entity; is_served catches a
+        # since-hidden one) — and SELF-HEAL the stored list so they don't
+        # accumulate (order preserved).
+        served = [
+            eid
+            for eid in stored
+            if self._hass.states.get(eid) is not None
+            and is_served(self._hass, eid)
+        ]
+        if served != stored:
+            try:
+                await self._hass.async_add_executor_job(
+                    registry.set_favorites, member_id, served
+                )
+            except (StorageError, sqlite3.Error):
+                pass  # best-effort heal; the filtered response below still holds
+        # Scope to the caller — a room-scoped user only sees its own rooms.
+        favorites = [eid for eid in served if in_scope(self._hass, eid, scope)]
         return self.json({"entity_ids": favorites})
 
     async def put(self, request: web.Request) -> web.Response:
