@@ -196,6 +196,7 @@ def _open_storage(
         storage.table("registry_devices"),
         storage.table("registry_scenes"),
         storage.table("registry_favorites"),
+        storage.table("registry_user_devices"),
     )
     registry.warm_up()  # room/name mirrors loaded — event-loop reads stay pure CPU
     tanks = TankEngine(

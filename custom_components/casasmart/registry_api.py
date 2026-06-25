@@ -216,12 +216,24 @@ class CasaSmartRegistryView(_RegistryView):
                 key=lambda item: (item.get("sort_order", 0), item.get("name", ""))
             )
 
+        user_devices = registry.list_user_devices()
+        if scope is not None:
+            user_devices = [
+                device
+                for device in user_devices
+                if any(
+                    in_scope(self._hass, entity_id, scope)
+                    for entity_id in device.get("entity_ids", [])
+                )
+            ]
+
         return self.json(
             {
                 "floors": floors,
                 "rooms": rooms,
                 "devices": devices,
                 "scenes": scenes,
+                "user_devices": user_devices,
             }
         )
 
@@ -481,6 +493,107 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
             return self._storage_failure(err)
         self._notify_change("devices")
         return self.json({"deleted": entity_id})
+
+
+class CasaSmartUserDeviceView(_RegistryView):
+    """PUT/PATCH/DELETE /api/casasmart/registry/user-devices/{ha_device_id}.
+
+    The grouped physical-device record — gang types/names, config entities,
+    device type, custom name/icon. PUT upserts the whole record (import /
+    re-import); PATCH edits named fields (rename, re-type a gang, set an icon);
+    DELETE un-grabs the device so its entities return to the add-devices list.
+    """
+
+    url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}"
+    name = f"api:{DOMAIN}:registry:user-device"
+
+    async def put(
+        self, request: web.Request, ha_device_id: str
+    ) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            device = await self._hass.async_add_executor_job(
+                lambda: registry.upsert_user_device(
+                    ha_device_id,
+                    entity_ids=payload.get("entity_ids"),
+                    gang_types=payload.get("gang_types"),
+                    gang_names=payload.get("gang_names"),
+                    config_entity_ids=payload.get("config_entity_ids"),
+                    device_type=payload.get("device_type"),
+                    custom_name=payload.get("custom_name"),
+                    custom_icon=payload.get("custom_icon"),
+                )
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("user-devices")
+        return self.json(device)
+
+    async def patch(
+        self, request: web.Request, ha_device_id: str
+    ) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            device = await self._hass.async_add_executor_job(
+                lambda: registry.patch_user_device(
+                    ha_device_id,
+                    entity_ids=payload.get("entity_ids", ...),
+                    gang_types=payload.get("gang_types", ...),
+                    gang_names=payload.get("gang_names", ...),
+                    config_entity_ids=payload.get("config_entity_ids", ...),
+                    device_type=payload.get("device_type", ...),
+                    custom_name=payload.get("custom_name", ...),
+                    custom_icon=payload.get("custom_icon", ...),
+                )
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("user-devices")
+        return self.json(device)
+
+    async def delete(
+        self, request: web.Request, ha_device_id: str
+    ) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        try:
+            await self._hass.async_add_executor_job(
+                registry.delete_user_device, ha_device_id
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("user-devices")
+        return self.json({"deleted": ha_device_id})
 
 
 class CasaSmartScenesView(_RegistryView):
