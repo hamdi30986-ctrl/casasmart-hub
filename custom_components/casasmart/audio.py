@@ -104,6 +104,12 @@ _PORT_MAX = 65535
 # unbounded payload that then gets republished retained forever.
 _ATHAN_MAX_KEYS = 64
 _ATHAN_MAX_BYTES = 8192
+# Live-mirror string fields (room/title/...) from the broker — capped so a
+# giant retained value can't bloat what the hub serves the app.
+_LIVE_STR_MAX = 128
+# The agent's play-priority vocabulary (H2 arbitration), taken verbatim — an
+# arbitrary priority would defeat the speaker-side ranking.
+PRIORITY_VALUES = frozenset({"athan", "pa", "normal"})
 # A discovered (un-enrolled) speaker that announced once then died must not
 # clutter the add-flow forever. Entries not heard from within this window are
 # dropped from ``discovered()`` (M6). Generous enough that a healthy speaker
@@ -183,8 +189,50 @@ def _opt_str(value: Any, *, field: str) -> Optional[str]:
 
 
 def _is_number(value: Any) -> bool:
-    """True for a real numeric coordinate — int/float but NOT bool/None."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """True for a real, FINITE numeric coordinate — int/float but not bool/None
+    and not NaN/Infinity (which would serialise to invalid JSON)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
+def _validate_host(value: Any, *, field: str) -> str:
+    """A hostname/IP for a config field the hub serves VERBATIM to every Pi —
+    reject whitespace/garbage that would black-hole the fleet."""
+    if not isinstance(value, str) or not value.strip():
+        raise AudioError(f"{field} is required")
+    host = value.strip()
+    if not (
+        1 <= len(host) <= 253
+        and host[0].isalnum()
+        and host[-1].isalnum()
+        and all(c.isalnum() or c in ".-:" for c in host)
+    ):
+        raise AudioError(f"{field} must be a valid hostname or IP")
+    return host
+
+
+def _clean_live(payload: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist + type-check the broker's published live fields before they
+    enter the served mirror. Untrusted broker data (a NaN volume, a giant room
+    string, a wrong-typed flag) must not poison the speaker list the app parses
+    — unknown/invalid keys are dropped."""
+    out: dict[str, Any] = {}
+    room = payload.get("room")
+    if isinstance(room, str) and room.strip():
+        out["room"] = room.strip()[:_LIVE_STR_MAX]
+    for flag in ("playing", "airplay_active"):
+        if isinstance(payload.get(flag), bool):
+            out[flag] = payload[flag]
+    for text in ("playing_file", "airplay_title", "airplay_artist"):
+        value = payload.get(text)
+        if isinstance(value, str):
+            out[text] = value[:_LIVE_STR_MAX]
+    if _is_number(payload.get("volume")):
+        out["volume"] = max(_VOLUME_MIN, min(_VOLUME_MAX, int(payload["volume"])))
+    if _is_number(payload.get("uptime")):
+        out["uptime"] = payload["uptime"]
+    return out
 
 
 class AudioEngine:
@@ -282,7 +330,7 @@ class AudioEngine:
         with self._lock:
             updated = dict(self._broker)
             if host is not None:
-                updated["host"] = _clean_name(host, field="broker host")
+                updated["host"] = _validate_host(host, field="broker host")
             updated["port"] = _validate_port(
                 port, field="broker port", default=updated["port"]
             )
@@ -342,7 +390,7 @@ class AudioEngine:
         with self._lock:
             updated = dict(self._pa)
             if host is not None:
-                updated["host"] = _clean_name(host, field="PA host")
+                updated["host"] = _validate_host(host, field="PA host")
             updated["port"] = _validate_port(
                 port, field="PA port", default=updated["port"]
             )
@@ -379,15 +427,20 @@ class AudioEngine:
         # assumption the hub makes about the otherwise-opaque blob, and it
         # mirrors the app-side "pick a city" guard — a defence in depth, not a
         # schema. ``enabled`` falsey (off) is always allowed through.
-        if config.get("enabled"):
+        enabled = config.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise AudioError("athan 'enabled' must be a boolean")
+        if enabled:
             if not _is_number(config.get("lat")) or not _is_number(config.get("lon")):
                 raise AudioError(
-                    "athan cannot be enabled without numeric lat/lon coordinates"
+                    "athan cannot be enabled without finite lat/lon coordinates"
                 )
         try:
             import json
 
-            encoded = json.dumps(config)
+            # allow_nan=False: a non-finite value would serialise to invalid
+            # JSON and poison the relayed athan/config the scheduler reads.
+            encoded = json.dumps(config, allow_nan=False)
         except (TypeError, ValueError) as err:
             raise AudioError(f"athan config is not JSON-serialisable: {err}") from err
         if len(encoded.encode("utf-8")) > _ATHAN_MAX_BYTES:
@@ -507,18 +560,10 @@ class AudioEngine:
             live = self._live.setdefault(mac6, {})
             live["online"] = True
             live["last_seen"] = self._clock()
-            for key in (
-                "room",
-                "volume",
-                "playing",
-                "playing_file",
-                "airplay_active",
-                "airplay_title",
-                "airplay_artist",
-                "uptime",
-            ):
-                if key in payload:
-                    live[key] = payload[key]
+            # Allowlist + type-check the broker's fields — a NaN/wrong-type blob
+            # must not poison the served mirror (it would blank the app's whole
+            # speaker list on a strict JSON decode).
+            live.update(_clean_live(payload))
 
     def ingest_announce(self, mac: Any, room: Any = None) -> None:
         """Apply a ``speakers/announce`` discovery beacon.
@@ -535,7 +580,7 @@ class AudioEngine:
             live["online"] = True
             live["last_seen"] = self._clock()
             if isinstance(room, str) and room.strip():
-                live["room"] = room.strip()
+                live["room"] = room.strip()[:_LIVE_STR_MAX]
 
     def discovered(self, *, ttl: Optional[float] = _DISCOVERY_TTL_SECONDS) -> list[dict[str, Any]]:
         """Speakers the hub has heard from that are NOT yet enrolled.
@@ -624,7 +669,11 @@ class AudioEngine:
         if volume is not None:
             payload["volume"] = _validate_volume(volume)
         if priority is not None:
-            payload["priority"] = _opt_str(priority, field="priority")
+            if priority not in PRIORITY_VALUES:
+                raise AudioError(
+                    f"priority must be one of {sorted(PRIORITY_VALUES)}"
+                )
+            payload["priority"] = priority
         payload["ts"] = self._clock() if now is None else now
         if mac is None:
             return TOPIC_BROADCAST, payload

@@ -193,6 +193,22 @@ class AthanConfigTests(AudioTestCase):
         with self.assertRaises(AudioError):
             self.engine.set_athan({"blob": "x" * 9000})
 
+    def test_rejects_non_bool_enabled(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": 1, "lat": 21, "lon": 39})
+
+    def test_rejects_enabled_with_non_finite_coords(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan(
+                {"enabled": True, "lat": float("inf"), "lon": 39}
+            )
+
+    def test_preserves_unknown_scheduler_keys(self):
+        # The blob is opaque — keys the hub doesn't model must round-trip.
+        cfg = {"enabled": True, "lat": 21, "lon": 39, "per_prayer": {"fajr": 5}}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan(), cfg)
+
 
 class SpeakerRegistryTests(AudioTestCase):
     def test_enroll_and_list(self):
@@ -277,6 +293,17 @@ class LiveStatusTests(AudioTestCase):
     def test_ingest_state_ignores_malformed(self):
         self.engine.ingest_state("965cb9", "not-a-dict")
         self.assertFalse(self.engine.live_status("965cb9").get("online", False))
+
+    def test_ingest_state_drops_non_finite_and_wrong_types(self):
+        # A bad broker blob must not poison the served mirror (Phase 7).
+        self.engine.ingest_state(
+            "965cb9",
+            {"volume": float("nan"), "playing": "yes", "room": "Office"},
+        )
+        live = self.engine.live_status("965cb9")
+        self.assertNotIn("volume", live)  # NaN dropped
+        self.assertNotIn("playing", live)  # wrong type dropped
+        self.assertEqual(live["room"], "Office")  # valid value kept
 
     def test_live_status_surfaces_in_list(self):
         self.engine.ingest_state("965cb9", {"volume": 30, "playing": False})
@@ -420,6 +447,10 @@ class PlayBuildTests(AudioTestCase):
     def test_play_volume_validated(self):
         with self.assertRaises(AudioError):
             self.engine.build_play(url="http://h/x.mp3", volume=200)
+
+    def test_play_rejects_unknown_priority(self):
+        with self.assertRaises(AudioError):
+            self.engine.build_play(url="http://h/x.mp3", priority="bogus")
 
 
 if __name__ == "__main__":
