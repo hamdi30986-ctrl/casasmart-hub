@@ -160,6 +160,19 @@ class UserDeviceTests(RegistryTestCase):
             self.engine.grabbed_entity_ids(), {"switch.a", "switch.a_led"}
         )
 
+    def test_grabbed_keeps_every_gang_of_a_multi_gang_device(self):
+        # All gangs + config of one physical device count as grabbed — an
+        # offline gang is still grabbed, so the add-list keeps it subtracted.
+        self.engine.upsert_user_device(
+            "dev-1",
+            entity_ids=["switch.left", "switch.middle", "switch.right"],
+            config_entity_ids=["switch.left_led"],
+        )
+        self.assertEqual(
+            self.engine.grabbed_entity_ids(),
+            {"switch.left", "switch.middle", "switch.right", "switch.left_led"},
+        )
+
     def test_patch_leaves_unspecified_fields(self):
         self.engine.upsert_user_device(
             "dev-1",

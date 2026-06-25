@@ -132,5 +132,44 @@ class WeatherServiceTests(unittest.TestCase):
         )
 
 
+@unittest.skipIf(
+    filtering is None, f"casasmart.filtering unimportable: {_IMPORT_ERROR}"
+)
+class IsServedTests(unittest.TestCase):
+    """is_served is the SHIPPED gate (REST + WS). Pin exposed + visible
+    (hidden_by/entity_category None) so the weather-service exclusion — the
+    clause that actually ships — is the variable under test."""
+
+    @mock.patch.object(filtering, "er")
+    def test_weather_service_sensor_is_not_served(self, er_mod):
+        entry = mock.Mock(hidden_by=None, entity_category=None, device_id="owm")
+        registry = mock.Mock()
+        registry.async_get.return_value = entry
+        er_mod.async_get.return_value = registry
+        er_mod.async_entries_for_device.return_value = [
+            mock.Mock(entity_id="weather.openweathermap"),
+            mock.Mock(entity_id="sensor.openweathermap_temperature"),
+        ]
+        self.assertFalse(
+            filtering.is_served(_hass(), "sensor.openweathermap_temperature")
+        )
+
+    @mock.patch.object(filtering, "er")
+    def test_real_sensor_is_served(self, er_mod):
+        entry = mock.Mock(
+            hidden_by=None, entity_category=None, device_id="aqara"
+        )
+        registry = mock.Mock()
+        registry.async_get.return_value = entry
+        er_mod.async_get.return_value = registry
+        er_mod.async_entries_for_device.return_value = [
+            mock.Mock(entity_id="sensor.bedroom_temperature"),
+            mock.Mock(entity_id="sensor.bedroom_humidity"),
+        ]
+        self.assertTrue(
+            filtering.is_served(_hass(), "sensor.bedroom_temperature")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
