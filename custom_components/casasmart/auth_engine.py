@@ -240,6 +240,7 @@ class AuthEngine:
         public_key_pem: str,
         rooms: list[str] | None = None,
         enrolled_via: str | None = None,
+        member_id: str | None = None,
     ) -> str:
         """Store a device's identity; returns the new device id.
 
@@ -281,6 +282,12 @@ class AuthEngine:
                 "ver": 1,
                 "paired_at": time.time(),
                 "enrolled_via": enrolled_via,
+                # The PERSON this device belongs to. An "add device to member"
+                # pairing code carries an existing member_id (the device joins
+                # that person); a new-member code passes None and we mint one.
+                # favorites + user_settings key by member_id so a person's
+                # devices share them (auth itself still uses the per-device sub).
+                "member_id": member_id or f"mem-{secrets.token_urlsafe(9)}",
             }
             self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
@@ -464,6 +471,7 @@ class AuthEngine:
                 "rooms": record.get("rooms"),
                 "paired_at": int(record.get("paired_at", 0)),
                 "enrolled_via": record.get("enrolled_via"),
+                "member_id": record.get("member_id") or device_id,
                 "last_seen": last_seen.get(device_id),
             }
             for device_id, record in self._devices.items()
@@ -488,8 +496,61 @@ class AuthEngine:
             "rooms": record.get("rooms"),
             "paired_at": int(record.get("paired_at", 0)),
             "enrolled_via": record.get("enrolled_via"),
+            "member_id": record.get("member_id") or device_id,
             "last_seen": last_seen,
         }
+
+    def member_id_for(self, device_id: str) -> str:
+        """The PERSON id this device belongs to — the key favorites +
+        user_settings roam by. Falls back to the device id for a legacy record
+        enrolled before member_id existed (it is then its own one-device
+        member), so no data migration is needed."""
+        record = self._devices.get(device_id)
+        if record is None:
+            return device_id
+        return record.get("member_id") or device_id
+
+    def member_device_count(self, member_id: str) -> int:
+        """How many enrolled devices belong to ``member_id`` — the caller
+        prunes a member's personal data only when this hits zero (the last
+        device unpaired)."""
+        return sum(
+            1
+            for device_id, record in self._devices.items()
+            if (record.get("member_id") or device_id) == member_id
+        )
+
+    def list_members(self) -> list[dict[str, Any]]:
+        """Distinct members (people) with a device count — the family-share
+        'add a device to [member]' picker. Name/role/rooms come from the
+        member's most-recently-paired device (set consistently per member at
+        pairing)."""
+        members: dict[str, dict[str, Any]] = {}
+        for device_id, record in self._devices.items():
+            mid = record.get("member_id") or device_id
+            paired_at = int(record.get("paired_at", 0))
+            entry = members.get(mid)
+            if entry is None:
+                members[mid] = {
+                    "member_id": mid,
+                    "name": record.get("name"),
+                    "role": record.get("role"),
+                    "rooms": record.get("rooms"),
+                    "device_count": 1,
+                    "_paired_at": paired_at,
+                }
+            else:
+                entry["device_count"] += 1
+                if paired_at >= entry["_paired_at"]:
+                    entry.update(
+                        name=record.get("name"),
+                        role=record.get("role"),
+                        rooms=record.get("rooms"),
+                        _paired_at=paired_at,
+                    )
+        for entry in members.values():
+            entry.pop("_paired_at", None)
+        return list(members.values())
 
     def last_seen(self, device_id: str) -> float | None:
         """The device's last-validated-token timestamp, or None this boot.
@@ -572,8 +633,12 @@ class AuthEngine:
             "paired_at": int(record.get("paired_at", 0)),
         }
 
-    def delete_device(self, device_id: str) -> None:
+    def delete_device(self, device_id: str) -> str:
         """Unpair a device — instant kill for all its tokens (plan B2).
+
+        Returns the unpaired device's ``member_id`` so the caller can prune the
+        person's favorites/user_settings IFF this was their last device (see
+        :meth:`member_device_count`) — otherwise those rows orphan.
 
         The admin cannot be deleted through the API; factory reset is the
         only way the owner identity leaves the hub.
@@ -584,12 +649,14 @@ class AuthEngine:
                 raise UnknownDeviceError("Unknown device")
             if record.get("role") == ROLE_ADMIN:
                 raise UserManagementError("The admin account cannot be unpaired")
+            member_id = record.get("member_id") or device_id
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
             # Their login surface resets too — stale lockouts shouldn't
             # follow a re-pair of the same phone.
             self.throttle.clear(device_id)
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
+        return member_id
 
     def revoke_by_pairing_code(self, code_id: str | None) -> list[str]:
         """Unpair every NON-admin device that enrolled via ``code_id``.

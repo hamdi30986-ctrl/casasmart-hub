@@ -41,7 +41,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .auth_api import authenticate_request, json_body
+from .auth_api import authenticate_request, get_engine, json_body
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .entity_bridge import CommandError, validate_command
 from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
@@ -921,9 +921,16 @@ class CasaSmartFavoritesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
+        # Favorites roam per PERSON: resolve the request's device sub to its
+        # member_id (Phase 5) inside the executor — a legacy device is its own
+        # one-device member, so it falls back to the sub.
+        engine = get_engine(self._hass)
+        sub = claims["sub"]
         try:
             favorites = await self._hass.async_add_executor_job(
-                registry.get_favorites, claims["sub"]
+                lambda: registry.get_favorites(
+                    engine.member_id_for(sub) if engine else sub
+                )
             )
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
@@ -961,12 +968,20 @@ class CasaSmartFavoritesView(_RegistryView):
                 return self.json_message(
                     f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
                 )
+        engine = get_engine(self._hass)
+        sub = claims["sub"]
         try:
             saved = await self._hass.async_add_executor_job(
-                registry.set_favorites, claims["sub"], entity_ids
+                lambda: registry.set_favorites(
+                    engine.member_id_for(sub) if engine else sub, entity_ids
+                )
             )
         except RegistryError as err:
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
+        # Nudge the member's other devices to re-pull (Phase 5). The app
+        # re-fetches favorites + settings on any registry_changed, so under
+        # per-account keying the shared change lands on the sibling phone.
+        self._notify_change("favorites")
         return self.json({"entity_ids": saved})

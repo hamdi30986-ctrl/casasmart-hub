@@ -95,6 +95,10 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             # dispatcher can't keep pushing alarm/lock events to a departed
             # owner's phone (Phase 3).
             data.storage.table("push_tokens").clear()
+            # Every member just left, so their per-person favorites + settings
+            # (member_id-keyed) would orphan — clear them too (Phase 5).
+            data.storage.table("registry_favorites").clear()
+            data.storage.table("user_settings").clear()
             # No admin remains after the wipe, so this mints a fresh ADMIN
             # bootstrap code and returns its plaintext.
             code = pairing.ensure_bootstrap_code()

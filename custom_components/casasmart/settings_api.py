@@ -24,8 +24,8 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .auth_api import authenticate_request, json_body
-from .const import DOMAIN
+from .auth_api import authenticate_request, get_engine, json_body
+from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .user_settings import SettingsError, UserSettingsEngine
 
 if TYPE_CHECKING:
@@ -60,8 +60,12 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         settings = get_user_settings(self._hass)
         if settings is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        # Settings roam per PERSON: resolve sub -> member_id (Phase 5) in the
+        # executor; a legacy device is its own member (falls back to sub).
+        engine = get_engine(self._hass)
+        sub = claims["sub"]
         doc = await self._hass.async_add_executor_job(
-            settings.get, claims["sub"]
+            lambda: settings.get(engine.member_id_for(sub) if engine else sub)
         )
         return self.json(doc)
 
@@ -79,10 +83,17 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
+        engine = get_engine(self._hass)
+        sub = claims["sub"]
         try:
             doc = await self._hass.async_add_executor_job(
-                settings.update, claims["sub"], payload
+                lambda: settings.update(
+                    engine.member_id_for(sub) if engine else sub, payload
+                )
             )
         except SettingsError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        # Nudge the member's other devices (Phase 5) — the app re-pulls its
+        # settings on any registry_changed.
+        self._hass.bus.async_fire(EVENT_REGISTRY_CHANGED, {"kind": "settings"})
         return self.json(doc)
