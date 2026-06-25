@@ -129,6 +129,26 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
     return is_exposed(entity_id) and is_visible(hass, entity_id)
 
 
+def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
+    """True when an entity may be a registry ORGANIZE target — assigned to a
+    room, renamed, reordered, or cleared. Deliberately WEAKER than
+    ``is_served``: the read/feed surface hides ``hidden_by`` entities and
+    uncurated diagnostics, but organizing is a different surface. A device
+    the integration has HIDDEN (e.g. a secondary gang switch with
+    ``hidden_by='integration'``), or a diagnostic row, can still legitimately
+    hold a room assignment and have it edited or cleared. Gating writes on
+    ``is_served`` 404'd those legitimate edits — the device was assignable
+    when first imported, then the integration hid it, and the hub then
+    refused to let the app move or clear it. Requires only that the entity is
+    REAL (a registry entry or a live state) and that its domain is exposed.
+    Reads/feeds keep using ``is_served``."""
+    if not is_exposed(entity_id):
+        return False
+    if er.async_get(hass).async_get(entity_id) is not None:
+        return True
+    return hass.states.get(entity_id) is not None
+
+
 def device_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
     """HA device-registry id for an entity, or None when it has no
     registry entry / no parent device (template/MQTT-yaml entities).
