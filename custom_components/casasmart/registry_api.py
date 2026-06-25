@@ -217,6 +217,18 @@ class CasaSmartRegistryView(_RegistryView):
             )
 
         user_devices = registry.list_user_devices()
+        # Drop phantoms: a grouped record whose every primary is gone from HA
+        # (deleted entities — not assignable) is not a real device, so don't
+        # paint a dead card. The stale record lingers harmlessly — its dead
+        # entities aren't served, so they're absent from the add-list too.
+        user_devices = [
+            device
+            for device in user_devices
+            if any(
+                is_assignable(self._hass, entity_id)
+                for entity_id in device.get("entity_ids", [])
+            )
+        ]
         if scope is not None:
             # Serve a grouped record only when EVERY primary is in the caller's
             # scope. A partial projection (keep in-scope gangs, spread the rest)
