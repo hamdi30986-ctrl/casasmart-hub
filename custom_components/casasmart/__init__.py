@@ -201,7 +201,7 @@ def _open_storage(
     registry.warm_up()  # room/name mirrors loaded — event-loop reads stay pure CPU
     tanks = TankEngine(
         storage.table("tank_devices"),
-        storage.table("tank_readings"),
+        storage.tank_readings(),
     )
     user_settings = UserSettingsEngine(storage.table("user_settings"))
     push = PushTokenStore(storage.table("push_tokens"))

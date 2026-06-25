@@ -51,6 +51,7 @@ from .const import (
     EVENT_ALARM_CHANGED,
     EVENT_AUDIO_CHANGED,
     EVENT_REGISTRY_CHANGED,
+    EVENT_TANK_CHANGED,
     WS_AUTH_TIMEOUT,
     WS_CLOSE_AUTH_EXPIRED,
     WS_CLOSE_AUTH_FAILED,
@@ -107,6 +108,7 @@ class WsConnection:
         self._unsub_registry_changed: Any = None
         self._unsub_alarm_changed: Any = None
         self._unsub_audio_changed: Any = None
+        self._unsub_tank_changed: Any = None
         self._token: str | None = None
         # Claims of the current token (role + room scope) — set on auth.
         self._claims: dict[str, Any] | None = None
@@ -133,6 +135,9 @@ class WsConnection:
         self._unsub_audio_changed = self._hass.bus.async_listen(
             EVENT_AUDIO_CHANGED, self._on_audio_changed
         )
+        self._unsub_tank_changed = self._hass.bus.async_listen(
+            EVENT_TANK_CHANGED, self._on_tank_changed
+        )
         recheck_task = asyncio.create_task(self._token_recheck_loop())
         try:
             await self._receive_loop()
@@ -153,6 +158,9 @@ class WsConnection:
         if self._unsub_audio_changed is not None:
             self._unsub_audio_changed()
             self._unsub_audio_changed = None
+        if self._unsub_tank_changed is not None:
+            self._unsub_tank_changed()
+            self._unsub_tank_changed = None
         for task in (self._sender_task, self._reauth_deadline_task):
             if task is not None:
                 task.cancel()
@@ -354,6 +362,22 @@ class WsConnection:
         kind = event.data.get("kind", "registry")
         try:
             self._send_queue.put_nowait(ws_protocol.frame_registry_changed(kind))
+        except asyncio.QueueFull:
+            _LOGGER.warning("WS client too slow (queue full), disconnecting")
+            self._hass.async_create_task(
+                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
+            )
+
+    @callback
+    def _on_tank_changed(self, event: Event) -> None:
+        """Phase 4: a tank reading landed — nudge the app to re-fetch its
+        calibrated level. Content-free beyond the device id, like the registry
+        nudge; the app's tank GET stays the authorization boundary."""
+        device_id = event.data.get("device_id", "")
+        try:
+            self._send_queue.put_nowait(
+                ws_protocol.frame_tank_changed(device_id)
+            )
         except asyncio.QueueFull:
             _LOGGER.warning("WS client too slow (queue full), disconnecting")
             self._hass.async_create_task(

@@ -71,7 +71,13 @@ class HubStorage:
                     f"Could not enable WAL (journal_mode={journal_mode!r}). "
                     "Is the database on a filesystem that supports it?"
                 )
-            conn.execute("PRAGMA synchronous = NORMAL")  # recommended pairing with WAL
+            # synchronous=FULL: every COMMIT fsyncs the WAL, so a host power cut
+            # can't drop an acknowledged write (a pairing, a registry edit, a
+            # tank reading). NORMAL fsyncs only at checkpoint, which on a
+            # low-write hub can lag far behind. Affordable here because writes
+            # are small + infrequent — the tank readings table turned the one
+            # high-frequency writer into a one-row INSERT, not a 270 KB blob.
+            conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
         except Exception:
             conn.close()
@@ -120,7 +126,11 @@ class HubStorage:
             self._tables[namespace] = KeyValueTable(self, namespace)
         return self._tables[namespace]
 
-    # -- internals (used by KeyValueTable only) -------------------------------
+    def tank_readings(self) -> "TankReadingsTable":
+        """Append-only time-series store for tank readings (one row/reading)."""
+        return TankReadingsTable(self)
+
+    # -- internals (used by the table views only) -----------------------------
 
     @property
     def _connection(self) -> sqlite3.Connection:
@@ -169,7 +179,10 @@ class KeyValueTable(MutableMapping):
     def __setitem__(self, key: str, value: Any) -> None:
         self._check_key(key)
         try:
-            payload = json.dumps(value, ensure_ascii=False)
+            # allow_nan=False: a NaN/Infinity would serialize to a bare
+            # NaN/Infinity token that strict JSON parsers (the app) reject,
+            # poisoning the whole row — reject it at the write instead.
+            payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as err:
             raise TypeError(
                 f"Value for key {key!r} is not JSON-serializable: {err}"
@@ -233,3 +246,71 @@ class KeyValueTable(MutableMapping):
     def _check_key(key: Any) -> None:
         if not isinstance(key, str) or not key:
             raise TypeError(f"Keys must be non-empty strings, got {key!r}")
+
+
+class TankReadingsTable:
+    """Append-only per-row store for tank readings (the ``tank_readings`` table).
+
+    A high-frequency time series doesn't fit the rewrite-the-whole-value
+    KeyValueTable shape — at a 5-minute cadence that re-serialized a ~270 KB
+    blob every reading. Here an ingest is a single-row INSERT and retention is a
+    bounded DELETE. Stays inside the storage layer so callers never touch SQL.
+    """
+
+    def __init__(self, storage: HubStorage) -> None:
+        self._storage = storage
+
+    def append(self, device_id: str, t: int, v: float) -> None:
+        """Record one reading. (device_id, t) is unique — a repeated second
+        replaces rather than doubles the row."""
+        self._storage._execute_write(
+            """
+            INSERT INTO tank_readings (device_id, t, v) VALUES (?, ?, ?)
+            ON CONFLICT (device_id, t) DO UPDATE SET v = excluded.v
+            """,
+            (device_id, int(t), float(v)),
+        )
+
+    def latest_t(self, device_id: str) -> int | None:
+        """The newest reading's timestamp, or None — lets ingest keep t
+        monotonic across a clock step-back (an NTP correction after reboot)."""
+        row = self._storage._execute(
+            "SELECT MAX(t) FROM tank_readings WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def last(self, device_id: str) -> dict[str, Any] | None:
+        """The newest reading as ``{"t":..., "v":...}``, or None."""
+        row = self._storage._execute(
+            "SELECT t, v FROM tank_readings WHERE device_id = ? "
+            "ORDER BY t DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        return {"t": int(row[0]), "v": float(row[1])} if row else None
+
+    def recent(self, device_id: str, since_t: int) -> list[dict[str, Any]]:
+        """Readings at/after ``since_t``, NEWEST first (the app's history shape).
+
+        ORDER BY t makes 'newest first' robust to an out-of-order ingest t."""
+        rows = self._storage._execute(
+            "SELECT t, v FROM tank_readings WHERE device_id = ? AND t >= ? "
+            "ORDER BY t DESC",
+            (device_id, int(since_t)),
+        ).fetchall()
+        return [{"t": int(t), "v": float(v)} for t, v in rows]
+
+    def prune(self, device_id: str, before_t: int) -> int:
+        """Drop readings older than ``before_t`` (age-based retention); returns
+        the count removed. Cheap + indexed — usually 0-1 rows once steady."""
+        cursor = self._storage._execute_write(
+            "DELETE FROM tank_readings WHERE device_id = ? AND t < ?",
+            (device_id, int(before_t)),
+        )
+        return cursor.rowcount
+
+    def delete_device(self, device_id: str) -> None:
+        """Drop all readings for a device (when the device record is deleted)."""
+        self._storage._execute_write(
+            "DELETE FROM tank_readings WHERE device_id = ?", (device_id,)
+        )

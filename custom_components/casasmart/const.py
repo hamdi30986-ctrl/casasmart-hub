@@ -115,6 +115,10 @@ PUSH_RELAY_TIMEOUT_SECONDS = 10
 # each carrying the device id + the relevant levels so an automation can branch.
 EVENT_TANK_LOW = "casasmart_tank_low"
 EVENT_TANK_OFFLINE = "casasmart_tank_offline"
+# Fired on every successful tank reading ingest so the WS layer can nudge
+# connected apps to re-fetch the calibrated level in real time (Phase 4),
+# mirroring EVENT_REGISTRY_CHANGED. Carries only the device id (content-free).
+EVENT_TANK_CHANGED = "casasmart_tank_changed"
 # Carried in the plaintext push payload's ``data.type`` so the app localizes and
 # routes the notification (mirrors PUSH_TYPE_SECURITY / PUSH_TYPE_LOCK).
 PUSH_TYPE_TANK_LOW = "tank_low"

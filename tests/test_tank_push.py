@@ -132,7 +132,7 @@ class TankPushTestCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.storage.close)
         self.engine = TankEngine(
             self.storage.table("tank_devices"),
-            self.storage.table("tank_readings"),
+            self.storage.tank_readings(),
         )
         self.hass = FakeHass()
         self.notifier = FakeNotifier()
@@ -156,10 +156,7 @@ class TankPushTestCase(unittest.IsolatedAsyncioTestCase):
 
     def _put_reading(self, device_id: str, t: float, voltage: float) -> None:
         """Stamp a reading at an exact time so freshness is deterministic."""
-        table = self.storage.table("tank_readings")
-        blob = table.get(device_id) or {"entries": []}
-        blob["entries"].append({"t": int(t), "v": float(voltage)})
-        table[device_id] = blob
+        self.storage.tank_readings().append(device_id, int(t), float(voltage))
 
     def _fired(self, event_type: str) -> list:
         return [data for evt, data in self.hass.bus.fired if evt == event_type]
