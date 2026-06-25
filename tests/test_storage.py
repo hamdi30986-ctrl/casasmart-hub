@@ -26,7 +26,11 @@ from storage import (  # noqa: E402
     MigrationError,
     StorageError,
 )
-from storage.migrations import MIGRATIONS, get_user_version  # noqa: E402
+from storage.migrations import (  # noqa: E402
+    MIGRATIONS,
+    get_user_version,
+    run_migrations,
+)
 
 
 class StorageTestCase(unittest.TestCase):
@@ -172,8 +176,36 @@ class TestMigrations(StorageTestCase):
         storage.close()
         storage.open()
         storage.close()
-        # only the first open migrated (v0 -> v1), so exactly one backup
+        # only the first open migrated, so exactly one backup
         self.assertEqual(len(list(self.backup_dir.glob("*.db"))), 1)
+
+    def test_v2_backfills_tank_readings_from_v1_blob(self):
+        # Stand the db up at v1 only, then seed a legacy tank-readings blob.
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:1])
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO kv (namespace, key, value) VALUES (?, ?, ?)",
+                (
+                    "tank_readings",
+                    "dev-1",
+                    json.dumps(
+                        {"entries": [{"t": 100, "v": 1.5}, {"t": 200, "v": 1.7}]}
+                    ),
+                ),
+            )
+            conn.commit()
+        # Migrate to latest: v2 backfills the rows and drops the old blob.
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS)
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT t, v FROM tank_readings WHERE device_id='dev-1' "
+                "ORDER BY t"
+            ).fetchall()
+            self.assertEqual(rows, [(100, 1.5), (200, 1.7)])
+            leftover = conn.execute(
+                "SELECT COUNT(*) FROM kv WHERE namespace='tank_readings'"
+            ).fetchone()[0]
+            self.assertEqual(leftover, 0)
 
     def test_failed_migration_restores_database(self):
         # v1 schema with data in it
@@ -186,14 +218,17 @@ class TestMigrations(StorageTestCase):
             conn.execute("CREATE TABLE half_done (x)")
             raise RuntimeError("boom mid-migration")
 
-        broken = MIGRATIONS + (Migration(2, "intentionally broken", bad_migration),)
+        broken = MIGRATIONS + (
+            Migration(LATEST_VERSION + 1, "intentionally broken", bad_migration),
+        )
         storage2 = HubStorage(self.db_path, backup_dir=self.backup_dir)
         with self.assertRaises(MigrationError):
             storage2.open(migrations=broken)
 
-        # database restored: still v1, data intact, no half-applied table
+        # database restored: still at the latest shipped version, data intact,
+        # no half-applied table
         with sqlite3.connect(self.db_path) as conn:
-            self.assertEqual(get_user_version(conn), 1)
+            self.assertEqual(get_user_version(conn), LATEST_VERSION)
             tables = {
                 r[0]
                 for r in conn.execute(

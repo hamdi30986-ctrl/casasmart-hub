@@ -160,6 +160,13 @@ def frame_audio_changed() -> dict[str, Any]:
     return {"type": "audio_changed"}
 
 
+def frame_tank_changed(device_id: str) -> dict[str, Any]:
+    """A tank reading landed (Phase 4 ingest). Carries only the device id —
+    content-free like ``registry_changed``; the app re-fetches the calibrated
+    level through its tank GET, so the push leaks nothing REST would hide."""
+    return {"type": "tank_changed", "device_id": device_id}
+
+
 def frame_pong() -> dict[str, Any]:
     """Reply to a client ping."""
     return {"type": "pong"}

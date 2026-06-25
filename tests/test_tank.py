@@ -39,7 +39,7 @@ class TankTestCase(unittest.TestCase):
         self.addCleanup(self.storage.close)
         self.engine = TankEngine(
             self.storage.table("tank_devices"),
-            self.storage.table("tank_readings"),
+            self.storage.tank_readings(),
         )
 
 
@@ -114,10 +114,41 @@ class IngestTests(TankTestCase):
         self.engine.ingest(token, 1.5)
         fresh = TankEngine(
             self.storage.table("tank_devices"),
-            self.storage.table("tank_readings"),
+            self.storage.tank_readings(),
         )
         self.assertEqual(fresh.ingest(token, 1.6), "dev-1")
         self.assertEqual(len(fresh.recent_readings("dev-1")), 2)
+
+    def test_ingest_writes_one_row_per_reading_not_a_blob(self):
+        _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        for v in (1.0, 1.1, 1.2):
+            self.engine.ingest(token, v)
+        # Stored as discrete rows in the readings table, NOT a rewritten blob —
+        # the whole point of the v2 migration. Guards against a regression that
+        # reintroduces the per-reading full-array rewrite (the SD-card killer).
+        self.assertEqual(
+            len(self.storage.tank_readings().recent("dev-1", 0)), 3
+        )
+        self.assertEqual(len(self.storage.table("tank_readings")), 0)
+
+    def test_ingest_rejects_nonfinite_voltage(self):
+        _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(TankError):
+                self.engine.ingest(token, bad)
+        self.assertIsNone(self.engine.last_reading("dev-1"))
+
+    def test_ingest_keeps_t_monotonic_across_clock_stepback(self):
+        _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        now = int(time.time())
+        # Seed a reading ahead of the wall clock, then ingest — mimics an NTP
+        # step-back after a reboot: t must not collide or go backwards.
+        self.storage.tank_readings().append("dev-1", now + 100, 1.0)
+        self.engine.ingest(token, 1.1)
+        ts = [e["t"] for e in self.engine.recent_readings("dev-1", days=1)]
+        self.assertEqual(ts, sorted(ts, reverse=True))  # newest-first, ordered
+        self.assertEqual(len(set(ts)), len(ts))  # no duplicate timestamps
+        self.assertGreater(ts[0], now + 100)
 
     def test_bad_tokens_and_values(self):
         self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
@@ -134,33 +165,34 @@ class IngestTests(TankTestCase):
             self.engine.ingest(token, True)  # bool is not a voltage
 
     def test_days_filter(self):
-        _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
-        self.engine.ingest(token, 1.5)
-        # Backdate the entry beyond a 1-day window, keep it inside retention.
-        table = self.storage.table("tank_readings")
-        blob = table["dev-1"]
-        blob["entries"][0]["t"] = int(time.time()) - 2 * 24 * 3600
-        table["dev-1"] = blob
-        self.assertEqual(self.engine.recent_readings("dev-1", days=1), [])
-        self.assertEqual(len(self.engine.recent_readings("dev-1", days=7)), 1)
+        self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        # One reading 2 days old + one fresh, straddling a 1-day window.
+        readings = self.storage.tank_readings()
+        now = int(time.time())
+        readings.append("dev-1", now - 2 * 24 * 3600, 1.5)
+        readings.append("dev-1", now, 1.7)
+        self.assertEqual(len(self.engine.recent_readings("dev-1", days=1)), 1)
+        self.assertEqual(len(self.engine.recent_readings("dev-1", days=7)), 2)
         with self.assertRaises(TankError):
             self.engine.recent_readings("dev-1", days=0)
         with self.assertRaises(TankError):
             self.engine.recent_readings("dev-1", days="7")
 
-    def test_prune_caps_and_ages_out(self):
+    def test_prune_ages_out_old_readings(self):
         _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
-        table = self.storage.table("tank_readings")
+        readings = self.storage.tank_readings()
         now = int(time.time())
-        # 9100 in-retention entries + 5 ancient ones.
-        entries = [{"t": now - 40 * 24 * 3600, "v": 0.1} for _ in range(5)]
-        entries += [{"t": now - index, "v": 1.0} for index in range(9100, 0, -1)]
-        table["dev-1"] = {"entries": entries}
-        self.engine.ingest(token, 2.0)
-        stored = table["dev-1"]["entries"]
-        self.assertEqual(len(stored), 9000)  # cap held
-        self.assertEqual(stored[-1]["v"], 2.0)  # newest survived
-        self.assertTrue(all(e["t"] >= now - 32 * 24 * 3600 for e in stored))
+        # 5 readings older than the 31-day retention + 3 within it.
+        for index in range(5):
+            readings.append("dev-1", now - 40 * 24 * 3600 - index, 0.1)
+        for index in range(3):
+            readings.append("dev-1", now - (index + 1) * 60, 1.0)
+        self.engine.ingest(token, 2.0)  # an ingest runs the age-based prune
+        kept = self.engine.recent_readings("dev-1", days=60)
+        # The 5 ancient (beyond retention) are pruned; the 3 recent + the
+        # just-ingested reading survive, newest (2.0) first.
+        self.assertEqual(len(kept), 4)
+        self.assertEqual(kept[0]["v"], 2.0)
 
 
 class ScriptBuilderTests(unittest.TestCase):
@@ -321,7 +353,7 @@ class CalibrationStorageTests(TankTestCase):
         )
         fresh = TankEngine(
             self.storage.table("tank_devices"),
-            self.storage.table("tank_readings"),
+            self.storage.tank_readings(),
         )
         record = fresh.get_device("dev-1")
         self.assertEqual(record["calibration_voltage"], 2.0)
@@ -380,22 +412,6 @@ class StatusTests(TankTestCase):
             max_height=4.0,
             low_percent=20,
         )
-
-    def test_get_current_percent_no_reading(self):
-        self.assertIsNone(self.engine.get_current_percent("dev-1"))
-
-    def test_get_current_percent_with_reading(self):
-        self.engine.ingest(self.token, 2.0)  # -> 50%
-        self.assertAlmostEqual(self.engine.get_current_percent("dev-1"), 50.0)
-
-    def test_get_current_percent_uncalibrated(self):
-        _, token2 = self.engine.mint_device("dev-2", "Tank2", "10.0.0.6")
-        self.engine.ingest(token2, 1.5)
-        self.assertIsNone(self.engine.get_current_percent("dev-2"))
-
-    def test_get_current_percent_unknown_device(self):
-        with self.assertRaises(UnknownTankError):
-            self.engine.get_current_percent("nope")
 
     def test_status_below_threshold_is_low(self):
         self.engine.ingest(self.token, 0.4)  # 10% < 20

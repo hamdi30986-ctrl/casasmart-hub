@@ -14,6 +14,7 @@ Rules:
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sqlite3
@@ -51,9 +52,55 @@ def _migration_v1(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    """Append-only tank readings.
+
+    Tank telemetry is a high-frequency time series; the v1 shape stored it as a
+    single per-device JSON blob in ``kv`` that was rewritten WHOLE on every
+    5-minute reading (~270 KB x 288/day = tens of MB/day/device of flash wear).
+    Move it to a real row-per-reading table so an ingest is one INSERT and
+    retention is a bounded DELETE. Carry any existing history forward, then drop
+    the old blob rows.
+    """
+    conn.execute(
+        """
+        CREATE TABLE tank_readings (
+            device_id TEXT NOT NULL,
+            t         INTEGER NOT NULL,
+            v         REAL NOT NULL,
+            PRIMARY KEY (device_id, t)
+        )
+        """
+    )
+    # Backfill from the v1 kv blob (namespace 'tank_readings', one
+    # {"entries": [{"t":.., "v":..}, ...]} row per device), then remove it.
+    for device_id, blob in conn.execute(
+        "SELECT key, value FROM kv WHERE namespace = 'tank_readings'"
+    ).fetchall():
+        try:
+            entries = (json.loads(blob) or {}).get("entries", [])
+        except (TypeError, ValueError):
+            continue
+        for entry in entries:
+            try:
+                t = int(entry["t"])
+                v = float(entry["v"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if v != v or v in (float("inf"), float("-inf")):
+                continue  # drop any NaN/Inf the v1 path let through
+            conn.execute(
+                "INSERT OR IGNORE INTO tank_readings (device_id, t, v) "
+                "VALUES (?, ?, ?)",
+                (device_id, t, v),
+            )
+    conn.execute("DELETE FROM kv WHERE namespace = 'tank_readings'")
+
+
 #: Ordered list of all known migrations. Append-only — never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
+    Migration(2, "append-only tank_readings table", _migration_v2),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)

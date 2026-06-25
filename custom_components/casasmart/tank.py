@@ -26,8 +26,8 @@ unit-tests on a temp SQLite file like ``registry.py``/``auth_engine.py``):
   the provisioner uploads the script in append-mode chunks.
 
 Storage-touching methods are synchronous (call via executor). Readings
-are one JSON blob per device, bounded by count and age — at the script's
-5-minute cadence the cap holds ~31 days of 24/7 data.
+are an append-only per-row time series (one INSERT per reading) pruned by
+age — at the script's 5-minute cadence that holds ~31 days of 24/7 data.
 """
 
 from __future__ import annotations
@@ -62,8 +62,7 @@ SCRIPT_CHUNK_SIZE = 1024
 TANK_INGEST_URL_CONFIG_KEY = "tank_ingest_url"
 
 _NAME_MAX = 64
-# 5-minute cadence -> 288/day; 9000 ≈ 31 days of 24/7 readings.
-_MAX_READINGS = 9000
+# 5-minute cadence -> 288/day; ~31 days of 24/7 readings, retained by age.
 _RETENTION_SECONDS = 31 * 24 * 3600
 
 # -- Calibration (B8 Piece 4b) -------------------------------------------------
@@ -223,12 +222,14 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
 
 
 class TankEngine:
-    """Tank device records + bounded readings log over storage tables."""
+    """Tank device records (kv) + an append-only readings time series."""
 
-    def __init__(self, devices_table: Any, readings_table: Any) -> None:
+    def __init__(self, devices_table: Any, readings: Any) -> None:
         self._devices = devices_table
-        self._readings = readings_table
-        # Serializes storage mutations (held across SQLite I/O), same
+        # readings: a storage TankReadingsTable (append/recent/last/prune) —
+        # one row per reading, NOT a rewritten-whole JSON blob.
+        self._readings = readings
+        # Serializes device-record mutations (held across SQLite I/O), same
         # posture as RegistryEngine.
         self._lock = threading.RLock()
 
@@ -295,7 +296,7 @@ class TankEngine:
                 del self._devices[device_id]
             except KeyError:
                 raise UnknownTankError("Unknown tank device") from None
-            self._readings.pop(device_id, None)
+            self._readings.delete_device(device_id)
         _LOGGER.info("Tank %s deleted", device_id)
 
     # -- calibration (storage — call via executor) -----------------------------
@@ -379,21 +380,6 @@ class TankEngine:
             height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
         return _compute_percent(float(voltage), cal_v, cal_d, height)
 
-    def get_current_percent(self, device_id: str) -> float | None:
-        """The latest reading run through ``voltage_to_percent``.
-
-        ``None`` when the tank has no reading yet or isn't calibrated; raises
-        ``UnknownTankError`` for an unknown device.
-        """
-        with self._lock:
-            if device_id not in self._devices:
-                raise UnknownTankError("Unknown tank device")
-            entries = (self._readings.get(device_id) or {}).get("entries", [])
-        last = entries[-1] if entries else None
-        if last is None:
-            return None
-        return self.voltage_to_percent(device_id, last["v"])
-
     def status(self, device_id: str) -> dict[str, Any]:
         """Live status for the app's GET status endpoint + the push monitor.
 
@@ -409,8 +395,7 @@ class TankEngine:
             low_percent = int(
                 record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
             )
-            entries = (self._readings.get(device_id) or {}).get("entries", [])
-        last = entries[-1] if entries else None
+            last = self._readings.last(device_id)
         voltage = float(last["v"]) if last else None
         percent = (
             self.voltage_to_percent(device_id, voltage)
@@ -439,6 +424,11 @@ class TankEngine:
             raise UnknownTokenError
         if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
             raise TankError("voltage must be a number")
+        voltage = float(voltage)
+        if voltage != voltage or voltage in (float("inf"), float("-inf")):
+            # Reject non-finite at the trust boundary — a NaN/Inf would
+            # serialize to invalid JSON and poison every later read.
+            raise TankError("voltage must be a finite number")
         token_hash = _hash_token(token)
         with self._lock:
             device_id = None
@@ -450,10 +440,14 @@ class TankEngine:
                     break
             if device_id is None:
                 raise UnknownTokenError
-            entries = (self._readings.get(device_id) or {}).get("entries", [])
-            entries.append({"t": int(time.time()), "v": float(voltage)})
-            self._prune(entries)
-            self._readings[device_id] = {"entries": entries}
+            # Keep t strictly increasing even across a clock step-back (an NTP
+            # correction right after a power-loss reboot), so history stays
+            # ordered and the (device_id, t) key never collides.
+            now = int(time.time())
+            last_t = self._readings.latest_t(device_id)
+            t = now if last_t is None or now > last_t else last_t + 1
+            self._readings.append(device_id, t, voltage)
+            self._readings.prune(device_id, now - _RETENTION_SECONDS)
         return device_id
 
     def recent_readings(self, device_id: str, days: Any = 7) -> list[dict[str, Any]]:
@@ -474,29 +468,27 @@ class TankEngine:
             cal_v = record.get("calibration_voltage", 0.0) or 0.0
             cal_d = record.get("calibration_depth", 0.0) or 0.0
             height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
-            entries = (self._readings.get(device_id) or {}).get("entries", [])
-        cutoff = time.time() - days * 24 * 3600
+            cutoff = int(time.time()) - days * 24 * 3600
+            entries = self._readings.recent(device_id, cutoff)
+        # recent() returns newest-first, already windowed at the cutoff.
         return [
             {
                 "t": entry["t"],
                 "v": entry["v"],
                 "p": _compute_percent(entry["v"], cal_v, cal_d, height),
             }
-            for entry in reversed(entries)
-            if entry["t"] >= cutoff
+            for entry in entries
         ]
 
     def last_reading(self, device_id: str) -> dict[str, Any] | None:
         """The newest reading, or None (also None for unknown devices —
         the provision wait loop polls this before the record is hot)."""
-        with self._lock:
-            entries = (self._readings.get(device_id) or {}).get("entries", [])
-        return entries[-1] if entries else None
+        return self._readings.last(device_id)
 
     # -- internals ---------------------------------------------------------------
 
     def _public(self, device_id: str, record: dict[str, Any]) -> dict[str, Any]:
-        entries = (self._readings.get(device_id) or {}).get("entries", [])
+        last = self._readings.last(device_id)
         cal_v = record.get("calibration_voltage", 0.0) or 0.0
         cal_d = record.get("calibration_depth", 0.0) or 0.0
         return {
@@ -516,12 +508,5 @@ class TankEngine:
                 record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
             ),
             "is_calibrated": cal_v > 0 and cal_d > 0,
-            "last_reading": entries[-1] if entries else None,
+            "last_reading": last,
         }
-
-    @staticmethod
-    def _prune(entries: list[dict[str, Any]]) -> None:
-        cutoff = time.time() - _RETENTION_SECONDS
-        entries[:] = [entry for entry in entries if entry.get("t", 0) >= cutoff]
-        if len(entries) > _MAX_READINGS:
-            del entries[: len(entries) - _MAX_READINGS]

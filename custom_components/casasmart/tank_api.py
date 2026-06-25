@@ -47,7 +47,7 @@ from .auth_api import (
     is_lan_request,
     json_body,
 )
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_TANK_CHANGED
 from .tank import (
     TANK_INGEST_URL_CONFIG_KEY,
     TANK_SCRIPT_NAME,
@@ -446,6 +446,9 @@ class CasaSmartTankReadingView(_TankView):
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         _INGEST_THROTTLE.clear(source)
+        # Nudge connected apps to re-fetch this tank's calibrated level in real
+        # time (Phase 4) — mirrors the registry/alarm/audio nudge pattern.
+        self._hass.bus.async_fire(EVENT_TANK_CHANGED, {"device_id": device_id})
         return self.json({"ok": True, "device_id": device_id})
 
 

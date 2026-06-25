@@ -96,6 +96,14 @@ class JsonConfigStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_name, self._path)
+            # fsync the directory so the rename itself is durable: without it a
+            # power cut just after replace() can lose the rename — and with it
+            # the permanent pairing/recovery code hashes this file holds.
+            dir_fd = os.open(self._path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except OSError as err:
             try:
                 os.unlink(tmp_name)
