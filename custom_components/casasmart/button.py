@@ -91,6 +91,10 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         def _regenerate() -> dict:
             wiped_devices = auth.wipe_all_devices()
             wiped_codes = pairing.clear_all_codes()
+            # The unpaired phones' push tokens are now dead — drop them so the
+            # dispatcher can't keep pushing alarm/lock events to a departed
+            # owner's phone (Phase 3).
+            data.storage.table("push_tokens").clear()
             # No admin remains after the wipe, so this mints a fresh ADMIN
             # bootstrap code and returns its plaintext.
             code = pairing.ensure_bootstrap_code()
@@ -151,14 +155,16 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
 
 
 class CasaSmartFactoryResetButton(ButtonEntity):
-    """Nuclear reset (B3 tier 3) — wipes the CasaSmart APP layer only.
+    """Nuclear reset (B3 tier 3 / ownership transfer) — wipes the app layer.
 
-    Unpaired phones, pairing codes, recovery codes, favorites, per-user settings
-    and push tokens are cleared; HOUSE data (rooms, scenes, tanks, the HA
-    devices/automations/Zigbee mesh) survives. The PERMANENT codes survive too —
-    their hashes live in hub_config, so after the reset the SAME printed sticker
-    and metal card re-onboard the owner. Operator-only: reachable through Home
-    Assistant (admin login / on-site / Tailscale), never the CasaSmart API.
+    Cleared: unpaired phones, pairing + recovery codes, favorites, per-user
+    settings, push tokens, the alarm log + armed state, and the owner's device
+    LABELS (custom names/icons, gang names, per-entity display names). The
+    printed admin sticker + metal recovery card are ROTATED — fresh codes are
+    surfaced after the reset and the OLD printed codes are dead. KEPT: house
+    data (rooms, scenes, tanks, HA devices/automations/Zigbee mesh) and the
+    device STRUCTURE (gang typing / wiring). Operator-only: reachable through
+    Home Assistant (admin login / on-site / Tailscale), never the CasaSmart API.
     """
 
     _attr_has_entity_name = False
@@ -188,11 +194,12 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         _LOGGER.warning("CasaSmart factory reset requested via button")
         persistent_notification.async_create(
             self._hass,
-            "Factory reset triggered — the CasaSmart app layer (paired phones, "
-            "codes, favorites, settings, push tokens) is being wiped. House data "
-            "(rooms, scenes, tanks) is kept. Re-onboard the owner with the "
-            "**printed sticker** code on this network; the metal recovery card "
-            "still works too.",
+            "Factory reset triggered — the app layer (paired phones, codes, "
+            "favorites, settings, push tokens, alarm log/state) is being wiped "
+            "and the previous owner's device labels scrubbed. House data (rooms, "
+            "scenes, tanks) and device wiring are kept. FRESH admin + recovery "
+            "codes will be posted here after the reset — the OLD printed sticker "
+            "and metal card are now dead; re-sticker the hub with the new code.",
             title="CasaSmart Hub — factory reset",
             notification_id=f"{DOMAIN}_factory_reset",
         )
