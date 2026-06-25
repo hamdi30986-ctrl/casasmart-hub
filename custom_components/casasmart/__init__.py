@@ -664,10 +664,27 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("user_settings").clear()
             # B8: push tokens are phone-layer data — wipe on reset.
             runtime_data.storage.table("push_tokens").clear()
+            # Phase 3: the previous owner's alarm LOG and armed STATE must not
+            # carry to a new owner — clear both (the reload re-warms the engine
+            # to disarmed). Zones + settings are HOUSE config and survive.
+            runtime_data.storage.table("alarm_history").clear()
+            runtime_data.storage.table("alarm_state").clear()
+            # Phase 3: grouped device STRUCTURE is HOUSE data (gang typing /
+            # wiring) and survives, but the owner's LABELS are scrubbed —
+            # device custom names/icons, gang names, per-entity display names.
+            runtime_data.registry.scrub_owner_labels()
+            # Phase 3: rotate the printed credentials. Deleting the persisted
+            # hashes makes the reload re-mint AND re-surface a fresh admin
+            # sticker code + owner recovery code, so the previous owner's
+            # printed card/sticker can no longer re-claim the hub.
+            runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
+            runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
-            "CasaSmart factory reset: app layer wiped (devices, pairing, recovery)"
+            "CasaSmart factory reset: app layer wiped (devices, pairing, "
+            "recovery, favorites, settings, push, alarm log/state), owner "
+            "device labels scrubbed, printed codes rotated"
         )
         # Reload rebuilds the engine caches from the now-empty tables and
         # re-mints the bootstrap pairing code for re-onboarding.
