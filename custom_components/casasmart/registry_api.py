@@ -993,11 +993,27 @@ class CasaSmartFavoritesView(_RegistryView):
                 )
         engine = get_engine(self._hass)
         sub = claims["sub"]
+
+        def _load_mid_stored() -> tuple[str, list[str]]:
+            mid = engine.member_id_for(sub) if engine else sub
+            return mid, registry.get_favorites(mid)
+
+        try:
+            member_id, stored = await self._hass.async_add_executor_job(
+                _load_mid_stored
+            )
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        # A room-scoped caller only SEES + submits its in-scope slice (the GET
+        # filters out-of-scope). A plain replace would silently delete the
+        # member's favorites in rooms it can't see (Phase 7) — preserve those,
+        # appended after the caller's now-authoritative in-scope list.
+        out_of_scope = [
+            eid for eid in stored if not in_scope(self._hass, eid, scope)
+        ]
         try:
             saved = await self._hass.async_add_executor_job(
-                lambda: registry.set_favorites(
-                    engine.member_id_for(sub) if engine else sub, entity_ids
-                )
+                registry.set_favorites, member_id, entity_ids + out_of_scope
             )
         except RegistryError as err:
             return self._error_response(err)
@@ -1007,4 +1023,11 @@ class CasaSmartFavoritesView(_RegistryView):
         # re-fetches favorites + settings on any registry_changed, so under
         # per-account keying the shared change lands on the sibling phone.
         self._notify_change("favorites")
-        return self.json({"entity_ids": saved})
+        # Echo only the caller's in-scope view — never leak out-of-scope ids.
+        return self.json(
+            {
+                "entity_ids": [
+                    eid for eid in saved if in_scope(self._hass, eid, scope)
+                ]
+            }
+        )

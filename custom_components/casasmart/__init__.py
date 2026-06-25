@@ -669,6 +669,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # to disarmed). Zones + settings are HOUSE config and survive.
             runtime_data.storage.table("alarm_history").clear()
             runtime_data.storage.table("alarm_state").clear()
+            # Phase 7: the previous owner's AUDIO data is personal/credential —
+            # athan GPS coordinates, named speakers, the broker password + PA
+            # api-key — and must NOT survive a handover. Clear both audio tables;
+            # the new owner re-provisions speakers + reconfigures the broker.
+            runtime_data.storage.table("audio_config").clear()
+            runtime_data.storage.table("audio_speakers").clear()
             # Phase 3: grouped device STRUCTURE is HOUSE data (gang typing /
             # wiring) and survives, but the owner's LABELS are scrubbed —
             # device custom names/icons, gang names, per-entity display names.
@@ -683,8 +689,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
             "CasaSmart factory reset: app layer wiped (devices, pairing, "
-            "recovery, favorites, settings, push, alarm log/state), owner "
-            "device labels scrubbed, printed codes rotated"
+            "recovery, favorites, settings, push, alarm log/state, audio "
+            "config + speakers), owner device labels scrubbed, printed codes "
+            "rotated"
         )
         # Reload rebuilds the engine caches from the now-empty tables and
         # re-mints the bootstrap pairing code for re-onboarding.
