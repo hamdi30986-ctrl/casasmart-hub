@@ -30,6 +30,7 @@ def make_engine(storage: HubStorage) -> RegistryEngine:
         storage.table("registry_devices"),
         storage.table("registry_scenes"),
         storage.table("registry_favorites"),
+        storage.table("registry_user_devices"),
     )
     engine.warm_up()
     return engine
@@ -131,6 +132,73 @@ class AssignmentTests(RegistryTestCase):
             self.engine.assign_device("light.sofa", room_id="room-nope")
         with self.assertRaises(UnknownItemError):
             self.engine.remove_assignment("light.never_assigned")
+
+
+class UserDeviceTests(RegistryTestCase):
+    def test_upsert_get_list(self):
+        dev = self.engine.upsert_user_device(
+            "dev-1",
+            entity_ids=["switch.gang_left", "switch.gang_right"],
+            gang_types={"left": "light", "right": "switch"},
+            gang_names={"left": "Lounge"},
+            config_entity_ids=["switch.gang_led"],
+            device_type="wallSwitch",
+            custom_name="Lounge wall",
+        )
+        self.assertEqual(dev["ha_device_id"], "dev-1")
+        self.assertEqual(dev["gang_types"], {"left": "light", "right": "switch"})
+        self.assertEqual(
+            self.engine.get_user_device("dev-1")["custom_name"], "Lounge wall"
+        )
+        self.assertEqual(len(self.engine.list_user_devices()), 1)
+
+    def test_grabbed_includes_primaries_and_config(self):
+        self.engine.upsert_user_device(
+            "dev-1", entity_ids=["switch.a"], config_entity_ids=["switch.a_led"]
+        )
+        self.assertEqual(
+            self.engine.grabbed_entity_ids(), {"switch.a", "switch.a_led"}
+        )
+
+    def test_patch_leaves_unspecified_fields(self):
+        self.engine.upsert_user_device(
+            "dev-1",
+            entity_ids=["switch.a"],
+            custom_name="Old",
+            device_type="wallSwitch",
+        )
+        patched = self.engine.patch_user_device("dev-1", custom_name="New")
+        self.assertEqual(patched["custom_name"], "New")
+        self.assertEqual(patched["device_type"], "wallSwitch")  # untouched
+        self.assertEqual(patched["entity_ids"], ["switch.a"])  # untouched
+
+    def test_delete_ungrabs(self):
+        self.engine.upsert_user_device("dev-1", entity_ids=["switch.a"])
+        self.engine.delete_user_device("dev-1")
+        self.assertEqual(self.engine.grabbed_entity_ids(), set())
+        with self.assertRaises(UnknownItemError):
+            self.engine.get_user_device("dev-1")
+
+    def test_survives_reload(self):
+        self.engine.upsert_user_device(
+            "dev-1", entity_ids=["switch.a"], gang_types={"left": "fan"}
+        )
+        reloaded = make_engine(self.storage)
+        self.assertEqual(
+            reloaded.get_user_device("dev-1")["gang_types"], {"left": "fan"}
+        )
+
+    def test_validation(self):
+        with self.assertRaises(RegistryError):
+            self.engine.upsert_user_device("dev-1", entity_ids=["not-an-entity"])
+        with self.assertRaises(RegistryError):
+            self.engine.upsert_user_device("", entity_ids=["switch.a"])
+        with self.assertRaises(RegistryError):
+            self.engine.upsert_user_device(
+                "dev-1", entity_ids=["switch.a"], gang_types={"left": 5}
+            )
+        with self.assertRaises(UnknownItemError):
+            self.engine.patch_user_device("nope", custom_name="x")
 
 
 class SceneTests(RegistryTestCase):

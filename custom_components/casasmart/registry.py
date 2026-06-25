@@ -51,6 +51,7 @@ _NAME_MAX = 64
 _ICON_MAX = 64
 _MAX_FAVORITES = 200
 _MAX_SCENE_ENTITIES = 50
+_MAX_DEVICE_ENTITIES = 100
 
 
 class RegistryError(Exception):
@@ -115,6 +116,43 @@ def _clean_favorite(favorite: Any) -> bool:
     return favorite
 
 
+def _clean_entity_ids(
+    value: Any, what: str = "entity_ids", max_count: int = _MAX_DEVICE_ENTITIES
+) -> list[str]:
+    """A list of entity_id strings — deduped, order preserved, capped."""
+    if not isinstance(value, list) or any(
+        not isinstance(eid, str) or "." not in eid for eid in value
+    ):
+        raise RegistryError(f"{what} must be a list of entity_id strings")
+    if len(value) > max_count:
+        raise RegistryError(f"At most {max_count} {what}")
+    return list(dict.fromkeys(value))  # preserve order, drop dupes
+
+
+def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
+    """A {gang-suffix -> value} map (gang_types / gang_names); None -> {}."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+    ):
+        raise RegistryError(f"{what} must be a map of strings to strings")
+    return dict(value)
+
+
+def _clean_optional_name(name: Any) -> str | None:
+    """A nullable display name — None passes through, else validated."""
+    return None if name is None else _clean_name(name, "Device")
+
+
+def _clean_device_type(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > _NAME_MAX:
+        raise RegistryError("device_type must be a string")
+    return value
+
+
 def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
     """Validate a scene's command list against the entity-bridge whitelist."""
     if not isinstance(entities, list) or not entities:
@@ -145,7 +183,8 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
 
 
 class RegistryEngine:
-    """Floors, rooms, device assignments, scenes, per-user favorites."""
+    """Floors, rooms, device assignments, grouped user-devices, scenes,
+    per-user favorites."""
 
     def __init__(
         self,
@@ -154,12 +193,14 @@ class RegistryEngine:
         devices_table: Any,
         scenes_table: Any,
         favorites_table: Any,
+        user_devices_table: Any,
     ) -> None:
         self._floors = floors_table
         self._rooms = rooms_table
         self._devices = devices_table
         self._scenes = scenes_table
         self._favorites = favorites_table
+        self._user_devices = user_devices_table
         # Serializes storage mutations (held across SQLite I/O).
         self._lock = threading.RLock()
         # Guards ONLY the in-memory mirrors below — held for dict ops,
@@ -499,16 +540,121 @@ class RegistryEngine:
         """Replace the user's favorites list (order is meaningful).
         Stale rows for unpaired devices are harmless and die with the
         app-layer wipe (factory reset clears this table)."""
-        if not isinstance(entity_ids, list) or any(
-            not isinstance(eid, str) or "." not in eid for eid in entity_ids
-        ):
-            raise RegistryError("entity_ids must be a list of entity_id strings")
-        if len(entity_ids) > _MAX_FAVORITES:
-            raise RegistryError(f"At most {_MAX_FAVORITES} favorites")
-        deduped = list(dict.fromkeys(entity_ids))  # preserve order, drop dupes
+        deduped = _clean_entity_ids(entity_ids, "favorites", _MAX_FAVORITES)
         with self._lock:
             self._favorites[user_device_id] = {"entity_ids": deduped}
         return deduped
+
+    # -- grouped user-devices (storage — call via executor) --------------------
+    # The hub-side source of truth for a physical device's STRUCTURE: which
+    # entities were grabbed, the per-gang type (light/switch/fan), gang names,
+    # the config entities (the device's Settings sheet drives them), the device
+    # type, and custom name/icon. Room stays per-entity (assign_device), so
+    # these records carry no room. "Grabbed" = every entity referenced here, so
+    # the add-devices list is the served set MINUS grabbed_entity_ids().
+
+    def list_user_devices(self) -> list[dict[str, Any]]:
+        return [
+            {"ha_device_id": device_id, **record}
+            for device_id, record in self._user_devices.items()
+        ]
+
+    def get_user_device(self, ha_device_id: str) -> dict[str, Any]:
+        record = self._user_devices.get(ha_device_id)
+        if record is None:
+            raise UnknownItemError("Unknown device")
+        return {"ha_device_id": ha_device_id, **record}
+
+    def upsert_user_device(
+        self,
+        ha_device_id: Any,
+        *,
+        entity_ids: Any,
+        gang_types: Any = None,
+        gang_names: Any = None,
+        config_entity_ids: Any = None,
+        device_type: Any = None,
+        custom_name: Any = None,
+        custom_icon: Any = None,
+    ) -> dict[str, Any]:
+        """Create or fully replace a grouped-device record (import / re-import)."""
+        if not isinstance(ha_device_id, str) or not ha_device_id.strip():
+            raise RegistryError("ha_device_id is required")
+        record = {
+            "entity_ids": _clean_entity_ids(entity_ids),
+            "gang_types": _clean_gang_map(gang_types, "gang_types"),
+            "gang_names": _clean_gang_map(gang_names, "gang_names"),
+            "config_entity_ids": _clean_entity_ids(
+                config_entity_ids or [], "config_entity_ids"
+            ),
+            "device_type": _clean_device_type(device_type),
+            "custom_name": _clean_optional_name(custom_name),
+            "custom_icon": _clean_icon(custom_icon),
+        }
+        with self._lock:
+            self._user_devices[ha_device_id] = record
+        _LOGGER.info(
+            "Registry: user-device %s upserted (%d entities)",
+            ha_device_id,
+            len(record["entity_ids"]),
+        )
+        return {"ha_device_id": ha_device_id, **record}
+
+    def patch_user_device(
+        self,
+        ha_device_id: str,
+        *,
+        entity_ids: Any = ...,
+        gang_types: Any = ...,
+        gang_names: Any = ...,
+        config_entity_ids: Any = ...,
+        device_type: Any = ...,
+        custom_name: Any = ...,
+        custom_icon: Any = ...,
+    ) -> dict[str, Any]:
+        """Edit a grouped-device record. ``...`` means "leave unchanged"
+        (rename a gang, re-type, set an icon); an explicit None clears a
+        nullable field."""
+        with self._lock:
+            record = self._user_devices.get(ha_device_id)
+            if record is None:
+                raise UnknownItemError("Unknown device")
+            if entity_ids is not ...:
+                record["entity_ids"] = _clean_entity_ids(entity_ids)
+            if gang_types is not ...:
+                record["gang_types"] = _clean_gang_map(gang_types, "gang_types")
+            if gang_names is not ...:
+                record["gang_names"] = _clean_gang_map(gang_names, "gang_names")
+            if config_entity_ids is not ...:
+                record["config_entity_ids"] = _clean_entity_ids(
+                    config_entity_ids or [], "config_entity_ids"
+                )
+            if device_type is not ...:
+                record["device_type"] = _clean_device_type(device_type)
+            if custom_name is not ...:
+                record["custom_name"] = _clean_optional_name(custom_name)
+            if custom_icon is not ...:
+                record["custom_icon"] = _clean_icon(custom_icon)
+            self._user_devices[ha_device_id] = record  # persist
+        return {"ha_device_id": ha_device_id, **record}
+
+    def delete_user_device(self, ha_device_id: str) -> None:
+        """Remove a grouped device — its entities become un-grabbed and
+        re-appear in the add-devices list."""
+        with self._lock:
+            if ha_device_id not in self._user_devices:
+                raise UnknownItemError("Unknown device")
+            del self._user_devices[ha_device_id]
+        _LOGGER.info("Registry: user-device %s deleted", ha_device_id)
+
+    def grabbed_entity_ids(self) -> set[str]:
+        """Every entity grabbed into a user-device — primary gangs AND config
+        entities. The add-devices list is the served set MINUS this."""
+        grabbed: set[str] = set()
+        for record in self._user_devices.values():
+            grabbed.update(record.get("entity_ids", ()))
+            grabbed.update(record.get("config_entity_ids", ()))
+        return grabbed
 
     # -- first-run import (storage — call via executor) ------------------------------
 
