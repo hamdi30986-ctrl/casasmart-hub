@@ -656,8 +656,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("pairing_codes").clear()
             runtime_data.storage.table("recovery_codes").clear()
             # B17: favorites are phone/app-layer data — they die with the
-            # phones. Floors/rooms/scenes are HOUSE data and survive.
+            # phones. Floors/rooms (the physical layout) are HOUSE data and
+            # survive an ownership transfer.
             runtime_data.storage.table("registry_favorites").clear()
+            # A scene is owner-AUTHORED content (named, encoding the owner's
+            # brightness/temperature/curtain choices) — it belongs with the
+            # personal data, NOT the bricks-and-mortar room list. A new owner
+            # must not inherit it, and it can reference entities that no longer
+            # exist after the reset (re-audit follow-up).
+            runtime_data.storage.table("registry_scenes").clear()
             # MB-2: per-user settings are phone-layer too, same fate.
             # Tank devices/readings are HOUSE data (the Shelly keeps
             # posting through an ownership transfer) and survive.
@@ -689,9 +696,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
             "CasaSmart factory reset: app layer wiped (devices, pairing, "
-            "recovery, favorites, settings, push, alarm log/state, audio "
-            "config + speakers), owner device labels scrubbed, printed codes "
-            "rotated"
+            "recovery, favorites, scenes, settings, push, alarm log/state, "
+            "audio config + speakers), owner device labels scrubbed, printed "
+            "codes rotated"
         )
         # Reload rebuilds the engine caches from the now-empty tables and
         # re-mints the bootstrap pairing code for re-onboarding.
