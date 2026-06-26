@@ -50,6 +50,7 @@ from .const import (
     DOMAIN,
     EVENT_ALARM_CHANGED,
     EVENT_AUDIO_CHANGED,
+    EVENT_AUTH_CHANGED,
     EVENT_REGISTRY_CHANGED,
     EVENT_TANK_CHANGED,
     WS_AUTH_TIMEOUT,
@@ -109,6 +110,11 @@ class WsConnection:
         self._unsub_alarm_changed: Any = None
         self._unsub_audio_changed: Any = None
         self._unsub_tank_changed: Any = None
+        self._unsub_auth_changed: Any = None
+        # True once the client has sent a `subscribe` (so a re-auth knows whether
+        # to re-emit the snapshot); distinct from "subscribed to all", which the
+        # Subscription models as entity_ids=None.
+        self._subscribed = False
         self._token: str | None = None
         # Claims of the current token (role + room scope) — set on auth.
         self._claims: dict[str, Any] | None = None
@@ -138,6 +144,13 @@ class WsConnection:
         self._unsub_tank_changed = self._hass.bus.async_listen(
             EVENT_TANK_CHANGED, self._on_tank_changed
         )
+        # A privilege change (role/rooms/unpair/revoke) is content-free, so the
+        # connection rechecks its OWN token at once instead of waiting up to
+        # WS_TOKEN_RECHECK — closing the window where a just-narrowed scope keeps
+        # getting old-scope pushes (Phase 8).
+        self._unsub_auth_changed = self._hass.bus.async_listen(
+            EVENT_AUTH_CHANGED, self._on_auth_changed
+        )
         recheck_task = asyncio.create_task(self._token_recheck_loop())
         try:
             await self._receive_loop()
@@ -161,6 +174,9 @@ class WsConnection:
         if self._unsub_tank_changed is not None:
             self._unsub_tank_changed()
             self._unsub_tank_changed = None
+        if self._unsub_auth_changed is not None:
+            self._unsub_auth_changed()
+            self._unsub_auth_changed = None
         for task in (self._sender_task, self._reauth_deadline_task):
             if task is not None:
                 task.cancel()
@@ -261,6 +277,31 @@ class WsConnection:
                 code=WS_CLOSE_AUTH_EXPIRED, message=b"token expired"
             )
 
+    @callback
+    def _on_auth_changed(self, event: Event) -> None:
+        """Some device's privileges changed (content-free event). Recheck OUR
+        token now: a connection whose device was untouched revalidates cleanly
+        (a no-op), a revoked/re-scoped one gets `auth_required` at once."""
+        self._hass.async_create_task(self._recheck_now())
+
+    async def _recheck_now(self) -> None:
+        """Immediate, single-shot version of the recheck loop's body."""
+        if self._ws.closed or not self._token:
+            return
+        if await self._async_validate_token(self._token):
+            return  # still valid — our device wasn't the one that changed
+        if (
+            self._reauth_deadline_task is None
+            or self._reauth_deadline_task.done()
+        ):
+            self._token = None
+            await self._enqueue(
+                ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE))
+            )
+            self._reauth_deadline_task = asyncio.create_task(
+                self._reauth_deadline()
+            )
+
     # -- receive ------------------------------------------------------------
 
     async def _receive_loop(self) -> None:
@@ -290,6 +331,13 @@ class WsConnection:
             await self._enqueue(ws_protocol.frame_error(str(err)))
             return
         self._subscription.set(entity_ids)
+        self._subscribed = True
+        await self._emit_snapshot()
+
+    async def _emit_snapshot(self) -> None:
+        """Send the `subscribed` frame: the current scoped + served snapshot of
+        the subscribed set. Re-emitted after a scope-changing re-auth so the
+        live view reflects the new rooms at once (Phase 8)."""
         rooms = (self._claims or {}).get("rooms")
         devices = [
             serialize_device(self._hass, state)
@@ -308,6 +356,7 @@ class WsConnection:
         except ws_protocol.ProtocolError as err:
             await self._enqueue(ws_protocol.frame_error(str(err)))
             return
+        old_rooms = (self._claims or {}).get("rooms")
         if not await self._async_validate_token(token):
             await self._enqueue(
                 ws_protocol.frame_auth_failed("Invalid or expired token")
@@ -320,6 +369,11 @@ class WsConnection:
         await self._enqueue(
             ws_protocol.frame_auth_ok(self._hub_version, API_VERSION)
         )
+        # If the new token's room scope differs (an admin re-scoped this user),
+        # re-send the snapshot so the live view drops/gains rooms immediately
+        # instead of staying stale until the next subscribe (Phase 8).
+        if self._subscribed and (self._claims or {}).get("rooms") != old_rooms:
+            await self._emit_snapshot()
 
     # -- push ---------------------------------------------------------------
 
@@ -332,9 +386,21 @@ class WsConnection:
         """
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
+        if new_state is None:
+            # Entity removed (unpair / integration drop / registry delete). Tell
+            # a subscribed app to drop the tile — otherwise a dead card lingers
+            # for the connection's lifetime (Phase 8). The frame is just the id,
+            # so there is no state to room-scope.
+            if entity_id and self._subscription.matches(entity_id):
+                try:
+                    self._send_queue.put_nowait(
+                        ws_protocol.frame_entity_removed(entity_id)
+                    )
+                except asyncio.QueueFull:
+                    pass
+            return
         if (
-            new_state is None  # entity removed — not a device update
-            or not self._subscription.matches(entity_id)
+            not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
             # Room scope (B1.6): scoped tokens only get their rooms' pushes.
             or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
