@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H  # noqa: E402
@@ -88,7 +89,9 @@ class SettingsPut(SettingsViewTestCase):
     async def test_updates_display_name_and_tiles(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="admin")
         member = self.rt.auth.member_id_for(dev)
-        tiles = [{"type": "toggle", "entityId": "light.a", "name": "Lamp"}]
+        # A tank pseudo-tile round-trips without needing a served HA entity
+        # (entity-tiles now ride the Phase-8 served+scope write-guard).
+        tiles = [{"type": "tank", "entityId": "tank_1", "name": "Tank"}]
         status, body = await self._put(
             hdr, {"display_name": "Sara", "widget_tiles": tiles}
         )
@@ -183,6 +186,110 @@ class SettingsPut(SettingsViewTestCase):
     async def test_no_token_is_401(self) -> None:
         status, _ = await self._put({}, {"display_name": "x"})
         self.assertEqual(status, 401)
+
+
+class WidgetTileFilter(SettingsViewTestCase):
+    """Phase 8 — widget_tiles get the favorites posture: phantom entity-tiles
+    drop + self-heal on GET, served+scope write-guard on PUT; non-HA pseudo-
+    tiles (tank/scene/security) pass through untouched."""
+
+    async def test_get_drops_phantom_entity_tile_and_self_heals(self) -> None:
+        dev, hdr = H.session(self.rt.auth, role="admin")
+        member = self.rt.auth.member_id_for(dev)
+        self.settings.update(member, {"widget_tiles": [
+            {"type": "toggle", "entityId": "light.a", "name": "A"},
+            {"type": "toggle", "entityId": "switch.gone", "name": "Gone"},
+        ]})
+        self.hass.states.add("light.a")  # switch.gone has no state (deleted)
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.a"]),
+            in_scope=H.in_scope_for(),
+        ):
+            status, body = await self._get(hdr)
+        self.assertEqual(status, 200)
+        self.assertEqual([t["entityId"] for t in body["widget_tiles"]], ["light.a"])
+        # Self-heal: storage itself lost the phantom.
+        stored = self.settings.get(member)["widget_tiles"]
+        self.assertEqual([t["entityId"] for t in stored], ["light.a"])
+
+    async def test_get_keeps_pseudo_tiles(self) -> None:
+        dev, hdr = H.session(self.rt.auth, role="admin")
+        member = self.rt.auth.member_id_for(dev)
+        # tank + scene ids are NOT served HA entities, yet must survive.
+        self.settings.update(member, {"widget_tiles": [
+            {"type": "tank", "entityId": "tank_1", "name": "Tank"},
+            {"type": "scene", "entityId": "scene-xyz", "name": "Movie"},
+        ]})
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for([]),  # nothing served
+            in_scope=H.in_scope_for(),
+        ):
+            status, body = await self._get(hdr)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["widget_tiles"]), 2)  # both pseudo-tiles kept
+
+    async def test_get_scopes_entity_tiles_without_healing_out_of_scope(self):
+        dev, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
+        member = self.rt.auth.member_id_for(dev)
+        self.settings.update(member, {"widget_tiles": [
+            {"type": "toggle", "entityId": "light.a", "name": "A"},
+            {"type": "toggle", "entityId": "light.b", "name": "B"},
+        ]})
+        self.hass.states.add("light.a")
+        self.hass.states.add("light.b")
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.a", "light.b"]),
+            in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b out of scope
+        ):
+            status, body = await self._get(hdr)
+        self.assertEqual([t["entityId"] for t in body["widget_tiles"]], ["light.a"])
+        # Out-of-scope b is alive — must NOT be self-healed away.
+        stored = [t["entityId"] for t in self.settings.get(member)["widget_tiles"]]
+        self.assertEqual(stored, ["light.a", "light.b"])
+
+    async def test_put_rejects_unserved_entity_tile(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        self.hass.states.add("light.a")
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.a"]),
+            in_scope=H.in_scope_for(),
+        ):
+            status, _ = await self._put(hdr, {"widget_tiles": [
+                {"type": "toggle", "entityId": "switch.bogus", "name": "X"},
+            ]})
+        self.assertEqual(status, 400)
+
+    async def test_put_rejects_out_of_scope_entity_tile(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
+        self.hass.states.add("light.b")
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.b"]),
+            in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b out of scope
+        ):
+            status, _ = await self._put(hdr, {"widget_tiles": [
+                {"type": "toggle", "entityId": "light.b", "name": "B"},
+            ]})
+        self.assertEqual(status, 400)
+
+    async def test_put_accepts_served_entity_plus_pseudo_tiles(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        self.hass.states.add("light.a")
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.a"]),
+            in_scope=H.in_scope_for(),
+        ):
+            status, body = await self._put(hdr, {"widget_tiles": [
+                {"type": "toggle", "entityId": "light.a", "name": "A"},
+                {"type": "tank", "entityId": "tank_1", "name": "Tank"},
+            ]})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["widget_tiles"]), 2)
 
 
 if __name__ == "__main__":
