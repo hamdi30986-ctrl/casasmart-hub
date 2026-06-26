@@ -21,6 +21,7 @@ from ws_protocol import (  # noqa: E402
     frame_auth_failed,
     frame_auth_ok,
     frame_auth_required,
+    frame_entity_removed,
     frame_error,
     frame_pong,
     frame_state_changed,
@@ -149,6 +150,12 @@ class TestServerFrames(unittest.TestCase):
         )
         self.assertEqual(frame_pong(), {"type": "pong"})
         self.assertEqual(frame_error("nope"), {"type": "error", "message": "nope"})
+
+    def test_entity_removed_frame(self):
+        self.assertEqual(
+            frame_entity_removed("light.a"),
+            {"type": "entity_removed", "entity_id": "light.a"},
+        )
 
 
 if __name__ == "__main__":

@@ -135,6 +135,13 @@ def frame_state_changed(device: dict[str, Any]) -> dict[str, Any]:
     return {"type": "state_changed", "device": device}
 
 
+def frame_entity_removed(entity_id: str) -> dict[str, Any]:
+    """A subscribed entity was removed (unpaired / integration drop / registry
+    delete). Carries only the id so the app drops the tile instead of leaving a
+    dead card until the next reconnect — no state to scope, just the id."""
+    return {"type": "entity_removed", "entity_id": entity_id}
+
+
 def frame_registry_changed(kind: str) -> dict[str, Any]:
     """The home's organization changed (B17: floors/rooms/devices/scenes).
     Deliberately content-free — the app re-fetches through its own scoped
