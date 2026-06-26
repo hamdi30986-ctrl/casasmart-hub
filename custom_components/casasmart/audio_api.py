@@ -57,6 +57,7 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .audio import (
@@ -149,6 +150,17 @@ class _AudioView(HomeAssistantView):
 # -- speaker registry + live status -------------------------------------------
 
 
+def _scoped_area_names(hass: HomeAssistant, scope: list[str]) -> set[str]:
+    """Casefolded names of the HA areas in a token's room scope."""
+    registry = ar.async_get(hass)
+    names: set[str] = set()
+    for area_id in scope:
+        area = registry.async_get_area(area_id)
+        if area is not None and area.name:
+            names.add(area.name.strip().casefold())
+    return names
+
+
 class CasaSmartAudioSpeakersView(_AudioView):
     """GET /audio/speakers — enrolled speakers merged with live status.
 
@@ -160,14 +172,28 @@ class CasaSmartAudioSpeakersView(_AudioView):
     name = f"api:{DOMAIN}:audio:speakers"
 
     async def get(self, request: web.Request) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "audio.read")
+        claims, error = authenticate_request(self._hass, request, "audio.read")
         if error is not None:
             return error
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
         # speakers() copies the in-memory mirror — pure CPU, no executor hop.
-        return self.json({"speakers": audio.speakers()})
+        speakers = audio.speakers()
+        scope = claims.get("rooms")
+        if scope is not None:
+            # A room-scoped user (e.g. a guest/kids phone) sees only its rooms'
+            # speakers (Phase 8). Speakers carry a free-text room label, so match
+            # it against the caller's scoped AREA names; an unroomed speaker is
+            # shared house infra (visible to all). Fail-closed: a label matching
+            # no scoped area is hidden, never leaked.
+            allowed = _scoped_area_names(self._hass, scope)
+            speakers = [
+                s
+                for s in speakers
+                if not s.get("room") or s["room"].strip().casefold() in allowed
+            ]
+        return self.json({"speakers": speakers})
 
     async def post(self, request: web.Request) -> web.Response:
         _, error = authenticate_request(self._hass, request, "audio.manage")

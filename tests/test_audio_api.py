@@ -653,5 +653,58 @@ class ProvisionView(AudioViewTestCase):
         self.assertIn("s3cret-pw", _raw_body(resp))  # cred source, not redacted
 
 
+class SpeakerScope(AudioViewTestCase):
+    """Phase 8 — a room-scoped user sees only its rooms' speakers (the speaker's
+    free-text room label matched vs the caller's scoped area names); an unroomed
+    speaker is shared house infra; admin/unscoped sees all; fail-closed."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.view = CasaSmartAudioSpeakersView(self.hass)
+        self.rt.audio.enroll_speaker("aabbccddee01", "Kitchen Spk", "Kitchen")
+        self.rt.audio.enroll_speaker("aabbccddee02", "Bedroom Spk", "Bedroom")
+        self.rt.audio.enroll_speaker("aabbccddee03", "Hall Spk", None)  # no room
+
+    def _areas(self, mapping):
+        """Patch the HA area registry: area_id -> area(name)."""
+        reg = mock.Mock()
+
+        def _get_area(aid):
+            if aid not in mapping:
+                return None
+            area = mock.Mock()
+            area.name = mapping[aid]
+            return area
+
+        reg.async_get_area.side_effect = _get_area
+        return mock.patch("casasmart.audio_api.ar.async_get", return_value=reg)
+
+    async def _names(self, hdr):
+        resp = await self.view.get(H.FakeRequest(headers=hdr))
+        _, body = H.read_response(resp)
+        return sorted(s["name"] for s in body["speakers"])
+
+    async def test_admin_sees_all(self) -> None:
+        self.assertEqual(
+            await self._names(self._admin()),
+            ["Bedroom Spk", "Hall Spk", "Kitchen Spk"],
+        )
+
+    async def test_scoped_user_sees_its_room_plus_unroomed(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["area-kitchen"])
+        with self._areas({"area-kitchen": "Kitchen"}):
+            names = await self._names(hdr)
+        # Kitchen (label match) + Hall (no room = house-wide); Bedroom hidden.
+        self.assertEqual(names, ["Hall Spk", "Kitchen Spk"])
+
+    async def test_scoped_user_unmatched_label_is_fail_closed(self) -> None:
+        # The caller's scope resolves to an area no speaker room matches -> only
+        # the unroomed (house-wide) speaker shows. Fail-closed (no leak).
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["area-garage"])
+        with self._areas({"area-garage": "Garage"}):
+            names = await self._names(hdr)
+        self.assertEqual(names, ["Hall Spk"])
+
+
 if __name__ == "__main__":
     unittest.main()
