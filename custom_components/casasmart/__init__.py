@@ -682,10 +682,19 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # the new owner re-provisions speakers + reconfigures the broker.
             runtime_data.storage.table("audio_config").clear()
             runtime_data.storage.table("audio_speakers").clear()
-            # Phase 3: grouped device STRUCTURE is HOUSE data (gang typing /
-            # wiring) and survives, but the owner's LABELS are scrubbed —
-            # device custom names/icons, gang names, per-entity display names.
-            runtime_data.registry.scrub_owner_labels()
+            # Full-blank reset (user choice): wipe the ENTIRE CasaSmart
+            # organizational layer — floors, rooms, per-entity assignments,
+            # grouped-device structure — and clear the one-time import flag so
+            # the entry reload RE-SEEDS floors/rooms/assignments from HA's area
+            # registry (the canonical source — _async_import_registry). The
+            # owner's CasaSmart edits (renamed rooms, manual moves, gang
+            # grouping) go; the home re-derives clean defaults from HA. This
+            # supersedes the old scrub-labels-only ownership-transfer behavior.
+            runtime_data.storage.table("registry_floors").clear()
+            runtime_data.storage.table("registry_rooms").clear()
+            runtime_data.storage.table("registry_devices").clear()
+            runtime_data.storage.table("registry_user_devices").clear()
+            runtime_data.hub_config.delete("registry_imported")
             # Phase 3: rotate the printed credentials. Deleting the persisted
             # hashes makes the reload re-mint AND re-surface a fresh admin
             # sticker code + owner recovery code, so the previous owner's
@@ -695,9 +704,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
-            "CasaSmart factory reset: app layer wiped (devices, pairing, "
+            "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
-            "audio config + speakers), owner device labels scrubbed, printed "
+            "audio config + speakers, and the registry org layer (floors/rooms/"
+            "assignments/grouping) — re-seeding from HA on reload; printed "
             "codes rotated"
         )
         # Reload rebuilds the engine caches from the now-empty tables and
