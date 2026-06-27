@@ -660,30 +660,6 @@ class RegistryEngine:
             grabbed.update(record.get("config_entity_ids", ()))
         return grabbed
 
-    def scrub_owner_labels(self) -> None:
-        """Ownership-transfer scrub (Phase 3): clear the previous owner's
-        PERSONAL labels while KEEPING the physical structure. Cleared: each
-        grouped device's custom_name / custom_icon / gang_names, and every
-        per-entity display-name override. Kept: entity_ids / gang_types /
-        config_entity_ids / device_type (the wiring) and the room assignments
-        — the new owner inherits a working home, not the old owner's names."""
-        with self._lock:
-            for device_id, record in list(self._user_devices.items()):
-                record["custom_name"] = None
-                record["custom_icon"] = None
-                record["gang_names"] = {}
-                self._user_devices[device_id] = record
-            for entity_id, record in list(self._devices.items()):
-                if record.get("display_name") is not None:
-                    record["display_name"] = None
-                    self._devices[entity_id] = record
-        # Keep the event-loop mirror honest (display_name -> None) so a read
-        # before the post-reset reload re-warm can't serve a scrubbed name.
-        with self._mirror_lock:
-            for entity_id, cached in list(self._assignment_cache.items()):
-                self._assignment_cache[entity_id] = (cached[0], None)
-        _LOGGER.info("Registry: owner labels scrubbed (ownership transfer)")
-
     # -- first-run import (storage — call via executor) ------------------------------
 
     def import_initial(
