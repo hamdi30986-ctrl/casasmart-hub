@@ -77,6 +77,14 @@ class CodeInvalidError(PairingError):
     """Code unknown, expired, or already used — deliberately one bucket."""
 
 
+class HubAlreadyClaimedError(PairingError):
+    """The owner bootstrap code is correct but the hub already has an admin and
+    the presenting device is NOT already enrolled — i.e. a DIFFERENT phone.
+    Distinct from CodeInvalidError so enroll answers 'this hub is already paired'
+    instead of the generic 'invalid code'. The SAME phone re-pairing never
+    reaches here: enroll short-circuits it by public-key idempotency first."""
+
+
 def normalize_code(code: str) -> str:
     """Canonical form: uppercase, alphanumerics only (spaces/dashes dropped),
     so a code typed with stray spacing or lowercase still matches."""
@@ -270,8 +278,11 @@ class PairingManager:
             # The bootstrap admin code dies the moment an admin exists —
             # a leaked install card is useless on a claimed hub.
             if code_id == BOOTSTRAP_CODE_ID and self._admin_exists():
-                self.throttle.record_failure(source_key)
-                raise CodeInvalidError("Invalid pairing code")
+                # Correct owner code on a claimed hub. The SAME phone is already
+                # short-circuited (idempotent enroll) BEFORE redeem, so this is a
+                # DIFFERENT phone — answer plainly, and don't burn a throttle slot
+                # on a code that was actually right.
+                raise HubAlreadyClaimedError("This hub is already paired")
             del self._codes[code_id]  # single-use, consumed even pre-enroll
 
         self.throttle.clear(source_key)

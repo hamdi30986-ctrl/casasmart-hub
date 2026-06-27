@@ -49,7 +49,12 @@ from .auth_engine import (
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
 from .const import DOMAIN, EVENT_AUTH_CHANGED
-from .pairing import CodeInvalidError, PairingError, PairingManager
+from .pairing import (
+    CodeInvalidError,
+    HubAlreadyClaimedError,
+    PairingError,
+    PairingManager,
+)
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
 from .throttle import ThrottledError
@@ -253,6 +258,18 @@ class CasaSmartEnrollView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
+        # IDEMPOTENT re-pair: the SAME phone (same keypair) re-running onboarding
+        # — a UI glitch, a redundant claim — must be let straight back in, not
+        # bricked on its own already-claimed hub with "invalid code". If this
+        # public key is already enrolled, return its identity WITHOUT re-redeeming
+        # the code; the app then logs in as usual. Safe: the device id grants
+        # nothing — the token still requires the private key (login).
+        existing = await self._hass.async_add_executor_job(
+            engine.device_for_public_key, payload.get("public_key", "")
+        )
+        if existing is not None:
+            return self.json(existing, HTTPStatus.CREATED)
+
         source = request.remote or "unknown"
         try:
             grant = await self._hass.async_add_executor_job(
@@ -260,6 +277,12 @@ class CasaSmartEnrollView(HomeAssistantView):
             )
         except ThrottledError as err:
             return _throttled_response(err)
+        except HubAlreadyClaimedError:
+            # Correct owner code, but a DIFFERENT phone on a claimed hub — a
+            # clear, distinct answer, never the generic "invalid".
+            return self.json_message(
+                "This hub is already paired", HTTPStatus.CONFLICT
+            )
         except CodeInvalidError:
             # One generic bucket: unknown vs expired vs used is not leaked.
             return self.json_message(

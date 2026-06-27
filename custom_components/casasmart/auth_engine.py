@@ -500,6 +500,29 @@ class AuthEngine:
             "last_seen": last_seen,
         }
 
+    def device_for_public_key(self, public_key_pem: str) -> dict[str, Any] | None:
+        """The enrolled device whose key matches ``public_key_pem``, or None.
+
+        The same-phone re-pair seam: a phone re-running onboarding (a UI glitch,
+        a redundant claim) sends the SAME public key it enrolled with. Matching
+        it lets enroll be IDEMPOTENT — return the existing identity instead of
+        bricking on an already-claimed hub. Safe: the returned id grants
+        nothing; the token still requires proving the PRIVATE key via login.
+        """
+        try:
+            canonical_pem = auth_keys.validate_public_key(public_key_pem)
+        except auth_keys.KeyError_:
+            return None
+        with self._lock:
+            for device_id, record in self._devices.items():
+                if record.get("public_key") == canonical_pem:
+                    return {
+                        "device_id": device_id,
+                        "role": record.get("role"),
+                        "rooms": record.get("rooms"),
+                    }
+        return None
+
     def member_id_for(self, device_id: str) -> str:
         """The PERSON id this device belongs to — the key favorites +
         user_settings roam by. Falls back to the device id for a legacy record

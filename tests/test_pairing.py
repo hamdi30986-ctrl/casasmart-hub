@@ -18,6 +18,7 @@ import throttle as throttle_mod  # noqa: E402
 from pairing import (  # noqa: E402
     BOOTSTRAP_CODE_ID,
     CodeInvalidError,
+    HubAlreadyClaimedError,
     PairingError,
     PairingManager,
 )
@@ -204,11 +205,17 @@ class PairingTests(unittest.TestCase):
         self._admin = True
         self.assertIsNone(self.manager.ensure_bootstrap_code())
 
-    def test_bootstrap_dead_on_claimed_hub(self):
+    def test_bootstrap_already_paired_on_claimed_hub(self):
+        # A DIFFERENT phone presenting the CORRECT owner code on a claimed hub
+        # gets the distinct "already paired" signal, NOT the generic "invalid"
+        # (the SAME phone is short-circuited earlier by enroll's key idempotency).
         code = self.manager.ensure_bootstrap_code()
         self._admin = True  # admin paired through some other path
-        with self.assertRaises(CodeInvalidError):
+        with self.assertRaises(HubAlreadyClaimedError):
             self.manager.redeem(code, "ip-1")
+        # It's a real PairingError but distinct from CodeInvalidError.
+        self.assertTrue(issubclass(HubAlreadyClaimedError, PairingError))
+        self.assertFalse(issubclass(HubAlreadyClaimedError, CodeInvalidError))
         # ensure_bootstrap_code on a claimed hub clears the stale code.
         self.manager.ensure_bootstrap_code()
         self.assertNotIn(
