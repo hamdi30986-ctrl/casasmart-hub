@@ -105,10 +105,6 @@ class HubStorage:
             self._tables.clear()
 
     @property
-    def is_open(self) -> bool:
-        return self._conn is not None
-
-    @property
     def schema_version(self) -> int:
         with self._lock:
             return get_user_version(self._connection)

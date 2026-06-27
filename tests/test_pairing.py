@@ -157,26 +157,11 @@ class PairingTests(unittest.TestCase):
         with self.assertRaises(CodeInvalidError):
             self.manager.redeem(issued["code"], "ip-1")
 
-    def test_clear_user_codes(self):
-        self.manager.generate_code("user")
-        self.manager.generate_code("sub-admin")
-        self.assertEqual(self.manager.clear_user_codes(), 2)
-        self.assertEqual(self.manager.list_codes(), [])
-
-    def test_clear_user_codes_preserves_bootstrap(self):
-        self.manager.ensure_bootstrap_code()  # unclaimed hub -> bootstrap minted
-        self.manager.generate_code("user")
-        # Only the user code is wiped; the bootstrap admin code survives.
-        self.assertEqual(self.manager.clear_user_codes(), 1)
-        codes = self.manager.list_codes()
-        self.assertEqual(len(codes), 1)
-        self.assertTrue(codes[0]["bootstrap"])
-
     def test_clear_all_codes_includes_bootstrap(self):
         self.manager.ensure_bootstrap_code()  # unclaimed hub -> bootstrap minted
         self.manager.generate_code("user")
         self.manager.generate_code("sub-admin")
-        # Unlike clear_user_codes, the bootstrap admin code is wiped too.
+        # The bootstrap admin code is wiped too (full reset).
         self.assertEqual(self.manager.clear_all_codes(), 3)
         self.assertEqual(self.manager.list_codes(), [])
 
