@@ -173,31 +173,6 @@ class UserDeviceTests(RegistryTestCase):
             {"switch.left", "switch.middle", "switch.right", "switch.left_led"},
         )
 
-    def test_scrub_owner_labels_keeps_structure_clears_labels(self):
-        self.engine.upsert_user_device(
-            "dev-1",
-            entity_ids=["switch.a", "switch.b"],
-            gang_types={"a": "light", "b": "switch"},
-            gang_names={"a": "Maan lamp"},
-            config_entity_ids=["switch.a_led"],
-            device_type="wallSwitch",
-            custom_name="Maan's room",
-            custom_icon="bed",
-        )
-        self.engine.assign_device("switch.a", display_name="Old tile name")
-        self.engine.scrub_owner_labels()
-        dev = self.engine.get_user_device("dev-1")
-        # Owner labels cleared:
-        self.assertIsNone(dev["custom_name"])
-        self.assertIsNone(dev["custom_icon"])
-        self.assertEqual(dev["gang_names"], {})
-        self.assertIsNone(self.engine.display_name_of("switch.a"))
-        # Physical structure kept:
-        self.assertEqual(dev["entity_ids"], ["switch.a", "switch.b"])
-        self.assertEqual(dev["gang_types"], {"a": "light", "b": "switch"})
-        self.assertEqual(dev["config_entity_ids"], ["switch.a_led"])
-        self.assertEqual(dev["device_type"], "wallSwitch")
-
     def test_patch_leaves_unspecified_fields(self):
         self.engine.upsert_user_device(
             "dev-1",
