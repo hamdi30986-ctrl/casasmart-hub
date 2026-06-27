@@ -190,6 +190,31 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(claims["role"], "admin")
         self.assertEqual(issued["expires_in"], auth_engine.TOKEN_TTL)
 
+    def test_device_for_public_key_idempotent_re_pair(self):
+        # The same-phone re-pair seam (the front-door fix): a phone re-running
+        # onboarding sends the SAME public key it enrolled with. The hub must
+        # RECOGNISE it — idempotent identity — instead of duplicating or, on a
+        # claimed hub, bricking; the recognised id then logs in normally.
+        device_id = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        found = self.engine.device_for_public_key(self.public_pem)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["device_id"], device_id)
+        self.assertEqual(found["role"], "admin")
+        # The recognised identity actually authenticates (full round-trip).
+        issued = self._login(found["device_id"])
+        self.assertEqual(
+            self.engine.validate_token(issued["token"])["sub"], device_id
+        )
+        # Canonicalisation: a re-encoded form of the same key still matches.
+        self.assertIsNotNone(
+            self.engine.device_for_public_key(self.public_pem + "\n")
+        )
+        # A DIFFERENT phone's key is unknown -> falls through to redeem.
+        _, other_pem = make_keypair()
+        self.assertIsNone(self.engine.device_for_public_key(other_pem))
+        # Garbage never crashes.
+        self.assertIsNone(self.engine.device_for_public_key("not-a-key"))
+
     def test_single_admin_rule(self):
         self.engine.enroll_device("First", "admin", self.public_pem)
         _, second_pem = make_keypair()
