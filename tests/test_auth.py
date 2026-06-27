@@ -335,33 +335,6 @@ class EngineTests(unittest.TestCase):
         # Unknown device -> None, never a KeyError.
         self.assertIsNone(self.engine.last_seen("dev-nope"))
 
-    def test_revoke_by_pairing_code(self):
-        admin = self.engine.enroll_device("Owner", "admin", self.public_pem)
-        _, pem_a = make_keypair()
-        _, pem_b = make_keypair()
-        guest_a = self.engine.enroll_device(
-            "A", "sub-admin", pem_a, enrolled_via="pair-1"
-        )
-        guest_b = self.engine.enroll_device(
-            "B", "user", pem_b, enrolled_via="pair-2"
-        )
-        self.assertEqual(self.engine.revoke_by_pairing_code("pair-1"), [guest_a])
-        remaining = {u["device_id"] for u in self.engine.list_devices()}
-        self.assertEqual(remaining, {admin, guest_b})
-
-    def test_revoke_by_pairing_code_never_touches_admin(self):
-        admin = self.engine.enroll_device(
-            "Owner", "admin", self.public_pem, enrolled_via="bootstrap-admin"
-        )
-        self.assertEqual(self.engine.revoke_by_pairing_code("bootstrap-admin"), [])
-        self.assertIsNotNone(self.engine.get_device(admin))
-
-    def test_revoke_by_pairing_code_empty_is_noop(self):
-        self.engine.enroll_device("Owner", "admin", self.public_pem)
-        self.assertEqual(self.engine.revoke_by_pairing_code(None), [])
-        self.assertEqual(self.engine.revoke_by_pairing_code(""), [])
-        self.assertEqual(self.engine.revoke_by_pairing_code("pair-nope"), [])
-
     def test_wipe_all_devices(self):
         admin = self.engine.enroll_device("Owner", "admin", self.public_pem)
         _, pem_a = make_keypair()

@@ -245,9 +245,8 @@ class AuthEngine:
         """Store a device's identity; returns the new device id.
 
         ``enrolled_via`` records the pairing code id the device redeemed (None
-        for paths that don't go through one). It is the link the "Regenerate
-        pairing code" button follows to revoke whoever joined through the code
-        being rotated — see :meth:`revoke_by_pairing_code`.
+        for paths that don't go through one), retained on the device record for
+        potential per-code revocation.
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
@@ -681,39 +680,6 @@ class AuthEngine:
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
         return member_id
 
-    def revoke_by_pairing_code(self, code_id: str | None) -> list[str]:
-        """Unpair every NON-admin device that enrolled via ``code_id``.
-
-        The "Regenerate pairing code" button calls this so rotating the guest
-        code also cuts off whoever joined through the previous one — their
-        outstanding JWTs die instantly via the ``ver`` cache, same as
-        :meth:`delete_device`. The admin is never touched (it never comes
-        through a regenerable code), and a falsy ``code_id`` matches nothing.
-        Returns the revoked device ids.
-        """
-        if not code_id:
-            return []
-        revoked: list[str] = []
-        with self._lock:
-            targets = [
-                device_id
-                for device_id, record in self._devices.items()
-                if record.get("enrolled_via") == code_id
-                and record.get("role") != ROLE_ADMIN
-            ]
-            for device_id in targets:
-                del self._devices[device_id]
-                self._device_cache.pop(device_id, None)
-                self.throttle.clear(device_id)
-                revoked.append(device_id)
-        if revoked:
-            _LOGGER.info(
-                "Revoked %d device(s) enrolled via pairing code %s",
-                len(revoked),
-                code_id,
-            )
-        return revoked
-
     def wipe_all_devices(self) -> list[str]:
         """Unpair EVERY device — admin included. The pairing factory reset.
 
@@ -881,11 +847,6 @@ class AuthEngine:
             "expires_in": WIDGET_TOKEN_TTL,
             "scope": auth_tokens.SCOPE_WIDGET,
         }
-
-    @staticmethod
-    def allowed_rooms(claims: dict[str, Any]) -> list[str] | None:
-        """The token's room scope: a list of area ids, or None = all rooms."""
-        return claims.get("rooms")
 
     # -- housekeeping -------------------------------------------------------------
 
