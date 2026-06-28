@@ -142,15 +142,31 @@ def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
 
 _VALID_GANG_PRESENTATIONS = frozenset({"grouped", "solo", "hidden"})
 
+# A gang's `type` drives only the card icon + which tab it lands on — it NEVER
+# changes how the gang is controlled (always the relay's real domain). It is a
+# CLOSED set of relay-presentation categories, distinct from the free-form
+# device-level `device_type` (a SmartDevice enum name like wallSwitch/sensorMotion).
+_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
+
+
+def _clean_gang_type(value: Any) -> str:
+    """Validate a gang's presentation type against the known set."""
+    if not isinstance(value, str) or value not in _KNOWN_GANG_TYPES:
+        raise RegistryError(
+            "gang type must be one of: " + ", ".join(sorted(_KNOWN_GANG_TYPES))
+        )
+    return value
+
 
 def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
     """A ``{control_entity_id -> {type, icon?, name?, presentation}}`` map;
-    None -> {}. presentation defaults to 'grouped'; type defaults to 'switch'.
+    None -> {}. presentation defaults to 'grouped'; an absent type defaults to
+    'switch'.
 
-    Migration Phase 1 validates SHAPE only — the exactly-one-of
-    {grouped, solo, hidden} state machine (and the known-type set) is enforced
-    by the dedicated gang commands in a later phase; here ``type`` is any
-    string."""
+    Migration Phase 3 turns on enforcement: a PROVIDED ``type`` must be in the
+    known set (``_clean_gang_type``), and ``presentation`` must be one of
+    {grouped, solo, hidden}. The exactly-one-of invariant is intrinsic (a gang
+    holds a single presentation value); the dedicated gang commands flip it."""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -165,8 +181,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
                 "gang presentation must be grouped, solo or hidden"
             )
         gtype = gang.get("type")
-        if gtype is not None and not isinstance(gtype, str):
-            raise RegistryError("gang type must be a string")
+        clean_type = "switch" if gtype is None else _clean_gang_type(gtype)
         icon = gang.get("icon")
         if icon is not None and (not isinstance(icon, str) or len(icon) > 64):
             raise RegistryError("gang icon must be a string of at most 64 chars")
@@ -174,7 +189,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
         if name is not None and not isinstance(name, str):
             raise RegistryError("gang name must be a string")
         out[key] = {
-            "type": gtype if isinstance(gtype, str) else "switch",
+            "type": clean_type,
             "icon": icon,
             "name": name,
             "presentation": presentation,
@@ -734,6 +749,83 @@ class RegistryEngine:
                 record["room_id"] = _clean_optional_room(room_id)
             self._user_devices[ha_device_id] = record  # persist
         return self._serve_user_device(ha_device_id, record)
+
+    # -- per-gang presentation commands (storage — call via executor) ----------
+    # Flip ONE gang of a grouped record: promote/hide/un-hide (presentation),
+    # re-type, or relabel (name/icon). These are PURE presentation metadata —
+    # they never touch the device's entities or HA (control is always via the
+    # relay's real domain). The exactly-one-of {grouped, solo, hidden} invariant
+    # is intrinsic: a gang holds a single presentation value, so a flip is a
+    # validated assignment with no forbidden transition.
+
+    def _mutate_gang(
+        self, ha_device_id: str, gang_key: str, mutate: Any
+    ) -> dict[str, Any]:
+        """Read-modify-write ONE gang under the lock. ``UnknownItemError`` for an
+        absent device or gang. ``mutate`` validates + sets fields on a COPY of the
+        gang dict, so a rejected value (its ``RegistryError`` -> 400) leaves the
+        stored record untouched."""
+        with self._lock:
+            record = self._user_devices.get(ha_device_id)
+            if record is None:
+                raise UnknownItemError("Unknown device")
+            gangs = record.get("gangs")
+            if not isinstance(gangs, dict) or gang_key not in gangs:
+                raise UnknownItemError("Unknown gang")
+            gang = dict(gangs[gang_key])
+            mutate(gang)  # validates; may raise RegistryError before we persist
+            new_gangs = dict(gangs)
+            new_gangs[gang_key] = gang
+            record = {**record, "gangs": new_gangs}
+            self._user_devices[ha_device_id] = record  # persist
+        return self._serve_user_device(ha_device_id, record)
+
+    def set_gang_presentation(
+        self, ha_device_id: str, gang_key: str, presentation: Any
+    ) -> dict[str, Any]:
+        """Flip a gang's presentation — promote (grouped->solo), delete-the-solo
+        (solo->grouped), hide (any->hidden), un-hide (hidden->grouped). Every
+        operation is a validated assignment of the single presentation field."""
+
+        def mutate(gang: dict[str, Any]) -> None:
+            if presentation not in _VALID_GANG_PRESENTATIONS:
+                raise RegistryError(
+                    "gang presentation must be grouped, solo or hidden"
+                )
+            gang["presentation"] = presentation
+
+        return self._mutate_gang(ha_device_id, gang_key, mutate)
+
+    def set_gang_type(
+        self, ha_device_id: str, gang_key: str, gang_type: Any
+    ) -> dict[str, Any]:
+        """Re-type a gang against the known relay-presentation set."""
+
+        def mutate(gang: dict[str, Any]) -> None:
+            gang["type"] = _clean_gang_type(gang_type)
+
+        return self._mutate_gang(ha_device_id, gang_key, mutate)
+
+    def set_gang_name_icon(
+        self,
+        ha_device_id: str,
+        gang_key: str,
+        *,
+        name: Any = ...,
+        icon: Any = ...,
+    ) -> dict[str, Any]:
+        """Relabel a gang. ``...`` leaves a field unchanged; an explicit None
+        clears the name or icon."""
+
+        def mutate(gang: dict[str, Any]) -> None:
+            if name is not ...:
+                if name is not None and not isinstance(name, str):
+                    raise RegistryError("gang name must be a string or null")
+                gang["name"] = name
+            if icon is not ...:
+                gang["icon"] = _clean_icon(icon)
+
+        return self._mutate_gang(ha_device_id, gang_key, mutate)
 
     def delete_user_device(self, ha_device_id: str) -> None:
         """Remove a grouped device — its entities become un-grabbed and

@@ -33,6 +33,7 @@ try:
         CasaSmartDeviceAssignmentView,
         CasaSmartScenesView,
         CasaSmartSceneView,
+        CasaSmartUserDeviceGangView,
     )
     from casasmart.const import EVENT_REGISTRY_CHANGED
 
@@ -41,6 +42,7 @@ except Exception as err:  # noqa: BLE001 — HA-free local env
     CasaSmartRegistryView = CasaSmartFloorsView = CasaSmartFloorView = None
     CasaSmartRoomsView = CasaSmartRoomView = CasaSmartDeviceAssignmentView = None
     CasaSmartScenesView = CasaSmartSceneView = EVENT_REGISTRY_CHANGED = None
+    CasaSmartUserDeviceGangView = None
     _ERR = err
 
 _SKIP = H.IMPORT_ERROR or _ERR
@@ -588,6 +590,168 @@ class AuthGate(RegistryWritesTestCase):
     async def test_feed_get_no_token_is_401(self) -> None:
         resp = await CasaSmartRegistryView(self.hass).get(
             H.FakeRequest(headers={})
+        )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 401)
+
+
+# --------------------------------------------------------------------------- #
+# Per-gang presentation command — PATCH .../user-devices/{id}/gangs/{gang}
+# --------------------------------------------------------------------------- #
+class UserDeviceGangView(RegistryWritesTestCase):
+    def _seed(self) -> None:
+        """A 2-gang grouped record to flip. The gang key IS the control eid."""
+        self.rt.registry.upsert_user_device(
+            "grp",
+            control_entity_ids=["switch.a", "switch.b"],
+            gangs={
+                "switch.a": {"type": "switch", "presentation": "grouped"},
+                "switch.b": {"type": "light", "presentation": "grouped"},
+            },
+        )
+
+    def _pres(self, gang: str) -> str:
+        return self.rt.registry.get_user_device("grp")["gangs"][gang][
+            "presentation"
+        ]
+
+    async def test_patch_flips_presentation_get_reflects_and_pushes(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        view = CasaSmartUserDeviceGangView(self.hass)
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await view.patch(
+                H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
+                ha_device_id="grp",
+                gang="switch.a",
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["gangs"]["switch.a"]["presentation"], "solo")
+        self.assertEqual(self._pres("switch.a"), "solo")  # GET reflects (stored)
+        self.assertEqual(self._pres("switch.b"), "grouped")  # untouched
+        self.assertEqual(self._kinds("user-devices"), 1)  # push fired
+
+    async def test_patch_type_to_known_value(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"type": "heater"}),
+                ha_device_id="grp",
+                gang="switch.b",
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["gangs"]["switch.b"]["type"], "heater")
+
+    async def test_patch_invalid_presentation_is_400_no_push(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"presentation": "bogus"}),
+                ha_device_id="grp",
+                gang="switch.a",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 400)
+        self.assertEqual(self._pres("switch.a"), "grouped")  # untouched
+        self.assertEqual(self._kinds("user-devices"), 0)
+
+    async def test_patch_unknown_type_is_400(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"type": "cover"}),
+                ha_device_id="grp",
+                gang="switch.a",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 400)
+
+    async def test_patch_empty_body_is_400(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={}),
+                ha_device_id="grp",
+                gang="switch.a",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 400)
+
+    async def test_patch_unknown_device_is_404(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
+                ha_device_id="nope",
+                gang="switch.a",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 404)
+
+    async def test_patch_unknown_gang_is_404(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.registry_api", in_scope=_all_in_scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
+                ha_device_id="grp",
+                gang="switch.ghost",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 404)
+
+    async def test_patch_out_of_scope_gang_is_400(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="sub-admin", rooms=["room1"])
+        with mock.patch.multiple(
+            "casasmart.registry_api",
+            in_scope=H.in_scope_for({"room1": set()}),  # gang not in scope
+        ):
+            resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+                H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
+                ha_device_id="grp",
+                gang="switch.a",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 400)  # no-enumeration scope rejection
+        self.assertEqual(self._pres("switch.a"), "grouped")  # untouched
+
+    async def test_patch_user_role_is_403(self) -> None:
+        self._seed()
+        _, hdr = H.session(self.rt.auth, role="user")
+        resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+            H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
+            ha_device_id="grp",
+            gang="switch.a",
+        )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 403)
+
+    async def test_patch_no_token_is_401(self) -> None:
+        resp = await CasaSmartUserDeviceGangView(self.hass).patch(
+            H.FakeRequest(headers={}, body={"presentation": "solo"}),
+            ha_device_id="grp",
+            gang="switch.a",
         )
         status, _ = H.read_response(resp)
         self.assertEqual(status, 401)

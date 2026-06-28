@@ -131,6 +131,29 @@ class _RegistryView(HomeAssistantView):
                 )
         return None
 
+    def _scope_reject(self, claims, *entity_lists, require_assignable=True):
+        """Reject a write touching an entity outside the caller's scope (or,
+        for grabs, not assignable) — same no-enumeration message as the
+        favorites/assignment writes. An admin (rooms=None) passes the scope
+        test. DELETE / gang flips pass require_assignable=False so an all-dead
+        device stays removable / flippable. Returns an error response, or None
+        to proceed."""
+        scope = claims.get("rooms")
+        for entity_ids in entity_lists:
+            if not isinstance(entity_ids, list):
+                continue
+            for entity_id in entity_ids:
+                if (
+                    not isinstance(entity_id, str)
+                    or not in_scope(self._hass, entity_id, scope)
+                    or (require_assignable
+                        and not is_assignable(self._hass, entity_id))
+                ):
+                    return self.json_message(
+                        f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
+                    )
+        return None
+
 
 class CasaSmartRegistryView(_RegistryView):
     """GET /api/casasmart/registry — floors, rooms, devices, scenes."""
@@ -539,28 +562,6 @@ class CasaSmartUserDeviceView(_RegistryView):
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}"
     name = f"api:{DOMAIN}:registry:user-device"
 
-    def _scope_reject(self, claims, *entity_lists, require_assignable=True):
-        """Reject a write touching an entity outside the caller's scope (or,
-        for grabs, not assignable) — same no-enumeration message as the
-        favorites/assignment writes. An admin (rooms=None) passes the scope
-        test. DELETE passes require_assignable=False so an all-dead device
-        stays removable. Returns an error response, or None to proceed."""
-        scope = claims.get("rooms")
-        for entity_ids in entity_lists:
-            if not isinstance(entity_ids, list):
-                continue
-            for entity_id in entity_ids:
-                if (
-                    not isinstance(entity_id, str)
-                    or not in_scope(self._hass, entity_id, scope)
-                    or (require_assignable
-                        and not is_assignable(self._hass, entity_id))
-                ):
-                    return self.json_message(
-                        f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
-                    )
-        return None
-
     async def put(
         self, request: web.Request, ha_device_id: str
     ) -> web.Response:
@@ -692,6 +693,89 @@ class CasaSmartUserDeviceView(_RegistryView):
             return self._storage_failure(err)
         self._notify_change("user-devices")
         return self.json({"deleted": ha_device_id})
+
+
+class CasaSmartUserDeviceGangView(_RegistryView):
+    """PATCH /api/casasmart/registry/user-devices/{ha_device_id}/gangs/{gang}.
+
+    Flip ONE gang's presentation model — promote/hide/un-hide (``presentation``),
+    re-type (``type``), or relabel (``name``/``icon``). Pure presentation
+    metadata: it never touches the device's entities or HA. The body carries any
+    of ``{presentation, type, name, icon}`` and each provided field is applied;
+    the exactly-one-of {grouped, solo, hidden} invariant is the engine's. The
+    gang path segment IS the gang's control entity_id.
+    """
+
+    url = (
+        f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}/gangs/{{gang}}"
+    )
+    name = f"api:{DOMAIN}:registry:user-device:gang"
+
+    @staticmethod
+    def _apply(
+        registry: RegistryEngine,
+        ha_device_id: str,
+        gang: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply each provided field via its dedicated engine command. An empty
+        body (no presentation/type/name/icon) is a 400 — a no-op PATCH is a
+        client mistake, not a silent success."""
+        device = None
+        if "presentation" in payload:
+            device = registry.set_gang_presentation(
+                ha_device_id, gang, payload["presentation"]
+            )
+        if "type" in payload:
+            device = registry.set_gang_type(ha_device_id, gang, payload["type"])
+        if "name" in payload or "icon" in payload:
+            device = registry.set_gang_name_icon(
+                ha_device_id,
+                gang,
+                name=payload.get("name", ...),
+                icon=payload.get("icon", ...),
+            )
+        if device is None:
+            raise RegistryError(
+                "Body must set presentation, type, name or icon"
+            )
+        return device
+
+    async def patch(
+        self, request: web.Request, ha_device_id: str, gang: str
+    ) -> web.Response:
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        # A scoped caller may only flip a gang whose control entity_id is in its
+        # scope (admin passes). require_assignable=False — a presentation flip
+        # writes no HA entity, so a hidden/dead relay must stay flippable, same
+        # as DELETE.
+        reject = self._scope_reject(
+            claims, [gang], require_assignable=False
+        )
+        if reject is not None:
+            return reject
+        try:
+            device = await self._hass.async_add_executor_job(
+                lambda: self._apply(registry, ha_device_id, gang, payload)
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("user-devices")
+        return self.json(device)
 
 
 class CasaSmartScenesView(_RegistryView):

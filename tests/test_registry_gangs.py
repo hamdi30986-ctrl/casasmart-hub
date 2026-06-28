@@ -14,7 +14,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart"),
 )
 
-from registry import RegistryEngine, RegistryError  # noqa: E402
+from registry import RegistryEngine, RegistryError, UnknownItemError  # noqa: E402
 from storage import HubStorage  # noqa: E402
 
 
@@ -157,6 +157,126 @@ class GangsPhase1Tests(unittest.TestCase):
             if u["ha_device_id"] == "legacy-dev"
         ][0]
         self.assertEqual(listed["gangs"], {})
+
+
+class GangCommandsPhase3Tests(unittest.TestCase):
+    """Phase 3: per-gang presentation/type/name-icon commands + enforcement."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.storage = HubStorage(Path(self._tmp.name) / "test.db")
+        self.storage.open()
+        self.addCleanup(self.storage.close)
+        self.engine = _make_engine(self.storage)
+        # A 2-gang record, both grouped, to flip.
+        self.engine.upsert_user_device(
+            "grp",
+            control_entity_ids=["switch.a", "switch.b"],
+            gangs={
+                "switch.a": {"type": "switch", "presentation": "grouped"},
+                "switch.b": {"type": "light", "presentation": "grouped"},
+            },
+            config_entity_ids=["switch.led"],
+        )
+
+    def _pres(self, gang):
+        return self.engine.get_user_device("grp")["gangs"][gang]["presentation"]
+
+    def test_presentation_transitions_each_map_correctly(self):
+        # promote: grouped -> solo
+        served = self.engine.set_gang_presentation("grp", "switch.a", "solo")
+        self.assertEqual(served["gangs"]["switch.a"]["presentation"], "solo")
+        self.assertEqual(self._pres("switch.a"), "solo")  # persisted
+        # the OTHER gang is untouched (exactly-one is per-gang, no side effects)
+        self.assertEqual(self._pres("switch.b"), "grouped")
+        # delete-the-solo: solo -> grouped
+        self.engine.set_gang_presentation("grp", "switch.a", "grouped")
+        self.assertEqual(self._pres("switch.a"), "grouped")
+        # hide: any -> hidden
+        self.engine.set_gang_presentation("grp", "switch.b", "hidden")
+        self.assertEqual(self._pres("switch.b"), "hidden")
+        # un-hide: hidden -> grouped
+        self.engine.set_gang_presentation("grp", "switch.b", "grouped")
+        self.assertEqual(self._pres("switch.b"), "grouped")
+
+    def test_invalid_presentation_rejected_and_record_untouched(self):
+        with self.assertRaises(RegistryError):
+            self.engine.set_gang_presentation("grp", "switch.a", "bogus")
+        self.assertEqual(self._pres("switch.a"), "grouped")  # unchanged
+
+    def test_set_gang_type_known_accepted_unknown_rejected(self):
+        served = self.engine.set_gang_type("grp", "switch.a", "heater")
+        self.assertEqual(served["gangs"]["switch.a"]["type"], "heater")
+        self.engine.set_gang_type("grp", "switch.a", "outlet")
+        self.assertEqual(
+            self.engine.get_user_device("grp")["gangs"]["switch.a"]["type"],
+            "outlet",
+        )
+        for bad in ("cover", "lock", "climate", "", 42):
+            with self.assertRaises(RegistryError):
+                self.engine.set_gang_type("grp", "switch.a", bad)
+        # rejected type left the record on its last good value.
+        self.assertEqual(
+            self.engine.get_user_device("grp")["gangs"]["switch.a"]["type"],
+            "outlet",
+        )
+
+    def test_set_gang_name_icon(self):
+        self.engine.set_gang_name_icon("grp", "switch.b", name="Reading", icon="bulb")
+        g = self.engine.get_user_device("grp")["gangs"]["switch.b"]
+        self.assertEqual(g["name"], "Reading")
+        self.assertEqual(g["icon"], "bulb")
+        # ... sentinel leaves the other field unchanged; None clears.
+        self.engine.set_gang_name_icon("grp", "switch.b", name=None)
+        g = self.engine.get_user_device("grp")["gangs"]["switch.b"]
+        self.assertIsNone(g["name"])
+        self.assertEqual(g["icon"], "bulb")  # icon untouched
+        with self.assertRaises(RegistryError):
+            self.engine.set_gang_name_icon("grp", "switch.b", name=42)
+        with self.assertRaises(RegistryError):
+            self.engine.set_gang_name_icon("grp", "switch.b", icon="x" * 65)
+
+    def test_gang_command_on_absent_device_or_gang_is_unknown_item(self):
+        for fn in (
+            lambda: self.engine.set_gang_presentation("nope", "switch.a", "solo"),
+            lambda: self.engine.set_gang_type("nope", "switch.a", "light"),
+            lambda: self.engine.set_gang_name_icon("nope", "switch.a", name="x"),
+            lambda: self.engine.set_gang_presentation("grp", "switch.ghost", "solo"),
+            lambda: self.engine.set_gang_type("grp", "switch.ghost", "light"),
+            lambda: self.engine.set_gang_name_icon("grp", "switch.ghost", name="x"),
+        ):
+            with self.assertRaises(UnknownItemError):
+                fn()
+
+    def test_legacy_empty_gangs_record_has_no_flippable_gang(self):
+        # The 25 live records serve gangs:{} — every gang command must 404 until
+        # the Phase-6 migration populates gangs.
+        self.engine.upsert_user_device("legacy", entity_ids=["switch.z"])
+        with self.assertRaises(UnknownItemError):
+            self.engine.set_gang_presentation("legacy", "switch.z", "solo")
+
+    def test_commands_never_touch_entities_or_config(self):
+        before = self.engine.get_user_device("grp")
+        self.engine.set_gang_presentation("grp", "switch.a", "hidden")
+        after = self.engine.get_user_device("grp")
+        self.assertEqual(after["entity_ids"], before["entity_ids"])
+        self.assertEqual(after["config_entity_ids"], before["config_entity_ids"])
+
+    def test_upsert_rejects_unknown_gang_type(self):
+        # Phase 3 enforcement reaches the bulk write path too.
+        with self.assertRaises(RegistryError):
+            self.engine.upsert_user_device(
+                "x", entity_ids=["switch.a"],
+                gangs={"switch.a": {"type": "cover"}},
+            )
+        # known types still accepted.
+        ok = self.engine.upsert_user_device(
+            "x", entity_ids=["switch.a"],
+            gangs={"switch.a": {"type": "heater"}},
+        )
+        self.assertEqual(ok["gangs"]["switch.a"]["type"], "heater")
+        self.assertEqual(ok["gangs"]["switch.a"]["presentation"], "grouped")
 
 
 if __name__ == "__main__":
