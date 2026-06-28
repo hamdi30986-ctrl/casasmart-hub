@@ -131,13 +131,15 @@ class _RegistryView(HomeAssistantView):
                 )
         return None
 
-    def _scope_reject(self, claims, *entity_lists, require_assignable=True):
-        """Reject a write touching an entity outside the caller's scope (or,
-        for grabs, not assignable) — same no-enumeration message as the
-        favorites/assignment writes. An admin (rooms=None) passes the scope
-        test. DELETE / gang flips pass require_assignable=False so an all-dead
-        device stays removable / flippable. Returns an error response, or None
-        to proceed."""
+    def _scope_reject(self, claims, *entity_lists):
+        """Reject a write touching an entity outside the caller's scope — same
+        no-enumeration message as the favorites/assignment writes. An admin
+        (rooms=None) passes the scope test. Assignability is NOT checked
+        (Phase 9): a gang's type is presentation metadata, so a grouped/typed
+        record must stay writable even when its underlying entities aren't
+        individually servable (a dead/hidden relay, an all-dead device on DELETE,
+        a presentation flip that writes no HA entity). Returns an error response,
+        or None to proceed."""
         scope = claims.get("rooms")
         for entity_ids in entity_lists:
             if not isinstance(entity_ids, list):
@@ -146,8 +148,6 @@ class _RegistryView(HomeAssistantView):
                 if (
                     not isinstance(entity_id, str)
                     or not in_scope(self._hass, entity_id, scope)
-                    or (require_assignable
-                        and not is_assignable(self._hass, entity_id))
                 ):
                     return self.json_message(
                         f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
@@ -667,7 +667,7 @@ class CasaSmartUserDeviceView(_RegistryView):
             return not_ready
         # A scoped caller may only un-grab a device whose entities are all in
         # its scope; load the record first so an out-of-scope delete is refused
-        # (admin passes). require_assignable=False — a dead-entity device must
+        # (admin passes). Assignability isn't checked — a dead-entity device must
         # stay removable.
         try:
             existing = await self._hass.async_add_executor_job(
@@ -679,7 +679,6 @@ class CasaSmartUserDeviceView(_RegistryView):
             claims,
             existing.get("entity_ids"),
             existing.get("config_entity_ids"),
-            require_assignable=False,
         )
         if reject is not None:
             return reject
@@ -758,12 +757,9 @@ class CasaSmartUserDeviceGangView(_RegistryView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         # A scoped caller may only flip a gang whose control entity_id is in its
-        # scope (admin passes). require_assignable=False — a presentation flip
-        # writes no HA entity, so a hidden/dead relay must stay flippable, same
-        # as DELETE.
-        reject = self._scope_reject(
-            claims, [gang], require_assignable=False
-        )
+        # scope (admin passes). Assignability isn't checked — a presentation flip
+        # writes no HA entity, so a hidden/dead relay must stay flippable.
+        reject = self._scope_reject(claims, [gang])
         if reject is not None:
             return reject
         try:
