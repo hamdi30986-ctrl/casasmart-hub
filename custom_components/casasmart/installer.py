@@ -83,18 +83,18 @@ def permit_join_payload(enable: bool, duration: int) -> str:
 
 
 def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate an entity-registry patch body.
+    """Validate an entity-registry patch body — a name rename only.
 
-    The COMPLETE set of operations the app performs (mirroring HA's WS
-    ``config/entity_registry/update`` subset it actually uses):
+    The switch_as_x domain swap (``options_domain``/``options``) is gone
+    (Phase 7): the app never re-domains an entity, because a gang's type is
+    presentation metadata, never an HA rename. The only operation left is:
 
     - ``name`` — rename (string, or null to clear back to the device name)
-    - ``options_domain`` + ``options`` — the switch_as_x domain swap
 
     Anything else is rejected: this endpoint is a scoped proxy, not a
     general registry editor.
     """
-    unknown = set(payload) - {"name", "options_domain", "options"}
+    unknown = set(payload) - {"name"}
     if unknown:
         raise InstallerError(
             f"Unknown field(s): {', '.join(sorted(unknown))}"
@@ -105,17 +105,6 @@ def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
         if name is not None and not isinstance(name, str):
             raise InstallerError("name must be a string or null")
         changes["name"] = name
-    if "options" in payload and "options_domain" not in payload:
-        raise InstallerError("options requires options_domain")
-    if "options_domain" in payload:
-        options_domain = payload["options_domain"]
-        if not isinstance(options_domain, str) or not options_domain:
-            raise InstallerError("options_domain must be a non-empty string")
-        options = payload.get("options", {})
-        if not isinstance(options, dict):
-            raise InstallerError("options must be an object")
-        changes["options_domain"] = options_domain
-        changes["options"] = options
     if not changes:
         raise InstallerError("Nothing to update")
     return changes

@@ -244,18 +244,13 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # Mirror HA's WS handler exactly: plain updates first, then the
-        # options update (the switch_as_x swap) — both raise ValueError
-        # on bad input, which is the caller's 400.
+        # Name rename only — the switch_as_x options swap is gone (Phase 7).
+        # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:
             entry = registry.async_get(entity_id)
             if "name" in changes:
                 entry = registry.async_update_entity(
                     entity_id, name=changes["name"]
-                )
-            if "options_domain" in changes:
-                entry = registry.async_update_entity_options(
-                    entity_id, changes["options_domain"], changes["options"]
                 )
         except ValueError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
