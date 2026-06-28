@@ -99,24 +99,14 @@ class TestEntityPatch(unittest.TestCase):
     def test_rename_to_null_clears(self):
         self.assertEqual(parse_entity_patch({"name": None}), {"name": None})
 
-    def test_domain_swap(self):
-        self.assertEqual(
-            parse_entity_patch({"options_domain": "light", "options": {}}),
-            {"options_domain": "light", "options": {}},
-        )
-
-    def test_domain_swap_options_default_to_empty(self):
-        self.assertEqual(
-            parse_entity_patch({"options_domain": "fan"}),
-            {"options_domain": "fan", "options": {}},
-        )
-
-    def test_rename_and_swap_together(self):
-        changes = parse_entity_patch(
-            {"name": "Fan", "options_domain": "fan", "options": {}}
-        )
-        self.assertEqual(changes["name"], "Fan")
-        self.assertEqual(changes["options_domain"], "fan")
+    def test_switch_as_x_swap_now_rejected(self):
+        # Phase 7: the domain swap is gone — options_domain/options are unknown.
+        with self.assertRaises(InstallerError):
+            parse_entity_patch({"options_domain": "light", "options": {}})
+        with self.assertRaises(InstallerError):
+            parse_entity_patch({"options_domain": "fan"})
+        with self.assertRaises(InstallerError):
+            parse_entity_patch({"name": "Fan", "options_domain": "fan"})
 
     def test_unknown_fields_rejected(self):
         with self.assertRaises(InstallerError):
@@ -124,17 +114,9 @@ class TestEntityPatch(unittest.TestCase):
         with self.assertRaises(InstallerError):
             parse_entity_patch({"name": "x", "disabled_by": None})
 
-    def test_options_without_domain_rejected(self):
-        with self.assertRaises(InstallerError):
-            parse_entity_patch({"options": {}})
-
     def test_bad_values_rejected(self):
         with self.assertRaises(InstallerError):
             parse_entity_patch({"name": 42})
-        with self.assertRaises(InstallerError):
-            parse_entity_patch({"options_domain": ""})
-        with self.assertRaises(InstallerError):
-            parse_entity_patch({"options_domain": "light", "options": []})
 
     def test_empty_patch_rejected(self):
         with self.assertRaises(InstallerError):
