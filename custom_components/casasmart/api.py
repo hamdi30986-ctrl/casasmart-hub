@@ -126,6 +126,7 @@ from .registry_api import (
     CasaSmartSceneActivateView,
     CasaSmartScenesView,
     CasaSmartSceneView,
+    CasaSmartUserDeviceGangView,
     CasaSmartUserDeviceView,
 )
 from .settings_api import CasaSmartUserSettingsView
@@ -189,6 +190,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartRoomView(hass),
         CasaSmartDeviceAssignmentView(hass),
         CasaSmartUserDeviceView(hass),
+        CasaSmartUserDeviceGangView(hass),
         CasaSmartScenesView(hass),
         CasaSmartSceneView(hass),
         CasaSmartSceneActivateView(hass),
