@@ -14,9 +14,9 @@ wizard, tools, discovered devices). Every endpoint here is gated by
 - ``GET /api/casasmart/admin/states`` — the raw state dump behind the
   import/pairing diff (unfiltered except the token-bearing attributes —
   see ``installer.STRIPPED_STATE_ATTRS``).
-- ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — rename
-  + the switch_as_x domain swap, mirroring exactly the subset of HA's
-  WS ``config/entity_registry/update`` the app uses.
+- ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — entity
+  rename only (the switch_as_x domain swap was removed in Phase 7), a
+  scoped subset of HA's WS ``config/entity_registry/update``.
 - ``GET/POST /api/casasmart/admin/config_flow`` and
   ``POST .../config_flow/{flow_id}`` — the config-flow proxy,
   whitelisted to the Broadlink + EasyIR handlers (``installer
@@ -244,14 +244,13 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # Name rename only — the switch_as_x options swap is gone (Phase 7).
+        # Name rename only — the switch_as_x options swap is gone (Phase 7), so
+        # parse_entity_patch yields exactly {"name": ...}.
         # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:
-            entry = registry.async_get(entity_id)
-            if "name" in changes:
-                entry = registry.async_update_entity(
-                    entity_id, name=changes["name"]
-                )
+            entry = registry.async_update_entity(
+                entity_id, name=changes["name"]
+            )
         except ValueError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json(
