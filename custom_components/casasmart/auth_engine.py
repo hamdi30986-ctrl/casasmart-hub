@@ -133,7 +133,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "audio.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "audio.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     # B16 3c-4b: the installer surface — Zigbee permit-join, raw HA
-    # registry reads + entity surgery (rename, switch_as_x swap), the
+    # registry reads + entity surgery (rename only), the
     # whitelisted config-flow proxy (Broadlink/EasyIR) and IR blaster
     # commands. Owner-only: these reshape the home's hardware.
     "installer.manage": (ROLE_ADMIN,),

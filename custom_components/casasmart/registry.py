@@ -632,8 +632,10 @@ class RegistryEngine:
         #   control_entity_ids — alias of the stored entity_ids
         #   gangs — {} (the catalog falls back to its own derivation)
         #   room_id — None
-        # The record's own keys (via **record) win when present. The stored
-        # entity_ids field is renamed to control_entity_ids in the v3 migration.
+        # The record's own keys (via **record) win when present.
+        # control_entity_ids is DERIVED from the stored entity_ids at serve time
+        # — the v3 migration does NOT rename the stored key (records keep
+        # "entity_ids").
         return {
             "ha_device_id": device_id,
             "control_entity_ids": list(record.get("entity_ids", ())),
