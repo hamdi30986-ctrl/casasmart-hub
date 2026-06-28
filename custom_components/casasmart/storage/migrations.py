@@ -97,10 +97,103 @@ def _migration_v2(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM kv WHERE namespace = 'tank_readings'")
 
 
+# The closed set of gang presentation types the app understands (mirrors
+# registry._KNOWN_GANG_TYPES). A folded type outside it falls back to 'switch'.
+_V3_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
+
+# The gang-suffix labels the app keyed legacy gang_types/gang_names by (mirrors
+# the app's kGangSuffixLabels). Used to map a suffix-keyed legacy map back to the
+# control entity_id that carries that suffix.
+_V3_GANG_SUFFIX_KEYS = (
+    "left", "right", "center", "l1", "l2", "l3",
+    "endpoint_1", "endpoint_2", "endpoint_3", "gang_1", "gang_2", "gang_3",
+)
+
+
+def _v3_suffix_token(entity_id: str) -> str | None:
+    """The app's ``entitySuffixToken``: the gang suffix an entity_id ends with
+    (``switch.kitchen_left`` -> ``left``), or None when it carries none."""
+    local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    for key in _V3_GANG_SUFFIX_KEYS:
+        if local.endswith(f"_{key}") or local == key:
+            return key
+    return None
+
+
+def _migration_v3(conn: sqlite3.Connection) -> None:
+    """Fold the legacy flat ``gang_types``/``gang_names`` maps into the nested
+    ``gangs`` model so the app's presentation path drives cards from the hub.
+
+    Each control entity_id of a TYPED relay record becomes a gang
+    ``{type, icon, name, presentation:'grouped'}``. A record with no
+    ``gang_types`` is a single-function device (climate/cover/sensor/native
+    light) — it keeps NO gangs and is still rendered by its real domain, so this
+    never mistypes a non-relay device. Legacy maps were keyed inconsistently
+    (full entity_id, gang suffix, or a positional ``gang_N``); the type for each
+    entity is resolved by, in order: its entity_id key, its gang-suffix key, the
+    sole value on a single-gang record, else 'switch' — then validated to the
+    known set. Idempotent: a record that already carries gangs is left alone.
+    """
+    rows = conn.execute(
+        "SELECT key, value FROM kv WHERE namespace = 'registry_user_devices'"
+    ).fetchall()
+    for key, raw in rows:
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        existing = record.get("gangs")
+        if isinstance(existing, dict) and existing:
+            continue  # already folded — idempotent
+        gang_types = record.get("gang_types")
+        if not isinstance(gang_types, dict) or not gang_types:
+            continue  # not a typed relay device — no gangs, domain-rendered
+        entity_ids = [
+            eid for eid in (record.get("entity_ids") or []) if isinstance(eid, str)
+        ]
+        if not entity_ids:
+            continue
+        gang_names = record.get("gang_names")
+        if not isinstance(gang_names, dict):
+            gang_names = {}
+        sole_type = next(iter(gang_types.values())) if len(gang_types) == 1 else None
+
+        gangs: dict[str, dict] = {}
+        for eid in entity_ids:
+            suffix = _v3_suffix_token(eid)
+            gtype = (
+                gang_types.get(eid)
+                or (gang_types.get(suffix) if suffix else None)
+                or (sole_type if len(entity_ids) == 1 else None)
+                or "switch"
+            )
+            if not isinstance(gtype, str) or gtype not in _V3_KNOWN_GANG_TYPES:
+                gtype = "switch"
+            gname = gang_names.get(eid) or (
+                gang_names.get(suffix) if suffix else None
+            )
+            gangs[eid] = {
+                "type": gtype,
+                "icon": None,
+                "name": gname if isinstance(gname, str) else None,
+                "presentation": "grouped",
+            }
+        if gangs:
+            record["gangs"] = gangs
+            conn.execute(
+                "UPDATE kv SET value = ? "
+                "WHERE namespace = 'registry_user_devices' AND key = ?",
+                (json.dumps(record), key),
+            )
+
+
 #: Ordered list of all known migrations. Append-only — never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
     Migration(2, "append-only tank_readings table", _migration_v2),
+    Migration(3, "fold flat gang maps into nested gangs", _migration_v3),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
