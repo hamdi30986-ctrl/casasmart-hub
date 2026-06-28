@@ -140,6 +140,57 @@ def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
     return dict(value)
 
 
+_VALID_GANG_PRESENTATIONS = frozenset({"grouped", "solo", "hidden"})
+
+
+def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
+    """A ``{control_entity_id -> {type, icon?, name?, presentation}}`` map;
+    None -> {}. presentation defaults to 'grouped'; type defaults to 'switch'.
+
+    Migration Phase 1 validates SHAPE only — the exactly-one-of
+    {grouped, solo, hidden} state machine (and the known-type set) is enforced
+    by the dedicated gang commands in a later phase; here ``type`` is any
+    string."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RegistryError("gangs must be a map")
+    out: dict[str, dict[str, Any]] = {}
+    for key, gang in value.items():
+        if not isinstance(key, str) or not isinstance(gang, dict):
+            raise RegistryError("gangs entries must be {entity_id: {...}}")
+        presentation = gang.get("presentation", "grouped")
+        if presentation not in _VALID_GANG_PRESENTATIONS:
+            raise RegistryError(
+                "gang presentation must be grouped, solo or hidden"
+            )
+        gtype = gang.get("type")
+        if gtype is not None and not isinstance(gtype, str):
+            raise RegistryError("gang type must be a string")
+        icon = gang.get("icon")
+        if icon is not None and (not isinstance(icon, str) or len(icon) > 64):
+            raise RegistryError("gang icon must be a string of at most 64 chars")
+        name = gang.get("name")
+        if name is not None and not isinstance(name, str):
+            raise RegistryError("gang name must be a string")
+        out[key] = {
+            "type": gtype if isinstance(gtype, str) else "switch",
+            "icon": icon,
+            "name": name,
+            "presentation": presentation,
+        }
+    return out
+
+
+def _clean_optional_room(value: Any) -> str | None:
+    """A nullable device-level room id."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise RegistryError("room_id must be a non-empty string or null")
+    return value
+
+
 def _clean_optional_name(name: Any) -> str | None:
     """A nullable display name — None passes through, else validated."""
     return None if name is None else _clean_name(name, "Device")
@@ -557,9 +608,28 @@ class RegistryEngine:
     # these records carry no room. "Grabbed" = every entity referenced here, so
     # the add-devices list is the served set MINUS grabbed_entity_ids().
 
+    @staticmethod
+    def _serve_user_device(
+        device_id: str, record: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Emit the forward shape with safe defaults so a new client always sees
+        # the fields even for a LEGACY record written before the migration:
+        #   control_entity_ids — alias of the stored entity_ids
+        #   gangs — {} (the catalog falls back to its own derivation)
+        #   room_id — None
+        # The record's own keys (via **record) win when present. The stored
+        # entity_ids field is renamed to control_entity_ids in the v3 migration.
+        return {
+            "ha_device_id": device_id,
+            "control_entity_ids": list(record.get("entity_ids", ())),
+            "gangs": record.get("gangs", {}),
+            "room_id": record.get("room_id"),
+            **record,
+        }
+
     def list_user_devices(self) -> list[dict[str, Any]]:
         return [
-            {"ha_device_id": device_id, **record}
+            self._serve_user_device(device_id, record)
             for device_id, record in self._user_devices.items()
         ]
 
@@ -567,33 +637,45 @@ class RegistryEngine:
         record = self._user_devices.get(ha_device_id)
         if record is None:
             raise UnknownItemError("Unknown device")
-        return {"ha_device_id": ha_device_id, **record}
+        return self._serve_user_device(ha_device_id, record)
 
     def upsert_user_device(
         self,
         ha_device_id: Any,
         *,
-        entity_ids: Any,
+        entity_ids: Any = None,
+        control_entity_ids: Any = None,
         gang_types: Any = None,
         gang_names: Any = None,
+        gangs: Any = None,
         config_entity_ids: Any = None,
         device_type: Any = None,
         custom_name: Any = None,
         custom_icon: Any = None,
+        room_id: Any = None,
     ) -> dict[str, Any]:
-        """Create or fully replace a grouped-device record (import / re-import)."""
+        """Create or fully replace a grouped-device record (import / re-import).
+
+        ``control_entity_ids`` is the forward name for ``entity_ids`` (the gang
+        relays); either is accepted. ``gangs`` is the nested per-gang
+        presentation model keyed by control entity_id; ``room_id`` is the
+        device-level room. Legacy flat ``gang_types``/``gang_names`` are still
+        accepted through the migration window."""
         if not isinstance(ha_device_id, str) or not ha_device_id.strip():
             raise RegistryError("ha_device_id is required")
+        controls = entity_ids if control_entity_ids is None else control_entity_ids
         record = {
-            "entity_ids": _clean_entity_ids(entity_ids),
+            "entity_ids": _clean_entity_ids(controls),
             "gang_types": _clean_gang_map(gang_types, "gang_types"),
             "gang_names": _clean_gang_map(gang_names, "gang_names"),
+            "gangs": _clean_gangs(gangs),
             "config_entity_ids": _clean_entity_ids(
                 config_entity_ids or [], "config_entity_ids"
             ),
             "device_type": _clean_device_type(device_type),
             "custom_name": _clean_optional_name(custom_name),
             "custom_icon": _clean_icon(custom_icon),
+            "room_id": _clean_optional_room(room_id),
         }
         with self._lock:
             self._user_devices[ha_device_id] = record
@@ -602,33 +684,42 @@ class RegistryEngine:
             ha_device_id,
             len(record["entity_ids"]),
         )
-        return {"ha_device_id": ha_device_id, **record}
+        return self._serve_user_device(ha_device_id, record)
 
     def patch_user_device(
         self,
         ha_device_id: str,
         *,
         entity_ids: Any = ...,
+        control_entity_ids: Any = ...,
         gang_types: Any = ...,
         gang_names: Any = ...,
+        gangs: Any = ...,
         config_entity_ids: Any = ...,
         device_type: Any = ...,
         custom_name: Any = ...,
         custom_icon: Any = ...,
+        room_id: Any = ...,
     ) -> dict[str, Any]:
         """Edit a grouped-device record. ``...`` means "leave unchanged"
         (rename a gang, re-type, set an icon); an explicit None clears a
-        nullable field."""
+        nullable field. ``control_entity_ids`` is the forward alias of
+        ``entity_ids``."""
         with self._lock:
             record = self._user_devices.get(ha_device_id)
             if record is None:
                 raise UnknownItemError("Unknown device")
-            if entity_ids is not ...:
-                record["entity_ids"] = _clean_entity_ids(entity_ids)
+            controls = (
+                entity_ids if control_entity_ids is ... else control_entity_ids
+            )
+            if controls is not ...:
+                record["entity_ids"] = _clean_entity_ids(controls)
             if gang_types is not ...:
                 record["gang_types"] = _clean_gang_map(gang_types, "gang_types")
             if gang_names is not ...:
                 record["gang_names"] = _clean_gang_map(gang_names, "gang_names")
+            if gangs is not ...:
+                record["gangs"] = _clean_gangs(gangs)
             if config_entity_ids is not ...:
                 record["config_entity_ids"] = _clean_entity_ids(
                     config_entity_ids or [], "config_entity_ids"
@@ -639,8 +730,10 @@ class RegistryEngine:
                 record["custom_name"] = _clean_optional_name(custom_name)
             if custom_icon is not ...:
                 record["custom_icon"] = _clean_icon(custom_icon)
+            if room_id is not ...:
+                record["room_id"] = _clean_optional_room(room_id)
             self._user_devices[ha_device_id] = record  # persist
-        return {"ha_device_id": ha_device_id, **record}
+        return self._serve_user_device(ha_device_id, record)
 
     def delete_user_device(self, ha_device_id: str) -> None:
         """Remove a grouped device — its entities become un-grabbed and
@@ -656,7 +749,9 @@ class RegistryEngine:
         entities. The add-devices list is the served set MINUS this."""
         grabbed: set[str] = set()
         for record in self._user_devices.values():
-            grabbed.update(record.get("entity_ids", ()))
+            grabbed.update(
+                record.get("control_entity_ids") or record.get("entity_ids", ())
+            )
             grabbed.update(record.get("config_entity_ids", ()))
         return grabbed
 
