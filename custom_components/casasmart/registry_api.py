@@ -226,7 +226,7 @@ class CasaSmartRegistryView(_RegistryView):
             for device in user_devices
             if any(
                 is_assignable(self._hass, entity_id)
-                for entity_id in device.get("entity_ids", [])
+                for entity_id in device.get("control_entity_ids", [])
             )
         ]
         if scope is not None:
@@ -239,10 +239,10 @@ class CasaSmartRegistryView(_RegistryView):
             user_devices = [
                 device
                 for device in user_devices
-                if device.get("entity_ids")
+                if device.get("control_entity_ids")
                 and all(
                     in_scope(self._hass, entity_id, scope)
-                    for entity_id in device.get("entity_ids", [])
+                    for entity_id in device.get("control_entity_ids", [])
                 )
             ]
 
@@ -578,7 +578,9 @@ class CasaSmartUserDeviceView(_RegistryView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         reject = self._scope_reject(
-            claims, payload.get("entity_ids"), payload.get("config_entity_ids")
+            claims,
+            payload.get("control_entity_ids") or payload.get("entity_ids"),
+            payload.get("config_entity_ids"),
         )
         if reject is not None:
             return reject
@@ -587,12 +589,15 @@ class CasaSmartUserDeviceView(_RegistryView):
                 lambda: registry.upsert_user_device(
                     ha_device_id,
                     entity_ids=payload.get("entity_ids"),
+                    control_entity_ids=payload.get("control_entity_ids"),
                     gang_types=payload.get("gang_types"),
                     gang_names=payload.get("gang_names"),
+                    gangs=payload.get("gangs"),
                     config_entity_ids=payload.get("config_entity_ids"),
                     device_type=payload.get("device_type"),
                     custom_name=payload.get("custom_name"),
                     custom_icon=payload.get("custom_icon"),
+                    room_id=payload.get("room_id"),
                 )
             )
         except RegistryError as err:
@@ -619,7 +624,9 @@ class CasaSmartUserDeviceView(_RegistryView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         reject = self._scope_reject(
-            claims, payload.get("entity_ids"), payload.get("config_entity_ids")
+            claims,
+            payload.get("control_entity_ids") or payload.get("entity_ids"),
+            payload.get("config_entity_ids"),
         )
         if reject is not None:
             return reject
@@ -628,12 +635,15 @@ class CasaSmartUserDeviceView(_RegistryView):
                 lambda: registry.patch_user_device(
                     ha_device_id,
                     entity_ids=payload.get("entity_ids", ...),
+                    control_entity_ids=payload.get("control_entity_ids", ...),
                     gang_types=payload.get("gang_types", ...),
                     gang_names=payload.get("gang_names", ...),
+                    gangs=payload.get("gangs", ...),
                     config_entity_ids=payload.get("config_entity_ids", ...),
                     device_type=payload.get("device_type", ...),
                     custom_name=payload.get("custom_name", ...),
                     custom_icon=payload.get("custom_icon", ...),
+                    room_id=payload.get("room_id", ...),
                 )
             )
         except RegistryError as err:
