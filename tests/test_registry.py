@@ -213,6 +213,41 @@ class UserDeviceTests(RegistryTestCase):
         with self.assertRaises(UnknownItemError):
             self.engine.patch_user_device("nope", custom_name="x")
 
+    def test_patch_cannot_drop_a_grabbed_relay(self):
+        # H1: dropping a relay via PATCH would free it into the add-list while
+        # the device stays grabbed (the Tier-2 violation). Removal is hide/delete
+        # only — the PATCH is rejected and the record is left untouched.
+        self.engine.upsert_user_device(
+            "dev-1", entity_ids=["switch.left", "switch.right"]
+        )
+        with self.assertRaises(RegistryError):
+            self.engine.patch_user_device("dev-1", entity_ids=["switch.left"])
+        self.assertEqual(
+            self.engine.get_user_device("dev-1")["entity_ids"],
+            ["switch.left", "switch.right"],
+        )
+
+    def test_patch_may_grow_the_relay_set(self):
+        # H1: growing the set (re-discovery) is fine; only dropping is forbidden.
+        self.engine.upsert_user_device("dev-1", entity_ids=["switch.left"])
+        patched = self.engine.patch_user_device(
+            "dev-1", entity_ids=["switch.left", "switch.right"]
+        )
+        self.assertEqual(patched["entity_ids"], ["switch.left", "switch.right"])
+
+    def test_orphan_gangs_without_a_relay_are_dropped(self):
+        # H3: a gang must map to a grabbed relay — an orphan (no matching
+        # entity_id) is pruned so the gangs= path can't invent a phantom gang.
+        dev = self.engine.upsert_user_device(
+            "dev-1",
+            entity_ids=["switch.left"],
+            gangs={
+                "switch.left": {"type": "light", "presentation": "solo"},
+                "switch.ghost": {"type": "switch", "presentation": "grouped"},
+            },
+        )
+        self.assertEqual(list(dev["gangs"].keys()), ["switch.left"])
+
 
 class SceneTests(RegistryTestCase):
     GOOD = [{"entity_id": "light.sofa", "action": "turn_on",
