@@ -248,6 +248,19 @@ class UserDeviceTests(RegistryTestCase):
         )
         self.assertEqual(list(dev["gangs"].keys()), ["switch.left"])
 
+    def test_grab_rejects_a_relay_already_grabbed_elsewhere(self):
+        # H2: a relay can't be grabbed by two devices at once.
+        self.engine.upsert_user_device(
+            "dev-1", entity_ids=["switch.a", "switch.b"]
+        )
+        with self.assertRaises(RegistryError):
+            self.engine.upsert_user_device("dev-2", entity_ids=["switch.b"])
+        # Re-importing the SAME device replaces its own record (not a clash).
+        self.engine.upsert_user_device("dev-1", entity_ids=["switch.a"])
+        self.assertEqual(
+            self.engine.get_user_device("dev-1")["entity_ids"], ["switch.a"]
+        )
+
 
 class SceneTests(RegistryTestCase):
     GOOD = [{"entity_id": "light.sofa", "action": "turn_on",

@@ -799,11 +799,22 @@ class AuthEngine:
             # the same lock+read we already do, so no extra cost on the hot
             # path and no DB write per request.
             cached["last_seen"] = time.time()
+            # Authorize off the STORED role/rooms, never the client-presented
+            # JWT claim. The ver gate above already guarantees they match, but
+            # stamping makes authorize() depend on the device record — so a token
+            # whose claims were somehow trusted without this check can't ride an
+            # elevated role past authorize().
+            claims["role"] = cached["role"]
+            claims["rooms"] = cached.get("rooms")
         return claims
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
-        """True when the token's role grants the named permission.
+        """True when the role grants the named permission.
+
+        ``claims`` MUST come from ``AuthEngine.validate_token``, which stamps the
+        role/rooms from the STORED device record (not the raw JWT) — so the role
+        checked here is the device's, never a client-presented claim.
 
         A ``scope: widget`` token is additionally capped to
         ``WIDGET_SCOPE_PERMISSIONS`` — the scope check runs FIRST so a

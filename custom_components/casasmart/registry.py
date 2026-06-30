@@ -707,6 +707,25 @@ class RegistryEngine:
         # A gang must map to a grabbed relay — drop any orphan.
         record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
         with self._lock:
+            # A relay can't be grabbed by two devices: reject if any of this
+            # record's entities is already owned by a DIFFERENT record. A
+            # re-import of the same ha_device_id replaces its own record (exempt);
+            # a fresh grab of an in-use relay is the double-grab the model forbids.
+            taken: set[str] = set()
+            for other_id, other in self._user_devices.items():
+                if other_id == ha_device_id:
+                    continue
+                taken.update(other.get("entity_ids", ()))
+                taken.update(other.get("config_entity_ids", ()))
+            clash = [
+                e
+                for e in (*record["entity_ids"], *record["config_entity_ids"])
+                if e in taken
+            ]
+            if clash:
+                raise RegistryError(
+                    f"entities already grabbed by another device: {clash}"
+                )
             self._user_devices[ha_device_id] = record
         _LOGGER.info(
             "Registry: user-device %s upserted (%d entities)",

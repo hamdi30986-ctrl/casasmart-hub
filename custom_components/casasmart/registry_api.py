@@ -774,6 +774,17 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         return self.json(device)
 
 
+def _scene_entity_ids(entities: Any) -> list[str]:
+    """The entity_ids referenced by a scene's entities payload (str ids only)."""
+    if not isinstance(entities, list):
+        return []
+    return [
+        e["entity_id"]
+        for e in entities
+        if isinstance(e, dict) and isinstance(e.get("entity_id"), str)
+    ]
+
+
 class CasaSmartScenesView(_RegistryView):
     """POST /api/casasmart/registry/scenes — create a scene."""
 
@@ -781,7 +792,9 @@ class CasaSmartScenesView(_RegistryView):
     name = f"api:{DOMAIN}:registry:scenes"
 
     async def post(self, request: web.Request) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -795,6 +808,14 @@ class CasaSmartScenesView(_RegistryView):
         unserved = self._unserved_scene_entity(payload.get("entities"))
         if unserved is not None:
             return unserved
+        # Scope re-check — the same defense-in-depth the favorites/user-device
+        # writes do. Unreachable today (every registry.manage caller is unscoped),
+        # but consistent if a scoped non-user role is ever introduced.
+        reject = self._scope_reject(
+            claims, _scene_entity_ids(payload.get("entities"))
+        )
+        if reject is not None:
+            return reject
         try:
             scene = await self._hass.async_add_executor_job(
                 lambda: registry.create_scene(
@@ -818,7 +839,9 @@ class CasaSmartSceneView(_RegistryView):
     name = f"api:{DOMAIN}:registry:scene"
 
     async def patch(self, request: web.Request, scene_id: str) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "registry.manage")
+        claims, error = authenticate_request(
+            self._hass, request, "registry.manage"
+        )
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -833,6 +856,11 @@ class CasaSmartSceneView(_RegistryView):
             unserved = self._unserved_scene_entity(payload["entities"])
             if unserved is not None:
                 return unserved
+            reject = self._scope_reject(
+                claims, _scene_entity_ids(payload["entities"])
+            )
+            if reject is not None:
+                return reject
         try:
             scene = await self._hass.async_add_executor_job(
                 lambda: registry.update_scene(
