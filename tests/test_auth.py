@@ -223,6 +223,16 @@ class EngineTests(unittest.TestCase):
         # Other roles still fine.
         self.engine.enroll_device("Helper", "sub-admin", second_pem)
 
+    def test_is_owner_device(self):
+        # owner-only push (alarm/lock/tank) keys off this: the admin -> True; a
+        # sub-admin / scoped / unknown device -> False.
+        admin_id = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        _, sub_pem = make_keypair()
+        sub_id = self.engine.enroll_device("Helper", "sub-admin", sub_pem)
+        self.assertTrue(self.engine.is_owner_device(admin_id))
+        self.assertFalse(self.engine.is_owner_device(sub_id))
+        self.assertFalse(self.engine.is_owner_device("dev-nope"))
+
     def test_enroll_validation(self):
         with self.assertRaises(EnrollError):
             self.engine.enroll_device("", "admin", self.public_pem)
