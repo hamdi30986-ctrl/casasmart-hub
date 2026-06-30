@@ -75,6 +75,13 @@ _LOGGER = logging.getLogger(__name__)
 PUSH_TYPE_SECURITY = "security"
 PUSH_TYPE_LOCK = "lock"
 
+# Owner-only audiences: alarm (security), lock, and tank alerts reach the enrolled
+# admin only — a room-scoped phone doesn't get them. A LIFE-SAFETY alarm
+# (fire/smoke; data.life_safety == "1") is the exception and stays house-wide.
+_OWNER_ONLY_TYPES = frozenset(
+    {PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK, PUSH_TYPE_TANK_LOW, PUSH_TYPE_TANK_OFFLINE}
+)
+
 # Relay priority buckets (must match the relay's accepted values).
 PRIORITY_CRITICAL = "critical"
 PRIORITY_NORMAL = "normal"
@@ -196,6 +203,10 @@ class PushDispatcher:
         title = "Life-safety alarm" if life_safety else "Security alarm"
         body = f"{name} triggered the alarm" if name else "The alarm was triggered"
         data = {"type": PUSH_TYPE_SECURITY, "title": title, "body": body}
+        if life_safety:
+            # House-wide audience flag: a fire/smoke (life-safety) alarm must
+            # reach EVERYONE, not just the owner (consumed in _dispatch_inner).
+            data["life_safety"] = "1"
         if isinstance(entity_id, str) and entity_id:
             data["entity_id"] = entity_id
         return data
@@ -252,10 +263,25 @@ class PushDispatcher:
             _LOGGER.exception("Push dispatch: reading device tokens failed")
             return
 
+        # Owner-only events (alarm / lock / tank) go to the enrolled admin only;
+        # a life-safety alarm (data.life_safety) stays house-wide. If roles can't
+        # be resolved we fail OPEN (deliver to all) so a safety alert is never
+        # silently dropped.
+        owner_only = (
+            data.get("type") in _OWNER_ONLY_TYPES
+            and data.get("life_safety") != "1"
+        )
+        engine = None
+        if owner_only:
+            from .auth_api import get_engine
+
+            engine = get_engine(self._hass)
         device_tokens = [
             rec["fcm_token"]
-            for rec in tokens.values()
-            if isinstance(rec.get("fcm_token"), str) and rec["fcm_token"]
+            for dev_id, rec in tokens.items()
+            if isinstance(rec.get("fcm_token"), str)
+            and rec["fcm_token"]
+            and (not owner_only or engine is None or engine.is_owner_device(dev_id))
         ]
         if not device_tokens:
             _LOGGER.debug(

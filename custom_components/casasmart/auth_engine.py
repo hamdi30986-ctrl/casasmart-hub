@@ -808,6 +808,13 @@ class AuthEngine:
             claims["rooms"] = cached.get("rooms")
         return claims
 
+    def is_owner_device(self, device_id: str) -> bool:
+        """True when [device_id] is the enrolled ADMIN (owner) — for owner-only
+        push (alarm/lock/tank). Unknown or room-scoped devices return False."""
+        with self._lock:
+            cached = self._device_cache.get(device_id)
+            return bool(cached and cached.get("role") == ROLE_ADMIN)
+
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
         """True when the role grants the named permission.
