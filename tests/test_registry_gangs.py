@@ -68,7 +68,7 @@ class GangsPhase1Tests(unittest.TestCase):
         self.assertEqual(
             dev["gangs"]["switch.kitchen_left"],
             {"type": "light", "icon": "bulb", "name": "Ceiling",
-             "presentation": "solo"},
+             "presentation": "solo", "room_id": None},
         )
         right = dev["gangs"]["switch.kitchen_right"]
         self.assertEqual(right["type"], "fan")
@@ -262,6 +262,19 @@ class GangCommandsPhase3Tests(unittest.TestCase):
         after = self.engine.get_user_device("grp")
         self.assertEqual(after["entity_ids"], before["entity_ids"])
         self.assertEqual(after["config_entity_ids"], before["config_entity_ids"])
+
+    def test_set_gang_room(self):
+        # 1B: a gang carries its own room, independent of the device's room.
+        self.engine.set_gang_room("grp", "switch.a", "kitchen")
+        self.assertEqual(
+            self.engine.get_user_device("grp")["gangs"]["switch.a"]["room_id"],
+            "kitchen",
+        )
+        # ...and can be cleared back to None.
+        self.engine.set_gang_room("grp", "switch.a", None)
+        self.assertIsNone(
+            self.engine.get_user_device("grp")["gangs"]["switch.a"]["room_id"]
+        )
 
     def test_upsert_rejects_unknown_gang_type(self):
         # Phase 3 enforcement reaches the bulk write path too. Use a relay NOT in
