@@ -197,6 +197,16 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _gangs_backed_by(
+    gangs: dict[str, dict[str, Any]], entity_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Keep only gangs whose control entity_id is a grabbed relay — a gang must
+    map to a real entity in the record, never a phantom (so the gangs= write
+    path can't invent one)."""
+    allowed = set(entity_ids)
+    return {key: gang for key, gang in gangs.items() if key in allowed}
+
+
 def _clean_optional_room(value: Any) -> str | None:
     """A nullable device-level room id."""
     if value is None:
@@ -694,6 +704,8 @@ class RegistryEngine:
             "custom_icon": _clean_icon(custom_icon),
             "room_id": _clean_optional_room(room_id),
         }
+        # A gang must map to a grabbed relay — drop any orphan.
+        record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
         with self._lock:
             self._user_devices[ha_device_id] = record
         _LOGGER.info(
@@ -730,7 +742,19 @@ class RegistryEngine:
                 entity_ids if control_entity_ids is ... else control_entity_ids
             )
             if controls is not ...:
-                record["entity_ids"] = _clean_entity_ids(controls)
+                new_ids = _clean_entity_ids(controls)
+                # A PATCH must never DROP a grabbed relay: that would free one
+                # relay into the add-list while the device stays grabbed. Relay
+                # removal is hide-the-gang or delete-the-device only; growing the
+                # set (re-discovery) is fine. A full re-import goes through the
+                # PUT/upsert path, not here.
+                dropped = [e for e in record["entity_ids"] if e not in new_ids]
+                if dropped:
+                    raise RegistryError(
+                        f"entity_ids cannot drop a grabbed relay {dropped}; "
+                        "hide the gang or delete the device"
+                    )
+                record["entity_ids"] = new_ids
             if gang_types is not ...:
                 record["gang_types"] = _clean_gang_map(gang_types, "gang_types")
             if gang_names is not ...:
@@ -749,6 +773,9 @@ class RegistryEngine:
                 record["custom_icon"] = _clean_icon(custom_icon)
             if room_id is not ...:
                 record["room_id"] = _clean_optional_room(room_id)
+            # A gang must map to a grabbed relay — drop any orphan (e.g. a
+            # gangs= patch referencing a non-relay).
+            record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
             self._user_devices[ha_device_id] = record  # persist
         return self._serve_user_device(ha_device_id, record)
 
