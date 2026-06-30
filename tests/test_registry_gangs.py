@@ -264,7 +264,7 @@ class GangCommandsPhase3Tests(unittest.TestCase):
         self.assertEqual(after["config_entity_ids"], before["config_entity_ids"])
 
     def test_set_gang_room(self):
-        # 1B: a gang carries its own room, independent of the device's room.
+        # A gang carries its own room, independent of the device's room.
         self.engine.set_gang_room("grp", "switch.a", "kitchen")
         self.assertEqual(
             self.engine.get_user_device("grp")["gangs"]["switch.a"]["room_id"],
