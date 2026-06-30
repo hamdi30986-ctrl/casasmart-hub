@@ -264,19 +264,20 @@ class GangCommandsPhase3Tests(unittest.TestCase):
         self.assertEqual(after["config_entity_ids"], before["config_entity_ids"])
 
     def test_upsert_rejects_unknown_gang_type(self):
-        # Phase 3 enforcement reaches the bulk write path too.
+        # Phase 3 enforcement reaches the bulk write path too. Use a relay NOT in
+        # the setUp "grp" record so the H2 double-grab guard doesn't fire here.
         with self.assertRaises(RegistryError):
             self.engine.upsert_user_device(
-                "x", entity_ids=["switch.a"],
-                gangs={"switch.a": {"type": "cover"}},
+                "x", entity_ids=["switch.x"],
+                gangs={"switch.x": {"type": "cover"}},
             )
         # known types still accepted.
         ok = self.engine.upsert_user_device(
-            "x", entity_ids=["switch.a"],
-            gangs={"switch.a": {"type": "heater"}},
+            "x", entity_ids=["switch.x"],
+            gangs={"switch.x": {"type": "heater"}},
         )
-        self.assertEqual(ok["gangs"]["switch.a"]["type"], "heater")
-        self.assertEqual(ok["gangs"]["switch.a"]["presentation"], "grouped")
+        self.assertEqual(ok["gangs"]["switch.x"]["type"], "heater")
+        self.assertEqual(ok["gangs"]["switch.x"]["presentation"], "grouped")
 
 
 if __name__ == "__main__":

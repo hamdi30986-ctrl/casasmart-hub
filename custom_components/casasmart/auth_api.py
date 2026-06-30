@@ -158,10 +158,22 @@ def is_lan_request(
         return True
     for cidr in extra_cidrs or []:
         try:
-            if remote in ipaddress.ip_network(cidr, strict=False):
-                return True
+            network = ipaddress.ip_network(cidr, strict=False)
         except ValueError:
             _LOGGER.error("Ignoring invalid pairing_extra_lan_cidrs entry %r", cidr)
+            continue
+        if not network.is_private:
+            # The LAN-widening knob may only cover a PRIVATE proxy range (e.g.
+            # Docker Desktop's VM interface) — never public space, which would
+            # expose pairing/recovery to the internet. Refuse it loudly.
+            _LOGGER.error(
+                "Refusing PUBLIC pairing_extra_lan_cidrs entry %r — "
+                "LAN-widening is private-only",
+                cidr,
+            )
+            continue
+        if remote in network:
+            return True
     return False
 
 
