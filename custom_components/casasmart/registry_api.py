@@ -734,9 +734,13 @@ class CasaSmartUserDeviceGangView(_RegistryView):
                 name=payload.get("name", ...),
                 icon=payload.get("icon", ...),
             )
+        if "room_id" in payload:
+            device = registry.set_gang_room(
+                ha_device_id, gang, payload["room_id"]
+            )
         if device is None:
             raise RegistryError(
-                "Body must set presentation, type, name or icon"
+                "Body must set presentation, type, name, icon or room_id"
             )
         return device
 

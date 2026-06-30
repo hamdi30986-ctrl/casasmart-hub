@@ -193,6 +193,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
             "icon": icon,
             "name": name,
             "presentation": presentation,
+            "room_id": _clean_optional_room(gang.get("room_id")),
         }
     return out
 
@@ -872,6 +873,17 @@ class RegistryEngine:
                 gang["name"] = name
             if icon is not ...:
                 gang["icon"] = _clean_icon(icon)
+
+        return self._mutate_gang(ha_device_id, gang_key, mutate)
+
+    def set_gang_room(
+        self, ha_device_id: str, gang_key: str, room_id: Any
+    ) -> dict[str, Any]:
+        """Place ONE gang on a room (or clear it with None) — independent of the
+        device's own room. Validated like the device-level room_id."""
+
+        def mutate(gang: dict[str, Any]) -> None:
+            gang["room_id"] = _clean_optional_room(room_id)
 
         return self._mutate_gang(ha_device_id, gang_key, mutate)
 
