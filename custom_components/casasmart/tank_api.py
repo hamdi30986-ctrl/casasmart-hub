@@ -43,8 +43,6 @@ from homeassistant.core import HomeAssistant
 
 from .auth_api import (
     authenticate_request,
-    get_extra_lan_cidrs,
-    is_lan_request,
     json_body,
 )
 from .const import DOMAIN, EVENT_TANK_CHANGED
@@ -391,13 +389,26 @@ class CasaSmartTankProvisionView(_TankView):
         )
 
 
+def _client_ip(request: web.Request) -> str:
+    """Best-effort real client IP (for throttle keying + logging). Prefers the
+    Cloudflare-set header when a reading arrives via the tunnel, else the peer."""
+    for header in ("CF-Connecting-IP", "X-Forwarded-For"):
+        value = request.headers.get(header)
+        if value:
+            return value.split(",")[0].strip()
+    return request.remote or "unknown"
+
+
 class CasaSmartTankReadingView(_TankView):
     """POST /api/casasmart/tank/reading — the Shelly script's ingest.
 
     The minted device token is the credential (``{"device_token": ...,
-    "voltage": ...}``). LAN-only like enroll — the device lives on the
-    LAN and a leaked token must be useless remotely. Bad tokens are
-    throttled per source with the shared escalating walls.
+    "voltage": ...}``). Accepted from ANY source — the Shelly may reach the hub
+    directly on the LAN or via the Cloudflare tunnel, and a tank reading is
+    low-stakes (a water-level number). Bad tokens are throttled per real client
+    (X-Forwarded-For / CF-Connecting-IP behind the tunnel) with the shared
+    escalating walls. Pairing/recovery stay LAN-locked (see ``is_lan_request``)
+    — this relaxation is scoped to tank ingest only.
     """
 
     url = f"/api/{DOMAIN}/tank/reading"
@@ -407,21 +418,16 @@ class CasaSmartTankReadingView(_TankView):
         tanks, not_ready = self._tanks_or_503()
         if not_ready is not None:
             return not_ready
-        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
-            _LOGGER.warning(
-                "Tank reading refused (non-LAN source: %s)", request.remote
-            )
-            return self.json_message(
-                "Tank ingest is only available on the hub's own network",
-                HTTPStatus.FORBIDDEN,
-            )
         payload = await json_body(request)
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
-        source = request.remote or "unknown"
+        # Token-authenticated, accepted from ANY source — the Shelly may reach
+        # the hub on the LAN or via the Cloudflare tunnel. The per-source throttle
+        # below (keyed on the real client) walls token brute-force.
+        source = _client_ip(request)
         try:
             _INGEST_THROTTLE.check(source)
         except ThrottledError as err:
