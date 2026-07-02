@@ -369,10 +369,14 @@ class WsConnection:
         await self._enqueue(
             ws_protocol.frame_auth_ok(self._hub_version, API_VERSION)
         )
-        # If the new token's room scope differs (an admin re-scoped this user),
-        # re-send the snapshot so the live view drops/gains rooms immediately
-        # instead of staying stale until the next subscribe (Phase 8).
-        if self._subscribed and (self._claims or {}).get("rooms") != old_rooms:
+        # Re-send the snapshot after EVERY re-auth (m2). The app gates data
+        # frames while it re-authenticates (auth_required -> auth_ok), so any
+        # state_changed the hub pushed during that grace window is dropped
+        # client-side and its tiles freeze until the next reconnect. A fresh
+        # snapshot on re-auth reconciles that missed state — and also drops/gains
+        # rooms at once when an admin re-scoped this user mid-connection (the
+        # scope-change case this used to be limited to; Phase 8).
+        if self._subscribed:
             await self._emit_snapshot()
 
     # -- push ---------------------------------------------------------------
