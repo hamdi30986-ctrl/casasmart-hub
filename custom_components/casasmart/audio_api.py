@@ -161,6 +161,26 @@ def _scoped_area_names(hass: HomeAssistant, scope: list[str]) -> set[str]:
     return names
 
 
+def _speaker_in_scope(
+    speaker: dict[str, Any],
+    allowed_ids: set[str],
+    allowed_names: set[str],
+) -> bool:
+    """Whether a room-scoped caller may see this speaker.
+
+    Exact ``area_id`` membership first (the modern, robust path); then the
+    legacy free-text ``room`` name-match for enrolments made before speakers
+    carried an area id; then shared (no room at all) → visible to everyone.
+    """
+    area_id = speaker.get("area_id")
+    if area_id:
+        return area_id in allowed_ids
+    room = speaker.get("room")
+    if room:
+        return room.strip().casefold() in allowed_names
+    return True
+
+
 class CasaSmartAudioSpeakersView(_AudioView):
     """GET /audio/speakers — enrolled speakers merged with live status.
 
@@ -183,16 +203,16 @@ class CasaSmartAudioSpeakersView(_AudioView):
         scope = claims.get("rooms")
         if scope is not None:
             # A room-scoped user (e.g. a guest/kids phone) sees only its rooms'
-            # speakers (Phase 8). Speakers carry a free-text room label, so match
-            # it against the caller's scoped AREA names; an unroomed speaker is
-            # shared house infra (visible to all). Fail-closed: a label matching
-            # no scoped area is hidden, never leaked.
-            allowed = _scoped_area_names(self._hass, scope)
-            speakers = [
-                s
-                for s in speakers
-                if not s.get("room") or s["room"].strip().casefold() in allowed
-            ]
+            # speakers (Phase 8). Preferred path: the speaker's ``area_id`` (==
+            # the app's room_id / HA area id) is matched EXACTLY against the
+            # caller's room scope — robust, no name-string fuzziness. Legacy
+            # fallback: a speaker with no area_id but a free-text ``room`` label
+            # is matched by casefolded area NAME (older enrolments). A speaker
+            # with neither is shared house infra, visible to all. Fail-closed: a
+            # scoped speaker matching nothing is hidden, never leaked.
+            allowed_ids = set(scope)
+            allowed_names = _scoped_area_names(self._hass, scope)
+            speakers = [s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)]
         return self.json({"speakers": speakers})
 
     async def post(self, request: web.Request) -> web.Response:
@@ -214,6 +234,8 @@ class CasaSmartAudioSpeakersView(_AudioView):
                 payload.get("mac"),
                 payload.get("name"),
                 payload.get("room"),
+                payload.get("icon"),
+                payload.get("room_id"),
             )
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
@@ -246,6 +268,8 @@ class CasaSmartAudioSpeakerView(_AudioView):
                 mac6,
                 payload.get("name"),
                 payload.get("room"),
+                payload.get("icon"),
+                payload.get("room_id"),
             )
         except UnknownSpeakerError as err:
             return self.json_message(str(err), HTTPStatus.NOT_FOUND)
@@ -751,12 +775,14 @@ def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
 # closure capturing request state.
 
 
-def _enroll_job(audio: AudioEngine, mac, name, room):
-    return audio.enroll_speaker(mac, name, room)
+def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):
+    return audio.enroll_speaker(mac, name, room, icon=icon, area_id=area_id)
 
 
-def _update_job(audio: AudioEngine, mac6, name, room):
-    return audio.update_speaker(mac6, name=name, room=room)
+def _update_job(audio: AudioEngine, mac6, name, room, icon, area_id):
+    return audio.update_speaker(
+        mac6, name=name, room=room, icon=icon, area_id=area_id
+    )
 
 
 def _set_broker_job(audio: AudioEngine, payload: dict[str, Any]):
