@@ -136,6 +136,30 @@ class SpeakersView(AudioViewTestCase):
             EVENT_AUDIO_CHANGED, [evt for evt, _ in self.hass.bus.fired]
         )
 
+    async def test_post_enroll_stores_custom_icon(self) -> None:
+        resp = await self.view.post(
+            H.FakeRequest(
+                headers=self._admin(),
+                body={"mac": "aabbcc", "name": "Salon", "icon": "sonos"},
+            )
+        )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["speaker"]["custom_icon"], "sonos")
+        stored = next(
+            s for s in self.rt.audio.speakers() if s["mac6"] == "aabbcc"
+        )
+        self.assertEqual(stored["custom_icon"], "sonos")
+
+    async def test_get_speaker_shape_has_custom_icon_key(self) -> None:
+        # A speaker enrolled with no icon still serves the key (null).
+        self.rt.audio.enroll_speaker("112233", "No Icon", None)
+        served = next(
+            s for s in self.rt.audio.speakers() if s["mac6"] == "112233"
+        )
+        self.assertIn("custom_icon", served)
+        self.assertIsNone(served["custom_icon"])
+
     async def test_post_bad_mac_is_400(self) -> None:
         # "zzzz" is not hex -> normalize_mac6 raises AudioError -> 400.
         resp = await self.view.post(
@@ -195,6 +219,30 @@ class SpeakerView(AudioViewTestCase):
             s for s in self.rt.audio.speakers() if s["mac6"] == "ddeeff"
         )
         self.assertEqual(stored["name"], "New Name")
+
+    async def test_put_sets_and_clears_custom_icon(self) -> None:
+        # Set an icon.
+        resp = await self.view.put(
+            H.FakeRequest(headers=self._admin(), body={"icon": "hifi"}),
+            mac6="ddeeff",
+        )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["speaker"]["custom_icon"], "hifi")
+        # Renaming without an icon field leaves the icon untouched.
+        resp = await self.view.put(
+            H.FakeRequest(headers=self._admin(), body={"name": "Renamed"}),
+            mac6="ddeeff",
+        )
+        _, body = H.read_response(resp)
+        self.assertEqual(body["speaker"]["custom_icon"], "hifi")
+        # Empty-string icon clears it.
+        resp = await self.view.put(
+            H.FakeRequest(headers=self._admin(), body={"icon": ""}),
+            mac6="ddeeff",
+        )
+        _, body = H.read_response(resp)
+        self.assertIsNone(body["speaker"]["custom_icon"])
 
     async def test_put_unknown_speaker_is_404(self) -> None:
         resp = await self.view.put(
@@ -704,6 +752,31 @@ class SpeakerScope(AudioViewTestCase):
         with self._areas({"area-garage": "Garage"}):
             names = await self._names(hdr)
         self.assertEqual(names, ["Hall Spk"])
+
+    async def test_scoped_user_matches_by_area_id_exactly(self) -> None:
+        # A speaker assigned an area_id is scoped by EXACT id membership — no
+        # dependence on the free-text label matching the area name (SPK-5).
+        self.rt.audio.enroll_speaker(
+            "aabbccddee04", "Studio Sonos", "some label", area_id="area-studio"
+        )
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["area-studio"])
+        with self._areas({"area-studio": "Studio"}):
+            names = await self._names(hdr)
+        # Studio speaker (id match) + Hall (house-wide); label never consulted.
+        self.assertEqual(names, ["Hall Spk", "Studio Sonos"])
+
+    async def test_area_id_out_of_scope_is_hidden(self) -> None:
+        # area_id present but not in scope -> hidden even if the label would
+        # have matched the caller's area name (id takes priority, fail-closed).
+        self.rt.audio.enroll_speaker(
+            "aabbccddee05", "Sneaky", "Kitchen", area_id="area-bedroom"
+        )
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["area-kitchen"])
+        with self._areas({"area-kitchen": "Kitchen"}):
+            names = await self._names(hdr)
+        # Kitchen Spk (legacy label match) + Hall; "Sneaky" hidden despite its
+        # Kitchen *label*, because its area_id is area-bedroom.
+        self.assertEqual(names, ["Hall Spk", "Kitchen Spk"])
 
 
 if __name__ == "__main__":

@@ -162,6 +162,45 @@ def _clean_optional_name(name: Any, *, field: str) -> Optional[str]:
     return _clean_name(name, field=field)
 
 
+# Max length for a custom-icon key (an app icon-set key like ``speaker`` /
+# ``sonos``, not free text). Bounds a hostile payload without policing the
+# vocabulary — the app owns the icon-key set.
+_ICON_KEY_MAX = 64
+
+
+def _clean_optional_icon(icon: Any) -> Optional[str]:
+    """Normalise a custom-icon key: ``None`` or ``""`` clears it, a non-empty
+    string is stripped + length-capped. The icon key is app-defined, so the hub
+    only length-bounds it."""
+    if icon is None:
+        return None
+    if not isinstance(icon, str):
+        raise AudioError("icon must be a string")
+    cleaned = icon.strip()
+    if not cleaned:
+        return None
+    return cleaned[:_ICON_KEY_MAX]
+
+
+# Max length for an area/room id (an HA area id — the app's room_id is the same
+# id). Bounds a hostile payload; the hub does not validate the id exists.
+_AREA_ID_MAX = 128
+
+
+def _clean_optional_area_id(area_id: Any) -> Optional[str]:
+    """Normalise a room/area id: ``None`` or ``""`` clears it, a non-empty
+    string is stripped + length-capped. The id is the app's ``room_id`` (== HA
+    area id); scoping compares it verbatim against the token's room scope."""
+    if area_id is None:
+        return None
+    if not isinstance(area_id, str):
+        raise AudioError("area_id must be a string")
+    cleaned = area_id.strip()
+    if not cleaned:
+        return None
+    return cleaned[:_AREA_ID_MAX]
+
+
 def _validate_volume(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AudioError("volume must be an integer 0-100")
@@ -453,23 +492,40 @@ class AudioEngine:
     # -- speaker registry (storage) --------------------------------------------
 
     def enroll_speaker(
-        self, mac: Any, name: Any, room: Any = None
+        self,
+        mac: Any,
+        name: Any,
+        room: Any = None,
+        icon: Any = None,
+        area_id: Any = None,
     ) -> dict[str, Any]:
         """Add (or rename in place) an enrolled speaker.
 
         Called at the end of the app's add-speaker flow once the speaker is on
         the LAN and named. Idempotent on the id: re-enrolling updates the
-        name/room and preserves ``enrolled_at``.
+        name/room/icon/area and preserves ``enrolled_at``.
         """
         mac6 = normalize_mac6(mac)
         clean_name = _clean_name(name)
         clean_room = _clean_optional_name(room, field="room")
+        clean_icon = _clean_optional_icon(icon)
+        clean_area = _clean_optional_area_id(area_id)
         with self._lock:
             existing = self._speakers.get(mac6)
             record = {
                 "mac6": mac6,
                 "name": clean_name,
                 "room": clean_room,
+                # Hub-owned custom-icon key (app icon-set). Re-enrolling with no
+                # icon preserves the existing one rather than clearing it.
+                "custom_icon": clean_icon
+                if icon is not None
+                else (existing.get("custom_icon") if existing else None),
+                # Room/area assignment (== app room_id / HA area id). Drives the
+                # room-scoped visibility filter. Preserved across re-enroll.
+                "area_id": clean_area
+                if area_id is not None
+                else (existing.get("area_id") if existing else None),
                 "enrolled_at": existing["enrolled_at"]
                 if existing
                 else self._clock(),
@@ -479,9 +535,16 @@ class AudioEngine:
             return dict(record)
 
     def update_speaker(
-        self, mac: Any, *, name: Any = None, room: Any = None
+        self,
+        mac: Any,
+        *,
+        name: Any = None,
+        room: Any = None,
+        icon: Any = None,
+        area_id: Any = None,
     ) -> dict[str, Any]:
-        """Rename / re-room an enrolled speaker (omitted fields unchanged)."""
+        """Rename / re-room / re-icon / re-assign an enrolled speaker (omitted
+        fields unchanged; pass ``icon=""`` / ``area_id=""`` to clear)."""
         mac6 = normalize_mac6(mac)
         with self._lock:
             existing = self._speakers.get(mac6)
@@ -492,6 +555,10 @@ class AudioEngine:
                 record["name"] = _clean_name(name)
             if room is not None:
                 record["room"] = _clean_name(room, field="room")
+            if icon is not None:
+                record["custom_icon"] = _clean_optional_icon(icon)
+            if area_id is not None:
+                record["area_id"] = _clean_optional_area_id(area_id)
             self._speakers_table[mac6] = record
             self._speakers[mac6] = dict(record)
             return dict(record)
@@ -523,6 +590,10 @@ class AudioEngine:
             result = []
             for mac6 in sorted(self._speakers):
                 record = dict(self._speakers[mac6])
+                # Always present in the served shape, even for speakers enrolled
+                # before these fields existed (persisted rows won't carry them).
+                record.setdefault("custom_icon", None)
+                record.setdefault("area_id", None)
                 record["live"] = dict(self._live.get(mac6, {"online": False}))
                 result.append(record)
             return result
