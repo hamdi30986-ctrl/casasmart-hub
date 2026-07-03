@@ -81,9 +81,9 @@ systemctl enable --now snapclient
 
 The client has **no server address and no pipe**. It receives and plays. Done.
 
-> Also refresh `cs_payload.tar.gz` while we're in there so the golden payload carries
-> today's hub-native agent + athan changes (currently the payload `app.py` predates
-> them). Tracked separately from transport, which needs no payload change.
+> The only payload change is adding `snapclient`; `cs_payload.tar.gz` is otherwise
+> current (as of 2026-07-04 the payload `app.py` matches the live agent, and it already
+> ships shairport with `enable_remote="yes"` — so transport needs no payload change).
 
 ### 3b. Hub side — a "CasaSmart Audio" HA add-on
 
