@@ -37,6 +37,7 @@ try:
         CasaSmartAudioBrokerView,
         CasaSmartAudioPaConfigView,
         CasaSmartAudioCommandView,
+        CasaSmartAudioAirplayView,
         CasaSmartAudioBroadcastView,
         CasaSmartAudioProvisionView,
         _parse_targets,
@@ -592,6 +593,82 @@ class CommandView(AudioViewTestCase):
         with self._with_adapter():
             resp = await self.view.post(
                 H.FakeRequest(headers={}, body={"cmd": "stop"}), mac6="ddeeff"
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 401)
+
+
+class AirplayView(AudioViewTestCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.view = CasaSmartAudioAirplayView(self.hass)
+        self.rt.audio.enroll_speaker("aabbccddeeff", "Kitchen")
+        self.adapter = FakeAdapter()
+
+    def _with_adapter(self):
+        return mock.patch(
+            "casasmart.audio_api.get_audio_adapter", lambda hass: self.adapter
+        )
+
+    async def test_playpause_publishes_raw_verb_to_remote_topic(self) -> None:
+        with self._with_adapter():
+            resp = await self.view.post(
+                H.FakeRequest(headers=self._admin(), body={"action": "playpause"}),
+                mac6="ddeeff",
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["action"], "playpause")
+        self.assertEqual(body["topic"], "speakers/ddeeff/airplay/remote")
+        # RAW string (shairport expects a bare verb, not JSON), non-retained —
+        # it's a fire-and-forget command, not persisted state.
+        topic, payload, _qos, retain = self.adapter.published[0]
+        self.assertEqual(topic, "speakers/ddeeff/airplay/remote")
+        self.assertEqual(payload, "playpause")
+        self.assertIsInstance(payload, str)
+        self.assertFalse(retain)
+
+    async def test_next_and_previous_map_to_dacp_verbs(self) -> None:
+        with self._with_adapter():
+            r1 = await self.view.post(
+                H.FakeRequest(headers=self._admin(), body={"action": "next"}),
+                mac6="ddeeff",
+            )
+            r2 = await self.view.post(
+                H.FakeRequest(headers=self._admin(), body={"action": "previous"}),
+                mac6="ddeeff",
+            )
+        self.assertEqual(H.read_response(r1)[1]["action"], "nextitem")
+        self.assertEqual(H.read_response(r2)[1]["action"], "previtem")
+        self.assertEqual(self.adapter.published[0][1], "nextitem")
+        self.assertEqual(self.adapter.published[1][1], "previtem")
+
+    async def test_unknown_action_is_400(self) -> None:
+        with self._with_adapter():
+            resp = await self.view.post(
+                H.FakeRequest(headers=self._admin(), body={"action": "yeet"}),
+                mac6="ddeeff",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 400)
+        self.assertEqual(self.adapter.published, [])  # nothing published
+
+    async def test_unknown_speaker_is_404(self) -> None:
+        with self._with_adapter():
+            resp = await self.view.post(
+                H.FakeRequest(
+                    headers=self._admin(), body={"action": "playpause"}
+                ),
+                mac6="000000",
+            )
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 404)
+
+    async def test_requires_control_no_token_is_401(self) -> None:
+        with self._with_adapter():
+            resp = await self.view.post(
+                H.FakeRequest(headers={}, body={"action": "playpause"}),
+                mac6="ddeeff",
             )
         status, _ = H.read_response(resp)
         self.assertEqual(status, 401)

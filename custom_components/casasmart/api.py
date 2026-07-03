@@ -89,6 +89,7 @@ from .alarm_api import (
     CasaSmartAlarmZoneView,
 )
 from .audio_api import (
+    CasaSmartAudioAirplayView,
     CasaSmartAudioAthanView,
     CasaSmartAudioBroadcastView,
     CasaSmartAudioBrokerView,
@@ -220,6 +221,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartAudioSpeakerView(hass),
         CasaSmartAudioDiscoverView(hass),
         CasaSmartAudioCommandView(hass),
+        CasaSmartAudioAirplayView(hass),
         CasaSmartAudioBroadcastView(hass),
         CasaSmartAudioPaView(hass),
         CasaSmartAudioPaClipView(hass),

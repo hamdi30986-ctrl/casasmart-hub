@@ -24,6 +24,7 @@ from audio import (  # noqa: E402
     UnknownSpeakerError,
     normalize_mac6,
     speaker_command_topic,
+    speaker_airplay_remote_topic,
 )
 
 
@@ -418,6 +419,39 @@ class CommandTests(AudioTestCase):
     def test_command_on_unknown_speaker_raises(self):
         with self.assertRaises(UnknownSpeakerError):
             self.engine.build_command("aaaaaa", CMD_STOP)
+
+
+class AirplayRemoteTests(AudioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.engine.enroll_speaker("965cb9", "Work Room")
+
+    def test_playpause_maps_to_verb_and_remote_topic(self):
+        topic, verb = self.engine.build_airplay_remote("965cb9", "playpause")
+        self.assertEqual(topic, speaker_airplay_remote_topic("965cb9"))
+        self.assertEqual(topic, "speakers/965cb9/airplay/remote")
+        self.assertEqual(verb, "playpause")
+
+    def test_next_previous_map_to_dacp_verbs(self):
+        self.assertEqual(
+            self.engine.build_airplay_remote("965cb9", "next")[1], "nextitem"
+        )
+        self.assertEqual(
+            self.engine.build_airplay_remote("965cb9", "previous")[1], "previtem"
+        )
+
+    def test_verb_is_a_bare_string_not_a_dict(self):
+        # shairport's remote topic wants a raw command word, never JSON.
+        _, verb = self.engine.build_airplay_remote("965cb9", "pause")
+        self.assertIsInstance(verb, str)
+
+    def test_unknown_action_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.build_airplay_remote("965cb9", "moonwalk")
+
+    def test_airplay_on_unknown_speaker_raises(self):
+        with self.assertRaises(UnknownSpeakerError):
+            self.engine.build_airplay_remote("aaaaaa", "playpause")
 
 
 class PlayBuildTests(AudioTestCase):
