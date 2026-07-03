@@ -1,29 +1,24 @@
 """Hub-native athan (prayer-call) scheduler.
 
-Computes the five daily prayer times locally — pure-Python solar algorithm, no
-network and no external library — from the athan config the app stores via
-``PUT /audio/athan`` (``lat``/``lon``/``timezone``/``method``), falling back to
-the hub's own configured location (``hass.config.latitude/longitude/time_zone``).
-It arms one HA timer per prayer and, at prayer time, publishes a broadcast
-``play`` command (priority ``athan``) through the audio adapter — the same play
-path PA uses.
+Computes the five daily prayer times locally via ``prayer-times-calculator-offline``
+(the same offline, no-network library Home Assistant's *Islamic Prayer Times*
+integration uses) from the athan config the app stores through ``PUT /audio/athan``
+(``lat``/``lon``/``timezone``/``method``/``school``), falling back to the hub's own
+configured location (``hass.config.latitude/longitude/time_zone``). It arms one HA
+timer per prayer and, at prayer time, publishes a broadcast ``play`` command
+(priority ``athan``) through the audio adapter — the same play path PA uses.
 
 This replaces the standalone ``casaos-athan-scheduler`` daemon. The hub owns
-audio (B14), so it owns athan scheduling too. Being in-process means it ships
-with every hub, resolves timezones through HA's DST-aware ``zoneinfo`` database
-(so prayer times are correct in any region, not just no-DST Saudi Arabia), and
-needs no Supabase, no hardcoded home id, and no separate broker credentials.
-
-The prayer-time math is ported verbatim from the (verified-accurate) daemon;
-only the timezone handling is upgraded from a fixed offset table to real,
-per-date IANA offsets.
+audio (B14), so it owns athan scheduling too. The library returns UTC timestamps,
+so DST/offset handling is inherent (no fixed table), and it adds Hanafi/Shafi Asr,
+high-latitude rules and ~24 regional calculation methods — correct in any region,
+with no Supabase, no hardcoded home id and no separate broker credentials.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-from datetime import date, datetime, time, tzinfo
+from datetime import datetime, timezone, tzinfo  # noqa: F401  (tzinfo used in hints)
 from typing import Any, Optional
 
 from homeassistant.core import HomeAssistant, callback
@@ -43,107 +38,69 @@ PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 # wake — skip anything already more than this many seconds past.
 _GRACE_SEC = 120
 
-
-# ── Pure prayer-time math (ported from the verified daemon) ───────────────────
-# Standard solar-position algorithm; fajr/isha depression angles per method.
-
-def _method_params(method: str) -> dict[str, Optional[float]]:
-    m = (method or "makkah").lower()
-    if m in ("makkah", "umalqura", "umm_al_qura"):
-        return {"fajr": 18.5, "isha": None, "isha_min": 90}
-    if m in ("mwl", "muslim_world_league"):
-        return {"fajr": 18.0, "isha": 17.0, "isha_min": None}
-    if m in ("egyptian",):
-        return {"fajr": 19.5, "isha": 17.5, "isha_min": None}
-    if m in ("karachi",):
-        return {"fajr": 18.0, "isha": 18.0, "isha_min": None}
-    if m in ("isna", "north_america"):
-        return {"fajr": 15.0, "isha": 15.0, "isha_min": None}
-    return {"fajr": 18.5, "isha": None, "isha_min": 90}  # default: makkah
+# The library's accepted calculation methods (lower-case). The app historically
+# sends "egyptian"; the library calls it "egypt", so alias it.
+_LIB_METHODS = frozenset({
+    "mwl", "isna", "egypt", "makkah", "karachi", "tehran", "jafari", "gulf",
+    "kuwait", "qatar", "singapore", "france", "turkey", "russia", "moonsighting",
+    "dubai", "jakim", "tunisia", "algeria", "kemenag", "morocco", "portugal",
+    "jordan", "custom",
+})
+_METHOD_ALIASES = {"egyptian": "egypt", "umalqura": "makkah", "umm_al_qura": "makkah"}
+_DEFAULT_METHOD = "makkah"
+_ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
 
 
-def _julian_date(year: int, month: int, day: int) -> float:
-    if month <= 2:
-        year -= 1
-        month += 12
-    a = year // 100
-    b = 2 - a + a // 4
-    return int(365.25 * (year + 4716)) + int(30.6001 * (month + 1)) + day + b - 1524.5
+def compute_prayer_times_utc(
+    lat: float, lon: float, method: str, school: str, date_str: str
+) -> Optional[dict[str, datetime]]:
+    """The five prayer times as timezone-aware UTC datetimes for ``date_str``.
 
-
-def _sun_position(jd: float) -> tuple[float, float]:
-    """Return (declination, equation-of-time) in degrees / hours."""
-    d = jd - 2451545.0
-    g = (357.529 + 0.98560028 * d) % 360
-    q = (280.459 + 0.98564736 * d) % 360
-    lam = (q + 1.915 * math.sin(math.radians(g)) + 0.020 * math.sin(math.radians(2 * g))) % 360
-    e = 23.439 - 0.00000036 * d
-    ra = math.degrees(
-        math.atan2(
-            math.cos(math.radians(e)) * math.sin(math.radians(lam)),
-            math.cos(math.radians(lam)),
-        )
-    )
-    decl = math.degrees(math.asin(math.sin(math.radians(e)) * math.sin(math.radians(lam))))
-    eqt = (q / 15.0) - (ra / 15.0)
-    while eqt > 12:
-        eqt -= 24
-    while eqt < -12:
-        eqt += 24
-    return decl, eqt
-
-
-def _hour_angle(angle: float, lat: float, decl: float) -> float:
-    cos_h = (
-        -math.sin(math.radians(angle))
-        - math.sin(math.radians(lat)) * math.sin(math.radians(decl))
-    ) / (math.cos(math.radians(lat)) * math.cos(math.radians(decl)))
-    return math.degrees(math.acos(max(-1.0, min(1.0, cos_h)))) / 15.0
-
-
-def _asr_angle(lat: float, decl: float) -> float:
-    angle = math.atan(1.0 / (1 + math.tan(abs(math.radians(lat) - math.radians(decl)))))
-    cos_h = (
-        math.sin(angle) - math.sin(math.radians(lat)) * math.sin(math.radians(decl))
-    ) / (math.cos(math.radians(lat)) * math.cos(math.radians(decl)))
-    return math.degrees(math.acos(max(-1.0, min(1.0, cos_h)))) / 15.0
-
-
-def prayer_times_local(
-    for_date: date, lat: float, lon: float, utc_offset: float, method: str
-) -> dict[str, float]:
-    """The five prayer times as hours-since-local-midnight (float, 0..24)."""
-    p = _method_params(method)
-    jd = _julian_date(for_date.year, for_date.month, for_date.day)
-    decl, eqt = _sun_position(jd)
-    dhuhr = 12.0 + utc_offset - (lon / 15.0) - eqt
-    sunset = dhuhr + _hour_angle(0.833, lat, decl)
-    isha = (
-        sunset + p["isha_min"] / 60.0
-        if p["isha_min"]
-        else dhuhr + _hour_angle(p["isha"], lat, decl)
-    )
-    return {
-        "Fajr": (dhuhr - _hour_angle(p["fajr"], lat, decl)) % 24,
-        "Dhuhr": dhuhr % 24,
-        "Asr": (dhuhr + _asr_angle(lat, decl)) % 24,
-        "Maghrib": sunset % 24,
-        "Isha": isha % 24,
-    }
-
-
-def _offset_hours(tz: tzinfo, for_date: date) -> float:
-    """The tz's UTC offset (hours) at local noon on ``for_date`` — DST-aware.
-
-    Sampling at noon keeps us safely inside the day, away from the ambiguous
-    hour around a DST transition.
+    Uses ``prayer-times-calculator-offline`` (pure local math, no network).
+    Returns None if the library is missing or the calculation fails, so the
+    caller schedules nothing rather than crashing the loop.
     """
-    dt = datetime.combine(for_date, time(12, 0), tzinfo=tz)
-    off = dt.utcoffset()
-    return off.total_seconds() / 3600.0 if off is not None else 0.0
+    try:
+        from prayer_times_calculator_offline import PrayerTimesCalculator
+    except Exception:  # noqa: BLE001 — declared in manifest; guard anyway
+        _LOGGER.warning("Athan: prayer-times-calculator-offline not installed")
+        return None
+
+    m = _METHOD_ALIASES.get((method or "").lower(), (method or "").lower())
+    if m not in _LIB_METHODS:
+        m = _DEFAULT_METHOD
+    sch = (school or "shafi").lower()
+    if sch not in _ASR_SCHOOLS:
+        sch = "shafi"
+
+    try:
+        calc = PrayerTimesCalculator(
+            latitude=float(lat),
+            longitude=float(lon),
+            calculation_method=m,
+            date=date_str,
+            school=sch,
+        )
+        raw = calc.fetch_prayer_times()
+    except Exception:  # noqa: BLE001 — a bad config must not kill the loop
+        _LOGGER.exception("Athan: prayer-time calculation failed")
+        return None
+
+    out: dict[str, datetime] = {}
+    for prayer in PRAYER_NAMES:
+        value = raw.get(prayer)
+        if not value:
+            continue
+        try:
+            dt = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            continue
+        if dt.tzinfo is None:  # library emits +00:00, but be defensive
+            dt = dt.replace(tzinfo=timezone.utc)
+        out[prayer] = dt
+    return out or None
 
 
-# ── Scheduler ─────────────────────────────────────────────────────────────────
 class AthanScheduler:
     """Computes prayer times off the athan config and fires them on HA's clock."""
 
@@ -190,38 +147,36 @@ class AthanScheduler:
         if resolved is None:
             _LOGGER.debug("Athan: disabled or no location — nothing scheduled")
             return
-        lat, lon, tz_name, method = resolved
+        lat, lon, tz_name, method, school = resolved
 
         tz = dt_util.get_time_zone(tz_name)
         if tz is None:
             _LOGGER.warning("Athan: unknown timezone %r — nothing scheduled", tz_name)
             return
 
-        now = datetime.now(tz)
-        today = now.date()
-        offset = _offset_hours(tz, today)
-        times = prayer_times_local(today, lat, lon, offset, method)
+        today = datetime.now(tz).date()
+        times = compute_prayer_times_utc(lat, lon, method, school, today.isoformat())
+        if not times:
+            _LOGGER.warning("Athan: could not compute prayer times for %s", today)
+            return
 
+        now_utc = dt_util.utcnow()
         armed: list[str] = []
         for prayer in PRAYER_NAMES:
-            hours = times[prayer]
-            # Floor to the minute — matches the original daemon so Jeddah users
-            # see the exact prayer minutes they're already used to.
-            h = int(hours)
-            m = int((hours - h) * 60)
-            fire_at = datetime.combine(today, time(h, m), tzinfo=tz)
-            delay = (fire_at - now).total_seconds()
-            if delay < -_GRACE_SEC:
+            fire_at = times.get(prayer)
+            if fire_at is None:
+                continue
+            if (fire_at - now_utc).total_seconds() < -_GRACE_SEC:
                 continue  # already well past — skip (grace guards a late wake)
             unsub = async_track_point_in_time(
                 self._hass, self._make_fire(prayer), fire_at
             )
             self._unsub_prayers.append(unsub)
-            armed.append(f"{prayer} {h:02d}:{m:02d}")
+            armed.append(f"{prayer} {fire_at.astimezone(tz).strftime('%H:%M')}")
 
         _LOGGER.info(
-            "Athan scheduled for %s (%s, %.4f,%.4f %s): %s",
-            today, method, lat, lon, tz_name,
+            "Athan scheduled for %s (%s/%s, %.4f,%.4f %s): %s",
+            today, method, school, lat, lon, tz_name,
             ", ".join(armed) if armed else "none remaining today",
         )
 
@@ -249,8 +204,10 @@ class AthanScheduler:
         except Exception:  # noqa: BLE001 — a dead bus is non-fatal, just logged
             _LOGGER.warning("Athan: %s not delivered — MQTT bus unavailable", prayer)
 
-    def _resolve_config(self) -> Optional[tuple[float, float, str, str]]:
-        """Return ``(lat, lon, tz_name, method)`` or None if athan is off / no location.
+    def _resolve_config(
+        self,
+    ) -> Optional[tuple[float, float, str, str, str]]:
+        """Return ``(lat, lon, tz_name, method, school)`` or None if athan is off.
 
         Location and timezone fall back to the hub's own HA config so a client
         hub configured with the customer's location works with no app-side setup.
@@ -270,8 +227,9 @@ class AthanScheduler:
         if lat is None or lon is None:
             return None
         tz_name = athan.get("timezone") or self._hass.config.time_zone or "UTC"
-        method = athan.get("method") or "makkah"
+        method = athan.get("method") or _DEFAULT_METHOD
+        school = athan.get("school") or "shafi"
         try:
-            return float(lat), float(lon), str(tz_name), str(method)
+            return float(lat), float(lon), str(tz_name), str(method), str(school)
         except (TypeError, ValueError):
             return None
