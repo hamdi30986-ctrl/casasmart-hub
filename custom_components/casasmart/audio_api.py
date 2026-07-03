@@ -170,6 +170,15 @@ def get_audio_adapter(hass: HomeAssistant) -> AudioAdapter | None:
     return runtime_data.audio_adapter
 
 
+def get_athan_scheduler(hass: HomeAssistant):
+    """The loaded entry's hub-native athan scheduler (None until started)."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.athan_scheduler
+
+
 class _AudioView(HomeAssistantView):
     """Shared plumbing for the audio views."""
 
@@ -696,6 +705,12 @@ class CasaSmartAudioAthanView(_AudioView):
                 _LOGGER.warning(
                     "Athan config stored but not relayed — MQTT bus is down"
                 )
+        # Re-arm the hub's own scheduler off the new config immediately (the
+        # retained relay above is now vestigial — kept for any external listener
+        # — but the hub itself is the scheduler and reschedules in-process).
+        scheduler = get_athan_scheduler(self._hass)
+        if scheduler is not None:
+            scheduler.reschedule()
         return self.json({"athan": stored, "relayed": relayed})
 
 

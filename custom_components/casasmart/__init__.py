@@ -70,6 +70,7 @@ from .alarm import AlarmEngine
 from .alarm_adapter import AlarmAdapter
 from .audio import AudioEngine
 from .audio_adapter import AudioAdapter
+from .athan_scheduler import AthanScheduler
 from .recovery import RecoveryManager, hash_code as recovery_hash_code
 from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
@@ -121,6 +122,9 @@ class CasaSmartRuntimeData:
     # failed before it started, or while audio is unprovisioned (still set,
     # just inert — the object exists so the API can publish through it).
     audio_adapter: AudioAdapter | None = None
+    # Hub-native athan scheduler: computes prayer times + fires broadcast plays
+    # via the audio adapter. None only if setup failed before it was started.
+    athan_scheduler: AthanScheduler | None = None
     # B8 push dispatcher: alarm/lock events -> signed relay pushes. None if the
     # TLS identity (its hub-id source) or the push key was unavailable at setup.
     push_dispatcher: PushDispatcher | None = None
@@ -338,6 +342,13 @@ async def async_setup_entry(
     audio_adapter = AudioAdapter(hass, audio)
     await audio_adapter.async_start()
     entry.runtime_data.audio_adapter = audio_adapter
+
+    # Hub-native athan scheduler: computes prayer times locally and fires them
+    # through the same adapter (broadcast play, priority athan). Replaces the
+    # old external casaos-athan-scheduler daemon — ships in-process with the hub.
+    athan_scheduler = AthanScheduler(hass, audio, audio_adapter)
+    await athan_scheduler.async_start()
+    entry.runtime_data.athan_scheduler = athan_scheduler
 
     # B13: expose the alarm panel as a native HA entity (runtime_data — its
     # engine source — is already set above, so the platform can read it).
@@ -737,6 +748,8 @@ async def async_unload_entry(
         entry.runtime_data.tank_push_monitor.async_stop()
     if entry.runtime_data.push_dispatcher is not None:
         entry.runtime_data.push_dispatcher.async_stop()
+    if entry.runtime_data.athan_scheduler is not None:
+        await entry.runtime_data.athan_scheduler.async_stop()
     if entry.runtime_data.audio_adapter is not None:
         await entry.runtime_data.audio_adapter.async_stop()
     if entry.runtime_data.mdns is not None:
