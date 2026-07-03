@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -46,6 +47,7 @@ from .const import (
     PUSH_RELAY_PUSH_PATH,
     PUSH_RELAY_URL_CONFIG_KEY,
     PUSH_RELAY_URL_DEFAULT,
+    PROVISION_SECRET_CONFIG_KEY,
     RECOVERY_CODE_HASH_CONFIG_KEY,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
@@ -190,6 +192,12 @@ def _open_storage(
         hub_config.set(
             RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code)
         )
+    # Speaker-provisioning secret — baked into each site's Pi image (platform.json)
+    # and presented on GET /audio/provision so a speaker can fetch broker creds
+    # from any source (incl. a Docker-NAT'd hub whose LAN check misfires) without
+    # exposing them off-network. Minted once; survives factory reset via hub_config.
+    if not hub_config.get(PROVISION_SECRET_CONFIG_KEY):
+        hub_config.set(PROVISION_SECRET_CONFIG_KEY, secrets.token_urlsafe(24))
     registry = RegistryEngine(
         storage.table("registry_floors"),
         storage.table("registry_rooms"),

@@ -48,7 +48,7 @@ from .auth_engine import (
     UserManagementError,
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
-from .const import DOMAIN, EVENT_AUTH_CHANGED
+from .const import DOMAIN, EVENT_AUTH_CHANGED, PROVISION_SECRET_CONFIG_KEY
 from .pairing import (
     CodeInvalidError,
     HubAlreadyClaimedError,
@@ -99,6 +99,19 @@ def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.recovery
+
+
+def get_provision_secret(hass: HomeAssistant) -> str | None:
+    """The shared speaker-provisioning secret, or None when not set up.
+
+    A Pi presents this (header ``X-CasaSmart-Provision-Key``) on
+    ``GET /audio/provision`` to fetch broker creds without the LAN-only gate.
+    """
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.hub_config.get(PROVISION_SECRET_CONFIG_KEY)
 
 
 def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
