@@ -157,26 +157,29 @@ class AthanConfigTests(AudioTestCase):
         with self.assertRaises(AudioError):
             self.engine.set_athan({"bad": {1, 2, 3}})  # a set isn't JSON
 
-    # -- M2: enabled athan needs real coordinates -----------------------------
+    # -- athan coordinates are OPTIONAL (hub-inherited location) ---------------
 
-    def test_enabled_without_coords_rejected(self):
-        with self.assertRaises(AudioError):
-            self.engine.set_athan({"enabled": True, "method": "makkah"})
+    def test_enabled_without_coords_allowed(self):
+        # The hub-native scheduler falls back to the home's own location, so an
+        # enabled athan with no coords is valid (the app inherits location now).
+        cfg = {"enabled": True, "method": "makkah"}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan(), cfg)
 
-    def test_enabled_with_null_coords_rejected(self):
-        with self.assertRaises(AudioError):
-            self.engine.set_athan(
-                {"enabled": True, "lat": None, "lon": None, "method": "makkah"}
-            )
+    def test_enabled_with_null_coords_allowed(self):
+        cfg = {"enabled": True, "lat": None, "lon": None, "method": "makkah"}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan(), cfg)
 
     def test_enabled_with_bool_coords_rejected(self):
-        # bool is an int subclass — must not pass as a coordinate.
+        # bool is an int subclass — must not pass as a coordinate if supplied.
         with self.assertRaises(AudioError):
             self.engine.set_athan({"enabled": True, "lat": True, "lon": True})
 
-    def test_enabled_with_one_missing_coord_rejected(self):
+    def test_enabled_with_non_numeric_coord_rejected(self):
+        # A supplied coordinate that isn't a finite number is still refused.
         with self.assertRaises(AudioError):
-            self.engine.set_athan({"enabled": True, "lat": 21.3})
+            self.engine.set_athan({"enabled": True, "lat": "nope", "lon": 39.0})
 
     def test_disabled_without_coords_allowed(self):
         # Turning athan OFF must always persist, coords or not.

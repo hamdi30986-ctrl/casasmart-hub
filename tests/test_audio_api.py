@@ -304,6 +304,25 @@ class AthanView(AudioViewTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["athan"]["method"], "MWL")
 
+    async def test_get_location_falls_back_to_home(self) -> None:
+        # No pinned coords → the resolved location is the hub's own home config.
+        self.rt.audio.set_athan({"enabled": True, "method": "makkah"})
+        resp = await self.view.get(H.FakeRequest(headers=self._admin()))
+        _, body = H.read_response(resp)
+        self.assertEqual(body["location"]["source"], "home")
+        self.assertEqual(body["location"]["timezone"], "Asia/Riyadh")
+        self.assertEqual(body["location"]["lat"], 21.5433)
+
+    async def test_get_location_reflects_pinned_coords(self) -> None:
+        self.rt.audio.set_athan(
+            {"enabled": True, "lat": 41.0, "lon": 29.0, "timezone": "Europe/Istanbul"}
+        )
+        resp = await self.view.get(H.FakeRequest(headers=self._admin()))
+        _, body = H.read_response(resp)
+        self.assertEqual(body["location"]["source"], "config")
+        self.assertEqual(body["location"]["lat"], 41.0)
+        self.assertEqual(body["location"]["timezone"], "Europe/Istanbul")
+
     async def test_put_stores_and_extra_keys_survive(self) -> None:
         # Phase-7 opaque-blob round-trip: the hub does NOT model per_prayer / a
         # nested override map, yet those EXTRA keys must survive PUT -> GET.
