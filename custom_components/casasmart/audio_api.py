@@ -36,7 +36,7 @@ Installer — broker / PA credentials:
 - ``GET/PUT /audio/pa-config``             — PA service host/port/api-key (``audio.manage``)
 
 Device-facing — the Pi pulls its broker creds on boot:
-- ``GET    /audio/provision``              — broker coordinates, LAN-only, no JWT
+- ``GET    /audio/provision``              — broker coordinates, provisioning-key or LAN
 
 Mutations that move the hub's view of the speakers (enroll/remove/update) fire
 ``EVENT_AUDIO_CHANGED`` so the WS server nudges connected apps to re-fetch —
@@ -46,6 +46,7 @@ from the adapter's ingest path.
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import logging
 import re
@@ -72,6 +73,7 @@ from .audio_adapter import AudioAdapter, AudioAdapterNotReady
 from .auth_api import (
     authenticate_request,
     get_extra_lan_cidrs,
+    get_provision_secret,
     is_lan_request,
     json_body,
 )
@@ -786,10 +788,11 @@ class CasaSmartAudioProvisionView(_AudioView):
     """GET /audio/provision — broker coordinates for the Pi speaker agent.
 
     Replaces the dead Supabase edge function the agent used to beg for creds.
-    LAN-only with NO JWT (same posture as the tank ingest): the speaker lives
-    on the LAN, has no user identity, and a leaked broker cred is useless
-    remotely (the broker isn't exposed off-LAN). The response IS the secret —
-    so it never leaves the local network.
+    Auth is the shared provisioning secret (header ``X-CasaSmart-Provision-Key``,
+    baked into the Pi image) OR LAN membership. The secret path works from any
+    source — so a Docker-NAT'd hub, whose LAN check sees a rewritten peer IP,
+    still provisions — while the LAN fallback keeps the original keyless posture
+    for a bare on-LAN hub.
     """
 
     url = f"/api/{DOMAIN}/audio/provision"
@@ -799,12 +802,23 @@ class CasaSmartAudioProvisionView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
+        # Auth = the shared provisioning secret (header) OR the LAN gate. The
+        # secret path is what a Pi uses: it works from any source, so a
+        # Docker-NAT'd hub (whose LAN check sees a rewritten peer IP) still
+        # provisions. The LAN fallback preserves the original keyless posture
+        # for a bare on-LAN hub.
+        secret = get_provision_secret(self._hass)
+        presented = request.headers.get("X-CasaSmart-Provision-Key", "")
+        secret_ok = bool(secret) and hmac.compare_digest(presented, secret)
+        if not secret_ok and not is_lan_request(
+            request, get_extra_lan_cidrs(self._hass)
+        ):
             _LOGGER.warning(
-                "Audio provision refused (non-LAN source: %s)", request.remote
+                "Audio provision refused (bad/absent key, non-LAN source: %s)",
+                request.remote,
             )
             return self.json_message(
-                "Provisioning is only available on the hub's own network",
+                "Provisioning requires the hub's provisioning key or LAN access",
                 HTTPStatus.FORBIDDEN,
             )
         broker = audio.provision()

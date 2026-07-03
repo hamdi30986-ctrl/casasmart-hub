@@ -44,6 +44,10 @@ HUB_NAME_CONFIG_KEY = "hub_name"
 # wiped on reset, this JSON config file is not). Re-installed from these on boot.
 BOOTSTRAP_CODE_HASH_CONFIG_KEY = "bootstrap_code_hash"
 RECOVERY_CODE_HASH_CONFIG_KEY = "recovery_code_hash"
+# Shared secret a Pi speaker presents on GET /audio/provision to fetch broker
+# creds from any source (not just the LAN). Baked into each site's Pi image
+# (platform.json). Generated once at setup, survives factory reset via hub_config.
+PROVISION_SECRET_CONFIG_KEY = "provision_secret"
 
 # -- Auth / enrollment (B2) -----------------------------------------------------
 # Fired on the HA bus whenever the enrolled-device set changes — a device
