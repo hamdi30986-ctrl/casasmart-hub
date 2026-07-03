@@ -133,6 +133,14 @@ class _Runtime:
         self.athan_scheduler = None
 
 
+class _FakeHAConfig:
+    """The ``hass.config`` location the athan GET reads for its fallback."""
+
+    latitude = 21.5433
+    longitude = 39.1728
+    time_zone = "Asia/Riyadh"
+
+
 class FakeHass:
     """Just enough ``hass`` for the views + ``authenticate_request``."""
 
@@ -140,6 +148,7 @@ class FakeHass:
         self.config_entries = FakeConfigEntries(_Entry(runtime))
         self.states = FakeStates()
         self.bus = FakeBus()
+        self.config = _FakeHAConfig()
         self.data: dict[str, Any] = {}
 
     async def async_add_executor_job(self, func, *args):

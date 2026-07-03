@@ -460,20 +460,18 @@ class AudioEngine:
         for key in config:
             if not isinstance(key, str):
                 raise AudioError("athan config keys must be strings")
-        # Backstop (M2): the scheduler can't compute prayer times without
-        # coordinates, so an "enabled" athan with no lat/lon would show ON in
-        # the UI yet silently never fire. This is the one field-level
-        # assumption the hub makes about the otherwise-opaque blob, and it
-        # mirrors the app-side "pick a city" guard — a defence in depth, not a
-        # schema. ``enabled`` falsey (off) is always allowed through.
         enabled = config.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise AudioError("athan 'enabled' must be a boolean")
-        if enabled:
-            if not _is_number(config.get("lat")) or not _is_number(config.get("lon")):
-                raise AudioError(
-                    "athan cannot be enabled without finite lat/lon coordinates"
-                )
+        # lat/lon are OPTIONAL: the hub-native scheduler falls back to the hub's
+        # own configured location (hass.config) when the app pins no coordinates,
+        # so athan can be enabled with the location inherited from the home. If
+        # coordinates ARE supplied they must be finite numbers — a string or NaN
+        # would break the scheduler / poison the relayed blob.
+        for coord in ("lat", "lon"):
+            value = config.get(coord)
+            if value is not None and not _is_number(value):
+                raise AudioError(f"athan {coord!r} must be a finite number")
         try:
             import json
 

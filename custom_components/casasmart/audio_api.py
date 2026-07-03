@@ -673,7 +673,20 @@ class CasaSmartAudioAthanView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        return self.json({"athan": audio.get_athan()})
+        athan = audio.get_athan()
+        # The effective location the scheduler will use: the app's pinned coords
+        # if any, else the hub's own home location (hass.config). The app renders
+        # this read-only ("Location follows your home · <timezone>") now that it
+        # no longer pins a city itself.
+        cfg = self._hass.config
+        pinned = athan.get("lat") is not None and athan.get("lon") is not None
+        location = {
+            "lat": athan.get("lat") if pinned else cfg.latitude,
+            "lon": athan.get("lon") if pinned else cfg.longitude,
+            "timezone": athan.get("timezone") or cfg.time_zone,
+            "source": "config" if pinned else "home",
+        }
+        return self.json({"athan": athan, "location": location})
 
     async def put(self, request: web.Request) -> web.Response:
         _, error = authenticate_request(self._hass, request, "audio.manage")
