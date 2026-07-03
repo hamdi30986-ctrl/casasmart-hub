@@ -460,6 +460,47 @@ class CasaSmartAudioCommandView(_AudioView):
         return self.json({"ok": True, "topic": topic, "command": message})
 
 
+class CasaSmartAudioAirplayView(_AudioView):
+    """POST /audio/speakers/{mac6}/airplay — AirPlay transport (DACP remote).
+
+    Body: ``{"action": "playpause"}`` (also play/pause/next/previous/stop). The
+    engine maps the action to shairport-sync's remote verb; we publish it as a
+    **raw, non-retained** string to ``speakers/<mac6>/airplay/remote`` and
+    shairport relays it as a DACP command to the AirPlay *source* — so the
+    phone's own playback actually pauses/skips. A no-op if nothing is currently
+    AirPlaying to that speaker.
+    """
+
+    url = f"/api/{DOMAIN}/audio/speakers/{{mac6}}/airplay"
+    name = f"api:{DOMAIN}:audio:airplay"
+
+    async def post(self, request: web.Request, mac6: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "audio.control")
+        if error is not None:
+            return error
+        audio, not_ready = self._audio_or_503()
+        if not_ready is not None:
+            return not_ready
+        adapter, adapter_not_ready = self._adapter_or_503()
+        if adapter_not_ready is not None:
+            return adapter_not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            topic, verb = audio.build_airplay_remote(mac6, payload.get("action"))
+        except UnknownSpeakerError as err:
+            return self.json_message(str(err), HTTPStatus.NOT_FOUND)
+        except AudioError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        published_error = self._publish_or_503(adapter, topic, verb)
+        if published_error is not None:
+            return published_error
+        return self.json({"ok": True, "topic": topic, "action": verb})
+
+
 class CasaSmartAudioBroadcastView(_AudioView):
     """POST /audio/broadcast — play a URL/file on every speaker.
 

@@ -73,6 +73,31 @@ def speaker_state_topic(mac6: str) -> str:
     return f"speakers/{mac6}/state"
 
 
+def speaker_airplay_remote_topic(mac6: str) -> str:
+    """The topic shairport-sync subscribes for DACP remote control.
+
+    shairport-sync runs with ``enable_remote = "yes"`` and ``topic =
+    speakers/<mac6>/airplay``; a raw command word published to ``<topic>/remote``
+    is relayed as a DACP command to the *AirPlay source* (the phone), so the
+    phone's own playback actually pauses/skips — not a cosmetic hub-side stop.
+    """
+    return f"speakers/{mac6}/airplay/remote"
+
+
+# -- AirPlay transport (DACP verbs shairport-sync accepts on .../remote) -------
+# The app speaks a small, stable action vocabulary; we map it to shairport's
+# exact remote verbs. ``playpause`` toggles, matching the single play/pause
+# button whose icon reflects the live ``airplay_active`` state.
+AIRPLAY_ACTIONS = {
+    "playpause": "playpause",
+    "play": "play",
+    "pause": "pause",
+    "next": "nextitem",
+    "previous": "previtem",
+    "stop": "stop",
+}
+
+
 # -- Commands the app may issue (the agent's ``cmd`` vocabulary) ---------------
 CMD_VOLUME = "volume"
 CMD_STOP = "stop"
@@ -710,6 +735,25 @@ class AudioEngine:
             payload["value"] = _validate_volume(value)
             payload["ts"] = self._clock() if now is None else now
         return speaker_command_topic(mac6), payload
+
+    def build_airplay_remote(self, mac: Any, action: Any) -> tuple[str, str]:
+        """Validate an AirPlay transport action → ``(topic, raw_verb)``.
+
+        The result is published as a **raw string** (not JSON) to the speaker's
+        ``airplay/remote`` topic; shairport-sync relays it as DACP to the phone.
+        Raises ``UnknownSpeakerError`` for an un-enrolled speaker and
+        ``AudioError`` for an unknown action.
+        """
+        mac6 = normalize_mac6(mac)
+        if mac6 not in self._speakers:
+            raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+        verb = AIRPLAY_ACTIONS.get(action)
+        if verb is None:
+            raise AudioError(
+                f"Unknown airplay action {action!r} "
+                f"(expected one of {sorted(AIRPLAY_ACTIONS)})"
+            )
+        return speaker_airplay_remote_topic(mac6), verb
 
     def build_play(
         self,
