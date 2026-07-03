@@ -121,12 +121,16 @@ class FakeConfigEntries:
 
 
 class _Runtime:
-    def __init__(self, storage, auth, registry, audio) -> None:
+    def __init__(self, storage, auth, registry, audio, hub_config=None) -> None:
         self.storage = storage
         self.auth = auth
         self.registry = registry
         self.audio = audio
+        self.hub_config = hub_config
         self.pairing = None
+        # Present-but-inert in view tests (no live MQTT/loop): the athan PUT
+        # handler calls get_athan_scheduler(); None means "skip the reschedule".
+        self.athan_scheduler = None
 
 
 class FakeHass:
@@ -194,7 +198,7 @@ def make_hub(tmpdir) -> tuple[Any, Any]:
         storage.table("audio_speakers"),
     )
     audio.warm_up()
-    runtime = _Runtime(storage, auth, registry, audio)
+    runtime = _Runtime(storage, auth, registry, audio, hub_config)
     return FakeHass(runtime), runtime
 
 
