@@ -49,16 +49,16 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import secrets
+import time
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .audio import (
     AudioEngine,
@@ -82,12 +82,72 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# A PA clip is small and the PA service is on the LAN; this is generous for a
-# busy box yet far under anything the app would sit through.
-_PA_UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=30)
-# Hard cap on a proxied PA upload so a client can't stream an unbounded body
-# through the hub into the PA service. PA clips are short voice/chime files.
+# Hard cap on a PA upload so a client can't stream an unbounded body into the
+# hub. PA clips are short voice/chime files.
 _PA_MAX_BYTES = 16 * 1024 * 1024
+# How long a hosted PA clip stays fetchable. The speakers fetch within ~1s of
+# the play command, so this is generous; short enough that the unguessable URL
+# is a non-issue. Clips are evicted lazily on access — no background sweeper.
+_PA_CLIP_TTL = 120.0
+# Cap on concurrently-hosted clips (defence against an upload flood).
+_PA_CLIP_MAX_COUNT = 16
+_PA_STORE_KEY = f"{DOMAIN}_pa_clips"
+
+
+class PaClipStore:
+    """Ephemeral in-memory store of PA clips the hub hosts for its speakers.
+
+    The app uploads a recorded clip; the hub keeps the bytes here under a random
+    token and hands the speakers a token URL to fetch (presigned-URL pattern —
+    the token + short TTL are the access control, so the fetch endpoint needs no
+    JWT, which also side-steps the Docker LAN-gate that would otherwise reject
+    the speakers). One event loop → no locking; expired entries are evicted
+    lazily on access, so there is no background task.
+    """
+
+    def __init__(
+        self, ttl: float = _PA_CLIP_TTL, max_count: int = _PA_CLIP_MAX_COUNT
+    ) -> None:
+        self._ttl = ttl
+        self._max_count = max_count
+        # token -> (data, content_type, expires_at_monotonic)
+        self._clips: dict[str, tuple[bytes, str, float]] = {}
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl
+
+    def _evict_expired(self) -> None:
+        now = time.monotonic()
+        for token in [t for t, (_d, _c, exp) in self._clips.items() if exp <= now]:
+            del self._clips[token]
+
+    def put(self, data: bytes, content_type: str) -> str:
+        """Store a clip and return its token; drops the oldest if at capacity."""
+        self._evict_expired()
+        while len(self._clips) >= self._max_count:
+            oldest = min(self._clips, key=lambda t: self._clips[t][2])
+            del self._clips[oldest]
+        token = secrets.token_urlsafe(24)  # ~192 bits of entropy
+        self._clips[token] = (data, content_type, time.monotonic() + self._ttl)
+        return token
+
+    def get(self, token: str) -> tuple[bytes, str] | None:
+        """Return ``(data, content_type)`` for a live token, else None."""
+        self._evict_expired()
+        item = self._clips.get(token)
+        if item is None:
+            return None
+        return item[0], item[1]
+
+
+def _pa_store(hass: HomeAssistant) -> PaClipStore:
+    """The per-hass PA clip store, created on first use."""
+    store = hass.data.get(_PA_STORE_KEY)
+    if store is None:
+        store = PaClipStore()
+        hass.data[_PA_STORE_KEY] = store
+    return store
 
 
 def get_audio(hass: HomeAssistant) -> AudioEngine | None:
@@ -431,12 +491,16 @@ class CasaSmartAudioBroadcastView(_AudioView):
 
 
 class CasaSmartAudioPaView(_AudioView):
-    """POST /audio/pa — proxy a PA audio upload to the PA service.
+    """POST /audio/pa — host a PA clip on the hub and play it on the speakers.
 
-    The app sends a ``multipart/form-data`` body with an ``audio`` file part
-    (same shape the PA service already accepts). The hub forwards it to the
-    configured PA service ``/pa/upload`` with the stored ``X-API-Key``, so the
-    phone never holds the PA key. The PA service hosts the clip + broadcasts it.
+    Hub-native (no external PA service): the app POSTs ``multipart/form-data``
+    with an ``audio`` file part (+ optional ``targets``). The hub stores the clip
+    under a random token and publishes a ``play`` command carrying the
+    hub-relative clip path; each speaker builds a URL from the hub host it is
+    already connected to (so it tracks the hub's IP with no extra discovery) and
+    fetches the clip over the LAN. The audio never touches the cloud — when the
+    app is remote only the upload rides the tunnel; the speakers still fetch
+    locally. Served by ``CasaSmartAudioPaClipView``.
     """
 
     url = f"/api/{DOMAIN}/audio/pa"
@@ -449,13 +513,9 @@ class CasaSmartAudioPaView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        pa = audio.get_pa()
-        host = pa.get("host")
-        if not host:
-            return self.json_message(
-                "PA service is not configured on the hub",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-            )
+        adapter, adapter_not_ready = self._adapter_or_503()
+        if adapter_not_ready is not None:
+            return adapter_not_ready
 
         filename, content_type, data, targets, read_error = await self._read_pa_parts(
             request
@@ -463,36 +523,50 @@ class CasaSmartAudioPaView(_AudioView):
         if read_error is not None:
             return read_error
 
-        target = f"http://{host}:{pa.get('port') or 9876}/pa/upload"
-        form = aiohttp.FormData()
-        form.add_field(
-            "audio", data, filename=filename, content_type=content_type
+        # Host the clip under an unguessable token and hand the speakers a
+        # hub-relative path — each resolves it against the hub host it is live
+        # on, so it survives the hub's IP changing (see PaClipStore).
+        token = _pa_store(self._hass).put(
+            data, content_type or "application/octet-stream"
         )
-        # H1: thread the selected speakers through to the PA service so the
-        # clip plays ONLY to those speakers. Empty/absent targets => the PA
-        # service broadcasts to everyone (the historical behaviour), so this is
-        # backward compatible with an app that doesn't send a selection.
-        if targets:
-            form.add_field("targets", ",".join(targets))
-        headers = {}
-        if pa.get("api_key"):
-            headers["X-API-Key"] = pa["api_key"]
-        session = async_get_clientsession(self._hass)
+        clip_path = f"/api/{DOMAIN}/audio/pa-clip/{token}"
+
+        # Play(pa) on the selected speakers, or broadcast to all. A target that
+        # isn't enrolled is skipped rather than failing the whole announcement.
+        played_on: list[str] = []
         try:
-            async with session.post(
-                target, data=form, headers=headers, timeout=_PA_UPLOAD_TIMEOUT
-            ) as response:
-                body = await response.json(content_type=None)
-                status = response.status
-        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-            _LOGGER.warning("PA upload proxy to %s failed: %s", target, err)
-            return self.json_message(
-                f"PA service unreachable: {err}", HTTPStatus.BAD_GATEWAY
-            )
-        # Pass the PA service's own status/body straight back to the app.
-        return web.json_response(
-            body if isinstance(body, dict) else {"ok": status == HTTPStatus.OK},
-            status=status,
+            if targets:
+                for mac6 in targets:
+                    try:
+                        topic, message = audio.build_play(
+                            mac=mac6, url=clip_path, priority="pa"
+                        )
+                    except UnknownSpeakerError:
+                        _LOGGER.warning("PA target %s not enrolled — skipped", mac6)
+                        continue
+                    published_error = self._publish_or_503(adapter, topic, message)
+                    if published_error is not None:
+                        return published_error
+                    played_on.append(mac6)
+                if not played_on:
+                    return self.json_message(
+                        "None of the target speakers are enrolled",
+                        HTTPStatus.NOT_FOUND,
+                    )
+            else:
+                topic, message = audio.build_play(url=clip_path, priority="pa")
+                published_error = self._publish_or_503(adapter, topic, message)
+                if published_error is not None:
+                    return published_error
+        except AudioError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        return self.json(
+            {
+                "ok": True,
+                "played_on": played_on or "all",
+                "clip_ttl": _pa_store(self._hass).ttl,
+            }
         )
 
     async def _read_pa_parts(
@@ -545,6 +619,26 @@ class CasaSmartAudioPaView(_AudioView):
                 "Missing 'audio' file part", HTTPStatus.BAD_REQUEST
             )
         return filename, content_type, data, targets, None
+
+
+class CasaSmartAudioPaClipView(_AudioView):
+    """GET /audio/pa-clip/{token} — serve a hosted PA clip to the speakers.
+
+    No JWT: access is gated by the unguessable token + short TTL (presigned-URL
+    pattern). Deliberately NOT LAN-gated — the speakers fetch this and, behind
+    Docker, every inbound source is rewritten to a non-LAN peer, so a LAN gate
+    would reject them. Plain HTTP so the Pi's ``wget`` needs no TLS.
+    """
+
+    url = f"/api/{DOMAIN}/audio/pa-clip/{{token}}"
+    name = f"api:{DOMAIN}:audio:pa-clip"
+
+    async def get(self, request: web.Request, token: str) -> web.Response:
+        item = _pa_store(self._hass).get(token)
+        if item is None:
+            return web.Response(status=HTTPStatus.NOT_FOUND)
+        data, content_type = item
+        return web.Response(body=data, content_type=content_type)
 
 
 # -- athan config -------------------------------------------------------------
