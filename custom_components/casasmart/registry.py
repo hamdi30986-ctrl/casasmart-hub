@@ -928,7 +928,11 @@ class RegistryEngine:
         counts = {"floors": 0, "rooms": 0, "assignments": 0}
         with self._lock:
             for floor in floors:
-                floor_id = floor["floor_id"]
+                floor_id = floor.get("floor_id")
+                if not isinstance(floor_id, str) or not floor_id:
+                    # No usable id -> can't be stored; skip the record, never
+                    # abort the seed (same lenient posture as names).
+                    continue
                 if floor_id in self._floors:
                     continue
                 self._floors[floor_id] = {
@@ -944,7 +948,12 @@ class RegistryEngine:
                 icon = room.get("icon")
                 record = {
                     "name": _lenient_name(room.get("name"), room_id),
-                    "floor_id": floor_id if floor_id in self._floors else None,
+                    # area.floor_id is None for any HA area not on a floor —
+                    # the NORMAL shape for apartments. A floorless room is
+                    # valid; only a dangling reference gets cleared.
+                    "floor_id": floor_id
+                    if isinstance(floor_id, str) and floor_id in self._floors
+                    else None,
                     # Same lenient posture: a bad HA icon is dropped, not fatal.
                     "icon": icon
                     if isinstance(icon, str) and 0 < len(icon) <= _ICON_MAX

@@ -216,6 +216,20 @@ class KeyValueTable(MutableMapping):
         ).fetchone()
         return int(row[0])
 
+    def __contains__(self, key: object) -> bool:
+        # MutableMapping's default __contains__ probes __getitem__, whose
+        # _check_key raises TypeError for non-string keys. Membership is a
+        # question, not a write — `None in table` is legitimate (optional
+        # foreign ids like a room's floor_id) and the dict answer is False,
+        # not a crash. Also saves fetching + JSON-parsing the whole value.
+        if not isinstance(key, str) or not key:
+            return False
+        row = self._storage._execute(
+            "SELECT 1 FROM kv WHERE namespace = ? AND key = ?",
+            (self._namespace, key),
+        ).fetchone()
+        return row is not None
+
     def __repr__(self) -> str:
         return f"<KeyValueTable {self._namespace!r} ({len(self)} keys)>"
 

@@ -400,6 +400,20 @@ class ImportTests(RegistryTestCase):
         self.assertIsNone(rooms["r1"]["icon"])  # oversized icon dropped
         self.assertEqual(rooms["r2"]["name"], "r2")  # None -> id fallback
 
+    def test_import_room_with_no_floor_is_valid(self):
+        """area.floor_id is None for any HA area not on a floor — the normal
+        shape for apartments. This must seed the room, not TypeError (a raise
+        here aborted the whole seed on every boot — Maher incident)."""
+        counts = self.engine.import_initial(
+            [{"floor_id": None, "name": "Ghost"}],  # keyless floor -> skipped
+            [{"room_id": "flat", "name": "Flat", "floor_id": None}],
+            [{"entity_id": "light.flat", "room_id": "flat"}],
+        )
+        self.assertEqual(counts, {"floors": 0, "rooms": 1, "assignments": 1})
+        rooms = {r["room_id"]: r for r in self.engine.list_rooms()}
+        self.assertIsNone(rooms["flat"]["floor_id"])
+        self.assertEqual(self.engine.room_of("light.flat"), "flat")
+
     def test_rerun_never_overwrites_installer_edits(self):
         self.engine.import_initial(self.FLOORS, self.ROOMS, self.ASSIGNMENTS)
         other = self.engine.create_room("Den")
