@@ -138,6 +138,16 @@ class TestKeyValueTable(StorageTestCase):
             with self.assertRaises(TypeError, msg=repr(bad)):
                 t[bad] = "v"
 
+    def test_contains_answers_false_for_invalid_keys(self):
+        """Membership is a question, not a write: `None in table` must be
+        False, never TypeError (it aborted the registry seed on every boot
+        for rooms whose HA area had no floor)."""
+        t = self.make_storage().table("users")
+        t["u1"] = 1
+        for bad in (None, 1, b"x", ""):
+            self.assertNotIn(bad, t, msg=repr(bad))
+        self.assertIn("u1", t)
+
     def test_non_json_value_rejected(self):
         t = self.make_storage().table("users")
         with self.assertRaises(TypeError):
