@@ -3,11 +3,40 @@
     "step": {
       "user": {
         "title": "CasaSmart Hub",
-        "description": "Set up the CasaSmart hub on this Home Assistant instance."
+        "description": "Set up the CasaSmart hub on this Home Assistant instance.",
+        "data": {
+          "cloudflare_domain": "Cloudflare tunnel domain (optional)"
+        },
+        "data_description": {
+          "cloudflare_domain": "The hub's public Cloudflare tunnel hostname, e.g. maher-ha.mazinus.com — leave empty if this hub has no tunnel. The tunnel is automatically disabled after setup (pairing must happen over the LAN); re-enable it from the integration options once pairing is done."
+        }
       }
+    },
+    "error": {
+      "invalid_domain": "Enter a plain domain like maher-ha.mazinus.com (or paste its https:// address) — no path, port, or query."
     },
     "abort": {
       "single_instance_allowed": "Only one CasaSmart hub is allowed per Home Assistant instance."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "CasaSmart Hub options",
+        "description": "Cloudflare remote access for this hub.\n\n{tunnel_status}\n\nKeep the tunnel OFF while pairing new devices — pairing is LAN-only, and an active tunnel can route even local phones through Cloudflare where they get blocked.",
+        "data": {
+          "cloudflare_domain": "Cloudflare tunnel domain",
+          "tunnel_enabled": "Cloudflare tunnel enabled"
+        },
+        "data_description": {
+          "cloudflare_domain": "Public tunnel hostname, e.g. maher-ha.mazinus.com. Clear it to stop advertising a remote path to phones.",
+          "tunnel_enabled": "ON starts the cloudflared add-on and sets it to start on boot. OFF stops it and disables start-on-boot, so it stays down across reboots until re-enabled here."
+        }
+      }
+    },
+    "error": {
+      "invalid_domain": "Enter a plain domain like maher-ha.mazinus.com (or paste its https:// address) — no path, port, or query.",
+      "domain_required": "Enter a Cloudflare tunnel domain before enabling the tunnel."
     }
   }
 }

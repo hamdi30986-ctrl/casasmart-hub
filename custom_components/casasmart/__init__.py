@@ -15,6 +15,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -37,6 +38,8 @@ from .const import (
     API_VERSION,
     BACKUP_DIR_NAME,
     BOOTSTRAP_CODE_HASH_CONFIG_KEY,
+    CONF_CLOUDFLARE_DOMAIN,
+    CONF_TUNNEL_ENABLED,
     DATA_DIR_NAME,
     DB_FILENAME,
     DOMAIN,
@@ -76,10 +79,22 @@ from .registry import RegistryEngine
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
-from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
+from .tunnel import (
+    TUNNEL_URL_CONFIG_KEY,
+    domain_to_tunnel_url,
+    normalize_cloudflare_domain,
+    normalize_tunnel_url,
+)
+from .tunnel_control import CloudflaredController, TunnelControlError
 from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
+
+# Persistent-notification ids for the tunnel reconciler — fixed so repeats
+# replace the previous notice instead of stacking.
+_NOTIFY_TUNNEL_UNAVAILABLE = f"{DOMAIN}_tunnel_control_unavailable"
+_NOTIFY_TUNNEL_AUTO_DISABLED = f"{DOMAIN}_tunnel_auto_disabled"
+_NOTIFY_TUNNEL_ERROR = f"{DOMAIN}_tunnel_control_error"
 
 # HA entity platforms the hub exposes:
 #  - ALARM_CONTROL_PANEL (B13): the panel mirroring the hub-authoritative
@@ -136,6 +151,13 @@ class CasaSmartRuntimeData:
     # B6 mDNS advertiser; None if TLS identity (its hub-id source) is absent
     # or zeroconf wasn't ready — discovery degrades, the hub stays reachable.
     mdns: MdnsAdvertiser | None = None
+    # Cloudflare tunnel management: the Supervisor-coupled controller (its
+    # slug cache lives for the entry's lifetime). None until setup wires it.
+    tunnel_control: CloudflaredController | None = None
+    # Snapshot of the tunnel options last applied to hub_config, so the
+    # update listener can retire a domain-DERIVED tunnel_url when the domain
+    # is cleared — without ever touching a service-set URL (B7 installer path).
+    tunnel_options_applied: dict[str, Any] | None = None
 
 
 def _open_storage(
@@ -291,6 +313,11 @@ async def async_setup_entry(
         audio=audio,
     )
 
+    # Cloudflare domain (entry options) -> advertised tunnel_url (hub_config),
+    # before the TLS/handshake layer comes up so the first handshake already
+    # carries it. No options domain -> hub_config untouched (B7 service path).
+    await _async_sync_tunnel_url(hass, entry)
+
     await _async_import_registry(hass, hub_config, registry)
 
     # DEV-ONLY auto-enrollment: re-provision trusted dev keys (mint_token.py et
@@ -353,6 +380,18 @@ async def async_setup_entry(
     # B13: expose the alarm panel as a native HA entity (runtime_data — its
     # engine source — is already set above, so the platform can read it).
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Cloudflare tunnel desired-state enforcement. The options listener does
+    # sync + reconcile on every change (flow save / service mirror); the boot
+    # reconcile runs as a BACKGROUND task so a wedged Supervisor can never
+    # block or fail hub setup (same degrade-gracefully doctrine as mDNS/push).
+    entry.runtime_data.tunnel_control = CloudflaredController(hass)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    entry.async_create_background_task(
+        hass,
+        _async_reconcile_tunnel(hass, entry),
+        name="casasmart-tunnel-reconcile",
+    )
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
     return True
@@ -623,6 +662,193 @@ async def _async_start_push(
     runtime_data.tank_push_monitor = tank_monitor
 
 
+def _tunnel_options_snapshot(entry: CasaSmartConfigEntry) -> dict[str, Any]:
+    """The tunnel-relevant slice of entry.options, for change detection."""
+    return {
+        CONF_CLOUDFLARE_DOMAIN: entry.options.get(CONF_CLOUDFLARE_DOMAIN),
+        CONF_TUNNEL_ENABLED: entry.options.get(CONF_TUNNEL_ENABLED),
+    }
+
+
+async def _async_sync_tunnel_url(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry
+) -> None:
+    """Derive hub_config["tunnel_url"] from the options domain (if set).
+
+    Options are the user surface; ``hub_config["tunnel_url"]`` stays the
+    canonical *advertised* URL — the handshake (api.py) and camera URLs
+    (camera_api.py) read it live per request, so no reload is ever needed.
+    The URL keeps being advertised even while the tunnel is toggled OFF:
+    phones capture the remote path at pairing for when it returns (their
+    fallback chain tolerates a dead URL), and pairing is LAN-only anyway.
+
+    Without an options domain this is a no-op — a service-set URL from the
+    B7 installer path is never touched.
+    """
+    domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
+    runtime_data = entry.runtime_data
+    if domain:
+        url = domain_to_tunnel_url(domain)
+        if url is None:
+            # Flow-validated domains can't get here; fail closed if one does.
+            _LOGGER.warning(
+                "Configured Cloudflare domain %r is unusable — not advertising it",
+                domain,
+            )
+        elif runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY) != url:
+            # JsonConfigStore writes are blocking (executor), and skipped
+            # when the value is current so boot never costs a disk write.
+            await hass.async_add_executor_job(
+                runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
+            )
+            _LOGGER.info(
+                "Advertised tunnel URL derived from Cloudflare domain: %s", url
+            )
+    runtime_data.tunnel_options_applied = _tunnel_options_snapshot(entry)
+
+
+async def _async_options_updated(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry
+) -> None:
+    """Entry options changed (options flow save, or the service mirror).
+
+    Syncs the advertised URL, retires it when the domain was cleared, and
+    schedules a reconcile. Deliberately NO entry reload: nothing caches
+    ``tunnel_url`` (both consumers read it live — verified), and a reload
+    would needlessly drop live app WS connections and restart TLS/MQTT.
+    """
+    runtime_data = entry.runtime_data
+    previous = runtime_data.tunnel_options_applied or {}
+    domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
+    previous_domain = previous.get(CONF_CLOUDFLARE_DOMAIN)
+
+    if domain:
+        await _async_sync_tunnel_url(hass, entry)
+    else:
+        if previous_domain:
+            # Domain cleared via the options flow. Retire the advertised URL
+            # only if it is still the one WE derived — a URL set through the
+            # casasmart.set_tunnel_url service is not ours to delete.
+            derived = domain_to_tunnel_url(previous_domain)
+            hub_config = runtime_data.hub_config
+            if (
+                derived is not None
+                and hub_config.get(TUNNEL_URL_CONFIG_KEY) == derived
+            ):
+                await hass.async_add_executor_job(
+                    hub_config.delete, TUNNEL_URL_CONFIG_KEY
+                )
+                _LOGGER.info(
+                    "Cloudflare domain cleared — no longer advertising %s",
+                    derived,
+                )
+        runtime_data.tunnel_options_applied = _tunnel_options_snapshot(entry)
+
+    entry.async_create_background_task(
+        hass,
+        _async_reconcile_tunnel(hass, entry),
+        name="casasmart-tunnel-reconcile",
+    )
+
+
+async def _async_reconcile_tunnel(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry
+) -> None:
+    """Enforce the desired tunnel state (options) on the cloudflared add-on.
+
+    Desired-state model, not imperative start/stop: every run compares what
+    the add-on IS (running? boot mode?) against what the options SAY and
+    closes the gap — so a manually-started add-on while the toggle is OFF
+    gets stopped again on the next run, and installing the add-on after the
+    fact "just works". Runs at boot and after every options change; every
+    failure notifies + logs and never raises — the tunnel is one feature,
+    not the hub.
+    """
+    domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
+    if not domain:
+        # No domain -> fully inert. Never touch an add-on we weren't pointed
+        # at — an installed cloudflared may be tunneling something else.
+        return
+    desired_on = bool(entry.options.get(CONF_TUNNEL_ENABLED, False))
+
+    controller = entry.runtime_data.tunnel_control
+    if controller is None:  # unloading race — next setup reconciles
+        return
+
+    if not controller.available():
+        # Container/Core install (like the dev hub): domain storage and
+        # handshake advertising still work; only add-on control is inert.
+        _LOGGER.info(
+            "Cloudflare domain configured but tunnel control is unavailable "
+            "(no add-on Supervisor on this install) — manage cloudflared "
+            "manually; the options toggle has no effect here"
+        )
+        persistent_notification.async_create(
+            hass,
+            "A Cloudflare tunnel domain is configured, but this Home "
+            "Assistant install has no add-on Supervisor, so the CasaSmart "
+            "hub cannot start/stop cloudflared for you. Manage the tunnel "
+            "where it runs; the domain keeps being advertised to phones.",
+            title="CasaSmart — tunnel control unavailable",
+            notification_id=_NOTIFY_TUNNEL_UNAVAILABLE,
+        )
+        return
+
+    try:
+        slug = await controller.async_discover()
+        if slug is None:
+            _LOGGER.warning(
+                "Cloudflare domain configured but no cloudflared add-on is "
+                "installed — desired tunnel state (%s) saved; it will be "
+                "applied once the add-on is installed",
+                "enabled" if desired_on else "disabled",
+            )
+            persistent_notification.async_create(
+                hass,
+                "A Cloudflare tunnel domain is configured, but no cloudflared "
+                "add-on is installed. Install the Cloudflare Tunnel add-on and "
+                "the CasaSmart hub will manage it automatically.",
+                title="CasaSmart — cloudflared add-on not found",
+                notification_id=_NOTIFY_TUNNEL_UNAVAILABLE,
+            )
+            return
+
+        state = await controller.async_state(slug)
+        if desired_on:
+            if not state.running or state.boot != "auto":
+                await controller.async_enable(slug, running=state.running)
+        else:
+            if state.running or state.boot != "manual":
+                await controller.async_disable(slug, running=state.running)
+            if state.running:
+                # We just took a live tunnel down — say why, loudly.
+                persistent_notification.async_create(
+                    hass,
+                    f"The Cloudflare tunnel add-on ({slug}) was stopped and "
+                    "set to manual start. Device pairing must happen over the "
+                    "LAN only — an active tunnel can route even local phones "
+                    "through Cloudflare, where the hub's LAN-only gate blocks "
+                    "them. Re-enable the tunnel from the CasaSmart "
+                    "integration options (gear icon) once pairing is done.",
+                    title="CasaSmart — Cloudflare tunnel disabled",
+                    notification_id=_NOTIFY_TUNNEL_AUTO_DISABLED,
+                )
+    except TunnelControlError as err:
+        _LOGGER.warning("Cloudflare tunnel reconcile failed: %s", err)
+        persistent_notification.async_create(
+            hass,
+            f"Could not reconcile the Cloudflare tunnel add-on: {err}\n\n"
+            "The hub keeps running and the tunnel was left as-is. Check the "
+            "Supervisor, then save the CasaSmart integration options again "
+            "to retry.",
+            title="CasaSmart — tunnel control error",
+            notification_id=_NOTIFY_TUNNEL_ERROR,
+        )
+        return
+    # Reconciled clean — retire any stale failure notice from earlier runs.
+    persistent_notification.async_dismiss(hass, _NOTIFY_TUNNEL_ERROR)
+
+
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register hub services (idempotent across entry reloads).
 
@@ -644,12 +870,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
         re-advertises the remote path to the app AT PAIRING (no manual URL
         entry on the phone). ``normalize_tunnel_url`` fails closed — an
         invalid/non-https URL is rejected here rather than handed to phones.
-        Reloading the entry rebuilds the handshake with the stored URL.
+
+        No entry reload (behavior change): both consumers (api.py handshake,
+        camera_api.py) read hub_config live per request — verified — so the
+        URL is advertised on the very next handshake, and a reload would
+        needlessly drop live app WS connections. A bare-origin URL is also
+        mirrored into the entry options so the options flow shows reality;
+        a NEW domain seeds tunnel_enabled=False (same contract as setup:
+        fresh tunnel domains start disabled for LAN-only pairing).
         """
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
-        runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+        entry = entries[0]
+        runtime_data: CasaSmartRuntimeData = entry.runtime_data
 
         url = normalize_tunnel_url(call.data.get("url"))
         if url is None:
@@ -661,8 +895,30 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await hass.async_add_executor_job(
             runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
         )
-        _LOGGER.info("CasaSmart tunnel URL set; reloading to re-advertise it")
-        await hass.config_entries.async_reload(entries[0].entry_id)
+        _LOGGER.info(
+            "CasaSmart tunnel URL set to %s — advertised on the next handshake",
+            url,
+        )
+
+        # Keep the snapshot honest: this URL is now service-set, so a later
+        # options-flow domain clear must not delete it (unless the mirror
+        # below re-derives it from an options domain).
+        runtime_data.tunnel_options_applied = _tunnel_options_snapshot(entry)
+
+        domain = normalize_cloudflare_domain(url)
+        if domain is not None and entry.options.get(CONF_CLOUDFLARE_DOMAIN) != domain:
+            new_options = dict(entry.options)
+            new_options[CONF_CLOUDFLARE_DOMAIN] = domain
+            new_options.setdefault(CONF_TUNNEL_ENABLED, False)
+            # Fires the update listener -> sync (no-op, same URL) + reconcile.
+            hass.config_entries.async_update_entry(entry, options=new_options)
+        elif domain is None:
+            # Path-prefixed / ported URL — can't be expressed as a domain;
+            # options left alone, the URL above still advertises.
+            _LOGGER.debug(
+                "Tunnel URL %s is not a bare origin — not mirrored to options",
+                url,
+            )
 
     async def _handle_factory_reset(call) -> None:
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
@@ -759,3 +1015,36 @@ async def async_unload_entry(
     await hass.async_add_executor_job(entry.runtime_data.storage.close)
     _LOGGER.info("CasaSmart Hub storage closed")
     return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Entry deleted: best-effort restore of cloudflared to boot=auto.
+
+    The reconciler may have parked the add-on at boot=manual (tunnel
+    disabled). Removing the integration must not permanently strand the
+    client's remote access, so hand auto-boot back to the Supervisor —
+    without starting the add-on (removal is not consent to open remote
+    access right now). Best effort by design: no Supervisor, no add-on, or
+    a Supervisor error is logged and dropped. runtime_data is already gone
+    here, so a fresh controller is built.
+    """
+    if not entry.options.get(CONF_CLOUDFLARE_DOMAIN):
+        return
+    controller = CloudflaredController(hass)
+    if not controller.available():
+        return
+    try:
+        slug = await controller.async_discover()
+        if slug is not None:
+            await controller.async_restore_boot_auto(slug)
+            _LOGGER.info(
+                "CasaSmart removed — cloudflared add-on %s restored to "
+                "boot=auto",
+                slug,
+            )
+    except TunnelControlError as err:
+        _LOGGER.warning(
+            "Could not restore cloudflared boot mode on removal: %s", err
+        )

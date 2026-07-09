@@ -38,6 +38,21 @@ MDNS_REFRESH_INTERVAL_MINUTES = 5
 # Optional installer-set friendly hub name, surfaced in the mDNS TXT `name`.
 HUB_NAME_CONFIG_KEY = "hub_name"
 
+# -- Cloudflare tunnel management (B7 follow-up) --------------------------------
+# Entry-OPTIONS keys (not hub_config): what the user controls from the config/
+# options flow. The contract is desired-state reconciliation — these record
+# what the tunnel SHOULD be; a background reconciler enforces it against the
+# cloudflared add-on via the Supervisor API (started + boot=auto when enabled,
+# stopped + boot=manual when disabled). The config flow seeds
+# ``tunnel_enabled: False`` whenever a domain is provided, so a fresh install
+# auto-stops the tunnel — pairing must be LAN-only (cloudflared traffic reaches
+# HA from loopback, which the LAN gate refuses; a phone on home WiFi that
+# resolves the CF domain would route out and back and get blocked).
+# ``hub_config["tunnel_url"]`` stays the canonical *advertised* URL (tunnel.py);
+# setup/options-update derives it from the domain below.
+CONF_CLOUDFLARE_DOMAIN = "cloudflare_domain"
+CONF_TUNNEL_ENABLED = "tunnel_enabled"
+
 # Permanent printed-code hashes (B2/B3): the admin "acquire" code and the owner
 # recovery code are minted once at provisioning, their hashes stored here so the
 # printed sticker + metal card survive a factory reset (the storage tables are
