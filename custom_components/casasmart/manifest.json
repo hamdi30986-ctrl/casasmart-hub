@@ -3,7 +3,7 @@
   "name": "CasaSmart Hub",
   "codeowners": ["@casasmart"],
   "config_flow": true,
-  "after_dependencies": ["automation", "camera", "recorder", "stream"],
+  "after_dependencies": ["automation", "camera", "hassio", "recorder", "stream"],
   "dependencies": ["http", "zeroconf"],
   "documentation": "https://github.com/casasmart/casasmart-hub",
   "integration_type": "hub",

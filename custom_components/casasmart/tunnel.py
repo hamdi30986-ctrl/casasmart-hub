@@ -28,10 +28,25 @@ Validation doctrine — **fail closed, never publish garbage**:
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 # hub_config.json key the installer sets at onboarding (plan B7).
 TUNNEL_URL_CONFIG_KEY = "tunnel_url"
+
+# One DNS label: 1-63 chars of [a-z0-9-], no leading/trailing hyphen.
+# (Hostnames only — underscores are legal in some DNS records but not in
+# hostnames, and a Cloudflare tunnel hostname is a hostname.)
+_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Add-on slugs are `<repo-hash>_cloudflared` and the hash is NOT stable across
+# add-on repos (observed `9074a9fa_cloudflared`; the repo just migrated to
+# homeassistant-apps/app-cloudflared, so future installs may differ again).
+# Match on the suffix — never a hardcoded slug.
+_CLOUDFLARED_SLUG_SUFFIX = "_cloudflared"
+# Add-on states that count as "running" when picking among multiple matches
+# (mirrors aiohasupervisor AddonState values — kept as strings so this module
+# stays stdlib-only and flat-importable by the unit tests).
+_RUNNING_ADDON_STATES = frozenset({"started", "startup"})
 
 
 def normalize_tunnel_url(value: object) -> str | None:
@@ -66,3 +81,111 @@ def normalize_tunnel_url(value: object) -> str | None:
         return None
 
     return candidate.rstrip("/")
+
+
+def normalize_cloudflare_domain(value: object) -> str | None:
+    """Return the bare lowercase tunnel hostname, or None if unusable.
+
+    The config/options flow field accepts what a human is likely to paste:
+    ``maher-ha.mazinus.com`` or a full ``https://maher-ha.mazinus.com/``.
+    Anything that is not reducible to a plain FQDN is rejected — same
+    fail-closed doctrine as ``normalize_tunnel_url``:
+
+    - A pasted URL must be an https *origin*. A path prefix (``/noha``),
+      port, userinfo, query or fragment cannot be expressed as a domain,
+      and silently dropping any of them would change what the value means.
+    - A Cloudflare tunnel hostname is a public DNS name on 443 — no ports,
+      no IP literals, at least two labels.
+    - Trailing root dot (``host.example.``) and case are normalized away.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    # Pasted-URL form: validate as a tunnel URL first (https-only, no
+    # userinfo/query/fragment), then require it to be a bare origin.
+    if "//" in candidate or ":" in candidate:
+        url = normalize_tunnel_url(candidate)
+        if url is None:
+            return None
+        parts = urlsplit(url)
+        if parts.path:
+            return None
+        try:
+            if parts.port is not None:
+                return None
+        except ValueError:
+            return None
+        host = parts.hostname or ""
+    else:
+        # Bare-domain form. urlsplit does the lowercasing/IDNA-safe host
+        # extraction; a "/", "?" or "#" in the value lands in path/query/
+        # fragment of the constructed URL and is rejected above or here.
+        if "/" in candidate or "?" in candidate or "#" in candidate or "@" in candidate:
+            return None
+        try:
+            host = urlsplit(f"https://{candidate}").hostname or ""
+        except ValueError:
+            return None
+
+    host = host.rstrip(".")
+    if not host or len(host) > 253:
+        return None
+    labels = host.split(".")
+    if len(labels) < 2:
+        return None
+    if not all(_DOMAIN_LABEL_RE.fullmatch(label) for label in labels):
+        return None
+    # An all-digit final label is an IPv4 literal, not a DNS name — a
+    # Cloudflare tunnel hostname can never be an IP.
+    if labels[-1].isdigit():
+        return None
+    return host
+
+
+def domain_to_tunnel_url(value: object) -> str | None:
+    """Derive the advertised tunnel URL from a Cloudflare domain.
+
+    ``None`` in, ``None`` out — the caller decides whether that means
+    "don't advertise" or "leave the existing URL alone". The result is
+    re-run through ``normalize_tunnel_url`` so the two validators can
+    never disagree about what gets published to phones.
+    """
+    host = normalize_cloudflare_domain(value)
+    if host is None:
+        return None
+    return normalize_tunnel_url(f"https://{host}")
+
+
+def pick_cloudflared_slug(addons: object) -> str | None:
+    """Pick the cloudflared add-on slug from a Supervisor add-on listing.
+
+    Input is ``[(slug, name, state), ...]`` (plain strings — the HA-coupled
+    controller flattens the aiohasupervisor models so this stays pure and
+    unit-testable). Matching is by slug suffix ``_cloudflared`` (repo-hash
+    prefixes are not stable) plus the locally-built ``cloudflared``. With
+    several matches, prefer a running one, else first sorted — deterministic
+    so the reconciler always targets the same add-on; the caller logs the
+    choice.
+    """
+    if not isinstance(addons, (list, tuple)):
+        return None
+    matches: list[tuple[str, str]] = []
+    for item in addons:
+        try:
+            slug, _name, state = item
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(slug, str) or not slug:
+            continue
+        if slug != "cloudflared" and not slug.endswith(_CLOUDFLARED_SLUG_SUFFIX):
+            continue
+        matches.append((slug, state if isinstance(state, str) else ""))
+    if not matches:
+        return None
+    running = sorted(slug for slug, state in matches if state in _RUNNING_ADDON_STATES)
+    if running:
+        return running[0]
+    return min(slug for slug, _state in matches)
