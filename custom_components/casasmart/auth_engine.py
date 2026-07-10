@@ -135,8 +135,11 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # B16 3c-4b: the installer surface — Zigbee permit-join, raw HA
     # registry reads + entity surgery (rename only), the
     # whitelisted config-flow proxy (Broadlink/EasyIR) and IR blaster
-    # commands. Owner-only: these reshape the home's hardware.
-    "installer.manage": (ROLE_ADMIN,),
+    # commands. Owner decision 2026-07-11: sub-admins are trusted
+    # co-managers and may add/reshape hardware too (reverses the
+    # 2026-06-23 admin-only call; the app's addDevices gate widened in
+    # lockstep).
+    "installer.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     # B5 self-update. ``read`` (current vs latest version + changelog) is a
     # user-facing surface — every role sees the red dot. ``install`` triggers
     # the hub to self-replace and restart, so it is owner-only, the same trust
