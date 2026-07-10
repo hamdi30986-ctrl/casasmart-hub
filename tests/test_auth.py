@@ -548,6 +548,41 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(TokenError):
             self.engine.validate_token(token)
 
+    def test_token_error_code_stale_vs_unenrolled(self):
+        # The 401 `code` contract (widget-kick incident 2026-07-09): an
+        # edited device's outstanding tokens are STALE (recover via
+        # login/re-mint); only a deleted device is UNENROLLED (the one
+        # code that means "pair again"). Session and widget tokens must
+        # agree.
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        session = self._login(device_id)["token"]
+        widget = self.engine.mint_widget_token(device_id)["token"]
+
+        self.engine.update_device(device_id, rooms=["living"])  # ver bump
+        for stale in (session, widget):
+            with self.assertRaises(TokenError) as ctx:
+                self.engine.validate_token(stale)
+            self.assertEqual(ctx.exception.code, "token_stale")
+
+        self.engine.delete_device(device_id)
+        for dead in (session, widget):
+            with self.assertRaises(TokenError) as ctx:
+                self.engine.validate_token(dead)
+            self.assertEqual(ctx.exception.code, "unenrolled")
+
+    def test_token_error_code_invalid_and_expired(self):
+        with self.assertRaises(TokenError) as ctx:
+            self.engine.validate_token("garbage")
+        self.assertEqual(ctx.exception.code, "token_invalid")
+
+        device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
+        expired = auth_tokens.issue_token(
+            self.engine._signing_secret(), device_id, "user", None, ttl=-100
+        )
+        with self.assertRaises(TokenError) as ctx:
+            self.engine.validate_token(expired)
+        self.assertEqual(ctx.exception.code, "token_expired")
+
     def test_widget_token_unknown_device(self):
         with self.assertRaises(UnknownDeviceError):
             self.engine.mint_widget_token("ghost-device")

@@ -63,7 +63,24 @@ VALID_SCOPES = (SCOPE_WIDGET,)
 
 
 class TokenError(Exception):
-    """The token is malformed, forged, expired, or not ours."""
+    """The token is malformed, forged, expired, or not ours.
+
+    ``code`` is the machine-readable reason clients receive in the 401
+    body, so they can react proportionately instead of guessing from an
+    opaque message:
+
+    - ``token_invalid`` — forged/malformed/wrong secret; a fresh login is
+      the only recovery.
+    - ``token_expired`` — a genuine token past ``exp``; refresh via login.
+    - ``token_stale`` — the device was edited (auth ``ver`` bumped); the
+      device is STILL enrolled — re-auth/re-mint, never re-pair.
+    - ``unenrolled`` — the device record is gone; the one code that
+      legitimately means "pair again".
+    """
+
+    def __init__(self, message: str, code: str = "token_invalid") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -179,7 +196,7 @@ def validate_token(
     if not isinstance(exp, int) or not isinstance(iat, int):
         raise TokenError("Missing iat/exp")
     if current > exp + CLOCK_SKEW:
-        raise TokenError("Token expired")
+        raise TokenError("Token expired", code="token_expired")
     if iat > current + CLOCK_SKEW:
         raise TokenError("Token issued in the future")
 

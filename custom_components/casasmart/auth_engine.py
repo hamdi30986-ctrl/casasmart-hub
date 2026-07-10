@@ -793,8 +793,17 @@ class AuthEngine:
         claims = auth_tokens.validate_token(self._signing_secret(), token)
         with self._lock:
             cached = self._device_cache.get(claims["sub"])
-            if cached is None or cached["ver"] != claims.get("ver"):
-                raise TokenError("Token revoked")
+            if cached is None:
+                # warm_up() mirrors every enrolled device at startup and
+                # enroll/delete keep the cache in sync, so a miss means the
+                # device is GONE — the one condition that justifies telling
+                # the client to re-pair.
+                raise TokenError("Token revoked", code="unenrolled")
+            if cached["ver"] != claims.get("ver"):
+                # Device still enrolled, just edited since this token was
+                # minted (role/rooms change). A fresh login/mint recovers —
+                # clients must NOT treat this as a re-pair signal.
+                raise TokenError("Token revoked", code="token_stale")
             # Liveness clock for the per-user sensors — in-memory, updated on
             # the same lock+read we already do, so no extra cost on the hot
             # path and no DB write per request.

@@ -226,9 +226,14 @@ def authenticate_request(
         )
     try:
         claims = engine.validate_token(authorization.removeprefix("Bearer "))
-    except TokenError:
+    except TokenError as err:
+        # Same opaque message for every failure (no oracle), but a
+        # machine-readable ``code`` so clients can tell "re-login/re-mint
+        # fixes this" (token_expired/token_stale) apart from "this device
+        # is no longer paired" (unenrolled) — a widget 401 must never be
+        # read as a re-pair signal unless the hub says so explicitly.
         return None, web.json_response(
-            {"message": "Invalid or expired token"},
+            {"message": "Invalid or expired token", "code": err.code},
             status=HTTPStatus.UNAUTHORIZED,
             headers={"WWW-Authenticate": "Bearer"},
         )
