@@ -352,6 +352,27 @@ class AthanView(AudioViewTestCase):
         self.assertEqual(get_body["athan"]["method"], "UmmAlQura")
         self.assertTrue(get_body["athan"]["enabled"])
 
+    async def test_get_includes_schedule_block(self) -> None:
+        # Observability: GET always carries a `schedule` key (null until the
+        # scheduler has run) so the app can render "next athan".
+        self.rt.audio.set_athan({"enabled": True, "method": "makkah"})
+        resp = await self.view.get(H.FakeRequest(headers=self._admin()))
+        _, body = H.read_response(resp)
+        self.assertIn("schedule", body)
+
+    async def test_put_speakers_selection_round_trips(self) -> None:
+        config = {"enabled": True, "method": "makkah", "speakers": ["aabbcc", "ddeeff"]}
+        with mock.patch(
+            "casasmart.audio_api.get_audio_adapter", lambda hass: None
+        ):
+            put = await self.view.put(
+                H.FakeRequest(headers=self._admin(), body={"athan": config})
+            )
+        self.assertEqual(H.read_response(put)[0], 200)
+        get = await self.view.get(H.FakeRequest(headers=self._admin()))
+        _, get_body = H.read_response(get)
+        self.assertEqual(get_body["athan"]["speakers"], ["aabbcc", "ddeeff"])
+
     async def test_put_accepts_bare_config_without_athan_wrapper(self) -> None:
         # The view falls back to the whole body when there is no "athan" key.
         with mock.patch(

@@ -727,7 +727,12 @@ class CasaSmartAudioAthanView(_AudioView):
             "timezone": athan.get("timezone") or cfg.time_zone,
             "source": "config" if pinned else "home",
         }
-        return self.json({"athan": athan, "location": location})
+        # Observability: the scheduler's last computed schedule (today's times,
+        # which are still ahead, the next one, and the resolved target speakers)
+        # so the app can show "Next athan: …" and a silent miss can't hide.
+        scheduler = get_athan_scheduler(self._hass)
+        schedule = scheduler.schedule_snapshot() if scheduler is not None else None
+        return self.json({"athan": athan, "location": location, "schedule": schedule})
 
     async def put(self, request: web.Request) -> web.Response:
         _, error = authenticate_request(self._hass, request, "audio.manage")

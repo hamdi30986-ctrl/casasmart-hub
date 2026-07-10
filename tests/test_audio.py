@@ -177,6 +177,33 @@ class AthanConfigTests(AudioTestCase):
         with self.assertRaises(AudioError):
             self.engine.set_athan({"enabled": True, "lat": True, "lon": True})
 
+    # -- per-speaker targets (optional; scheduler normalises/filters) -----------
+
+    def test_speakers_list_accepted_and_persisted(self):
+        cfg = {"enabled": True, "method": "makkah", "speakers": ["aabbcc", "ddeeff"]}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan()["speakers"], ["aabbcc", "ddeeff"])
+
+    def test_empty_speakers_list_accepted(self):
+        # [] means "all speakers" — a valid, explicit choice.
+        cfg = {"enabled": True, "speakers": []}
+        self.engine.set_athan(cfg)
+        self.assertEqual(self.engine.get_athan()["speakers"], [])
+
+    def test_speakers_not_a_list_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "speakers": "aabbcc"})
+
+    def test_speakers_non_string_entry_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "speakers": ["aabbcc", 5]})
+
+    def test_speakers_too_many_rejected(self):
+        with self.assertRaises(AudioError):
+            self.engine.set_athan(
+                {"enabled": True, "speakers": [f"{i:06x}" for i in range(65)]}
+            )
+
     def test_enabled_with_non_numeric_coord_rejected(self):
         # A supplied coordinate that isn't a finite number is still refused.
         with self.assertRaises(AudioError):

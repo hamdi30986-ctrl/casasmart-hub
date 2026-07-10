@@ -129,6 +129,9 @@ _PORT_MAX = 65535
 # unbounded payload that then gets republished retained forever.
 _ATHAN_MAX_KEYS = 64
 _ATHAN_MAX_BYTES = 8192
+# Cap the per-speaker athan target list. The scheduler normalises + intersects
+# it with the enrolled set at fire time; this just bounds the stored blob.
+_ATHAN_MAX_SPEAKERS = 64
 # Live-mirror string fields (room/title/...) from the broker — capped so a
 # giant retained value can't bloat what the hub serves the app.
 _LIVE_STR_MAX = 128
@@ -497,6 +500,22 @@ class AudioEngine:
             value = config.get(coord)
             if value is not None and not _is_number(value):
                 raise AudioError(f"athan {coord!r} must be a finite number")
+        # Optional per-speaker target list. Absent/empty => athan broadcasts to
+        # ALL speakers (default). Present => only those fire. We validate it is a
+        # bounded list of non-empty strings here; the scheduler normalises each
+        # id and intersects with the enrolled set at fire time (it owns the
+        # schema — the hub just guarantees a sane, bounded blob).
+        speakers = config.get("speakers")
+        if speakers is not None:
+            if not isinstance(speakers, list):
+                raise AudioError("athan 'speakers' must be a list")
+            if len(speakers) > _ATHAN_MAX_SPEAKERS:
+                raise AudioError(
+                    f"athan 'speakers' has too many entries (max {_ATHAN_MAX_SPEAKERS})"
+                )
+            for item in speakers:
+                if not isinstance(item, str) or not item.strip():
+                    raise AudioError("athan 'speakers' entries must be non-empty strings")
         try:
             import json
 

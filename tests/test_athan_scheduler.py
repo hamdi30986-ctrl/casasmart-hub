@@ -78,14 +78,19 @@ class _Hass:
 
 
 class _Engine:
-    def __init__(self, athan):
+    def __init__(self, athan, speakers=None):
         self._athan = athan
+        self._enrolled = list(speakers or [])
 
     def get_athan(self):
         return self._athan
 
-    def build_play(self, *, file, priority):
-        return ("speakers/broadcast", {"cmd": "play", "file": file, "priority": priority})
+    def speakers(self):
+        return list(self._enrolled)
+
+    def build_play(self, *, file, priority, mac=None):
+        topic = "speakers/broadcast" if mac is None else f"speakers/{mac}/command"
+        return (topic, {"cmd": "play", "file": file, "priority": priority})
 
 
 class _Adapter:
@@ -110,6 +115,29 @@ def _future_times():
         }
 
     return _compute
+
+
+class _RestoresModuleGlobals:
+    """Snapshot the athan module globals that tests monkeypatch (the compute
+    function + the two HA trackers) and restore them after each test, so a mock
+    never leaks into another class — notably the real-library TestLibraryCompute.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_globals = (
+            A.compute_prayer_times_utc,
+            A.async_track_point_in_time,
+            A.async_track_time_change,
+        )
+
+    def tearDown(self):
+        (
+            A.compute_prayer_times_utc,
+            A.async_track_point_in_time,
+            A.async_track_time_change,
+        ) = self._saved_globals
+        super().tearDown()
 
 
 class TestLibraryCompute(unittest.TestCase):
@@ -176,7 +204,7 @@ class TestConfigResolution(unittest.TestCase):
         )
 
 
-class TestFireAndArming(unittest.TestCase):
+class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
     def test_fire_builds_broadcast_play(self):
         adapter = _Adapter()
         s = A.AthanScheduler(
@@ -221,6 +249,89 @@ class TestFireAndArming(unittest.TestCase):
         A.compute_prayer_times_utc = _future_times()
         A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter()).reschedule()
         self.assertEqual(armed, [])
+
+
+class TestTargeting(unittest.TestCase):
+    """Per-speaker athan targeting and the all / subset / none rule."""
+
+    @staticmethod
+    def _engine(selection, enrolled):
+        athan = {"enabled": True, "lat": 21.7731, "lon": 39.0976,
+                 "timezone": "Asia/Riyadh", "method": "makkah"}
+        if selection is not None:
+            athan["speakers"] = selection
+        return _Engine(athan, speakers=[{"mac6": m} for m in enrolled])
+
+    def test_no_selection_is_broadcast(self):
+        eng = self._engine(None, ["aabbcc"])
+        has, targets = A.AthanScheduler(_Hass(), eng, _Adapter())._resolve_targets(eng.get_athan())
+        self.assertFalse(has)
+        self.assertEqual(targets, [])
+
+    def test_selection_intersects_enrolled(self):
+        # ddeeff is selected but not enrolled → dropped; order preserved.
+        eng = self._engine(["aabbcc", "ddeeff"], ["112233", "aabbcc"])
+        has, targets = A.AthanScheduler(_Hass(), eng, _Adapter())._resolve_targets(eng.get_athan())
+        self.assertTrue(has)
+        self.assertEqual(targets, ["aabbcc"])
+
+    def test_fire_targets_selected_speakers_only(self):
+        adapter = _Adapter()
+        eng = self._engine(["aabbcc", "ddeeff"], ["aabbcc", "ddeeff", "112233"])
+        A.AthanScheduler(_Hass(), eng, adapter)._fire_athan("Asr")
+        topics = sorted(t for t, _ in adapter.published)
+        self.assertEqual(topics, ["speakers/aabbcc/command", "speakers/ddeeff/command"])
+        self.assertNotIn("speakers/broadcast", topics)  # not the third, not all
+
+    def test_fire_no_selection_broadcasts(self):
+        adapter = _Adapter()
+        eng = self._engine(None, ["aabbcc"])
+        A.AthanScheduler(_Hass(), eng, adapter)._fire_athan("Asr")
+        self.assertEqual([t for t, _ in adapter.published], ["speakers/broadcast"])
+
+    def test_fire_selection_all_unenrolled_fires_nowhere(self):
+        # An explicit selection whose speakers are all gone must NOT fall back
+        # to broadcast — athan fires on nothing (never blasts everyone).
+        adapter = _Adapter()
+        eng = self._engine(["ddeeff"], ["aabbcc"])
+        A.AthanScheduler(_Hass(), eng, adapter)._fire_athan("Asr")
+        self.assertEqual(adapter.published, [])
+
+
+class TestScheduleSnapshot(_RestoresModuleGlobals, unittest.TestCase):
+    def test_snapshot_reports_next_and_targets(self):
+        A.compute_prayer_times_utc = _future_times()
+        eng = _Engine(
+            {"enabled": True, "lat": 21.7731, "lon": 39.0976,
+             "timezone": "Asia/Riyadh", "method": "makkah", "speakers": ["aabbcc"]},
+            speakers=[{"mac6": "aabbcc"}],
+        )
+        s = A.AthanScheduler(_Hass(), eng, _Adapter())
+        s.reschedule()
+        snap = s.schedule_snapshot()
+        self.assertTrue(snap["enabled"])
+        self.assertEqual(snap["speakers_mode"], "subset")
+        self.assertEqual(snap["speakers"], ["aabbcc"])
+        self.assertEqual(len(snap["prayers"]), 5)
+        self.assertEqual(snap["next"]["name"], "Dhuhr")  # Fajr past, Dhuhr next
+
+    def test_snapshot_disabled_is_minimal(self):
+        s = A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter())
+        s.reschedule()
+        self.assertEqual(s.schedule_snapshot(), {"enabled": False})
+
+
+class TestHourlyRearm(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase):
+    async def test_async_start_registers_hourly_recompute(self):
+        calls = []
+        A.async_track_time_change = lambda hass, action, **kw: (calls.append(kw) or (lambda: None))
+        A.compute_prayer_times_utc = _future_times()
+        s = A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter())
+        await s.async_start()
+        # Hourly (minute=1, no hour=) so a missed trigger self-heals within the hour.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], {"minute": 1, "second": 0})
+        self.assertNotIn("hour", calls[0])
 
 
 if __name__ == "__main__":

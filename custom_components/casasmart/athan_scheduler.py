@@ -28,6 +28,8 @@ from homeassistant.helpers.event import (
 )
 import homeassistant.util.dt as dt_util
 
+from .audio import normalize_mac6, AudioError
+
 _LOGGER = logging.getLogger(__name__)
 
 # Prayer-call MP3s are baked onto each Pi speaker image at this path.
@@ -109,25 +111,40 @@ class AthanScheduler:
         self._engine = engine
         self._adapter = adapter
         self._unsub_prayers: list[Any] = []
-        self._unsub_midnight: Optional[Any] = None
+        self._unsub_recompute: Optional[Any] = None
+        # Last computed schedule, for the GET /audio/athan `schedule` block so
+        # the app can show "next athan" and a silent failure can't hide.
+        self._schedule: dict[str, Any] = {"enabled": False}
 
     async def async_start(self) -> None:
-        """Arm today's prayers and a daily 00:01 recompute."""
-        self._unsub_midnight = async_track_time_change(
-            self._hass, self._handle_midnight, hour=0, minute=1, second=0
+        """Arm today's prayers and a self-healing hourly recompute.
+
+        The hourly tick (at :01) both rolls the day over at 00:01 AND re-arms
+        every hour — so a missed trigger (a slept host, a dropped timer, a
+        toggle that raced setup) self-corrects within the hour instead of
+        silently missing a whole day. reschedule() is idempotent, so re-running
+        it costs one offline prayer-time calc and cancel/re-arm.
+        """
+        self._unsub_recompute = async_track_time_change(
+            self._hass, self._handle_recompute, minute=1, second=0
         )
         self.reschedule()
 
     async def async_stop(self) -> None:
         """Cancel every armed timer (idempotent)."""
         self._cancel_prayers()
-        if self._unsub_midnight is not None:
-            self._unsub_midnight()
-            self._unsub_midnight = None
+        if self._unsub_recompute is not None:
+            self._unsub_recompute()
+            self._unsub_recompute = None
 
     @callback
-    def _handle_midnight(self, _now: datetime) -> None:
+    def _handle_recompute(self, _now: datetime) -> None:
         self.reschedule()
+
+    def schedule_snapshot(self) -> dict[str, Any]:
+        """The last computed schedule (today's times + which are still ahead +
+        target speakers), for the athan API's observability block."""
+        return dict(self._schedule)
 
     def _cancel_prayers(self) -> None:
         for unsub in self._unsub_prayers:
@@ -146,39 +163,104 @@ class AthanScheduler:
         resolved = self._resolve_config()
         if resolved is None:
             _LOGGER.debug("Athan: disabled or no location — nothing scheduled")
+            self._schedule = {"enabled": False}
             return
         lat, lon, tz_name, method, school = resolved
 
         tz = dt_util.get_time_zone(tz_name)
         if tz is None:
             _LOGGER.warning("Athan: unknown timezone %r — nothing scheduled", tz_name)
+            self._schedule = {"enabled": True, "error": f"unknown timezone {tz_name!r}"}
             return
 
         today = datetime.now(tz).date()
         times = compute_prayer_times_utc(lat, lon, method, school, today.isoformat())
         if not times:
             _LOGGER.warning("Athan: could not compute prayer times for %s", today)
+            self._schedule = {"enabled": True, "error": "prayer-time computation failed"}
             return
+
+        athan = self._engine.get_athan() or {}
+        has_sel, targets = self._resolve_targets(athan)
 
         now_utc = dt_util.utcnow()
         armed: list[str] = []
+        prayers_out: list[dict[str, Any]] = []
+        next_prayer: Optional[dict[str, Any]] = None
         for prayer in PRAYER_NAMES:
             fire_at = times.get(prayer)
             if fire_at is None:
                 continue
-            if (fire_at - now_utc).total_seconds() < -_GRACE_SEC:
+            local = fire_at.astimezone(tz).strftime("%H:%M")
+            upcoming = (fire_at - now_utc).total_seconds() >= -_GRACE_SEC
+            prayers_out.append(
+                {"name": prayer, "at": fire_at.isoformat(), "local": local, "upcoming": upcoming}
+            )
+            if not upcoming:
                 continue  # already well past — skip (grace guards a late wake)
             unsub = async_track_point_in_time(
                 self._hass, self._make_fire(prayer), fire_at
             )
             self._unsub_prayers.append(unsub)
-            armed.append(f"{prayer} {fire_at.astimezone(tz).strftime('%H:%M')}")
+            armed.append(f"{prayer} {local}")
+            if next_prayer is None:
+                next_prayer = {"name": prayer, "at": fire_at.isoformat(), "local": local}
+
+        mode = "all" if not has_sel else ("subset" if targets else "none")
+        self._schedule = {
+            "enabled": True,
+            "date": today.isoformat(),
+            "timezone": tz_name,
+            "method": method,
+            "school": school,
+            "speakers_mode": mode,
+            "speakers": targets,
+            "prayers": prayers_out,
+            "next": next_prayer,
+        }
+
+        # A configured selection that resolves to zero enrolled speakers means
+        # athan is ENABLED but would fire NOWHERE — surface it loudly (visible
+        # even at the hub's default:warning level); it's a real misconfiguration.
+        if has_sel and not targets:
+            _LOGGER.warning(
+                "Athan enabled for %s but its selected speakers are all un-enrolled — "
+                "athan will fire on NO speakers until the selection is fixed.", today,
+            )
 
         _LOGGER.info(
-            "Athan scheduled for %s (%s/%s, %.4f,%.4f %s): %s",
+            "Athan scheduled for %s (%s/%s, %.4f,%.4f %s) on %s: %s",
             today, method, school, lat, lon, tz_name,
+            "all speakers" if not has_sel
+            else (f"{len(targets)} speaker(s): {','.join(targets)}" if targets
+                  else "NO speakers (empty selection)"),
             ", ".join(armed) if armed else "none remaining today",
         )
+
+    def _resolve_targets(self, athan: dict[str, Any]) -> tuple[bool, list[str]]:
+        """``(has_selection, target_mac6s)``.
+
+        No selection (absent/empty ``speakers``) => broadcast to ALL speakers.
+        A selection is normalised and intersected with the currently-enrolled
+        speakers, so a removed/renamed speaker silently drops out — an explicit
+        selection NEVER falls back to blasting everyone (unlike PA).
+        """
+        raw = athan.get("speakers")
+        if not raw or not isinstance(raw, list):
+            return False, []
+        try:
+            enrolled = {s.get("mac6") for s in self._engine.speakers()}
+        except Exception:  # noqa: BLE001 — a registry hiccup must not kill firing
+            enrolled = set()
+        targets: list[str] = []
+        for item in raw:
+            try:
+                mac6 = normalize_mac6(item)
+            except AudioError:
+                continue
+            if mac6 in enrolled and mac6 not in targets:
+                targets.append(mac6)
+        return True, targets
 
     def _make_fire(self, prayer: str) -> Any:
         @callback
@@ -191,18 +273,40 @@ class AthanScheduler:
         if self._resolve_config() is None:
             _LOGGER.info("Athan: %s reached but athan is now disabled — skipping", prayer)
             return
-        try:
-            topic, payload = self._engine.build_play(
-                file=f"{ATHAN_DIR}/{prayer.lower()}.mp3", priority="athan"
+        athan = self._engine.get_athan() or {}
+        has_sel, targets = self._resolve_targets(athan)
+        file_path = f"{ATHAN_DIR}/{prayer.lower()}.mp3"
+
+        if has_sel and not targets:
+            _LOGGER.warning(
+                "Athan: %s — selected speakers are all un-enrolled; firing nowhere", prayer
             )
-        except Exception:  # noqa: BLE001 — a build error must not kill the loop
-            _LOGGER.exception("Athan: failed to build %s play command", prayer)
             return
-        try:
-            self._adapter.publish(topic, payload, qos=1)
-            _LOGGER.info("Athan fired: %s -> %s", prayer, topic)
-        except Exception:  # noqa: BLE001 — a dead bus is non-fatal, just logged
-            _LOGGER.warning("Athan: %s not delivered — MQTT bus unavailable", prayer)
+
+        # No selection => a single broadcast (mac=None). A selection => one
+        # targeted play per chosen speaker (the same path PA uses).
+        macs: list[Optional[str]] = targets if has_sel else [None]
+        delivered = 0
+        for mac in macs:
+            try:
+                topic, payload = self._engine.build_play(
+                    mac=mac, file=file_path, priority="athan"
+                )
+            except Exception:  # noqa: BLE001 — a build error must not kill the loop
+                _LOGGER.exception("Athan: failed to build %s play command", prayer)
+                continue
+            try:
+                self._adapter.publish(topic, payload, qos=1)
+                delivered += 1
+            except Exception:  # noqa: BLE001 — a dead bus is non-fatal, just logged
+                _LOGGER.warning(
+                    "Athan: %s not delivered to %s — MQTT bus unavailable", prayer, topic
+                )
+        if delivered:
+            _LOGGER.info(
+                "Athan fired: %s -> %s", prayer,
+                "all speakers" if not has_sel else f"{delivered} speaker(s): {','.join(targets)}",
+            )
 
     def _resolve_config(
         self,
