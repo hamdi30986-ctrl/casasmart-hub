@@ -73,6 +73,31 @@ def _install_ha_stubs() -> None:
 
         core.callback = callback
 
+    # homeassistant.helpers.event.async_call_later — the widget-refresh coalescer
+    # (Phase 8). Controllable stub: records each scheduled flush so a test can
+    # fire it manually and returns a cancel handle.
+    helpers = sys.modules.setdefault(
+        "homeassistant.helpers", types.ModuleType("homeassistant.helpers")
+    )
+    event_mod = sys.modules.setdefault(
+        "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
+    )
+    if not hasattr(event_mod, "async_call_later"):
+        event_mod.calls = []
+
+        def async_call_later(hass, delay, action):
+            rec = {"delay": delay, "action": action, "cancelled": False}
+            event_mod.calls.append(rec)
+
+            def _cancel() -> None:
+                rec["cancelled"] = True
+
+            return _cancel
+
+        event_mod.async_call_later = async_call_later
+    ha.helpers = helpers
+    helpers.event = event_mod
+
 
 _install_ha_stubs()
 
@@ -494,6 +519,102 @@ class TransitionMatrixTests(unittest.TestCase):
         self.assertFalse(self._t("locked", "locking"))
         self.assertFalse(self._t(None, "locked"))
         self.assertFalse(self._t("locked", None))
+
+
+class WidgetRefreshTests(DispatcherTestCase):
+    """Coalesced silent widget-refresh push (Phase 8)."""
+
+    def _ev(self, entity_id, old, new):
+        return {
+            "entity_id": entity_id,
+            "old_state": FakeState(old) if old is not None else None,
+            "new_state": FakeState(new) if new is not None else None,
+        }
+
+    async def test_control_edges_coalesce_into_one_silent_push(self) -> None:
+        import homeassistant.helpers.event as ev
+
+        ev.calls.clear()
+        self.push_store.register("dev-1", "fcm-1", "ios")
+        self._make_dispatcher()
+
+        # Two settled control edges within the window → ONE flush scheduled.
+        self.hass.bus.fire("state_changed", self._ev("light.kitchen", "off", "on"))
+        self.hass.bus.fire("state_changed", self._ev("switch.fan", "off", "on"))
+        self.assertEqual(len(ev.calls), 1, "coalesced to a single flush")
+
+        # Nothing sent until the coalescing window elapses.
+        await self._drain()
+        self.assertEqual(len(self.session.calls), 0)
+
+        # Fire the timer → exactly one silent update_widgets push.
+        ev.calls[0]["action"](None)
+        await self._drain()
+        self.assertEqual(len(self.session.calls), 1)
+        body = self.session.calls[0]["json"]
+        self.assertEqual(body["priority"], PRIORITY_NORMAL)
+        data = body["payloads"][0]["data"]
+        self.assertEqual(data["type"], "update_widgets")
+        self.assertEqual(data["silent"], "1")
+        self.assertNotIn("title", data)
+        self._verify_signature(body)
+
+    async def test_widget_push_goes_house_wide_not_owner_only(self) -> None:
+        import homeassistant.helpers.event as ev
+
+        ev.calls.clear()
+        self.push_store.register("dev-owner", "fcm-owner", "ios")
+        self.push_store.register("dev-room", "fcm-room", "android")
+        self._make_dispatcher()
+        self.hass.bus.fire("state_changed", self._ev("light.kitchen", "off", "on"))
+        ev.calls[0]["action"](None)
+        await self._drain()
+
+        tokens = {
+            p["device_token"] for p in self.session.calls[0]["json"]["payloads"]
+        }
+        self.assertEqual(tokens, {"fcm-owner", "fcm-room"})
+
+    async def test_irrelevant_changes_do_not_schedule(self) -> None:
+        import homeassistant.helpers.event as ev
+
+        ev.calls.clear()
+        self.push_store.register("dev-1", "fcm-1", "ios")
+        self._make_dispatcher()
+
+        # Excluded domain (sensor churns constantly), no-op change, and a flap
+        # in from unavailable — none is a real settled control edge.
+        self.hass.bus.fire("state_changed", self._ev("sensor.power", "100", "105"))
+        self.hass.bus.fire("state_changed", self._ev("light.kitchen", "on", "on"))
+        self.hass.bus.fire("state_changed", self._ev("light.kitchen", "unavailable", "on"))
+        self.assertEqual(len(ev.calls), 0)
+        await self._drain()
+        self.assertEqual(len(self.session.calls), 0)
+
+
+class WidgetRelevanceMatrixTests(unittest.TestCase):
+    """Direct coverage of the widget-relevant predicate."""
+
+    def _r(self, entity_id, old, new) -> bool:
+        return PushDispatcher._is_widget_relevant_change(
+            entity_id,
+            FakeState(old) if old is not None else None,
+            FakeState(new) if new is not None else None,
+        )
+
+    def test_relevant(self) -> None:
+        self.assertTrue(self._r("light.k", "off", "on"))
+        self.assertTrue(self._r("cover.garage", "closed", "open"))
+        self.assertTrue(self._r("climate.ac", "off", "cool"))
+        self.assertTrue(self._r("lock.front", "locked", "unlocked"))
+
+    def test_irrelevant(self) -> None:
+        self.assertFalse(self._r("sensor.power", "100", "105"))  # excluded domain
+        self.assertFalse(self._r("binary_sensor.motion", "off", "on"))
+        self.assertFalse(self._r("light.k", "on", "on"))  # no change
+        self.assertFalse(self._r("light.k", "unavailable", "on"))  # flap in
+        self.assertFalse(self._r("light.k", "on", "unknown"))  # flap out
+        self.assertFalse(self._r("light.k", None, "on"))
 
 
 if __name__ == "__main__":

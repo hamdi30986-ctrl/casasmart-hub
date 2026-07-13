@@ -53,6 +53,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     EVENT_ALARM_TRIGGERED,
@@ -61,6 +62,7 @@ from .const import (
     PUSH_RELAY_TIMEOUT_SECONDS,
     PUSH_TYPE_TANK_LOW,
     PUSH_TYPE_TANK_OFFLINE,
+    PUSH_TYPE_UPDATE_WIDGETS,
 )
 
 if TYPE_CHECKING:
@@ -99,6 +101,23 @@ _LOCK_PREFIX = "lock."
 _LOCK_SETTLED = frozenset({STATE_LOCKED, STATE_UNLOCKED})
 _LOCK_FLAP_STATES = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
+# Widget-refresh coalescing (Phase 8). Control domains whose state a home-screen
+# widget renders — a settled edge here is worth a silent refresh. Sensors and
+# binary_sensors are deliberately EXCLUDED: their state churns continuously and
+# iOS grants only a tight background-push budget, so pushing on every drift would
+# exhaust it. Power/temperature tiles ride the widget's own ~1min timeline
+# refresh + the foreground app sync instead.
+_WIDGET_DOMAINS = frozenset(
+    {"light", "switch", "input_boolean", "lock", "cover", "climate", "fan"}
+)
+# Leading-edge debounce: the FIRST relevant change arms a single flush this many
+# seconds out; changes within the window are absorbed into it. Caps widget
+# pushes at one per window (a scene flipping many entities → one push) and keeps
+# well inside the iOS background-push budget.
+_WIDGET_PUSH_COALESCE_SECONDS = 15.0
+# States that don't count as a real, settled value for a widget edge.
+_WIDGET_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
+
 # Per-batch replay nonce: 32 random bytes -> 64 hex chars, comfortably above the
 # relay's 32-char floor. (``token_hex(n)`` returns 2n hex chars.)
 _NONCE_BYTES = 32
@@ -127,6 +146,8 @@ class PushDispatcher:
         self._clock = clock
         self._unsub_alarm: Optional[Callable[[], None]] = None
         self._unsub_state: Optional[Callable[[], None]] = None
+        # Pending coalesced widget-refresh flush (None = nothing scheduled).
+        self._widget_flush_cancel: Optional[Callable[[], None]] = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -147,13 +168,16 @@ class PushDispatcher:
 
     @callback
     def async_stop(self) -> None:
-        """Release both listeners (idempotent — safe on any unload)."""
+        """Release both listeners + any pending flush (idempotent)."""
         if self._unsub_alarm is not None:
             self._unsub_alarm()
             self._unsub_alarm = None
         if self._unsub_state is not None:
             self._unsub_state()
             self._unsub_state = None
+        if self._widget_flush_cancel is not None:
+            self._widget_flush_cancel()
+            self._widget_flush_cancel = None
 
     # -- bus handlers ----------------------------------------------------------
 
@@ -165,15 +189,55 @@ class PushDispatcher:
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        """Runs for every HA state change — reject non-lock edges cheaply."""
+        """Runs for every HA state change — cheap domain guard up front."""
         entity_id = event.data.get("entity_id")
-        if not isinstance(entity_id, str) or not entity_id.startswith(_LOCK_PREFIX):
+        if not isinstance(entity_id, str):
             return
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
-        if not self._is_real_lock_transition(old_state, new_state):
-            return
-        data = self._build_lock_payload(entity_id, new_state)
+
+        # Lock: an immediate, owner-only alert on a settled transition.
+        if entity_id.startswith(_LOCK_PREFIX):
+            if self._is_real_lock_transition(old_state, new_state):
+                data = self._build_lock_payload(entity_id, new_state)
+                self._hass.async_create_task(self._dispatch(data, PRIORITY_NORMAL))
+            # A lock edge is also widget-relevant (lock tiles) — fall through.
+
+        # Widget refresh: coalesce a settled control-state edge into one silent
+        # push (Phase 8). Cheap domain check first so the hot path stays fast.
+        if self._is_widget_relevant_change(entity_id, old_state, new_state):
+            self._mark_widgets_dirty()
+
+    @staticmethod
+    def _is_widget_relevant_change(
+        entity_id: str, old_state: Any, new_state: Any
+    ) -> bool:
+        """True for a settled control-domain state edge a widget would render."""
+        domain = entity_id.split(".", 1)[0]
+        if domain not in _WIDGET_DOMAINS:
+            return False
+        # Need a real new value and a real prior value that actually differs —
+        # ignore attribute-only churn and flaps in/out of unavailable/unknown.
+        if new_state is None or new_state.state in _WIDGET_UNSETTLED:
+            return False
+        if old_state is None or old_state.state in _WIDGET_UNSETTLED:
+            return False
+        return old_state.state != new_state.state
+
+    @callback
+    def _mark_widgets_dirty(self) -> None:
+        """Arm one coalesced widget-refresh flush; absorb changes within it."""
+        if self._widget_flush_cancel is not None:
+            return  # a flush is already scheduled for this window
+        self._widget_flush_cancel = async_call_later(
+            self._hass, _WIDGET_PUSH_COALESCE_SECONDS, self._flush_widget_refresh
+        )
+
+    @callback
+    def _flush_widget_refresh(self, _now: Any) -> None:
+        """Send the coalesced silent widget-refresh push."""
+        self._widget_flush_cancel = None
+        data = {"type": PUSH_TYPE_UPDATE_WIDGETS, "silent": "1"}
         self._hass.async_create_task(self._dispatch(data, PRIORITY_NORMAL))
 
     @staticmethod

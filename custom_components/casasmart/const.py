@@ -142,6 +142,10 @@ EVENT_TANK_CHANGED = "casasmart_tank_changed"
 # routes the notification (mirrors PUSH_TYPE_SECURITY / PUSH_TYPE_LOCK).
 PUSH_TYPE_TANK_LOW = "tank_low"
 PUSH_TYPE_TANK_OFFLINE = "tank_offline"
+# Silent (data.silent == "1") signal telling the app to reload its home-screen
+# widgets — the relay fans it out as a background push (no visible alert) and the
+# app's background handler pokes the widgets to re-fetch fresh hub state.
+PUSH_TYPE_UPDATE_WIDGETS = "update_widgets"
 
 # -- WebSocket server (B1.5) ---------------------------------------------------
 # First frame after connect must be the auth frame within this window.
