@@ -101,9 +101,11 @@ class WsConnection:
         self._ws = ws
         self._hub_version = hub_version
         self._subscription = ws_protocol.Subscription()
-        self._send_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
-            maxsize=WS_SEND_QUEUE_MAX
-        )
+        # Phase 11: a coalescing queue absorbs bursts on a congested tunnel —
+        # newer state supersedes older, redundant nudges collapse, and the
+        # oldest push is dropped before the socket ever is. Protocol frames are
+        # never dropped (put_protocol); pushes go through offer().
+        self._send_queue = ws_protocol.CoalescingSendQueue(WS_SEND_QUEUE_MAX)
         self._sender_task: asyncio.Task | None = None
         self._unsub_state_changed: Any = None
         self._unsub_registry_changed: Any = None
@@ -396,12 +398,7 @@ class WsConnection:
             # for the connection's lifetime (Phase 8). The frame is just the id,
             # so there is no state to room-scope.
             if entity_id and self._subscription.matches(entity_id):
-                try:
-                    self._send_queue.put_nowait(
-                        ws_protocol.frame_entity_removed(entity_id)
-                    )
-                except asyncio.QueueFull:
-                    pass
+                self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
             return
         if (
             not self._subscription.matches(entity_id)
@@ -411,15 +408,7 @@ class WsConnection:
         ):
             return
         device = serialize_device(self._hass, new_state)
-        try:
-            self._send_queue.put_nowait(ws_protocol.frame_state_changed(device))
-        except asyncio.QueueFull:
-            # Consumer is 256 frames behind: dead link or hopeless backlog.
-            # Close instead of buffering unbounded; the app reconnects.
-            _LOGGER.warning("WS client too slow (queue full), disconnecting")
-            self._hass.async_create_task(
-                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
-            )
+        self._offer_or_close(ws_protocol.frame_state_changed(device))
 
     @callback
     def _on_registry_changed(self, event: Event) -> None:
@@ -430,13 +419,7 @@ class WsConnection:
         is filtered to its own slice like every other read.
         """
         kind = event.data.get("kind", "registry")
-        try:
-            self._send_queue.put_nowait(ws_protocol.frame_registry_changed(kind))
-        except asyncio.QueueFull:
-            _LOGGER.warning("WS client too slow (queue full), disconnecting")
-            self._hass.async_create_task(
-                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
-            )
+        self._offer_or_close(ws_protocol.frame_registry_changed(kind))
 
     @callback
     def _on_tank_changed(self, event: Event) -> None:
@@ -444,15 +427,7 @@ class WsConnection:
         calibrated level. Content-free beyond the device id, like the registry
         nudge; the app's tank GET stays the authorization boundary."""
         device_id = event.data.get("device_id", "")
-        try:
-            self._send_queue.put_nowait(
-                ws_protocol.frame_tank_changed(device_id)
-            )
-        except asyncio.QueueFull:
-            _LOGGER.warning("WS client too slow (queue full), disconnecting")
-            self._hass.async_create_task(
-                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
-            )
+        self._offer_or_close(ws_protocol.frame_tank_changed(device_id))
 
     @callback
     def _on_alarm_changed(self, event: Event) -> None:
@@ -466,13 +441,7 @@ class WsConnection:
         """
         if not AuthEngine.authorize(self._claims or {}, "alarm.read"):
             return
-        try:
-            self._send_queue.put_nowait(ws_protocol.frame_alarm_changed())
-        except asyncio.QueueFull:
-            _LOGGER.warning("WS client too slow (queue full), disconnecting")
-            self._hass.async_create_task(
-                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
-            )
+        self._offer_or_close(ws_protocol.frame_alarm_changed())
 
     @callback
     def _on_audio_changed(self, event: Event) -> None:
@@ -483,18 +452,24 @@ class WsConnection:
         """
         if not AuthEngine.authorize(self._claims or {}, "audio.read"):
             return
-        try:
-            self._send_queue.put_nowait(ws_protocol.frame_audio_changed())
-        except asyncio.QueueFull:
-            _LOGGER.warning("WS client too slow (queue full), disconnecting")
-            self._hass.async_create_task(
-                self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
-            )
+        self._offer_or_close(ws_protocol.frame_audio_changed())
 
     async def _enqueue(self, frame: dict[str, Any]) -> None:
-        """Route protocol replies through the same queue as pushes,
-        preserving send order on the single writer."""
-        await self._send_queue.put(frame)
+        """Route protocol replies through the same queue as pushes, preserving
+        send order on the single writer. Protocol frames are loss-intolerant, so
+        they are always admitted (never coalesced/dropped like pushes)."""
+        self._send_queue.put_protocol(frame)
+
+    def _offer_or_close(self, frame: dict[str, Any]) -> None:
+        """Queue a push frame, coalescing/dropping under backpressure. Only a
+        queue full of undrained protocol frames — a genuinely dead consumer —
+        closes the socket (Phase 11: a burst no longer kills a healthy app)."""
+        if self._send_queue.offer(frame):
+            return
+        _LOGGER.warning("WS client not draining (protocol backlog), disconnecting")
+        self._hass.async_create_task(
+            self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
+        )
 
     async def _sender_loop(self) -> None:
         """The single socket writer — drains the queue in order."""

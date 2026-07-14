@@ -25,6 +25,8 @@ Server -> client frames:
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from typing import Any
 
 # Frame types the client may send.
@@ -182,3 +184,131 @@ def frame_pong() -> dict[str, Any]:
 def frame_error(message: str) -> dict[str, Any]:
     """A frame was rejected; connection stays open."""
     return {"type": "error", "message": message}
+
+
+# -- Outbound backpressure (Phase 11) -----------------------------------------
+# On a congested tunnel (LTE, weak WiFi) a burst of state changes — a scene
+# flipping 20 lights, a re-sync fan-out — can arrive faster than the socket
+# drains. The old queue force-closed (4003 "too slow") the moment it hit its
+# cap, killing a perfectly healthy app that would have caught up in a second.
+#
+# These "push" frames are loss-tolerant: only the LATEST state of an entity
+# matters, and a nudge (registry/tank/alarm/audio) just says "re-fetch", so a
+# duplicate is pure redundancy. So under pressure we COALESCE (newer frame
+# replaces the older for the same entity/nudge) and, only if still over the cap,
+# DROP THE OLDEST push frame — never the socket. Protocol frames (auth_ok,
+# subscribed, auth_required/failed, error, pong) are loss-INTOLERANT: dropping
+# one corrupts the session, so they are always admitted and never evicted.
+
+# Push frame types whose older copies are safe to coalesce/drop under pressure.
+_COALESCEABLE_TYPES = frozenset(
+    {
+        "state_changed",
+        "entity_removed",
+        "registry_changed",
+        "tank_changed",
+        "alarm_changed",
+        "audio_changed",
+    }
+)
+
+
+def coalesce_key(frame: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Identity under which two frames are redundant, or None to never drop.
+
+    Two queued frames with the same key mean the same thing to the app — the
+    newer one fully supersedes the older (latest entity state, or an identical
+    "re-fetch" nudge). None marks a loss-intolerant protocol frame that must
+    never be coalesced or dropped.
+    """
+    ftype = frame.get("type")
+    if ftype not in _COALESCEABLE_TYPES:
+        return None
+    if ftype == "state_changed":
+        device = frame.get("device")
+        entity_id = device.get("entity_id") if isinstance(device, dict) else None
+        return ("state_changed", entity_id)
+    if ftype == "entity_removed":
+        return ("entity_removed", frame.get("entity_id"))
+    if ftype == "registry_changed":
+        return ("registry_changed", frame.get("kind"))
+    if ftype == "tank_changed":
+        return ("tank_changed", frame.get("device_id"))
+    # alarm_changed / audio_changed carry no payload — one identity each.
+    return (ftype,)
+
+
+class CoalescingSendQueue:
+    """Order-preserving single-consumer outbound queue with backpressure relief.
+
+    One writer drains it via :meth:`get`; the HA event-loop callbacks feed it.
+    Both run on the same loop, so no lock is needed — the only ``await`` is in
+    :meth:`get`, and nothing mutates the queue across it except synchronous
+    producer callbacks.
+
+    Protocol frames go in via :meth:`put_protocol` (always admitted). Push
+    frames go in via :meth:`offer`, which returns ``False`` only when the queue
+    is full of undroppable protocol frames — the genuine "hopeless consumer"
+    case where the caller should close the socket.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self._maxsize = maxsize
+        self._items: deque[dict[str, Any]] = deque()
+        self._event = asyncio.Event()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def _wake(self) -> None:
+        self._event.set()
+
+    def put_protocol(self, frame: dict[str, Any]) -> None:
+        """Admit a loss-intolerant protocol frame unconditionally (never
+        coalesced, never dropped — the cap does not apply to it)."""
+        self._items.append(frame)
+        self._wake()
+
+    def offer(self, frame: dict[str, Any]) -> bool:
+        """Admit a push frame, coalescing/dropping under pressure.
+
+        Returns True when the frame (or a newer equivalent) is queued, False
+        only when the queue is full of undroppable protocol frames — then the
+        caller closes the socket. A None-key frame passed here is treated as
+        droppable-if-over-cap but never coalesced (defensive; callers pass real
+        push frames).
+        """
+        key = coalesce_key(frame)
+        if key is not None:
+            # Coalesce: a newer frame for the same entity/nudge replaces the
+            # queued one in place — no growth, no reorder across other entities.
+            for i, existing in enumerate(self._items):
+                if coalesce_key(existing) == key:
+                    self._items[i] = frame
+                    self._wake()
+                    return True
+        if len(self._items) < self._maxsize:
+            self._items.append(frame)
+            self._wake()
+            return True
+        # Over the cap: evict the OLDEST droppable frame to admit this one.
+        for i, existing in enumerate(self._items):
+            if coalesce_key(existing) is not None:
+                del self._items[i]
+                self._items.append(frame)
+                self._wake()
+                return True
+        # Nothing droppable — the whole backlog is protocol frames the consumer
+        # isn't draining. That IS a dead/hopeless link; let the caller close.
+        return False
+
+    async def get(self) -> dict[str, Any]:
+        """Pop the oldest frame, waiting until one is available."""
+        while not self._items:
+            self._event.clear()
+            # Re-check after clear: a producer that appended between the empty
+            # check and the clear already fired _wake, which the clear would
+            # otherwise swallow — this guard stops a lost-wakeup hang.
+            if not self._items:
+                await self._event.wait()
+        return self._items.popleft()

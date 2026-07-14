@@ -4,6 +4,7 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -15,17 +16,23 @@ sys.path.insert(
 )
 
 from ws_protocol import (  # noqa: E402
+    CoalescingSendQueue,
     ProtocolError,
     Subscription,
     auth_token,
+    coalesce_key,
+    frame_alarm_changed,
+    frame_audio_changed,
     frame_auth_failed,
     frame_auth_ok,
     frame_auth_required,
     frame_entity_removed,
     frame_error,
     frame_pong,
+    frame_registry_changed,
     frame_state_changed,
     frame_subscribed,
+    frame_tank_changed,
     parse_client_frame,
     subscribe_entity_ids,
 )
@@ -156,6 +163,133 @@ class TestServerFrames(unittest.TestCase):
             frame_entity_removed("light.a"),
             {"type": "entity_removed", "entity_id": "light.a"},
         )
+
+
+def _state(entity_id, value="on"):
+    """A state_changed frame for [entity_id] (device dict is duck-typed)."""
+    return frame_state_changed({"entity_id": entity_id, "state": value})
+
+
+class TestCoalesceKey(unittest.TestCase):
+    def test_state_changed_keys_by_entity(self):
+        self.assertEqual(
+            coalesce_key(_state("light.a")), ("state_changed", "light.a")
+        )
+        # Same entity, different state -> same key (newer supersedes older).
+        self.assertEqual(
+            coalesce_key(_state("light.a", "on")),
+            coalesce_key(_state("light.a", "off")),
+        )
+
+    def test_nudges_key_by_identity(self):
+        self.assertEqual(
+            coalesce_key(frame_registry_changed("floors")),
+            ("registry_changed", "floors"),
+        )
+        self.assertEqual(
+            coalesce_key(frame_tank_changed("dev-1")), ("tank_changed", "dev-1")
+        )
+        self.assertEqual(coalesce_key(frame_alarm_changed()), ("alarm_changed",))
+        self.assertEqual(coalesce_key(frame_audio_changed()), ("audio_changed",))
+        self.assertEqual(
+            coalesce_key(frame_entity_removed("light.z")),
+            ("entity_removed", "light.z"),
+        )
+
+    def test_protocol_frames_are_never_droppable(self):
+        for frame in (
+            frame_auth_ok("1.0", 1),
+            frame_auth_failed("nope"),
+            frame_auth_required(30),
+            frame_subscribed([]),
+            frame_pong(),
+            frame_error("bad"),
+        ):
+            self.assertIsNone(coalesce_key(frame), frame)
+
+    def test_malformed_state_frame_keys_none_entity(self):
+        # Defensive: a device without entity_id still yields a stable key.
+        self.assertEqual(
+            coalesce_key({"type": "state_changed", "device": {}}),
+            ("state_changed", None),
+        )
+        self.assertEqual(
+            coalesce_key({"type": "state_changed"}),
+            ("state_changed", None),
+        )
+
+
+class TestCoalescingSendQueue(unittest.IsolatedAsyncioTestCase):
+    async def _drain(self, q):
+        out = []
+        while len(q):
+            out.append(await q.get())
+        return out
+
+    async def test_state_for_same_entity_coalesces_in_place(self):
+        q = CoalescingSendQueue(maxsize=8)
+        self.assertTrue(q.offer(_state("light.a", "on")))
+        self.assertTrue(q.offer(_state("light.b", "on")))
+        self.assertTrue(q.offer(_state("light.a", "off")))  # supersedes a=on
+        frames = await self._drain(q)
+        # Two frames (a, b), a carries the NEWEST state, order preserved.
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[0]["device"]["entity_id"], "light.a")
+        self.assertEqual(frames[0]["device"]["state"], "off")
+        self.assertEqual(frames[1]["device"]["entity_id"], "light.b")
+
+    async def test_redundant_nudges_collapse(self):
+        q = CoalescingSendQueue(maxsize=8)
+        for _ in range(5):
+            self.assertTrue(q.offer(frame_alarm_changed()))
+        self.assertTrue(q.offer(frame_registry_changed("rooms")))
+        self.assertTrue(q.offer(frame_registry_changed("rooms")))
+        frames = await self._drain(q)
+        self.assertEqual(
+            [f["type"] for f in frames], ["alarm_changed", "registry_changed"]
+        )
+
+    async def test_over_cap_drops_oldest_push_not_socket(self):
+        q = CoalescingSendQueue(maxsize=3)
+        for name in ("a", "b", "c"):  # fills the cap, all distinct entities
+            self.assertTrue(q.offer(_state(f"light.{name}")))
+        # Cap hit; a new distinct entity evicts the OLDEST push (light.a),
+        # never returns False (socket stays open).
+        self.assertTrue(q.offer(_state("light.d")))
+        frames = await self._drain(q)
+        ids = [f["device"]["entity_id"] for f in frames]
+        self.assertEqual(ids, ["light.b", "light.c", "light.d"])
+
+    async def test_protocol_frames_never_dropped_and_bypass_cap(self):
+        q = CoalescingSendQueue(maxsize=2)
+        q.put_protocol(frame_auth_ok("1.0", 1))
+        q.put_protocol(frame_subscribed([]))
+        # Cap is 2 and both slots hold protocol frames — a push can't evict
+        # them, so offer() reports the consumer is hopeless (caller closes).
+        self.assertFalse(q.offer(_state("light.a")))
+        frames = await self._drain(q)
+        self.assertEqual([f["type"] for f in frames], ["auth_ok", "subscribed"])
+
+    async def test_push_evicts_only_droppable_when_protocol_present(self):
+        q = CoalescingSendQueue(maxsize=3)
+        q.put_protocol(frame_auth_ok("1.0", 1))  # undroppable, oldest
+        self.assertTrue(q.offer(_state("light.a")))
+        self.assertTrue(q.offer(_state("light.b")))  # cap full now
+        # Over cap: must skip the protocol frame and drop the oldest PUSH (a).
+        self.assertTrue(q.offer(_state("light.c")))
+        frames = await self._drain(q)
+        self.assertEqual(frames[0]["type"], "auth_ok")
+        ids = [f["device"]["entity_id"] for f in frames[1:]]
+        self.assertEqual(ids, ["light.b", "light.c"])
+
+    async def test_get_waits_for_a_frame_then_returns_it(self):
+        q = CoalescingSendQueue(maxsize=4)
+        getter = asyncio.ensure_future(q.get())
+        await asyncio.sleep(0)  # let the getter park on the empty queue
+        self.assertFalse(getter.done())
+        q.put_protocol(frame_pong())
+        frame = await asyncio.wait_for(getter, timeout=1)
+        self.assertEqual(frame["type"], "pong")
 
 
 if __name__ == "__main__":

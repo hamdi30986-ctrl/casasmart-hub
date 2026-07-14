@@ -162,9 +162,14 @@ WS_REAUTH_GRACE = 30.0
 # How often a live connection's token is re-checked against the auth backend
 # (catches revocation/expiry without waiting for the next request).
 WS_TOKEN_RECHECK = 60.0
-# Outbound push queue per connection; a consumer this far behind is dead or
-# too slow to be useful — close instead of buffering unbounded.
-WS_SEND_QUEUE_MAX = 256
+# Outbound push queue cap per connection (Phase 11: a CoalescingSendQueue, not a
+# raw asyncio.Queue). Under a burst the queue coalesces (newest entity state /
+# nudge supersedes the older) and, only past this cap, drops the OLDEST push —
+# the socket is closed only when the backlog is entirely undrained protocol
+# frames (a genuinely dead consumer). Coalescing means a healthy phone's live
+# depth is ~one frame per distinct subscribed entity, well under this; the cap
+# is headroom for a transient burst before drop-oldest, not a kill threshold.
+WS_SEND_QUEUE_MAX = 512
 # WS close codes (4000-4999 = application-defined).
 WS_CLOSE_AUTH_TIMEOUT = 4000
 WS_CLOSE_AUTH_FAILED = 4001
