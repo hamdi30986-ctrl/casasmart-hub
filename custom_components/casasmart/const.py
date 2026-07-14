@@ -30,6 +30,12 @@ TLS_PORT_DEFAULT = 8443
 # for tests, like the other pure modules).
 TLS_CERT_CHECK_INTERVAL_HOURS = 24
 
+# -- Cloudflare tunnel edge-liveness watchdog (Phase 9) ------------------------
+# How often to probe the public tunnel URL to confirm cloudflared is actually
+# connected to Cloudflare's edge (not merely "started"). A flapped tunnel then
+# self-heals within this window instead of showing "offline" until a human acts.
+TUNNEL_WATCHDOG_INTERVAL_MINUTES = 5
+
 # -- mDNS discovery (B6) -------------------------------------------------------
 # The hub advertises `_casasmart._tcp` (service type owned by discovery.py) so
 # the app auto-discovers it on the LAN regardless of DHCP. The advertiser

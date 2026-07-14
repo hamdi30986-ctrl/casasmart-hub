@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -54,6 +55,7 @@ from .const import (
     RECOVERY_CODE_HASH_CONFIG_KEY,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
+    TUNNEL_WATCHDOG_INTERVAL_MINUTES,
 )
 from homeassistant.helpers import (
     area_registry as ar,
@@ -95,6 +97,7 @@ _LOGGER = logging.getLogger(__name__)
 _NOTIFY_TUNNEL_UNAVAILABLE = f"{DOMAIN}_tunnel_control_unavailable"
 _NOTIFY_TUNNEL_AUTO_DISABLED = f"{DOMAIN}_tunnel_auto_disabled"
 _NOTIFY_TUNNEL_ERROR = f"{DOMAIN}_tunnel_control_error"
+_NOTIFY_TUNNEL_EDGE_DOWN = f"{DOMAIN}_tunnel_edge_down"
 
 # HA entity platforms the hub exposes:
 #  - ALARM_CONTROL_PANEL (B13): the panel mirroring the hub-authoritative
@@ -391,6 +394,20 @@ async def async_setup_entry(
         hass,
         _async_reconcile_tunnel(hass, entry),
         name="casasmart-tunnel-reconcile",
+    )
+    # Edge-liveness watchdog (Phase 9): the reconcile above only enforces the
+    # add-on is running; this periodic probe confirms cloudflared is actually
+    # connected to Cloudflare's edge and restarts it if not, so a flapped tunnel
+    # self-heals instead of showing "offline" until a human intervenes.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            lambda _now: hass.async_create_task(
+                _async_tunnel_watchdog(hass, entry),
+                name="casasmart-tunnel-watchdog",
+            ),
+            timedelta(minutes=TUNNEL_WATCHDOG_INTERVAL_MINUTES),
+        )
     )
 
     _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
@@ -847,6 +864,64 @@ async def _async_reconcile_tunnel(
         return
     # Reconciled clean — retire any stale failure notice from earlier runs.
     persistent_notification.async_dismiss(hass, _NOTIFY_TUNNEL_ERROR)
+
+
+async def _async_tunnel_watchdog(
+    hass: HomeAssistant, entry: CasaSmartConfigEntry
+) -> None:
+    """Periodic edge-liveness check (Phase 9): heal a running-but-offline tunnel.
+
+    The reconciler only knows whether the add-on is *running*; cloudflared can
+    be running yet disconnected from Cloudflare's edge (network flap, edge drop)
+    — remote access goes dark with no add-on error. This probes the public
+    tunnel URL through the edge and restarts the add-on when Cloudflare reports
+    the origin unreachable. Only fires while the tunnel is meant to be ON and a
+    URL is advertised; never raises — the tunnel is one feature, not the hub.
+    """
+    domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
+    if not domain or not bool(entry.options.get(CONF_TUNNEL_ENABLED, False)):
+        return
+    controller = entry.runtime_data.tunnel_control
+    if controller is None or not controller.available():
+        return
+    tunnel_url = entry.runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
+    if not isinstance(tunnel_url, str) or not tunnel_url:
+        return
+
+    try:
+        slug = await controller.async_discover()
+        if slug is None:
+            return
+        state = await controller.async_state(slug)
+        if not state.running:
+            # A stopped add-on is the reconciler's job (it starts it); the
+            # watchdog only heals a tunnel that IS running but edge-dead.
+            return
+        result = await controller.async_watchdog_check(
+            slug, tunnel_url, time.monotonic()
+        )
+    except TunnelControlError as err:
+        _LOGGER.warning("Cloudflare tunnel watchdog failed: %s", err)
+        return
+
+    if result == "restart":
+        _LOGGER.warning(
+            "cloudflared %s was running but its Cloudflare edge connection was "
+            "down — restarted it to restore remote access",
+            slug,
+        )
+        persistent_notification.async_create(
+            hass,
+            f"The Cloudflare tunnel add-on ({slug}) was running but had lost "
+            "its connection to Cloudflare's edge, so remote access was down. "
+            "The hub restarted it automatically to reconnect. If this repeats, "
+            "check the add-on logs and your Cloudflare tunnel credentials.",
+            title="CasaSmart — tunnel auto-recovered",
+            notification_id=_NOTIFY_TUNNEL_EDGE_DOWN,
+        )
+    elif result == "up":
+        # Edge is healthy — clear any prior auto-recovery notice.
+        persistent_notification.async_dismiss(hass, _NOTIFY_TUNNEL_EDGE_DOWN)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

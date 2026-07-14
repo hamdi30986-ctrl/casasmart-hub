@@ -26,13 +26,22 @@ live add-on listing, never hardcoded.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
+import aiohttp
+
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .tunnel import pick_cloudflared_slug
+from .tunnel import (
+    EDGE_RESTART_COOLDOWN_SECONDS,
+    edge_watchdog_decision,
+    is_edge_origin_down,
+    pick_cloudflared_slug,
+)
 
 # Supervisor plumbing is optional at runtime (Container/Core installs) —
 # guard the imports so merely importing this module can never fail there.
@@ -53,6 +62,12 @@ _LOGGER = logging.getLogger(__name__)
 # Mirrors tunnel.py's running-state set; kept here too so the comparison the
 # reconciler makes (against .value strings) is explicit at the usage site.
 _RUNNING_STATES = frozenset({"started", "startup"})
+
+# --- Edge-liveness watchdog (Phase 9) ---------------------------------------
+# The pure logic (which statuses mean origin-down, and the probe/restart
+# decision) lives in tunnel.py so it's unit-testable without HA. Only the
+# HTTP-probe timeout is glue and stays here.
+_EDGE_PROBE_TIMEOUT_SECONDS = 10.0
 
 
 class TunnelControlError(HomeAssistantError):
@@ -79,6 +94,8 @@ class CloudflaredController:
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         self._slug: str | None = None
+        # Monotonic timestamp of the last edge-driven restart (cooldown gate).
+        self._last_edge_restart: float | None = None
 
     def available(self) -> bool:
         """True when a Supervisor exists (HAOS/Supervised installs only)."""
@@ -176,6 +193,57 @@ class CloudflaredController:
         _LOGGER.info(
             "Cloudflare tunnel add-on %s disabled (stopped, boot=manual)", slug
         )
+
+    async def async_edge_alive(self, tunnel_url: str) -> bool | None:
+        """Probe the public tunnel URL through Cloudflare's edge (Phase 9).
+
+        The request loops hub -> Cloudflare edge -> tunnel -> hub, so it tests
+        the thing the add-on's ``running`` state can't: is cloudflared actually
+        connected to the edge? Returns True if a response came back through the
+        tunnel, False if Cloudflare reports the origin unreachable (restart), or
+        None if there was no response at all — which usually means the hub's own
+        internet/DNS is down, NOT the tunnel, so the caller must not restart.
+        """
+        session = async_get_clientsession(self._hass)
+        timeout = aiohttp.ClientTimeout(total=_EDGE_PROBE_TIMEOUT_SECONDS)
+        try:
+            async with session.get(
+                tunnel_url,
+                timeout=timeout,
+                allow_redirects=False,
+                headers={"user-agent": "casasmart-edge-watchdog"},
+            ) as resp:
+                return not is_edge_origin_down(resp.status)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
+
+    async def async_restart(self, slug: str) -> None:
+        """Restart the add-on so cloudflared re-establishes its edge tunnel."""
+        try:
+            await self._addons().restart_addon(slug)
+        except SupervisorError as err:
+            raise TunnelControlError(
+                f"Restarting add-on {slug} failed: {err}"
+            ) from err
+        _LOGGER.info(
+            "Cloudflare tunnel add-on %s restarted (edge reconnect)", slug
+        )
+
+    async def async_watchdog_check(
+        self, slug: str, tunnel_url: str, now: float
+    ) -> str:
+        """One edge-liveness cycle: probe, decide, and restart if warranted.
+
+        [now] is a monotonic timestamp (injected for testability). Returns the
+        [edge_watchdog_decision] verdict; on ``"restart"`` the add-on is
+        restarted and the cooldown clock is stamped.
+        """
+        alive = await self.async_edge_alive(tunnel_url)
+        decision = edge_watchdog_decision(alive, self._last_edge_restart, now)
+        if decision == "restart":
+            await self.async_restart(slug)
+            self._last_edge_restart = now
+        return decision
 
     async def async_restore_boot_auto(self, slug: str) -> None:
         """Hand auto-boot back to the Supervisor (integration removal).

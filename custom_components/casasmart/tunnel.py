@@ -189,3 +189,48 @@ def pick_cloudflared_slug(addons: object) -> str | None:
     if running:
         return running[0]
     return min(slug for slug, _state in matches)
+
+
+# --- Edge-liveness watchdog (Phase 9) ---------------------------------------
+# Cloudflare returns these statuses from its EDGE when the edge is reachable but
+# it cannot reach the origin tunnel — i.e. cloudflared is running yet its edge
+# connection is dead. That is the exact "running but offline" case the add-on's
+# own state can't see, and the exact signal to restart. 521 web-server-down,
+# 522 conn-timed-out, 523 origin-unreachable, 530 (Argo/1033 tunnel error).
+_EDGE_ORIGIN_DOWN_STATUSES = frozenset({521, 522, 523, 530})
+# Never restart more than once per this window: a real flap gets one restart; a
+# persistent failure (bad creds, Cloudflare outage) is logged, not hammered.
+EDGE_RESTART_COOLDOWN_SECONDS = 900.0  # 15 min
+
+
+def is_edge_origin_down(status: int) -> bool:
+    """True when an HTTP status from the tunnel URL means Cloudflare's edge is
+    up but the origin tunnel is unreachable (restart cloudflared). Any other
+    status means the request reached the origin, so the tunnel is alive."""
+    return status in _EDGE_ORIGIN_DOWN_STATUSES
+
+
+def edge_watchdog_decision(
+    alive: bool | None,
+    last_restart: float | None,
+    now: float,
+    cooldown: float = EDGE_RESTART_COOLDOWN_SECONDS,
+) -> str:
+    """Pure watchdog verdict from a probe result + restart history.
+
+    [alive] is the tri-state from the controller's edge probe:
+    True (edge+origin up) / False (edge up, origin down) / None (no response —
+    the hub's OWN internet is likely down, NOT the tunnel).
+
+    Returns one of: ``"up"``, ``"inconclusive"``, ``"cooldown"``, ``"restart"``.
+    We restart ONLY on a definitive origin-down that's outside the cooldown —
+    never on an inconclusive result, so a local-internet outage can't trigger a
+    pointless restart loop.
+    """
+    if alive is None:
+        return "inconclusive"
+    if alive:
+        return "up"
+    if last_restart is not None and (now - last_restart) < cooldown:
+        return "cooldown"
+    return "restart"

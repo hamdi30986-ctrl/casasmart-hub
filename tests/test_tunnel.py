@@ -16,8 +16,11 @@ sys.path.insert(
 )
 
 from tunnel import (  # noqa: E402
+    EDGE_RESTART_COOLDOWN_SECONDS,
     TUNNEL_URL_CONFIG_KEY,
     domain_to_tunnel_url,
+    edge_watchdog_decision,
+    is_edge_origin_down,
     normalize_cloudflare_domain,
     normalize_tunnel_url,
     pick_cloudflared_slug,
@@ -366,6 +369,54 @@ class TestPickCloudflaredSlug(unittest.TestCase):
         self.assertEqual(
             pick_cloudflared_slug(addons), "1111aaaa_cloudflared"
         )
+
+
+class TestIsEdgeOriginDown(unittest.TestCase):
+    def test_edge_origin_down_statuses(self) -> None:
+        for status in (521, 522, 523, 530):
+            self.assertTrue(is_edge_origin_down(status), status)
+
+    def test_reachable_origin_statuses_are_alive(self) -> None:
+        # Any response that reached the origin — 2xx, redirects, auth gates,
+        # even 5xx from OUR own server — means the tunnel is up.
+        for status in (200, 204, 301, 401, 403, 404, 500, 502, 503):
+            self.assertFalse(is_edge_origin_down(status), status)
+
+
+class TestEdgeWatchdogDecision(unittest.TestCase):
+    def test_no_response_is_inconclusive(self) -> None:
+        # None = the hub's own internet is likely down; never restart.
+        self.assertEqual(
+            edge_watchdog_decision(None, None, 1000.0), "inconclusive"
+        )
+
+    def test_alive_is_up(self) -> None:
+        self.assertEqual(edge_watchdog_decision(True, None, 1000.0), "up")
+
+    def test_origin_down_never_restarted_is_restart(self) -> None:
+        self.assertEqual(edge_watchdog_decision(False, None, 1000.0), "restart")
+
+    def test_origin_down_inside_cooldown_holds(self) -> None:
+        # Restarted 100s ago, cooldown 900s -> hold.
+        self.assertEqual(
+            edge_watchdog_decision(False, 900.0, 1000.0), "cooldown"
+        )
+
+    def test_origin_down_past_cooldown_restarts_again(self) -> None:
+        # Last restart 1000s ago, past the 900s window -> restart again.
+        self.assertEqual(
+            edge_watchdog_decision(False, 0.0, 1000.0), "restart"
+        )
+
+    def test_cooldown_boundary_is_exclusive(self) -> None:
+        # Exactly at the cooldown edge counts as expired (>= cooldown restarts).
+        now = 5000.0
+        last = now - EDGE_RESTART_COOLDOWN_SECONDS
+        self.assertEqual(edge_watchdog_decision(False, last, now), "restart")
+
+    def test_alive_ignores_cooldown(self) -> None:
+        # A healthy probe is "up" regardless of restart history.
+        self.assertEqual(edge_watchdog_decision(True, 4999.0, 5000.0), "up")
 
 
 if __name__ == "__main__":
