@@ -41,6 +41,7 @@ from aiohttp import WSMsgType, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers.json import json_dumps
 
 from . import ws_protocol
 from .auth_engine import AuthEngine
@@ -476,6 +477,8 @@ class WsConnection:
         try:
             while not self._ws.closed:
                 frame = await self._send_queue.get()
-                await self._ws.send_json(frame)
+                # HA state attributes can contain datetime values (notably
+                # automation.last_triggered), so use the same encoder as REST.
+                await self._ws.send_json(frame, dumps=json_dumps)
         except (asyncio.CancelledError, ConnectionResetError):
             pass

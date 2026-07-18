@@ -143,6 +143,11 @@ class HubStorage:
             with self._connection:  # commit/rollback transaction
                 return self._connection.execute(sql, params)
 
+    def _fetchall(self, sql: str, params: tuple = ()) -> list[tuple]:
+        """Execute and consume a read while holding the connection lock."""
+        with self._lock:
+            return self._connection.execute(sql, params).fetchall()
+
 
 class KeyValueTable(MutableMapping):
     """Dict-like view over one namespace in the ``kv`` table.
@@ -215,6 +220,19 @@ class KeyValueTable(MutableMapping):
             "SELECT COUNT(*) FROM kv WHERE namespace = ?", (self._namespace,)
         ).fetchone()
         return int(row[0])
+
+    def items(self) -> list[tuple[str, Any]]:
+        """Return one consistent key/value snapshot.
+
+        MutableMapping's default view iterates keys and then fetches each value
+        separately. A concurrent delete between those operations raises a
+        spurious KeyError in read paths such as tank/device listings.
+        """
+        rows = self._storage._fetchall(
+            "SELECT key, value FROM kv WHERE namespace = ? ORDER BY key",
+            (self._namespace,),
+        )
+        return [(key, json.loads(value)) for key, value in rows]
 
     def __contains__(self, key: object) -> bool:
         # MutableMapping's default __contains__ probes __getitem__, whose

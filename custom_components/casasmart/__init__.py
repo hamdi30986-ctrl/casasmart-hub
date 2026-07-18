@@ -399,13 +399,13 @@ async def async_setup_entry(
     # add-on is running; this periodic probe confirms cloudflared is actually
     # connected to Cloudflare's edge and restarts it if not, so a flapped tunnel
     # self-heals instead of showing "offline" until a human intervenes.
+    async def _async_run_tunnel_watchdog(_now) -> None:
+        await _async_tunnel_watchdog(hass, entry)
+
     entry.async_on_unload(
         async_track_time_interval(
             hass,
-            lambda _now: hass.async_create_task(
-                _async_tunnel_watchdog(hass, entry),
-                name="casasmart-tunnel-watchdog",
-            ),
+            _async_run_tunnel_watchdog,
             timedelta(minutes=TUNNEL_WATCHDOG_INTERVAL_MINUTES),
         )
     )

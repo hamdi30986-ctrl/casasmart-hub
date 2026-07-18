@@ -116,6 +116,20 @@ class TestKeyValueTable(StorageTestCase):
         self.assertEqual(sorted(t), [f"k{i}" for i in range(5)])
         self.assertEqual(dict(t.items())["k3"], 3)
 
+    def test_items_is_a_consistent_snapshot_during_delete(self):
+        t = self.make_storage().table("devices")
+        t["a"] = {"state": "on"}
+        t["b"] = {"state": "off"}
+
+        snapshot = t.items()
+        del t["b"]
+
+        self.assertEqual(
+            dict(snapshot),
+            {"a": {"state": "on"}, "b": {"state": "off"}},
+        )
+        self.assertEqual(dict(t.items()), {"a": {"state": "on"}})
+
     def test_namespaces_are_isolated(self):
         storage = self.make_storage()
         storage.table("users")["shared_key"] = "from-users"
