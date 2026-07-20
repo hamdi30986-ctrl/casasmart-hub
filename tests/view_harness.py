@@ -80,6 +80,21 @@ class FakeBus:
         self.fired.append((event_type, data))
 
 
+class FakeServices:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any], bool]] = []
+        self.handlers: dict[tuple[str, str], Any] = {}
+
+    def has_service(self, domain, service):
+        return (domain, service) in self.handlers
+
+    def async_register(self, domain, service, handler, **kwargs):
+        self.handlers[(domain, service)] = handler
+
+    async def async_call(self, domain, service, data, *, blocking=False):
+        self.calls.append((domain, service, data, blocking))
+
+
 class FakeStates:
     """``hass.states`` over a dict — ``get`` + ``async_all``."""
 
@@ -147,6 +162,7 @@ class FakeHass:
     def __init__(self, runtime) -> None:
         self.config_entries = FakeConfigEntries(_Entry(runtime))
         self.states = FakeStates()
+        self.services = FakeServices()
         self.bus = FakeBus()
         self.config = _FakeHAConfig()
         self.data: dict[str, Any] = {}

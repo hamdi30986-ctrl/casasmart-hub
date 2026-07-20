@@ -22,3 +22,16 @@ set_tunnel_url:
       example: https://abc123.mazinus.com
       selector:
         text:
+activate_scene:
+  name: Activate CasaSmart scene
+  description: >-
+    Run a CasaSmart registry scene through the same validated executor used by
+    the owner app. Intended for CasaSmart-created Home Assistant automations.
+  fields:
+    scene_id:
+      name: Scene ID
+      description: Stable CasaSmart registry scene identifier.
+      required: true
+      example: scene-AbCdEf123
+      selector:
+        text:

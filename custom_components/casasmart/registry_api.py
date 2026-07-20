@@ -939,89 +939,97 @@ class CasaSmartSceneActivateView(_RegistryView):
             # Same 404 as nonexistent — out-of-scope scenes are invisible.
             return self.json_message("Unknown scene", HTTPStatus.NOT_FOUND)
 
-        # IR-AC fix: a climate "on" scene action is stored as a state command
-        # (set_temperature/set_hvac_mode) PLUS a separate set_fan_mode. For ACs
-        # driven over IR (Broadlink/SmartIR) every climate.* call is a full-state
-        # IR burst, so firing both back-to-back sends two codes and the second
-        # collides with the AC mid-power-on (it beeps and never settles on).
-        # Send ONE command per AC: drop the redundant set_fan_mode when the same
-        # climate entity already carries a state command in this scene. (Mirrors
-        # HA's scene.turn_on, which only re-sends attributes that actually differ;
-        # the set_temperature alone is one clean IR that turns the AC on.)
-        _climate_with_state = {
-            item["entity_id"]
-            for item in scene["entities"]
-            if item["entity_id"].split(".", 1)[0] == "climate"
-            and item.get("action") in ("set_temperature", "set_hvac_mode")
-        }
-        entities_to_run = [
-            item
-            for item in scene["entities"]
-            if not (
-                item["entity_id"].split(".", 1)[0] == "climate"
-                and item.get("action") == "set_fan_mode"
-                and item["entity_id"] in _climate_with_state
-            )
-        ]
+        return self.json(await async_execute_registry_scene(self._hass, scene))
 
-        results = []
-        for item in entities_to_run:
-            entity_id = item["entity_id"]
-            # Same liveness gate as the single command endpoint — an
-            # entity hidden AFTER the scene was written must not stay
-            # controllable through it.
-            if self._hass.states.get(entity_id) is None or not is_served(
-                self._hass, entity_id
-            ):
-                results.append(
-                    {
-                        "entity_id": entity_id,
-                        "ok": False,
-                        "error": "Device not available",
-                    }
-                )
-                continue
-            try:
-                domain, service, service_data = validate_command(
-                    entity_id, item["action"], item.get("data")
-                )
-                await asyncio.wait_for(
-                    self._hass.services.async_call(
-                        domain,
-                        service,
-                        {**service_data, "entity_id": entity_id},
-                        blocking=True,
-                    ),
-                    timeout=_SCENE_CALL_TIMEOUT,
-                )
-                results.append({"entity_id": entity_id, "ok": True})
-            except TimeoutError:
-                _LOGGER.warning(
-                    "Scene %s: %s on %s timed out", scene_id, item["action"],
-                    entity_id,
-                )
-                results.append(
-                    {"entity_id": entity_id, "ok": False, "error": "Timed out"}
-                )
-            except (CommandError, HomeAssistantError) as err:
-                _LOGGER.warning(
-                    "Scene %s: %s on %s failed: %s",
-                    scene_id,
-                    item["action"],
-                    entity_id,
-                    err,
-                )
-                results.append(
-                    {"entity_id": entity_id, "ok": False, "error": str(err)}
-                )
 
-        return self.json(
-            {
-                "scene_id": scene_id,
-                "ok": all(result["ok"] for result in results),
-                "results": results,
-            }
+async def async_execute_registry_scene(
+    hass: HomeAssistant, scene: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute a loaded registry scene through the shared command doctrine.
+
+    Both the authenticated REST endpoint and the internal HA automation service
+    call this function, so timeout, liveness and whitelist behavior cannot
+    drift between a manual launch and a scheduled launch.
+    """
+    scene_id = scene["scene_id"]
+
+    # IR-AC fix: a climate "on" scene action is stored as a state command
+    # (set_temperature/set_hvac_mode) PLUS a separate set_fan_mode. For ACs
+    # driven over IR (Broadlink/SmartIR) every climate.* call is a full-state
+    # IR burst, so firing both back-to-back sends two codes and the second
+    # collides with the AC mid-power-on (it beeps and never settles on).
+    # Send ONE command per AC: drop the redundant set_fan_mode when the same
+    # climate entity already carries a state command in this scene. (Mirrors
+    # HA's scene.turn_on, which only re-sends attributes that actually differ;
+    # the set_temperature alone is one clean IR that turns the AC on.)
+    _climate_with_state = {
+        item["entity_id"]
+        for item in scene["entities"]
+        if item["entity_id"].split(".", 1)[0] == "climate"
+        and item.get("action") in ("set_temperature", "set_hvac_mode")
+    }
+    entities_to_run = [
+        item
+        for item in scene["entities"]
+        if not (
+            item["entity_id"].split(".", 1)[0] == "climate"
+            and item.get("action") == "set_fan_mode"
+            and item["entity_id"] in _climate_with_state
         )
+    ]
+
+    results = []
+    for item in entities_to_run:
+        entity_id = item["entity_id"]
+        # Same liveness gate as the single command endpoint — an entity hidden
+        # AFTER the scene was written must not stay controllable through it.
+        if hass.states.get(entity_id) is None or not is_served(hass, entity_id):
+            results.append(
+                {
+                    "entity_id": entity_id,
+                    "ok": False,
+                    "error": "Device not available",
+                }
+            )
+            continue
+        try:
+            domain, service, service_data = validate_command(
+                entity_id, item["action"], item.get("data")
+            )
+            await asyncio.wait_for(
+                hass.services.async_call(
+                    domain,
+                    service,
+                    {**service_data, "entity_id": entity_id},
+                    blocking=True,
+                ),
+                timeout=_SCENE_CALL_TIMEOUT,
+            )
+            results.append({"entity_id": entity_id, "ok": True})
+        except TimeoutError:
+            _LOGGER.warning(
+                "Scene %s: %s on %s timed out", scene_id, item["action"], entity_id
+            )
+            results.append(
+                {"entity_id": entity_id, "ok": False, "error": "Timed out"}
+            )
+        except (CommandError, HomeAssistantError) as err:
+            _LOGGER.warning(
+                "Scene %s: %s on %s failed: %s",
+                scene_id,
+                item["action"],
+                entity_id,
+                err,
+            )
+            results.append(
+                {"entity_id": entity_id, "ok": False, "error": str(err)}
+            )
+
+    return {
+        "scene_id": scene_id,
+        "ok": all(result["ok"] for result in results),
+        "results": results,
+    }
 
 
 class CasaSmartFavoritesView(_RegistryView):

@@ -77,7 +77,8 @@ from .audio import AudioEngine
 from .audio_adapter import AudioAdapter
 from .athan_scheduler import AthanScheduler
 from .recovery import RecoveryManager, hash_code as recovery_hash_code
-from .registry import RegistryEngine
+from .registry import RegistryEngine, RegistryError
+from .registry_api import async_execute_registry_scene
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
@@ -934,8 +935,35 @@ def _async_register_services(hass: HomeAssistant) -> None:
     (admin login or trusted CLI), never through the CasaSmart API — a
     stolen app token can't factory-reset the hub.
     """
-    if hass.services.has_service(DOMAIN, "factory_reset"):
+    if all(
+        hass.services.has_service(DOMAIN, service)
+        for service in ("factory_reset", "set_tunnel_url", "activate_scene")
+    ):
         return
+
+    async def _handle_activate_scene(call) -> None:
+        """Run a CasaSmart registry scene from an HA automation."""
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            raise HomeAssistantError("CasaSmart hub is not loaded")
+        scene_id = call.data.get("scene_id")
+        if not isinstance(scene_id, str) or not scene_id:
+            raise HomeAssistantError("scene_id is required")
+        registry = entries[0].runtime_data.registry
+        try:
+            scene = await hass.async_add_executor_job(registry.get_scene, scene_id)
+        except RegistryError as err:
+            raise HomeAssistantError(str(err)) from err
+        result = await async_execute_registry_scene(hass, scene)
+        if not result["ok"]:
+            failed = [
+                item["entity_id"]
+                for item in result["results"]
+                if not item["ok"]
+            ]
+            raise HomeAssistantError(
+                f"Scene {scene_id} failed for: {', '.join(failed)}"
+            )
 
     async def _handle_set_tunnel_url(call) -> None:
         """Persist the hub's public tunnel URL into hub_config (plan B7).
@@ -1064,8 +1092,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         # re-mints the bootstrap pairing code for re-onboarding.
         await hass.config_entries.async_reload(entries[0].entry_id)
 
-    hass.services.async_register(DOMAIN, "factory_reset", _handle_factory_reset)
-    hass.services.async_register(DOMAIN, "set_tunnel_url", _handle_set_tunnel_url)
+    if not hass.services.has_service(DOMAIN, "factory_reset"):
+        hass.services.async_register(DOMAIN, "factory_reset", _handle_factory_reset)
+    if not hass.services.has_service(DOMAIN, "set_tunnel_url"):
+        hass.services.async_register(DOMAIN, "set_tunnel_url", _handle_set_tunnel_url)
+    if not hass.services.has_service(DOMAIN, "activate_scene"):
+        hass.services.async_register(DOMAIN, "activate_scene", _handle_activate_scene)
 
 
 async def async_unload_entry(
