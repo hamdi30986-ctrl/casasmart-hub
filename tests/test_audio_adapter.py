@@ -25,30 +25,14 @@ sys.path.insert(0, str(_CC))
 
 
 # -- homeassistant stubs (installed before importing the adapter) -------------
-def _install_ha_stubs() -> None:
-    if "homeassistant" in sys.modules:
-        return
-    ha = types.ModuleType("homeassistant")
-    core = types.ModuleType("homeassistant.core")
+# Shared stub package (tests/hastubs) — the adapter only needs core
+# (HomeAssistant/callback), but every suite installs the same superset so
+# load order can never change what a sibling sees.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    class HomeAssistant:  # never instantiated — _FakeHass duck-types it
-        pass
-
-    def callback(fn):  # @callback is a no-op marker in HA
-        return fn
-
-    core.HomeAssistant = HomeAssistant
-    core.callback = callback
-    sys.modules["homeassistant"] = ha
-    sys.modules["homeassistant.core"] = core
-
-
-_install_ha_stubs()
-
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 import casasmart.audio_adapter as audio_adapter  # noqa: E402
 from casasmart.audio_adapter import AudioAdapter, AudioAdapterNotReady  # noqa: E402

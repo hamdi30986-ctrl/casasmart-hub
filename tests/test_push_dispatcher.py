@@ -1,8 +1,9 @@
 """Unit tests for B8 Piece 4: the hub push dispatcher.
 
 The dispatcher is Home Assistant glue, so (like the alarm adapter) it imports
-``homeassistant.*`` at module top. HA isn't installed in the test env, so light
-stubs go into ``sys.modules`` before the import. Everything else is REAL: the
+``homeassistant.*`` at module top. HA isn't installed in the test env, so the
+shared stub package (``tests/hastubs``) goes into ``sys.modules`` before the
+import. Everything else is REAL: the
 ``PushSigner`` (real Ed25519), the ``PushTokenStore`` over a temp DB, and the
 exact canonical-JSON signing path — so a signature captured here verifies with
 the public key, proving the wire contract end to end. ``hass`` and the aiohttp
@@ -19,7 +20,6 @@ import base64
 import json
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -29,82 +29,17 @@ sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_CC))
 
 
-# -- homeassistant stubs (installed before importing the dispatcher) ----------
-def _install_ha_stubs() -> None:
-    """Augment (never clobber) the HA stub modules.
+# -- shared homeassistant stubs (installed before importing the dispatcher) ---
+# The dispatcher's owner-only path lazily imports auth_api, which needs
+# ``homeassistant.components.persistent_notification`` + ``components.http`` —
+# only the package-shaped shared stub can serve those. Its
+# ``helpers.event.async_call_later`` is the controllable one: it records each
+# scheduled flush in ``ev.calls`` so the WidgetRefreshTests fire it manually.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    Under ``unittest discover`` another suite (e.g. test_alarm_adapter) may have
-    already installed ``homeassistant`` with a DIFFERENT subset of symbols. So
-    this is additive: it always ensures ``const`` has the lock states the
-    dispatcher imports and ``core`` has Event/HomeAssistant/callback, without
-    removing whatever a sibling suite needs.
-    """
-    ha = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
-    assert ha is sys.modules["homeassistant"]
-
-    const = sys.modules.setdefault(
-        "homeassistant.const", types.ModuleType("homeassistant.const")
-    )
-    const.STATE_LOCKED = "locked"
-    const.STATE_UNLOCKED = "unlocked"
-    const.STATE_UNAVAILABLE = "unavailable"
-    const.STATE_UNKNOWN = "unknown"
-
-    core = sys.modules.setdefault(
-        "homeassistant.core", types.ModuleType("homeassistant.core")
-    )
-    if not hasattr(core, "Event"):
-
-        class Event:  # only ``.data`` is touched
-            def __init__(self, data):
-                self.data = data
-
-        core.Event = Event
-    if not hasattr(core, "HomeAssistant"):
-
-        class HomeAssistant:  # never instantiated — FakeHass duck-types it
-            pass
-
-        core.HomeAssistant = HomeAssistant
-    if not hasattr(core, "callback"):
-
-        def callback(fn):  # the @callback decorator is a no-op marker in HA
-            return fn
-
-        core.callback = callback
-
-    # homeassistant.helpers.event.async_call_later — the widget-refresh coalescer
-    # (Phase 8). Controllable stub: records each scheduled flush so a test can
-    # fire it manually and returns a cancel handle.
-    helpers = sys.modules.setdefault(
-        "homeassistant.helpers", types.ModuleType("homeassistant.helpers")
-    )
-    event_mod = sys.modules.setdefault(
-        "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
-    )
-    if not hasattr(event_mod, "async_call_later"):
-        event_mod.calls = []
-
-        def async_call_later(hass, delay, action):
-            rec = {"delay": delay, "action": action, "cancelled": False}
-            event_mod.calls.append(rec)
-
-            def _cancel() -> None:
-                rec["cancelled"] = True
-
-            return _cancel
-
-        event_mod.async_call_later = async_call_later
-    ha.helpers = helpers
-    helpers.event = event_mod
-
-
-_install_ha_stubs()
-
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 import aiohttp  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
@@ -162,10 +97,20 @@ class FakeBus:
             handler(Event(data))
 
 
+class _FakeConfigEntries:
+    """No loaded entry: ``auth_api.get_engine`` resolves to None, so the
+    dispatcher's owner-only filter fails OPEN and delivers to every
+    registered token — the exact contract the dispatch tests pin."""
+
+    def async_loaded_entries(self, domain):
+        return []
+
+
 class FakeHass:
     def __init__(self) -> None:
         self.bus = FakeBus()
         self.states = FakeStates()
+        self.config_entries = _FakeConfigEntries()
         self.created: list = []  # coroutines spawned by async_create_task
 
     def async_create_task(self, coro):

@@ -5,15 +5,14 @@ symbols are stubbed into ``sys.modules`` before import. The engine underneath
 is the REAL ``AlarmEngine`` over temp storage with a hand-cranked clock — the
 panel is exercised against the actual engine contract, not a mock of it.
 
-The stub installer is ADDITIVE (it doesn't bail if a sibling suite already
-registered a partial ``homeassistant`` package), so this runs cleanly under
-``python3 -m unittest discover -s tests`` alongside test_alarm_adapter.
+The stubs come from the SHARED package (``tests/hastubs``) that every suite
+installs, so this runs cleanly under ``python3 -m unittest discover -s tests``
+alongside test_alarm_adapter — in any order.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
-import enum
 import sys
 import tempfile
 import types
@@ -27,104 +26,15 @@ sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_CC))
 
 
-def _install_ha_stubs() -> None:
-    """Register exactly the HA symbols the panel imports (additive)."""
-    ha = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+# Shared homeassistant stub package (tests/hastubs): the panel's
+# alarm_control_panel classes (Entity/EntityFeature/State) live there now.
+# Every test patches ``acp_mod.async_call_later`` itself, so the shared
+# stub's recording default never runs here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    # homeassistant.core (Event / HomeAssistant / callback) — reuse if a
-    # sibling suite already installed it, else create a minimal one.
-    core = sys.modules.get("homeassistant.core")
-    if core is None:
-        core = types.ModuleType("homeassistant.core")
-
-        class Event:
-            def __init__(self, data=None):
-                self.data = data or {}
-
-        class HomeAssistant:
-            pass
-
-        def callback(fn):
-            return fn
-
-        core.Event = Event
-        core.HomeAssistant = HomeAssistant
-        core.callback = callback
-        sys.modules["homeassistant.core"] = core
-        ha.core = core
-
-    # homeassistant.const.Platform (not used by the panel, but harmless).
-    const = sys.modules.get("homeassistant.const")
-    if const is None:
-        const = types.ModuleType("homeassistant.const")
-        sys.modules["homeassistant.const"] = const
-
-    # homeassistant.components.alarm_control_panel
-    components = sys.modules.setdefault(
-        "homeassistant.components", types.ModuleType("homeassistant.components")
-    )
-    acp = types.ModuleType("homeassistant.components.alarm_control_panel")
-
-    class AlarmControlPanelEntityFeature(enum.IntFlag):
-        ARM_HOME = 1
-        ARM_AWAY = 2
-        ARM_NIGHT = 4
-
-    class AlarmControlPanelState(enum.StrEnum):
-        DISARMED = "disarmed"
-        ARMED_AWAY = "armed_away"
-        ARMED_HOME = "armed_home"
-        ARMED_NIGHT = "armed_night"
-        PENDING = "pending"
-        ARMING = "arming"
-        TRIGGERED = "triggered"
-
-    class AlarmControlPanelEntity:
-        """Minimal base: records async_write_ha_state calls.
-
-        ``write_count`` is a class attribute (not set in __init__) because the
-        real-world entity, like ours, does not call ``super().__init__()``.
-        """
-
-        write_count = 0
-
-        def async_write_ha_state(self) -> None:
-            self.write_count += 1
-
-    acp.AlarmControlPanelEntity = AlarmControlPanelEntity
-    acp.AlarmControlPanelEntityFeature = AlarmControlPanelEntityFeature
-    acp.AlarmControlPanelState = AlarmControlPanelState
-    sys.modules["homeassistant.components.alarm_control_panel"] = acp
-    components.alarm_control_panel = acp
-
-    # homeassistant.helpers.entity.DeviceInfo
-    helpers = sys.modules.setdefault(
-        "homeassistant.helpers", types.ModuleType("homeassistant.helpers")
-    )
-    helpers_entity = types.ModuleType("homeassistant.helpers.entity")
-    helpers_entity.DeviceInfo = dict  # the panel only constructs it
-    sys.modules["homeassistant.helpers.entity"] = helpers_entity
-    helpers.entity = helpers_entity
-
-    # homeassistant.helpers.event.async_call_later (patched per test)
-    helpers_event = sys.modules.get("homeassistant.helpers.event")
-    if helpers_event is None:
-        helpers_event = types.ModuleType("homeassistant.helpers.event")
-
-        def async_call_later(hass, delay, action):
-            raise AssertionError("async_call_later must be patched in tests")
-
-        helpers_event.async_call_later = async_call_later
-        sys.modules["homeassistant.helpers.event"] = helpers_event
-        helpers.event = helpers_event
-
-
-_install_ha_stubs()
-
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 import casasmart.alarm_control_panel as acp_mod  # noqa: E402
 from casasmart.alarm_control_panel import CasaSmartAlarmPanel  # noqa: E402

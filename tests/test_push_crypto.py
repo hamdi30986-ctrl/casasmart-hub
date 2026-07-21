@@ -20,22 +20,21 @@ import os
 import stat
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
 _CC = Path(__file__).resolve().parent.parent / "custom_components"
 _PKG = _CC / "casasmart"
 # push_crypto uses a package-relative import (``from .storage import ...``), so
-# it must load through a real ``casasmart`` package — register a stub whose
-# __path__ points at the source dir (same trick as test_alarm_adapter). No
-# homeassistant stubs are needed: push_crypto only touches cryptography + storage.
+# it must load through a real ``casasmart`` package — the shared stub package
+# registrar (tests/hastubs) provides it. No homeassistant stubs are needed:
+# push_crypto only touches cryptography + storage.
 sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_CC))
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package  # noqa: E402
+
+install_casasmart_package()
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
     Ed25519PrivateKey,

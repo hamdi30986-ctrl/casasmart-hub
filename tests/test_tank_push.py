@@ -1,7 +1,8 @@
 """Unit tests for B8 Piece 4b: the tank low-water + offline push monitor.
 
 ``TankPushMonitor`` lives in ``push_dispatcher.py`` (HA glue), so — like the
-dispatcher tests — light ``homeassistant.*`` stubs go into ``sys.modules`` before
+dispatcher tests — the shared ``homeassistant`` stub package (``tests/hastubs``)
+goes into ``sys.modules`` before
 the import. Everything tank-side is REAL: a ``TankEngine`` over a temp DB does
 the calibration math and owns the readings; only ``hass`` and the notifier are
 fakes. The monitor's two decision methods are driven directly with an injected
@@ -17,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -27,48 +27,14 @@ sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_CC))
 
 
-def _install_ha_stubs() -> None:
-    """Augment (never clobber) the HA stub modules the dispatcher imports."""
-    sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+# Shared homeassistant stub package (tests/hastubs) — the dispatcher module
+# needs const/core/helpers.event and, on owner-only dispatch, the auth_api
+# import chain (components.persistent_notification + components.http).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    const = sys.modules.setdefault(
-        "homeassistant.const", types.ModuleType("homeassistant.const")
-    )
-    const.STATE_LOCKED = "locked"
-    const.STATE_UNLOCKED = "unlocked"
-    const.STATE_UNAVAILABLE = "unavailable"
-    const.STATE_UNKNOWN = "unknown"
-
-    core = sys.modules.setdefault(
-        "homeassistant.core", types.ModuleType("homeassistant.core")
-    )
-    if not hasattr(core, "Event"):
-
-        class Event:
-            def __init__(self, data):
-                self.data = data
-
-        core.Event = Event
-    if not hasattr(core, "HomeAssistant"):
-
-        class HomeAssistant:
-            pass
-
-        core.HomeAssistant = HomeAssistant
-    if not hasattr(core, "callback"):
-
-        def callback(fn):
-            return fn
-
-        core.callback = callback
-
-
-_install_ha_stubs()
-
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 from casasmart.push_dispatcher import (  # noqa: E402
     PRIORITY_NORMAL,

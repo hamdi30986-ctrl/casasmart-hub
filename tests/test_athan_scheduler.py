@@ -14,11 +14,9 @@ Run from the repo root:
 
 import datetime
 import sys
-import types
 import unittest
 from datetime import timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 _CC = Path(__file__).resolve().parent.parent / "custom_components"
 _PKG = _CC / "casasmart"
@@ -26,43 +24,14 @@ sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_CC))
 
 
-def _install_ha_stubs() -> None:
-    if "homeassistant" in sys.modules:
-        return
-    ha = types.ModuleType("homeassistant")
-    core = types.ModuleType("homeassistant.core")
-    helpers = types.ModuleType("homeassistant.helpers")
-    event = types.ModuleType("homeassistant.helpers.event")
-    util = types.ModuleType("homeassistant.util")
-    dt = types.ModuleType("homeassistant.util.dt")
+# Shared homeassistant stub package (tests/hastubs): provides the trackers the
+# scheduler imports (inert no-op unsubs — tests that observe arming patch
+# ``A.async_track_point_in_time`` directly) plus ``util.dt``.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    class HomeAssistant:  # never instantiated — _FakeHass duck-types it
-        pass
-
-    def callback(fn):
-        return fn
-
-    core.HomeAssistant = HomeAssistant
-    core.callback = callback
-    event.async_track_point_in_time = lambda hass, action, when: (lambda: None)
-    event.async_track_time_change = lambda hass, action, **kw: (lambda: None)
-    dt.get_time_zone = lambda name: ZoneInfo(name)
-    dt.utcnow = lambda: datetime.datetime.now(timezone.utc)
-
-    sys.modules["homeassistant"] = ha
-    sys.modules["homeassistant.core"] = core
-    sys.modules["homeassistant.helpers"] = helpers
-    sys.modules["homeassistant.helpers.event"] = event
-    sys.modules["homeassistant.util"] = util
-    sys.modules["homeassistant.util.dt"] = dt
-
-
-_install_ha_stubs()
-
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 import casasmart.athan_scheduler as A  # noqa: E402
 

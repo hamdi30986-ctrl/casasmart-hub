@@ -14,7 +14,6 @@ Run from the repo root:
 import asyncio
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -29,58 +28,16 @@ sys.path.insert(0, str(_CC))
 
 
 # -- homeassistant stubs (installed before importing the adapter) -------------
-def _install_ha_stubs() -> None:
-    """Minimal stand-ins for the exact HA symbols the adapter imports."""
-    if "homeassistant" in sys.modules:
-        return
+# The shared stub package (tests/hastubs) — every test patches the adapter's
+# own ``async_call_later`` binding (mock.patch.object(alarm_adapter, ...)), so
+# the shared stub's recording default never runs here. The stub ``casasmart``
+# package resolves the adapter's package-relative imports WITHOUT running the
+# real __init__.py (it pulls in the full homeassistant runtime).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
-    ha = types.ModuleType("homeassistant")
-
-    const = types.ModuleType("homeassistant.const")
-    const.STATE_ON = "on"
-    const.STATE_UNAVAILABLE = "unavailable"
-    const.STATE_UNKNOWN = "unknown"
-
-    core = types.ModuleType("homeassistant.core")
-
-    class Event:  # only ``.data`` is touched by the adapter
-        def __init__(self, data):
-            self.data = data
-
-    class HomeAssistant:  # never instantiated here — FakeHass duck-types it
-        pass
-
-    def callback(fn):  # the @callback decorator is a no-op marker in HA
-        return fn
-
-    core.Event = Event
-    core.HomeAssistant = HomeAssistant
-    core.callback = callback
-
-    helpers = types.ModuleType("homeassistant.helpers")
-    helpers_event = types.ModuleType("homeassistant.helpers.event")
-
-    def async_call_later(hass, delay, action):  # patched per-test
-        raise AssertionError("async_call_later must be patched in tests")
-
-    helpers_event.async_call_later = async_call_later
-
-    sys.modules["homeassistant"] = ha
-    sys.modules["homeassistant.const"] = const
-    sys.modules["homeassistant.core"] = core
-    sys.modules["homeassistant.helpers"] = helpers
-    sys.modules["homeassistant.helpers.event"] = helpers_event
-
-
-_install_ha_stubs()
-
-# Register a stub ``casasmart`` package so the adapter's package-relative
-# imports resolve WITHOUT running the real __init__.py (it pulls in the full
-# homeassistant runtime). __path__ points at the source dir so submodules load.
-if "casasmart" not in sys.modules:
-    _pkg = types.ModuleType("casasmart")
-    _pkg.__path__ = [str(_PKG)]
-    sys.modules["casasmart"] = _pkg
+install_homeassistant_stubs()
+install_casasmart_package()
 
 import casasmart.alarm_adapter as alarm_adapter  # noqa: E402
 from casasmart.alarm_adapter import AlarmAdapter  # noqa: E402
