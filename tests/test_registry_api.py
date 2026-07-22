@@ -6,7 +6,7 @@ Pins the Phase 6/7 logic that lives in the VIEW, not the engine:
   caller's out-of-scope favorites (Phase 7), and fires the re-pull nudge.
 
 Container/CI only (imports Home Assistant). Run:
-    docker exec homeassistant-dev python3 -m unittest tests.test_registry_api -v
+    docker exec homeassistant python3 -m unittest tests.test_registry_api -v
 """
 
 from __future__ import annotations

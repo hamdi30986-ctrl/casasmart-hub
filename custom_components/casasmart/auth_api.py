@@ -115,9 +115,9 @@ def get_provision_secret(hass: HomeAssistant) -> str | None:
 
 
 def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
-    """Surface a freshly minted recovery code to the HA admin (Hamdi).
+    """Surface a freshly minted recovery code to the HA admin (the operator).
 
-    The plaintext exists exactly once — here. Hamdi engraves it on the
+    The plaintext exists exactly once — here. The operator engraves it on the
     metal card; dismissing the notification is the only copy gone.
     """
     persistent_notification.async_create(

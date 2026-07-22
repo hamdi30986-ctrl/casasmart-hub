@@ -93,15 +93,15 @@ class BrokerConfigTests(AudioTestCase):
 
     def test_set_and_persist_broker(self):
         self.engine.set_broker(
-            host="192.168.8.235", port=8883, tls=True, username="maz", password="s3cr3t"
+            host="192.168.1.10", port=8883, tls=True, username="mqtt-user", password="s3cr3t"
         )
         # New engine off the same tables must see the persisted values.
         fresh = self._make_engine()
         broker = fresh.get_broker()
-        self.assertEqual(broker["host"], "192.168.8.235")
+        self.assertEqual(broker["host"], "192.168.1.10")
         self.assertEqual(broker["port"], 8883)
         self.assertTrue(broker["tls"])
-        self.assertEqual(broker["username"], "maz")
+        self.assertEqual(broker["username"], "mqtt-user")
         self.assertEqual(broker["password"], "s3cr3t")
 
     def test_partial_update_keeps_other_fields(self):
@@ -117,11 +117,11 @@ class BrokerConfigTests(AudioTestCase):
 
     def test_provision_returns_broker_coords(self):
         self.engine.set_broker(
-            host="192.168.8.235", port=1883, username="maz", password="p"
+            host="192.168.1.10", port=1883, username="mqtt-user", password="p"
         )
         prov = self.engine.provision()
-        self.assertEqual(prov["host"], "192.168.8.235")
-        self.assertEqual(prov["username"], "maz")
+        self.assertEqual(prov["host"], "192.168.1.10")
+        self.assertEqual(prov["username"], "mqtt-user")
         self.assertEqual(prov["password"], "p")
 
 
@@ -130,10 +130,10 @@ class PaConfigTests(AudioTestCase):
         self.assertEqual(self.engine.get_pa()["port"], 9876)
 
     def test_set_and_persist_pa(self):
-        self.engine.set_pa(host="192.168.8.235", port=9876, api_key="k")
+        self.engine.set_pa(host="192.168.1.10", port=9876, api_key="k")
         fresh = self._make_engine()
         pa = fresh.get_pa()
-        self.assertEqual(pa["host"], "192.168.8.235")
+        self.assertEqual(pa["host"], "192.168.1.10")
         self.assertEqual(pa["api_key"], "k")
 
 

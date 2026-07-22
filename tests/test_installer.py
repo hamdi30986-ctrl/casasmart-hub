@@ -184,7 +184,7 @@ class TestFlowSerialization(unittest.TestCase):
                 "flow_id": "abc",
                 "handler": "broadlink",
                 "title": "Living Room RM4",
-                "data": {"host": "192.168.8.50"},  # entry internals
+                "data": {"host": "192.168.1.50"},  # entry internals
                 "result": object(),  # ConfigEntry — not serializable
             }
         )
@@ -219,7 +219,7 @@ class TestProgressFlowSerialization(unittest.TestCase):
                 "title_placeholders": {
                     "name": "RM4 pro",
                     "model": "RM4",
-                    "host": "192.168.8.50",
+                    "host": "192.168.1.50",
                 },
                 "unique_id": "secret-internal",
             },
@@ -231,7 +231,7 @@ class TestProgressFlowSerialization(unittest.TestCase):
         # title_placeholders surface under the key the app already parses.
         self.assertEqual(
             out["description_placeholders"],
-            {"name": "RM4 pro", "model": "RM4", "host": "192.168.8.50"},
+            {"name": "RM4 pro", "model": "RM4", "host": "192.168.1.50"},
         )
 
     def test_missing_context_is_safe(self):

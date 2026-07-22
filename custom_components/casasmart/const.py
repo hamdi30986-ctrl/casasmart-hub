@@ -91,7 +91,7 @@ EVENT_REGISTRY_CHANGED = "casasmart_registry_changed"
 EVENT_ALARM_CHANGED = "casasmart_alarm_changed"
 # Fired ONLY when an armed zone or a life-safety sensor actually trips the
 # alarm (`triggered` / `life_safety`). This is the installer's automation
-# hook — siren, lights flash, "whatever Hamdi configures per client" (plan
+# hook — siren, lights flash, "whatever the operator configures per client" (plan
 # B13). Tamper does NOT fire it (offline battery must not sound the house).
 # Carries the alarm event dict so an automation can branch on the cause.
 EVENT_ALARM_TRIGGERED = "casasmart_alarm_triggered"
@@ -123,7 +123,7 @@ UPDATE_CHECK_TTL_SECONDS = 6 * 3600
 # the hub_config key below — repointing a fleet needs no code change. The
 # default targets the production Deno Deploy relay (the ``casasmart-relay``
 # project on console.deno.com).
-PUSH_RELAY_URL_DEFAULT = "https://casasmart-relay.hamdi30986.deno.net"
+PUSH_RELAY_URL_DEFAULT = "https://casasmart-relay.example.deno.net"
 PUSH_RELAY_URL_CONFIG_KEY = "push_relay_url"
 # Path appended to the relay base URL for the push endpoint.
 PUSH_RELAY_PUSH_PATH = "/push"

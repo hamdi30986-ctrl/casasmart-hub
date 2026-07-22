@@ -1,7 +1,7 @@
 # Audio Phase 2 — Spotify + synchronized multi-room
 
 **Status:** planned, deferred (execute the week of 2026-07-07).
-**Author:** design review with Hamdi, 2026-07-04.
+**Author:** design review, 2026-07-04.
 **Prereq shipped:** real AirPlay transport control (play/pause/next/prev) — see the
 end of this doc; that landed 2026-07-04 and is independent of everything below.
 
@@ -11,7 +11,7 @@ only ever sends control. Nothing plays from the phone; picking a non-hub Spotify
 Connect target does nothing in our app.
 
 This plan is written to be **appliance-grade**: the installer bakes every moving part
-into the golden image and an HA add-on, tested once by us and cloned. Neither Hamdi nor
+into the golden image and an HA add-on, tested once by us and cloned. Neither the operator nor
 a client ever touches a Snapcast/librespot config file. That is the whole point — we are
 not "configuring Snapcast," we are shipping a product that happens to use it.
 
@@ -127,7 +127,7 @@ speakers.
 
 ### Premium + ToS reality (product decision, not code)
 - `librespot` is **unofficial**; commercial use is against Spotify's ToS. Fine for
-  Hamdi's own villa + demos; **before selling broadly**, move to Spotify's **certified
+  the operator's own villa + demos; **before selling broadly**, move to Spotify's **certified
   partner** program ("Spotify for Speakers"). The architecture is identical — swap the
   librespot box for the certified SDK; snapcast, OAuth-on-hub, Web-API control and the
   whole app UI are unchanged, so librespot-now is **not** throwaway work.
@@ -155,7 +155,7 @@ The Pi will have up to three audio producers contending for ALSA `dmix`:
 
 1. **Spike (½ day):** `apt install snapclient` on the Pi3; snapserver container on the
    hub with a format-locked test stream; snapclient with **no host** → discovers + plays.
-   Hamdi listens: no IP, no pipe, it just works. Gate: if ugly, fall back to
+   The operator listens: no IP, no pipe, it just works. Gate: if ugly, fall back to
    **single-speaker Spotify first** (no sync engine) and add sync later.
 2. **Speaker bake:** snapclient into `deploy-remote.sh` + `image_prep.sh`; refresh
    `cs_payload.tar.gz`.

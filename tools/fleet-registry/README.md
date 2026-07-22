@@ -1,6 +1,6 @@
 # Fleet Provisioning Registry
 
-**Operator-side tool. Never ships to a client hub.** This is Hamdi's master list
+**Operator-side tool. Never ships to a client hub.** This is the operator's master list
 of every CasaSmart hub deployed in the field — the data backbone the future
 master dashboard (B19) reads from.
 
@@ -8,7 +8,7 @@ master dashboard (B19) reads from.
 
 Every hub you install needs a **unique public address**:
 
-- **Cloudflare subdomain** (`noha.casasmart.sa`) — the road the client's **app**
+- **Cloudflare subdomain** (`hub1.example.com`) — the road the client's **app**
   takes over the internet.
 - **Tailscale hostname** — the private road **you** take to SSH / run the master
   dashboard.
@@ -25,18 +25,18 @@ cd casasmart-hub
 
 # Register a hub — auto-allocates the next free subdomain in the zone
 python3 tools/fleet-registry/cli.py register \
-    --hub-id omar-apt --client "Omar" --zone east-jeddah
+    --hub-id hub-002 --client "Client B" --zone zone-east
 
 # ...or claim an explicit subdomain
 python3 tools/fleet-registry/cli.py register \
-    --hub-id noha-villa --client "Noha" --zone north-jeddah \
-    --subdomain noha --tailscale noha-hub
+    --hub-id hub-001 --client "Client A" --zone zone-north \
+    --subdomain hub1 --tailscale hub1-node
 
 python3 tools/fleet-registry/cli.py list                 # whole fleet
-python3 tools/fleet-registry/cli.py list --zone riyadh
-python3 tools/fleet-registry/cli.py show noha-villa
-python3 tools/fleet-registry/cli.py update noha-villa --ha-version 2026.6.1
-python3 tools/fleet-registry/cli.py decommission omar-apt   # frees the subdomain
+python3 tools/fleet-registry/cli.py list --zone zone-south
+python3 tools/fleet-registry/cli.py show hub-001
+python3 tools/fleet-registry/cli.py update hub-001 --ha-version 2026.6.1
+python3 tools/fleet-registry/cli.py decommission hub-002   # frees the subdomain
 ```
 
 `register` prints the `tunnel_url` line to bake into that hub's `cloudflared`

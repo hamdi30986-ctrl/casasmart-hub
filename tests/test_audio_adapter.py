@@ -178,16 +178,16 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_connects_with_creds_and_tls(self):
         self.engine.set_broker(
-            host="192.168.8.235", port=8883, tls=True, username="maz", password="pw"
+            host="192.168.1.10", port=8883, tls=True, username="mqtt-user", password="pw"
         )
         await self.adapter.async_start()
-        self.assertEqual(self.client.connected_to, ("192.168.8.235", 8883))
+        self.assertEqual(self.client.connected_to, ("192.168.1.10", 8883))
         self.assertTrue(self.client.loop_started)
-        self.assertEqual(self.client.username, "maz")
+        self.assertEqual(self.client.username, "mqtt-user")
         self.assertTrue(self.client.tls)
 
     async def test_start_without_auth_skips_username(self):
-        self.engine.set_broker(host="192.168.8.235", port=1883)
+        self.engine.set_broker(host="192.168.1.10", port=1883)
         await self.adapter.async_start()
         self.assertIsNone(self.client.username)
         self.assertFalse(self.client.tls)

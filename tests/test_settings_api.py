@@ -11,7 +11,7 @@ The harness ``_Runtime`` does not expose ``user_settings`` (the view reads
 injects it — exactly the engine the view's ``get_user_settings`` resolves.
 
 Container/CI only (imports Home Assistant). Run:
-    docker exec homeassistant-dev python3 -m unittest tests.test_settings_api -v
+    docker exec homeassistant python3 -m unittest tests.test_settings_api -v
 """
 
 from __future__ import annotations
@@ -65,10 +65,10 @@ class SettingsGet(SettingsViewTestCase):
         dev, hdr = H.session(self.rt.auth, role="admin")
         member = self.rt.auth.member_id_for(dev)
         # Seed via the engine directly (as a PUT would land it).
-        self.settings.update(member, {"display_name": "Hamdi"})
+        self.settings.update(member, {"display_name": "Alex"})
         status, body = await self._get(hdr)
         self.assertEqual(status, 200)
-        self.assertEqual(body["display_name"], "Hamdi")
+        self.assertEqual(body["display_name"], "Alex")
         # The doc reports every known field, None when unset.
         self.assertIn("widget_tiles", body)
         self.assertIsNone(body["widget_tiles"])

@@ -8,7 +8,7 @@ entity the integration HID (hidden_by set, is_served False) but that EXISTS in
 the registry stays editable, while a genuine ghost (no registry, no state) 404s.
 
 Container/CI only (imports Home Assistant). Run:
-    docker exec -w /config/tests homeassistant-dev \
+    docker exec -w /config/tests homeassistant \
         python3 -m unittest test_registry_writes_api -v
 """
 

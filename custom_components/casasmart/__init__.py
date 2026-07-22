@@ -346,7 +346,7 @@ async def async_setup_entry(
         )
 
     if recovery_code is not None:
-        # Plaintext exists exactly once — Hamdi engraves the metal card
+        # Plaintext exists exactly once — the operator engraves the metal card
         # from this notification (B3 backup tier).
         notify_recovery_code(hass, recovery_code)
 
@@ -928,7 +928,7 @@ async def _async_tunnel_watchdog(
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register hub services (idempotent across entry reloads).
 
-    ``casasmart.factory_reset`` is the B3 nuclear tier: Hamdi, over
+    ``casasmart.factory_reset`` is the B3 nuclear tier: the operator, over
     Tailscale -> HA or on-site, wipes the CasaSmart APP layer only —
     paired phones, pairing codes, recovery code. HA devices, automations
     and the Zigbee mesh are untouched. Reachable only through HA itself

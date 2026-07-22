@@ -19,7 +19,7 @@ directly, skipping the public-key crypto path (covered by ``test_auth``).
 Imports the ``casasmart`` package (which pulls in Home Assistant + cryptography),
 so it only runs where those exist — the hub container / CI. Run e.g.:
 
-    docker exec homeassistant-dev python3 -m unittest tests.test_registry_api -v
+    docker exec homeassistant python3 -m unittest tests.test_registry_api -v
 """
 
 from __future__ import annotations

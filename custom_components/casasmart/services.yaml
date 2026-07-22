@@ -5,7 +5,7 @@ factory_reset:
     pairing codes and the recovery code. HA devices, automations and the
     Zigbee mesh are untouched. The hub re-mints its bootstrap pairing code
     so the owner can be re-onboarded (~5 minutes). Reachable only through
-    Home Assistant itself (Hamdi over Tailscale or on-site).
+    Home Assistant itself (the operator over Tailscale or on-site).
 set_tunnel_url:
   name: Set tunnel URL
   description: >-
@@ -17,9 +17,9 @@ set_tunnel_url:
   fields:
     url:
       name: Tunnel URL
-      description: The hub's public https tunnel origin (e.g. https://abc123.mazinus.com).
+      description: The hub's public https tunnel origin (e.g. https://abc123.example.com).
       required: true
-      example: https://abc123.mazinus.com
+      example: https://abc123.example.com
       selector:
         text:
 activate_scene:

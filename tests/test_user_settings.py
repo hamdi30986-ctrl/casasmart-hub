@@ -37,19 +37,19 @@ class UserSettingsTests(UserSettingsTestCase):
         )
 
     def test_partial_update_leaves_other_field(self):
-        self.engine.update("dev-1", {"display_name": "  Hamdi  "})
+        self.engine.update("dev-1", {"display_name": "  Alex  "})
         doc = self.engine.update("dev-1", {"widget_tiles": [TILE]})
-        self.assertEqual(doc["display_name"], "Hamdi")  # trimmed, untouched
+        self.assertEqual(doc["display_name"], "Alex")  # trimmed, untouched
         self.assertEqual(doc["widget_tiles"], [TILE])
 
     def test_explicit_null_clears(self):
-        self.engine.update("dev-1", {"display_name": "Hamdi", "widget_tiles": [TILE]})
+        self.engine.update("dev-1", {"display_name": "Alex", "widget_tiles": [TILE]})
         doc = self.engine.update("dev-1", {"display_name": None})
         self.assertIsNone(doc["display_name"])
         self.assertEqual(doc["widget_tiles"], [TILE])  # untouched
 
     def test_delete_drops_the_row(self):
-        self.engine.update("dev-1", {"display_name": "Hamdi"})
+        self.engine.update("dev-1", {"display_name": "Alex"})
         self.engine.delete("dev-1")
         self.assertEqual(
             self.engine.get("dev-1"),
@@ -58,28 +58,28 @@ class UserSettingsTests(UserSettingsTestCase):
         self.engine.delete("dev-1")  # no-op when already absent
 
     def test_empty_string_clears_like_null(self):
-        self.engine.update("dev-1", {"display_name": "Hamdi"})
+        self.engine.update("dev-1", {"display_name": "Alex"})
         doc = self.engine.update("dev-1", {"display_name": "   "})
         self.assertIsNone(doc["display_name"])
 
     def test_fully_cleared_row_is_deleted(self):
         table = self.storage.table("user_settings")
-        self.engine.update("dev-1", {"display_name": "Hamdi"})
+        self.engine.update("dev-1", {"display_name": "Alex"})
         self.assertIn("dev-1", table)
         self.engine.update("dev-1", {"display_name": None})
         self.assertNotIn("dev-1", table)
 
     def test_users_are_isolated(self):
-        self.engine.update("dev-1", {"display_name": "Hamdi"})
+        self.engine.update("dev-1", {"display_name": "Alex"})
         self.engine.update("dev-2", {"display_name": "Mazin"})
-        self.assertEqual(self.engine.get("dev-1")["display_name"], "Hamdi")
+        self.assertEqual(self.engine.get("dev-1")["display_name"], "Alex")
         self.assertEqual(self.engine.get("dev-2")["display_name"], "Mazin")
 
     def test_persists_across_reopen(self):
-        self.engine.update("dev-1", {"display_name": "Hamdi", "widget_tiles": [TILE]})
+        self.engine.update("dev-1", {"display_name": "Alex", "widget_tiles": [TILE]})
         fresh = UserSettingsEngine(self.storage.table("user_settings"))
         doc = fresh.get("dev-1")
-        self.assertEqual(doc["display_name"], "Hamdi")
+        self.assertEqual(doc["display_name"], "Alex")
         self.assertEqual(doc["widget_tiles"], [TILE])
 
     def test_tile_validation(self):

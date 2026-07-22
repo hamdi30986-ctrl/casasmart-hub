@@ -183,7 +183,7 @@ class EngineTests(unittest.TestCase):
         )
 
     def test_full_login_round_trip(self):
-        device_id = self.engine.enroll_device("Hamdi's iPhone", "admin", self.public_pem)
+        device_id = self.engine.enroll_device("Alex's iPhone", "admin", self.public_pem)
         issued = self._login(device_id)
         claims = self.engine.validate_token(issued["token"])
         self.assertEqual(claims["sub"], device_id)
@@ -513,7 +513,7 @@ class EngineTests(unittest.TestCase):
 
     def test_widget_token_admin_still_capped(self):
         # An ADMIN's widget token must not reach admin surfaces.
-        device_id = self.engine.enroll_device("Hamdi", "admin", self.public_pem)
+        device_id = self.engine.enroll_device("Alex", "admin", self.public_pem)
         claims = self.engine.validate_token(
             self.engine.mint_widget_token(device_id)["token"]
         )

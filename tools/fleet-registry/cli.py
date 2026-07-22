@@ -4,12 +4,12 @@
 Run from anywhere:
 
     python3 tools/fleet-registry/cli.py register \
-        --hub-id noha-villa --client "Noha" --zone north-jeddah
+        --hub-id hub-001 --client "Client A" --zone zone-north
 
-    python3 tools/fleet-registry/cli.py list --zone north-jeddah
-    python3 tools/fleet-registry/cli.py show noha-villa
-    python3 tools/fleet-registry/cli.py update noha-villa --ha-version 2026.6.1
-    python3 tools/fleet-registry/cli.py decommission noha-villa
+    python3 tools/fleet-registry/cli.py list --zone zone-north
+    python3 tools/fleet-registry/cli.py show hub-001
+    python3 tools/fleet-registry/cli.py update hub-001 --ha-version 2026.6.1
+    python3 tools/fleet-registry/cli.py decommission hub-001
 
 The registry JSON lives at ``tools/fleet-registry/fleet.json`` by default
 (git-ignored — it's operator data, not code). Override with --store.

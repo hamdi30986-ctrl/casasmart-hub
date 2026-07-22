@@ -16,7 +16,7 @@ Plan ("B3. Owner Recovery" + "Recovery Layers", Layer 1):
 - Redemption replaces the hub's single admin: the old admin device is
   unenrolled (its outstanding JWTs die instantly via the B2 ``ver``
   revocation) and the new phone's keypair becomes the admin. Tier 3
-  (Hamdi factory reset over Tailscale/on-site) is the
+  (operator factory reset over Tailscale/on-site) is the
   ``casasmart.factory_reset`` HA service — see ``__init__.py``.
 
 Code format: 10 characters from an unambiguous alphabet (no 0/O, 1/I/L),
@@ -48,7 +48,7 @@ except ImportError:  # top-level import in the test env (no HA package init)
 _LOGGER = logging.getLogger(__name__)
 
 # No 0/O, 1/I/L — the card is read by humans, possibly engraved, possibly
-# over the phone to Hamdi. Every character must be unambiguous.
+# over the phone to the operator. Every character must be unambiguous.
 CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LENGTH = 10
 CODE_GROUP = 5  # display as XXXXX-XXXXX

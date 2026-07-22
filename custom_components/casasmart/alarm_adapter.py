@@ -16,7 +16,7 @@ wires the engine to live Home Assistant. Specifically it
   how an app-driven disarm cancels a running countdown), and
 - fires ``EVENT_ALARM_TRIGGERED`` — carrying the alarm event — ONLY when an
   armed zone or a life-safety sensor actually trips. That bus event is the
-  installer's automation hook (siren, lights flash, "whatever Hamdi
+  installer's automation hook (siren, lights flash, "whatever the operator
   configures per client", plan B13). Tamper does not fire it.
 
 What this module pointedly does NOT touch: the engine's ``alert_sink``. That

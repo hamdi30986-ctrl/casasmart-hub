@@ -7,8 +7,8 @@ JSON-serializable values:
     storage = HubStorage(Path("/config/casasmart/hub.db"))
     storage.open()
     users = storage.table("users")
-    users["u-123"] = {"name": "Hamdi", "role": "admin"}
-    users["u-123"]            # -> {'name': 'Hamdi', 'role': 'admin'}
+    users["u-123"] = {"name": "Alex", "role": "admin"}
+    users["u-123"]            # -> {'name': 'Alex', 'role': 'admin'}
     "u-123" in users          # -> True
     del users["u-123"]
     storage.close()

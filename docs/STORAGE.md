@@ -12,7 +12,7 @@ from casasmart.storage import HubStorage
 storage = HubStorage(db_path, backup_dir=optional_path)  # default: <db dir>/backups
 storage.open()                 # runs migrations (backs up first), enables WAL
 users = storage.table("users") # dict-like, lazily created namespace
-users["u-123"] = {"name": "Hamdi", "role": "admin"}   # any JSON value
+users["u-123"] = {"name": "Alex", "role": "admin"}   # any JSON value
 users["u-123"]                 # -> dict (fresh copy; reassign to persist edits)
 "u-123" in users, len(users), list(users), users.items()
 del users["u-123"]

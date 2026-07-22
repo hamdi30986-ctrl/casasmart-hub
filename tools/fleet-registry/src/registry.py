@@ -1,6 +1,6 @@
 """Fleet provisioning registry — operator-side source of truth (Track B / B19 backbone).
 
-This tool NEVER ships to a client hub. It is Hamdi's master list of every
+This tool NEVER ships to a client hub. It is the operator's master list of every
 CasaSmart hub deployed in the field, organized by geographic zone. It exists
 to answer one question without guesswork as the fleet grows past a handful of
 installs: *which client got which public subdomain, and how do I reach their
@@ -89,7 +89,7 @@ class _Zones:
 
 
 def load_zones(path: Path) -> _Zones:
-    """Read the static zone config (north-jeddah → prefix etc.)."""
+    """Read the static zone config (zone-north → prefix etc.)."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     domain = raw.get("domain")
     if not isinstance(domain, str) or not domain:
@@ -190,7 +190,7 @@ class FleetRegistry:
         return {h.subdomain for h in hubs if h.status == STATUS_ACTIVE}
 
     def _allocate(self, zone: _Zone, taken: set[str]) -> str:
-        """Lowest free ``{prefix}NN`` slot in the zone (njed01, njed02, ...)."""
+        """Lowest free ``{prefix}NN`` slot in the zone (zn01, zn02, ...)."""
         n = 1
         while True:
             candidate = f"{zone.prefix}{n:02d}"
@@ -225,7 +225,7 @@ class FleetRegistry:
         """Add a hub, allocating (or claiming) a unique subdomain.
 
         ``subdomain=None`` auto-allocates the next free slot in the zone's
-        pool. Passing one explicitly (e.g. ``noha``) claims that exact label
+        pool. Passing one explicitly (e.g. ``hub1``) claims that exact label
         after validating it's a clean DNS label and not already in use.
         """
         hub_id = hub_id.strip()

@@ -24,7 +24,7 @@ from unittest import mock
 
 # filtering uses package-relative imports, so put the PARENT of the package on
 # the path and import it as casasmart.filtering. Repo layout in CI; fall back
-# to the deployed tree inside the homeassistant-dev container.
+# to the deployed tree inside the homeassistant container.
 _PARENT = Path(__file__).resolve().parent.parent / "custom_components"
 if not (_PARENT / "casasmart").exists():
     _PARENT = Path("/config/custom_components")

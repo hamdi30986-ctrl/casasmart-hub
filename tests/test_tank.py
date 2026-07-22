@@ -46,11 +46,11 @@ class TankTestCase(unittest.TestCase):
 class DeviceTests(TankTestCase):
     def test_mint_and_list(self):
         record, token = self.engine.mint_device(
-            "ShellyPlusUni-AABB", "  Roof Tank  ", "192.168.8.59", "SNSN-0043X"
+            "ShellyPlusUni-AABB", "  Roof Tank  ", "192.168.1.59", "SNSN-0043X"
         )
         self.assertEqual(record["device_id"], "shellyplusuni-aabb")
         self.assertEqual(record["name"], "Roof Tank")
-        self.assertEqual(record["ip"], "192.168.8.59")
+        self.assertEqual(record["ip"], "192.168.1.59")
         self.assertEqual(record["model"], "SNSN-0043X")
         self.assertIsNone(record["last_reading"])
         self.assertEqual(len(token), 32)  # token_hex(16)
@@ -198,9 +198,9 @@ class IngestTests(TankTestCase):
 class ScriptBuilderTests(unittest.TestCase):
     def test_bakes_url_and_token(self):
         script = build_tank_script(
-            "http://192.168.8.10:8123/api/casasmart/tank/reading", "aa" * 16
+            "http://192.168.1.10:8123/api/casasmart/tank/reading", "aa" * 16
         )
-        self.assertIn('"http://192.168.8.10:8123/api/casasmart/tank/reading"', script)
+        self.assertIn('"http://192.168.1.10:8123/api/casasmart/tank/reading"', script)
         self.assertIn(f'"{"aa" * 16}"', script)
         self.assertIn("Voltmeter", script)
         self.assertIn("device_token", script)

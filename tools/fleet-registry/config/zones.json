@@ -1,9 +1,9 @@
 {
-  "domain": "casasmart.sa",
+  "domain": "example.com",
   "zones": {
-    "north-jeddah": { "label": "North Jeddah", "prefix": "njed" },
-    "east-jeddah": { "label": "East Jeddah", "prefix": "ejed" },
-    "central-jeddah": { "label": "Central Jeddah", "prefix": "cjed" },
-    "riyadh": { "label": "Riyadh", "prefix": "ryd" }
+    "zone-north": { "label": "North Zone", "prefix": "zn" },
+    "zone-east": { "label": "East Zone", "prefix": "ze" },
+    "zone-central": { "label": "Central Zone", "prefix": "zc" },
+    "zone-south": { "label": "South Zone", "prefix": "zs" }
   }
 }

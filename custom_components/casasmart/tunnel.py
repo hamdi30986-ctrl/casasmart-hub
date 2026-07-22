@@ -87,11 +87,11 @@ def normalize_cloudflare_domain(value: object) -> str | None:
     """Return the bare lowercase tunnel hostname, or None if unusable.
 
     The config/options flow field accepts what a human is likely to paste:
-    ``maher-ha.mazinus.com`` or a full ``https://maher-ha.mazinus.com/``.
+    ``my-ha.example.com`` or a full ``https://my-ha.example.com/``.
     Anything that is not reducible to a plain FQDN is rejected — same
     fail-closed doctrine as ``normalize_tunnel_url``:
 
-    - A pasted URL must be an https *origin*. A path prefix (``/noha``),
+    - A pasted URL must be an https *origin*. A path prefix (``/myhub``),
       port, userinfo, query or fragment cannot be expressed as a domain,
       and silently dropping any of them would change what the value means.
     - A Cloudflare tunnel hostname is a public DNS name on 443 — no ports,

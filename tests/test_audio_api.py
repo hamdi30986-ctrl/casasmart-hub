@@ -15,7 +15,7 @@ surfaces as HTTP status codes:
   ``_parse_targets`` is covered here).
 
 Container/CI only (imports Home Assistant). Run:
-    docker exec -w /config/tests homeassistant-dev python3 -m unittest test_audio_api -v
+    docker exec -w /config/tests homeassistant python3 -m unittest test_audio_api -v
 """
 
 from __future__ import annotations
@@ -380,12 +380,12 @@ class AthanView(AudioViewTestCase):
         ):
             resp = await self.view.put(
                 H.FakeRequest(
-                    headers=self._admin(), body={"enabled": False, "city": "Jeddah"}
+                    headers=self._admin(), body={"enabled": False, "city": "Riyadh"}
                 )
             )
         status, body = H.read_response(resp)
         self.assertEqual(status, 200)
-        self.assertEqual(body["athan"]["city"], "Jeddah")
+        self.assertEqual(body["athan"]["city"], "Riyadh")
 
     async def test_put_enabled_non_bool_is_400(self) -> None:
         # enabled must be a real boolean — 1 is rejected by the engine.

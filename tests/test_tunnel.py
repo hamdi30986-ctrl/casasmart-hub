@@ -30,47 +30,47 @@ from tunnel import (  # noqa: E402
 class TestNormalizeTunnelUrl(unittest.TestCase):
     def test_plain_https_origin_passes_through(self) -> None:
         self.assertEqual(
-            normalize_tunnel_url("https://noha.casasmart.sa"),
-            "https://noha.casasmart.sa",
+            normalize_tunnel_url("https://myhub.example.com"),
+            "https://myhub.example.com",
         )
 
     def test_trailing_slash_normalized(self) -> None:
         self.assertEqual(
-            normalize_tunnel_url("https://noha.casasmart.sa/"),
-            "https://noha.casasmart.sa",
+            normalize_tunnel_url("https://myhub.example.com/"),
+            "https://myhub.example.com",
         )
 
     def test_surrounding_whitespace_stripped(self) -> None:
         self.assertEqual(
-            normalize_tunnel_url("  https://noha.casasmart.sa \n"),
-            "https://noha.casasmart.sa",
+            normalize_tunnel_url("  https://myhub.example.com \n"),
+            "https://myhub.example.com",
         )
 
     def test_path_prefix_kept(self) -> None:
         # A path-mounted tunnel (one hostname, routed prefix) is legal;
         # the app concatenates /api/casasmart/... below it.
         self.assertEqual(
-            normalize_tunnel_url("https://edge.casasmart.sa/noha/"),
-            "https://edge.casasmart.sa/noha",
+            normalize_tunnel_url("https://edge.example.com/myhub/"),
+            "https://edge.example.com/myhub",
         )
 
     def test_explicit_port_kept(self) -> None:
         self.assertEqual(
-            normalize_tunnel_url("https://noha.casasmart.sa:8443"),
-            "https://noha.casasmart.sa:8443",
+            normalize_tunnel_url("https://myhub.example.com:8443"),
+            "https://myhub.example.com:8443",
         )
 
     def test_http_rejected(self) -> None:
         # Bearer tokens ride this URL — plaintext must never be advertised.
-        self.assertIsNone(normalize_tunnel_url("http://noha.casasmart.sa"))
+        self.assertIsNone(normalize_tunnel_url("http://myhub.example.com"))
 
     def test_other_schemes_rejected(self) -> None:
-        self.assertIsNone(normalize_tunnel_url("wss://noha.casasmart.sa"))
-        self.assertIsNone(normalize_tunnel_url("ftp://noha.casasmart.sa"))
+        self.assertIsNone(normalize_tunnel_url("wss://myhub.example.com"))
+        self.assertIsNone(normalize_tunnel_url("ftp://myhub.example.com"))
 
     def test_scheme_relative_and_bare_host_rejected(self) -> None:
-        self.assertIsNone(normalize_tunnel_url("//noha.casasmart.sa"))
-        self.assertIsNone(normalize_tunnel_url("noha.casasmart.sa"))
+        self.assertIsNone(normalize_tunnel_url("//myhub.example.com"))
+        self.assertIsNone(normalize_tunnel_url("myhub.example.com"))
 
     def test_missing_host_rejected(self) -> None:
         self.assertIsNone(normalize_tunnel_url("https://"))
@@ -114,91 +114,91 @@ class TestNormalizeCloudflareDomain(unittest.TestCase):
 
     def test_bare_domain_passes(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("maher-ha.mazinus.com"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("my-ha.example.com"),
+            "my-ha.example.com",
         )
 
     def test_uppercase_lowercased(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("MAHER-HA.Mazinus.COM"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("MY-HA.example.com"),
+            "my-ha.example.com",
         )
 
     def test_surrounding_whitespace_stripped(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("  maher-ha.mazinus.com \n"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("  my-ha.example.com \n"),
+            "my-ha.example.com",
         )
 
     def test_trailing_root_dot_normalized(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("maher-ha.mazinus.com."),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("my-ha.example.com."),
+            "my-ha.example.com",
         )
 
     def test_pasted_https_url_accepted(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("https://maher-ha.mazinus.com"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("https://my-ha.example.com"),
+            "my-ha.example.com",
         )
 
     def test_pasted_https_url_trailing_slash_accepted(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("https://maher-ha.mazinus.com/"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("https://my-ha.example.com/"),
+            "my-ha.example.com",
         )
 
     def test_pasted_url_host_lowercased(self) -> None:
         self.assertEqual(
-            normalize_cloudflare_domain("https://MAHER-HA.mazinus.com/"),
-            "maher-ha.mazinus.com",
+            normalize_cloudflare_domain("https://MY-HA.example.com/"),
+            "my-ha.example.com",
         )
 
     def test_http_url_rejected(self) -> None:
         # Same doctrine as normalize_tunnel_url: plaintext never publishable.
-        self.assertIsNone(normalize_cloudflare_domain("http://maher.mazinus.com"))
+        self.assertIsNone(normalize_cloudflare_domain("http://my.example.com"))
 
     def test_other_schemes_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("wss://maher.mazinus.com"))
-        self.assertIsNone(normalize_cloudflare_domain("ftp://maher.mazinus.com"))
+        self.assertIsNone(normalize_cloudflare_domain("wss://my.example.com"))
+        self.assertIsNone(normalize_cloudflare_domain("ftp://my.example.com"))
 
     def test_scheme_relative_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("//maher.mazinus.com"))
+        self.assertIsNone(normalize_cloudflare_domain("//my.example.com"))
 
     def test_url_with_path_rejected(self) -> None:
         # A path prefix can't be expressed as a domain — dropping it silently
         # would change what the value means. Fail closed.
         self.assertIsNone(
-            normalize_cloudflare_domain("https://edge.casasmart.sa/noha")
+            normalize_cloudflare_domain("https://edge.example.com/myhub")
         )
 
     def test_url_with_port_rejected(self) -> None:
         # Cloudflare tunnel hostnames are public DNS on 443 — a port is a typo.
         self.assertIsNone(
-            normalize_cloudflare_domain("https://maher.mazinus.com:8443")
+            normalize_cloudflare_domain("https://my.example.com:8443")
         )
 
     def test_bare_domain_with_port_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("maher.mazinus.com:8443"))
+        self.assertIsNone(normalize_cloudflare_domain("my.example.com:8443"))
 
     def test_userinfo_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("user@maher.mazinus.com"))
+        self.assertIsNone(normalize_cloudflare_domain("user@my.example.com"))
         self.assertIsNone(
-            normalize_cloudflare_domain("https://user@maher.mazinus.com")
+            normalize_cloudflare_domain("https://user@my.example.com")
         )
         self.assertIsNone(
-            normalize_cloudflare_domain("https://user:pw@maher.mazinus.com")
+            normalize_cloudflare_domain("https://user:pw@my.example.com")
         )
 
     def test_query_and_fragment_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("maher.mazinus.com?x=1"))
-        self.assertIsNone(normalize_cloudflare_domain("maher.mazinus.com#frag"))
+        self.assertIsNone(normalize_cloudflare_domain("my.example.com?x=1"))
+        self.assertIsNone(normalize_cloudflare_domain("my.example.com#frag"))
         self.assertIsNone(
-            normalize_cloudflare_domain("https://maher.mazinus.com?x=1")
+            normalize_cloudflare_domain("https://my.example.com?x=1")
         )
 
     def test_bare_domain_with_path_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("maher.mazinus.com/path"))
+        self.assertIsNone(normalize_cloudflare_domain("my.example.com/path"))
 
     def test_single_label_rejected(self) -> None:
         # A CF tunnel hostname is a public FQDN — at least two labels.
@@ -206,8 +206,8 @@ class TestNormalizeCloudflareDomain(unittest.TestCase):
         self.assertIsNone(normalize_cloudflare_domain("https://localhost"))
 
     def test_ipv4_rejected(self) -> None:
-        self.assertIsNone(normalize_cloudflare_domain("192.168.8.100"))
-        self.assertIsNone(normalize_cloudflare_domain("https://192.168.8.100"))
+        self.assertIsNone(normalize_cloudflare_domain("192.168.1.100"))
+        self.assertIsNone(normalize_cloudflare_domain("https://192.168.1.100"))
 
     def test_ipv6_rejected(self) -> None:
         self.assertIsNone(normalize_cloudflare_domain("[::1]"))
@@ -236,7 +236,7 @@ class TestNormalizeCloudflareDomain(unittest.TestCase):
     def test_non_string_rejected(self) -> None:
         self.assertIsNone(normalize_cloudflare_domain(None))
         self.assertIsNone(normalize_cloudflare_domain(443))
-        self.assertIsNone(normalize_cloudflare_domain(["maher.mazinus.com"]))
+        self.assertIsNone(normalize_cloudflare_domain(["my.example.com"]))
 
     def test_garbage_rejected(self) -> None:
         self.assertIsNone(normalize_cloudflare_domain("not a domain at all"))
@@ -248,25 +248,25 @@ class TestDomainToTunnelUrl(unittest.TestCase):
 
     def test_valid_domain_becomes_https_origin(self) -> None:
         self.assertEqual(
-            domain_to_tunnel_url("maher-ha.mazinus.com"),
-            "https://maher-ha.mazinus.com",
+            domain_to_tunnel_url("my-ha.example.com"),
+            "https://my-ha.example.com",
         )
 
     def test_pasted_url_normalized_to_origin(self) -> None:
         self.assertEqual(
-            domain_to_tunnel_url("https://MAHER-HA.mazinus.com/"),
-            "https://maher-ha.mazinus.com",
+            domain_to_tunnel_url("https://MY-HA.example.com/"),
+            "https://my-ha.example.com",
         )
 
     def test_invalid_domain_gives_none(self) -> None:
-        self.assertIsNone(domain_to_tunnel_url("http://maher.mazinus.com"))
-        self.assertIsNone(domain_to_tunnel_url("maher.mazinus.com/path"))
+        self.assertIsNone(domain_to_tunnel_url("http://my.example.com"))
+        self.assertIsNone(domain_to_tunnel_url("my.example.com/path"))
         self.assertIsNone(domain_to_tunnel_url(""))
         self.assertIsNone(domain_to_tunnel_url(None))
 
     def test_roundtrip_agrees_with_url_validator(self) -> None:
         # The two validators must never disagree about what gets published.
-        url = domain_to_tunnel_url("maher-ha.mazinus.com")
+        url = domain_to_tunnel_url("my-ha.example.com")
         self.assertEqual(normalize_tunnel_url(url), url)
 
 

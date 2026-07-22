@@ -35,7 +35,7 @@ Every step above leaks the house key through Supabase. All three go.
 
 ## New flow
 
-1. **Prep (Hamdi, at home):** hub flashed with components; hub generates its
+1. **Prep (operator, at home):** hub flashed with components; hub generates its
    bootstrap admin code → printed as QR sticker on the hub.
 2. **Customer:** installs app → app browses mDNS for `_casasmart._tcp` →
    "CasaSmart Hub found" → scans QR / types 6-digit code.
@@ -64,12 +64,12 @@ A Supabase breach can no longer mint a working session: enroll is LAN-only,
 single-use, throttled, and the bootstrap code dies at first claim. What a
 breach buys shrinks from "forever HA god-token" to "knowing the tunnel URL".
 
-### Product decisions locked (Hamdi, 2026-06-12)
+### Product decisions locked (2026-06-12)
 
 - Pairing is **always on-site, on the hub's LAN**. Remote pre-provisioned
   pairing is dead by design — no flow needed for it.
 - Customer self-pairs; first claim = owner/admin. Installer screens
-  (3c-4b) remain Hamdi's on-site surface for device-to-HA pairing.
+  (3c-4b) remain the operator's on-site surface for device-to-HA pairing.
 - Cred recovery / factory reset / handover ride the existing B3 recovery +
   re-claim machinery — re-claim with a new code is the first-class answer.
 

@@ -68,19 +68,19 @@ class TestWalAndLifecycle(StorageTestCase):
     def test_close_is_idempotent_and_reopenable(self):
         storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
         storage.open()
-        storage.table("users")["u1"] = {"name": "Hamdi"}
+        storage.table("users")["u1"] = {"name": "Alex"}
         storage.close()
         storage.close()  # no error
         storage.open()
-        self.assertEqual(storage.table("users")["u1"], {"name": "Hamdi"})
+        self.assertEqual(storage.table("users")["u1"], {"name": "Alex"})
         storage.close()
 
 
 class TestKeyValueTable(StorageTestCase):
     def test_set_get_roundtrip(self):
         users = self.make_storage().table("users")
-        users["u1"] = {"name": "Hamdi", "role": "admin", "rooms": [1, 2]}
-        self.assertEqual(users["u1"], {"name": "Hamdi", "role": "admin", "rooms": [1, 2]})
+        users["u1"] = {"name": "Alex", "role": "admin", "rooms": [1, 2]}
+        self.assertEqual(users["u1"], {"name": "Alex", "role": "admin", "rooms": [1, 2]})
 
     def test_unicode_value_survives(self):
         t = self.make_storage().table("users")
@@ -235,7 +235,7 @@ class TestMigrations(StorageTestCase):
         # v1 schema with data in it
         storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
         storage.open()
-        storage.table("users")["u1"] = {"name": "Hamdi"}
+        storage.table("users")["u1"] = {"name": "Alex"}
         storage.close()
 
         def bad_migration(conn):
@@ -263,7 +263,7 @@ class TestMigrations(StorageTestCase):
             value = conn.execute(
                 "SELECT value FROM kv WHERE namespace='users' AND key='u1'"
             ).fetchone()[0]
-            self.assertEqual(json.loads(value), {"name": "Hamdi"})
+            self.assertEqual(json.loads(value), {"name": "Alex"})
 
     def test_downgrade_refused(self):
         with sqlite3.connect(self.db_path) as conn:

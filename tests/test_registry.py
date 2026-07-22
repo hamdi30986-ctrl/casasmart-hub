@@ -403,7 +403,7 @@ class ImportTests(RegistryTestCase):
     def test_import_room_with_no_floor_is_valid(self):
         """area.floor_id is None for any HA area not on a floor — the normal
         shape for apartments. This must seed the room, not TypeError (a raise
-        here aborted the whole seed on every boot — Maher incident)."""
+        here aborted the whole seed on every boot — a field incident)."""
         counts = self.engine.import_initial(
             [{"floor_id": None, "name": "Ghost"}],  # keyless floor -> skipped
             [{"room_id": "flat", "name": "Flat", "floor_id": None}],

@@ -8,12 +8,12 @@
           "cloudflare_domain": "Cloudflare tunnel domain (optional)"
         },
         "data_description": {
-          "cloudflare_domain": "The hub's public Cloudflare tunnel hostname, e.g. maher-ha.mazinus.com — leave empty if this hub has no tunnel. The tunnel is automatically disabled after setup (pairing must happen over the LAN); re-enable it from the integration options once pairing is done."
+          "cloudflare_domain": "The hub's public Cloudflare tunnel hostname, e.g. my-ha.example.com — leave empty if this hub has no tunnel. The tunnel is automatically disabled after setup (pairing must happen over the LAN); re-enable it from the integration options once pairing is done."
         }
       }
     },
     "error": {
-      "invalid_domain": "Enter a plain domain like maher-ha.mazinus.com (or paste its https:// address) — no path, port, or query."
+      "invalid_domain": "Enter a plain domain like my-ha.example.com (or paste its https:// address) — no path, port, or query."
     },
     "abort": {
       "single_instance_allowed": "Only one CasaSmart hub is allowed per Home Assistant instance."
@@ -29,13 +29,13 @@
           "tunnel_enabled": "Cloudflare tunnel enabled"
         },
         "data_description": {
-          "cloudflare_domain": "Public tunnel hostname, e.g. maher-ha.mazinus.com. Clear it to stop advertising a remote path to phones.",
+          "cloudflare_domain": "Public tunnel hostname, e.g. my-ha.example.com. Clear it to stop advertising a remote path to phones.",
           "tunnel_enabled": "ON starts the cloudflared add-on and sets it to start on boot. OFF stops it and disables start-on-boot, so it stays down across reboots until re-enabled here."
         }
       }
     },
     "error": {
-      "invalid_domain": "Enter a plain domain like maher-ha.mazinus.com (or paste its https:// address) — no path, port, or query.",
+      "invalid_domain": "Enter a plain domain like my-ha.example.com (or paste its https:// address) — no path, port, or query.",
       "domain_required": "Enter a Cloudflare tunnel domain before enabling the tunnel."
     }
   }
