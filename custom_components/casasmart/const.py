@@ -123,7 +123,7 @@ UPDATE_CHECK_TTL_SECONDS = 6 * 3600
 # the hub_config key below — repointing a fleet needs no code change. The
 # default targets the production Deno Deploy relay (the ``casasmart-relay``
 # project on console.deno.com).
-PUSH_RELAY_URL_DEFAULT = "https://casasmart-relay.example.deno.net"
+PUSH_RELAY_URL_DEFAULT = "https://casasmart-relay.hamdi30986.deno.net"
 PUSH_RELAY_URL_CONFIG_KEY = "push_relay_url"
 # Path appended to the relay base URL for the push endpoint.
 PUSH_RELAY_PUSH_PATH = "/push"
