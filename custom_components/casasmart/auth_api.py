@@ -46,6 +46,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .auth_engine import (
+    MAX_DEVICE_NAME_LENGTH,
     AuthEngine,
     ChallengeError,
     EnrollError,
@@ -85,6 +86,20 @@ def _get_push_store(hass: HomeAssistant):
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.push
+
+
+def _get_push_dispatcher(hass: HomeAssistant):
+    """The loaded entry's push dispatcher, or None when not set up.
+
+    None whenever the relay push leg isn't running (no TLS identity /
+    unusable push key — see ``__init__.py``); callers skip the push then,
+    the enroll itself is never blocked on notification plumbing.
+    """
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.push_dispatcher
 
 
 def get_engine(hass: HomeAssistant) -> AuthEngine | None:
@@ -394,6 +409,24 @@ class CasaSmartEnrollView(HomeAssistantView):
 
         # A new device joined — refresh the per-user sensors.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
+
+        # Phase 5 (D6): owner visibility — "New device paired: <name> (<role>)"
+        # to the admin's phone on every successful NEW enroll (the idempotent
+        # same-key re-pair above returns early and never gets here). Fired as a
+        # task so the enroll response never waits on the push relay; the
+        # dispatcher swallows its own failures. Notification-only by locked
+        # decision #6 — no approval gate. The name mirrors the engine's stored
+        # normalization (strip + cap) so the push shows what enrollment kept.
+        dispatcher = _get_push_dispatcher(self._hass)
+        if dispatcher is not None:
+            stored_name = (
+                payload.get("name", "").strip()[:MAX_DEVICE_NAME_LENGTH].strip()
+            )
+            self._hass.async_create_task(
+                dispatcher.async_send_device_paired(
+                    stored_name, grant["role"], device_id
+                )
+            )
 
         return self.json(
             {"device_id": device_id, "role": grant["role"], "rooms": grant["rooms"]},

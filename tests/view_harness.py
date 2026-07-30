@@ -148,6 +148,9 @@ class _Runtime:
         # Present-but-inert in view tests (no live MQTT/loop): the athan PUT
         # handler calls get_athan_scheduler(); None means "skip the reschedule".
         self.athan_scheduler = None
+        # None = relay push leg not running (mirrors CasaSmartRuntimeData's
+        # default); the enroll view's device-paired push is skipped.
+        self.push_dispatcher = None
 
 
 class _FakeHAConfig:
@@ -168,10 +171,19 @@ class FakeHass:
         self.bus = FakeBus()
         self.config = _FakeHAConfig()
         self.data: dict[str, Any] = {}
+        # Coroutines spawned via async_create_task (fire-and-forget work like
+        # the enroll view's device-paired push); tests await/close them.
+        self.created_tasks: list[Any] = []
 
     async def async_add_executor_job(self, func, *args):
         # Engines are sync; run inline (no thread) so tests stay deterministic.
         return func(*args)
+
+    def async_create_task(self, coro):
+        # Recorded, not scheduled (same contract as test_push_dispatcher's
+        # FakeHass) so tests decide exactly when background work runs.
+        self.created_tasks.append(coro)
+        return coro
 
 
 class FakeRequest:

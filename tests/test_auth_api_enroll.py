@@ -39,10 +39,11 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 
 import view_harness as H  # noqa: E402
 from casasmart.auth_api import CasaSmartEnrollView  # noqa: E402
-from casasmart.auth_engine import AuthEngine  # noqa: E402
+from casasmart.auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine  # noqa: E402
 from casasmart.const import REMOTE_PAIRING_ENABLED_CONFIG_KEY  # noqa: E402
 from casasmart.pairing import PairingManager  # noqa: E402
 from casasmart.storage import HubStorage  # noqa: E402
+from casasmart.throttle import MAX_FAILURES  # noqa: E402
 
 LAN_IP = "192.168.8.50"  # a phone on the hub's own network
 TUNNEL_IP = "127.0.0.1"  # cloudflared traffic reaches HA from loopback
@@ -57,6 +58,17 @@ def make_public_pem() -> str:
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
+
+
+class RecordingDispatcher:
+    """Stands in for ``runtime_data.push_dispatcher`` — records the enroll
+    view's device-paired sends (Phase 5 / D6) without a relay."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, str]] = []
+
+    async def async_send_device_paired(self, name, role, device_id) -> None:
+        self.sent.append({"name": name, "role": role, "device_id": device_id})
 
 
 class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
@@ -74,13 +86,14 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         self.pairing = PairingManager(
             self.storage.table("pairing_codes"), self.auth.has_admin
         )
-        runtime = types.SimpleNamespace(
+        self.runtime = types.SimpleNamespace(
             auth=self.auth,
             pairing=self.pairing,
             hub_config=self.hub_config,
             recovery=None,  # arm_recovery no-ops; not under test here
+            push_dispatcher=None,  # relay push leg not running (default)
         )
-        self.hass = H.FakeHass(runtime)
+        self.hass = H.FakeHass(self.runtime)
         self.view = CasaSmartEnrollView(self.hass)
 
     def _claim_hub(self) -> None:
@@ -181,6 +194,144 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self._enroll(issued["code"], LAN_IP)
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "user")
+
+    # -- Phase 5 (D5): throttle-bucket isolation at the wire seam ---------------
+
+    async def test_remote_lockout_does_not_block_lan_owner_claim(self) -> None:
+        # ONE source string ("127.0.0.1"), classified remote first and LAN
+        # after: a tunnel guessing burst locks the remote bucket (429 +
+        # Retry-After); the operator then widens pairing_extra_lan_cidrs
+        # (the existing private-only knob for proxies that rewrite every
+        # source — loopback space is private, so 127.0.0.0/8 is accepted),
+        # the SAME source becomes LAN-classified, and the owner's bootstrap
+        # claim goes straight through — the remote lockout never touched
+        # the LAN bucket.
+        self.hub_config.set(REMOTE_PAIRING_ENABLED_CONFIG_KEY, True)
+        code = self.pairing.ensure_bootstrap_code()
+        for _ in range(MAX_FAILURES):
+            status, body = await self._enroll("WRONGCOD", TUNNEL_IP)
+            self.assertEqual(status, 401)
+        resp = await self.view.post(
+            H.FakeRequest(
+                body={
+                    "pairing_code": "WRONGCOD",
+                    "public_key": make_public_pem(),
+                    "name": "Phone",
+                },
+                remote=TUNNEL_IP,
+            )
+        )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 429)
+        self.assertIn("Retry-After", resp.headers)
+        self.assertIn("retry_after", body)
+        self.hub_config.set("pairing_extra_lan_cidrs", ["127.0.0.0/8"])
+        status, body = await self._enroll(code, TUNNEL_IP, name="Owner phone")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")
+
+    # -- Phase 5 (D6): admin notification fires on enroll -----------------------
+
+    async def _drain_tasks(self) -> None:
+        """Run the fire-and-forget work the view spawned (the push send)."""
+        pending, self.hass.created_tasks = self.hass.created_tasks, []
+        for coro in pending:
+            await coro
+
+    async def test_enroll_fires_admin_notification(self) -> None:
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        self._claim_hub()
+        issued = self.pairing.generate_code("user", rooms=["area_living"])
+        status, body = await self._enroll(issued["code"], LAN_IP, name="  Kid iPad  ")
+        self.assertEqual(status, 201)
+        await self._drain_tasks()
+        self.assertEqual(
+            recorder.sent,
+            [
+                {
+                    # The engine's stored normalization (strip), not the raw body.
+                    "name": "Kid iPad",
+                    "role": "user",
+                    "device_id": body["device_id"],
+                }
+            ],
+        )
+
+    async def test_remote_enroll_fires_admin_notification(self) -> None:
+        # The D6 story itself: a member code redeemed through the tunnel
+        # (flag on) — the owner's phone hears about it.
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        self._claim_hub()
+        self.hub_config.set(REMOTE_PAIRING_ENABLED_CONFIG_KEY, True)
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll(issued["code"], TUNNEL_IP, name="LTE phone")
+        self.assertEqual(status, 201)
+        await self._drain_tasks()
+        self.assertEqual(len(recorder.sent), 1)
+        self.assertEqual(recorder.sent[0]["name"], "LTE phone")
+        self.assertEqual(recorder.sent[0]["device_id"], body["device_id"])
+
+    async def test_bootstrap_claim_also_notifies(self) -> None:
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        code = self.pairing.ensure_bootstrap_code()
+        status, body = await self._enroll(code, LAN_IP, name="Owner phone")
+        self.assertEqual(status, 201)
+        await self._drain_tasks()
+        self.assertEqual(len(recorder.sent), 1)
+        self.assertEqual(recorder.sent[0]["role"], "admin")
+
+    async def test_failed_enroll_does_not_notify(self) -> None:
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        self._claim_hub()
+        status, _ = await self._enroll("WRONGCOD", LAN_IP)
+        self.assertEqual(status, 401)
+        self.assertEqual(self.hass.created_tasks, [])
+        self.assertEqual(recorder.sent, [])
+
+    async def test_idempotent_repair_does_not_notify(self) -> None:
+        # The SAME phone re-running onboarding returns early on key
+        # idempotency — that is not a new device, so no second push.
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        pem = make_public_pem()
+        body_dict = {
+            "pairing_code": issued["code"],
+            "public_key": pem,
+            "name": "Phone",
+        }
+        resp = await self.view.post(H.FakeRequest(body=body_dict, remote=LAN_IP))
+        self.assertEqual(resp.status, 201)
+        resp = await self.view.post(H.FakeRequest(body=body_dict, remote=LAN_IP))
+        self.assertEqual(resp.status, 201)  # idempotent re-pair
+        await self._drain_tasks()
+        self.assertEqual(len(recorder.sent), 1)
+
+    async def test_notification_name_capped_like_the_stored_record(self) -> None:
+        recorder = RecordingDispatcher()
+        self.runtime.push_dispatcher = recorder
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, _ = await self._enroll(
+            issued["code"], LAN_IP, name=" " + "X" * (MAX_DEVICE_NAME_LENGTH + 20)
+        )
+        self.assertEqual(status, 201)
+        await self._drain_tasks()
+        self.assertEqual(recorder.sent[0]["name"], "X" * MAX_DEVICE_NAME_LENGTH)
+
+    async def test_no_dispatcher_enroll_still_works(self) -> None:
+        # push_dispatcher=None (relay leg not running) — pairing is never
+        # blocked on notification plumbing.
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, _ = await self._enroll(issued["code"], LAN_IP)
+        self.assertEqual(status, 201)
+        self.assertEqual(self.hass.created_tasks, [])
 
 
 if __name__ == "__main__":

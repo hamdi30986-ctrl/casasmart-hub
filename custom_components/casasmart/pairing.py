@@ -9,9 +9,13 @@ Plan ("Pairing codes"):
   successful pairing (the hub's own bootstrap admin code below is the exception).
 - Role + room scope are baked into the code at generation time, so the
   enrolling phone never gets to pick its own privileges.
-- Redemption is throttled per source (plan: "pairing-code entry" is a
-  secret-guessing surface; 5 tries -> escalating wall keeps the 8-char
-  code brute-force-proof).
+- Redemption is throttled per ``(source, purpose)`` (plan: "pairing-code
+  entry" is a secret-guessing surface; 5 tries -> escalating wall keeps
+  the 8-char code brute-force-proof). ``purpose`` is the request's
+  network class (LAN vs remote — Phase 5 / D5), so remote redemption
+  bursts can never exhaust the lockout counter the owner's on-LAN
+  bootstrap claim answers to, even where a proxy / CIDR-widening change
+  makes both arrive with the same source string.
 - Every code carries a CLASS (Phase 1): ``bootstrap`` (the owner claim,
   LAN-only forever) vs ``member`` (admin-minted, remotely redeemable once
   the hub's ``remote_pairing_enabled`` flag is on — enforced in ``redeem``
@@ -78,6 +82,21 @@ BOOTSTRAP_CODE_ID = "bootstrap-admin"
 # hub's ``remote_pairing_enabled`` flag is on (checked at the API layer).
 CODE_CLASS_BOOTSTRAP = "bootstrap"
 CODE_CLASS_MEMBER = "member"
+# Throttle purposes (Phase 5 / D5): the redeem throttle key is
+# ``<purpose>:<source>``, one bucket per network class, so a remote
+# lockout (e.g. every tunnel caller collapsing onto one loopback source,
+# or a port proxy rewriting all sources to one IP) can never block the
+# owner's LAN redemption from the same source string — and vice versa.
+# ``FailureThrottle`` keys are caller-chosen strings by design; this
+# composes the existing mechanism, it does not add a new one.
+THROTTLE_PURPOSE_LAN = "lan"
+THROTTLE_PURPOSE_REMOTE = "remote"
+
+
+def _throttle_key(source_key: str, remote_source: bool) -> str:
+    """The (source, purpose)-composed key for the redeem failure throttle."""
+    purpose = THROTTLE_PURPOSE_REMOTE if remote_source else THROTTLE_PURPOSE_LAN
+    return f"{purpose}:{source_key}"
 
 
 class PairingError(Exception):
@@ -289,10 +308,18 @@ class PairingManager:
         when ``remote_pairing_enabled`` is on). Member-class codes redeem
         normally; the bootstrap owner claim raises LanOnlyCodeError without
         consuming the code or burning a throttle slot.
+
+        Throttling is per ``(source, purpose)`` (Phase 5 / D5): LAN and
+        remote redemption count against SEPARATE buckets of the same
+        escalating throttle, so a remote guessing burst locked out at the
+        wall cannot block the owner's on-LAN claim from an identical
+        source string — and a LAN lockout cannot block legitimate remote
+        member redemption.
         """
-        self.throttle.check(source_key)
+        throttle_key = _throttle_key(source_key, remote_source)
+        self.throttle.check(throttle_key)
         if not isinstance(code, str) or not code.strip():
-            self.throttle.record_failure(source_key)
+            self.throttle.record_failure(throttle_key)
             raise CodeInvalidError("Invalid pairing code")
         code_hash = hash_code(code)
 
@@ -307,7 +334,7 @@ class PairingManager:
                 None,
             )
             if match is None:
-                self.throttle.record_failure(source_key)
+                self.throttle.record_failure(throttle_key)
                 raise CodeInvalidError("Invalid pairing code")
             code_id, record = match
             code_class = _code_class(code_id, record)
@@ -330,7 +357,7 @@ class PairingManager:
                 raise HubAlreadyClaimedError("This hub is already paired")
             del self._codes[code_id]  # single-use, consumed even pre-enroll
 
-        self.throttle.clear(source_key)
+        self.throttle.clear(throttle_key)
         _LOGGER.info(
             "Pairing code %s redeemed (role=%s, class=%s%s)",
             code_id,

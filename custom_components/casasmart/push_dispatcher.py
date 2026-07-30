@@ -76,12 +76,23 @@ _LOGGER = logging.getLogger(__name__)
 # branches on these to localize and route the notification.
 PUSH_TYPE_SECURITY = "security"
 PUSH_TYPE_LOCK = "lock"
+# Pairing redesign Phase 5 (D6): a device successfully enrolled — the owner
+# hears about every pair, LAN or remote. Notification-only by locked decision
+# #6: there is NO approval gate, the enroll has already happened.
+PUSH_TYPE_DEVICE_PAIRED = "device_paired"
 
-# Owner-only audiences: alarm (security), lock, and tank alerts reach the enrolled
-# admin only — a room-scoped phone doesn't get them. A LIFE-SAFETY alarm
-# (fire/smoke; data.life_safety == "1") is the exception and stays house-wide.
+# Owner-only audiences: alarm (security), lock, tank, and device-paired alerts
+# reach the enrolled admin only — a room-scoped phone doesn't get them. A
+# LIFE-SAFETY alarm (fire/smoke; data.life_safety == "1") is the exception and
+# stays house-wide.
 _OWNER_ONLY_TYPES = frozenset(
-    {PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK, PUSH_TYPE_TANK_LOW, PUSH_TYPE_TANK_OFFLINE}
+    {
+        PUSH_TYPE_SECURITY,
+        PUSH_TYPE_LOCK,
+        PUSH_TYPE_TANK_LOW,
+        PUSH_TYPE_TANK_OFFLINE,
+        PUSH_TYPE_DEVICE_PAIRED,
+    }
 )
 
 # Relay priority buckets (must match the relay's accepted values).
@@ -310,6 +321,28 @@ class PushDispatcher:
         wire contract. Never raises (``_dispatch`` swallows + logs).
         """
         await self._dispatch(data, priority)
+
+    async def async_send_device_paired(
+        self, name: str, role: str, device_id: str
+    ) -> None:
+        """Owner notification for a successful NEW device enroll (Phase 5, D6).
+
+        "New device paired: <name> (<role>)" — the enroll view calls this
+        after ``enroll_device`` lands, so a member code redeemed anywhere
+        (LAN or, with ``remote_pairing_enabled`` on, remotely) is always
+        visible to the owner. Rides the same signed relay path and the same
+        owner-only audience filter as alarm/lock/tank; notification-only by
+        locked decision #6 — no approval gate. Never raises.
+        """
+        await self._dispatch(
+            {
+                "type": PUSH_TYPE_DEVICE_PAIRED,
+                "title": "New device paired",
+                "body": f"{name} ({role})",
+                "device_id": device_id,
+            },
+            PRIORITY_NORMAL,
+        )
 
     async def _dispatch(self, data: dict[str, str], priority: str) -> None:
         """Sign + send one notification to every registered device token."""

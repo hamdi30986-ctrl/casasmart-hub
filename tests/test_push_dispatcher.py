@@ -51,6 +51,7 @@ from casasmart.push_crypto import PushSigner  # noqa: E402
 from casasmart.push_dispatcher import (  # noqa: E402
     PRIORITY_CRITICAL,
     PRIORITY_NORMAL,
+    PUSH_TYPE_DEVICE_PAIRED,
     PUSH_TYPE_LOCK,
     PUSH_TYPE_SECURITY,
     PushDispatcher,
@@ -535,6 +536,84 @@ class WidgetRefreshTests(DispatcherTestCase):
         self.assertEqual(len(ev.calls), 0)
         await self._drain()
         self.assertEqual(len(self.session.calls), 0)
+
+
+class _FakeAuthEngine:
+    """Only what the owner-only audience filter calls."""
+
+    def __init__(self, owner_id: str) -> None:
+        self._owner_id = owner_id
+
+    def is_owner_device(self, device_id: str) -> bool:
+        return device_id == self._owner_id
+
+
+class _EntriesWithEngine:
+    """A loaded entry whose runtime_data.auth resolves the owner — the shape
+    ``auth_api.get_engine`` reads."""
+
+    def __init__(self, engine) -> None:
+        import types
+
+        self._entry = types.SimpleNamespace(
+            runtime_data=types.SimpleNamespace(auth=engine)
+        )
+
+    def async_loaded_entries(self, domain):
+        return [self._entry]
+
+
+class DevicePairedTests(DispatcherTestCase):
+    """Phase 5 (D6): the device-paired owner notification."""
+
+    async def test_device_paired_reaches_owner_only(self) -> None:
+        self.push_store.register("dev-owner", "fcm-owner", "ios")
+        self.push_store.register("dev-room", "fcm-room", "android")
+        self.hass.config_entries = _EntriesWithEngine(_FakeAuthEngine("dev-owner"))
+        dispatcher = self._make_dispatcher()
+
+        await dispatcher.async_send_device_paired("iPhone 15", "user", "dev-new")
+
+        self.assertEqual(len(self.session.calls), 1)
+        body = self.session.calls[0]["json"]
+        self.assertEqual(body["priority"], PRIORITY_NORMAL)
+        tokens = {p["device_token"] for p in body["payloads"]}
+        self.assertEqual(tokens, {"fcm-owner"})  # admin only, room phone skipped
+        data = body["payloads"][0]["data"]
+        self.assertEqual(
+            data,
+            {
+                "type": PUSH_TYPE_DEVICE_PAIRED,
+                "title": "New device paired",
+                "body": "iPhone 15 (user)",
+                "device_id": "dev-new",
+            },
+        )
+        self._verify_signature(body)
+
+    async def test_device_paired_fails_open_without_engine(self) -> None:
+        # Same posture as alarm/lock/tank: when roles can't be resolved the
+        # audience filter fails OPEN so the alert is never silently dropped.
+        self.push_store.register("dev-owner", "fcm-owner", "ios")
+        self.push_store.register("dev-room", "fcm-room", "android")
+        dispatcher = self._make_dispatcher()  # default fake: no loaded entry
+
+        await dispatcher.async_send_device_paired("iPad", "sub-admin", "dev-new")
+
+        tokens = {
+            p["device_token"] for p in self.session.calls[0]["json"]["payloads"]
+        }
+        self.assertEqual(tokens, {"fcm-owner", "fcm-room"})
+
+    async def test_device_paired_never_raises(self) -> None:
+        # The enroll response must never depend on the relay: a dead relay is
+        # swallowed by the shared _dispatch path.
+        self.push_store.register("dev-owner", "fcm-owner", "ios")
+        self.session.error = aiohttp.ClientError("relay down")
+        dispatcher = self._make_dispatcher()
+
+        await dispatcher.async_send_device_paired("iPhone", "user", "dev-new")
+        # No exception escaped; nothing accepted by the (dead) relay.
 
 
 class WidgetRelevanceMatrixTests(unittest.TestCase):

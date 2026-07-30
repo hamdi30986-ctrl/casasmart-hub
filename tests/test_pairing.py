@@ -279,6 +279,69 @@ class PairingTests(unittest.TestCase):
         with self.assertRaises(LanOnlyCodeError):
             self.manager.redeem(code, "tunnel-ip", remote_source=True)
 
+    # -- Phase 5 (D5): (source, purpose) throttle buckets -----------------------
+
+    def _lock_bucket(self, source, *, remote):
+        """Burn MAX_FAILURES garbage redemptions into ONE (source, purpose)
+        bucket, then prove that bucket's wall is up."""
+        for _ in range(throttle_mod.MAX_FAILURES):
+            with self.assertRaises(CodeInvalidError):
+                self.manager.redeem("WRONGCOD", source, remote_source=remote)
+        with self.assertRaises(ThrottledError):
+            self.manager.redeem("WRONGCOD", source, remote_source=remote)
+
+    def test_remote_lockout_does_not_block_lan_redemption(self):
+        # The dispatch drill: a remote guessing burst (every tunnel caller
+        # collapses onto one source string) locks the REMOTE bucket — the
+        # owner's on-LAN bootstrap claim from the SAME source string goes
+        # straight through.
+        code = self.manager.ensure_bootstrap_code()
+        self._lock_bucket("ip-shared", remote=True)
+        grant = self.manager.redeem(code, "ip-shared")  # LAN purpose
+        self.assertEqual(grant["role"], "admin")
+        self.assertEqual(grant["code_class"], CODE_CLASS_BOOTSTRAP)
+
+    def test_lan_lockout_does_not_block_remote_member_redemption(self):
+        # ...and vice versa: a LAN lockout on the source leaves legitimate
+        # remote member redemption from that source untouched.
+        self._admin = True
+        issued = self.manager.generate_code("user")
+        self._lock_bucket("ip-shared", remote=False)
+        grant = self.manager.redeem(issued["code"], "ip-shared", remote_source=True)
+        self.assertEqual(grant["role"], "user")
+        self.assertEqual(grant["code_class"], CODE_CLASS_MEMBER)
+
+    def test_locked_remote_bucket_blocks_even_a_valid_remote_code(self):
+        # The wall precedes the code lookup: during a remote lockout even a
+        # VALID member code is refused remotely (and NOT consumed) — but the
+        # same code still redeems on the LAN, whose bucket is clean.
+        self._admin = True
+        issued = self.manager.generate_code("user")
+        self._lock_bucket("ip-shared", remote=True)
+        with self.assertRaises(ThrottledError):
+            self.manager.redeem(issued["code"], "ip-shared", remote_source=True)
+        grant = self.manager.redeem(issued["code"], "ip-shared")
+        self.assertEqual(grant["role"], "user")
+
+    def test_success_clears_only_its_own_bucket(self):
+        # Buckets are fully independent: 4 remote failures survive a LAN
+        # success on the same source — the 5th remote failure still raises
+        # the remote wall (a success must not launder the other purpose's
+        # count), while the LAN side stays open throughout.
+        self._admin = True
+        issued = self.manager.generate_code("user")
+        for _ in range(throttle_mod.MAX_FAILURES - 1):
+            with self.assertRaises(CodeInvalidError):
+                self.manager.redeem("WRONGCOD", "ip-shared", remote_source=True)
+        self.manager.redeem(issued["code"], "ip-shared")  # LAN success
+        with self.assertRaises(CodeInvalidError):  # remote failure #5
+            self.manager.redeem("WRONGCOD", "ip-shared", remote_source=True)
+        with self.assertRaises(ThrottledError):  # remote wall is up
+            self.manager.redeem("WRONGCOD", "ip-shared", remote_source=True)
+        issued2 = self.manager.generate_code("user")
+        grant = self.manager.redeem(issued2["code"], "ip-shared")  # LAN open
+        self.assertEqual(grant["role"], "user")
+
 
 if __name__ == "__main__":
     unittest.main()
