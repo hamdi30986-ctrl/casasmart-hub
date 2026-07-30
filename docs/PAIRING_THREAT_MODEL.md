@@ -57,12 +57,13 @@ attacker's key.
 ## Closing the TOFU window: the QR fingerprint anchor
 
 The mitigation this document previously listed as future work is now the
-committed design (pairing redesign, payload v2 — Phases 3/4): the mint
-response carries the hub's **`identity_fingerprint`** (and `tunnel_url`)
-inside the QR / deep-link payload, and the app compares the handshake
-identity against that out-of-band fingerprint **before pinning** — local or
-remote. The trust anchor moves from "whoever answered `/handshake` first"
-to "the admin-minted payload itself":
+committed design (pairing redesign, payload v2 — hub side landed in Phase 3,
+app side is Phase 4): the mint response carries the hub's
+**`identity_fingerprint`** (and `tunnel_url`) inside the QR / deep-link
+payload, and the app compares the handshake identity against that
+out-of-band fingerprint **before pinning** — local or remote. The trust
+anchor moves from "whoever answered `/handshake` first" to "the admin-minted
+payload itself":
 
 - **LAN first contact:** the same-LAN MITM window closes — an attacker
   answering `/handshake` cannot match the fingerprint committed in the QR.
@@ -73,6 +74,24 @@ to "the admin-minted payload itself":
 
 Until the payload-v2 phases land in the app, the LAN-gated TOFU above (with
 `remote_pairing_enabled` off) remains the operative, accepted model.
+
+### Payload v2 wire format (hub side — landed, Phase 3)
+
+`POST /api/casasmart/pairing/codes` (mint) responses are strictly additive
+over v1 — every v1 field (`code_id`, `code`, `role`, `rooms`, `member_id`,
+`expires_at`, `code_class`) is unchanged; new fields:
+
+| Field | Value | Present |
+|---|---|---|
+| `payload_version` | `2` | always |
+| `identity_fingerprint` | the pinned TLS identity — SHA-256 hex over the identity key's SPKI DER, identical to the handshake's `tls.identity_fingerprint_sha256` | while the TLS listener is up |
+| `tunnel_url` | the advertised remote path (hub_config `tunnel_url`, normalized — same live read as the handshake) | only while the options `tunnel_enabled` toggle is ON (the manual emergency OFF is honored: a fresh payload never points a new phone at a deliberately parked tunnel) |
+| `qr_payload` | `casasmart://family?code=<code>&v=2[&fp=<fingerprint>][&tunnel=<percent-encoded url>]` | always |
+
+`qr_payload` is the canonical v2 deep link the admin app renders as the QR.
+Backward compatible by construction: the current (v1) app scanner reads only
+the `code` query parameter and ignores unknown ones, so a v2 QR still pairs
+a v1 phone over the LAN.
 
 ## Cloud posture at install (Phase 2)
 

@@ -37,6 +37,7 @@ import ipaddress
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from aiohttp import web
 
@@ -53,6 +54,7 @@ from .auth_engine import (
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
 from .const import (
+    CONF_TUNNEL_ENABLED,
     DOMAIN,
     EVENT_AUTH_CHANGED,
     PROVISION_SECRET_CONFIG_KEY,
@@ -68,6 +70,7 @@ from .pairing import (
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
 from .throttle import ThrottledError
+from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
@@ -473,6 +476,80 @@ class CasaSmartRecoverView(HomeAssistantView):
         )
 
 
+# Pairing payload v2 (pairing redesign Phase 3). The mint response is what
+# the admin app renders as the QR / deep link, so it now also carries what a
+# NEW phone needs to reach and verify this hub without mDNS:
+#
+#   ``identity_fingerprint``  the TLS identity the app pins at first-contact
+#                             TOFU — the SAME value the handshake serves as
+#                             ``tls.identity_fingerprint_sha256`` (SHA-256
+#                             over the identity key's SPKI DER, tls.py).
+#   ``tunnel_url``            the hub's advertised remote path (hub_config
+#                             ``tunnel_url``, same live read as the
+#                             handshake), present only while the options
+#                             toggle says the tunnel is ON.
+#   ``payload_version``       2.
+#   ``qr_payload``            the canonical v2 deep link. The current app's
+#                             scanner reads ONLY the ``code`` query param and
+#                             ignores the rest (qr_scanner_screen.dart), so a
+#                             v2 QR still pairs a v1 phone on the LAN.
+#
+# Strictly additive: every v1 field is returned unchanged, and v1 clients
+# keep building their own ``casasmart://family?code=`` links from ``code``.
+PAIRING_PAYLOAD_VERSION = 2
+# Matches the app's deep-link contract ``casasmart://<type>?code=...`` —
+# admin-minted codes are family/member invites (QrType.family).
+_DEEP_LINK_BASE = "casasmart://family"
+
+
+def _get_loaded_entry(hass: HomeAssistant):
+    """The loaded CasaSmart config entry, or None when not set up."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    return entries[0] if entries else None
+
+
+def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
+    """The additive pairing-payload-v2 fields for a freshly minted code.
+
+    Degrades to LESS information, never wrong information: any piece that
+    is not usable right now (no TLS identity, no/unusable tunnel URL,
+    tunnel manually toggled OFF) is simply absent, and the consumer falls
+    back to v1 behavior (LAN-only pairing).
+    """
+    fields: dict[str, Any] = {"payload_version": PAIRING_PAYLOAD_VERSION}
+    # ``code`` first for parity with the app's v1 link; values are URL-safe
+    # by construction (code = unambiguous alnum alphabet, fp = hex) except
+    # the tunnel URL, which is percent-encoded.
+    params = [("code", code), ("v", str(PAIRING_PAYLOAD_VERSION))]
+
+    entry = _get_loaded_entry(hass)
+    if entry is not None:
+        runtime_data = entry.runtime_data
+        tls = getattr(runtime_data, "tls", None)
+        if tls is not None:
+            fingerprint = tls.material.identity_fingerprint
+            fields["identity_fingerprint"] = fingerprint
+            params.append(("fp", fingerprint))
+        # The options toggle is the manual emergency OFF (Phase 2): while
+        # it says off, a fresh pairing payload must not send a NEW phone to
+        # a tunnel the owner deliberately parked. (The handshake keeps
+        # advertising the URL to already-paired phones whose fallback chain
+        # tolerates a dead route — different consumer, deliberate
+        # difference.) Absent key = off, same fail-closed read as the
+        # reconciler.
+        tunnel_on = bool(entry.options.get(CONF_TUNNEL_ENABLED, False))
+        tunnel_url = normalize_tunnel_url(
+            runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
+        )
+        if tunnel_on and tunnel_url is not None:
+            fields["tunnel_url"] = tunnel_url
+            params.append(("tunnel", quote(tunnel_url, safe="")))
+
+    query = "&".join(f"{key}={value}" for key, value in params)
+    fields["qr_payload"] = f"{_DEEP_LINK_BASE}?{query}"
+    return fields
+
+
 class CasaSmartPairingCodesView(HomeAssistantView):
     """POST/GET /api/casasmart/pairing/codes — mint + list pairing codes."""
 
@@ -536,7 +613,12 @@ class CasaSmartPairingCodesView(HomeAssistantView):
             issued["role"],
             " add-device" if member_id else "",
         )
-        return self.json(issued, HTTPStatus.CREATED)
+        # Payload v2 (Phase 3): additive discovery + identity fields on top
+        # of the untouched v1 ``issued`` dict.
+        return self.json(
+            {**issued, **_payload_v2_fields(self._hass, issued["code"])},
+            HTTPStatus.CREATED,
+        )
 
     async def get(self, request: web.Request) -> web.Response:
         _, error = authenticate_request(self._hass, request, "pairing.generate")

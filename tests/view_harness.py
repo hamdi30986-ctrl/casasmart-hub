@@ -125,6 +125,8 @@ class _Entry:
     def __init__(self, runtime_data) -> None:
         self.runtime_data = runtime_data
         self.entry_id = "test-entry"
+        # Mirrors ConfigEntry.options (read by the payload-v2 tunnel gate).
+        self.options: dict[str, Any] = {}
 
 
 class FakeConfigEntries:
