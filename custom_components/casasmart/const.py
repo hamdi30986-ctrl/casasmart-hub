@@ -69,6 +69,14 @@ RECOVERY_CODE_HASH_CONFIG_KEY = "recovery_code_hash"
 # creds from any source (not just the LAN). Baked into each site's Pi image
 # (platform.json). Generated once at setup, survives factory reset via hub_config.
 PROVISION_SECRET_CONFIG_KEY = "provision_secret"
+# Pairing redesign Phase 1: hub_config flag (same family as
+# ``pairing_extra_lan_cidrs`` — a per-deployment pairing-gate knob, not an
+# entry option). When strictly True, the enroll gate lets NON-LAN requests
+# through to ``pairing.redeem``, whose code-class policy still keeps the
+# bootstrap owner claim LAN-only (first claim = physical possession). Unset /
+# anything else = the 2026-06-10 LAN-only gate byte-for-byte — fail closed.
+# Stays False until the Phase 6 field matrix passes on real hardware.
+REMOTE_PAIRING_ENABLED_CONFIG_KEY = "remote_pairing_enabled"
 
 # -- Auth / enrollment (B2) -----------------------------------------------------
 # Fired on the HA bus whenever the enrolled-device set changes — a device

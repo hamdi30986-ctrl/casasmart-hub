@@ -17,8 +17,11 @@ sys.path.insert(
 import throttle as throttle_mod  # noqa: E402
 from pairing import (  # noqa: E402
     BOOTSTRAP_CODE_ID,
+    CODE_CLASS_BOOTSTRAP,
+    CODE_CLASS_MEMBER,
     CodeInvalidError,
     HubAlreadyClaimedError,
+    LanOnlyCodeError,
     PairingError,
     PairingManager,
 )
@@ -102,6 +105,7 @@ class PairingTests(unittest.TestCase):
                 "rooms": ["area_living"],
                 "code_id": issued["code_id"],
                 "member_id": None,  # a new-member code mints one at enroll
+                "code_class": CODE_CLASS_MEMBER,  # admin-minted = member class
             },
         )
 
@@ -215,6 +219,65 @@ class PairingTests(unittest.TestCase):
         )
         grant = manager2.redeem(issued["code"], "ip-1")
         self.assertEqual(grant["role"], "user")
+
+    # -- Phase 1: code classes + the remote-source policy ----------------------
+
+    def test_minted_code_carries_member_class(self):
+        issued = self.manager.generate_code("user")
+        self.assertEqual(issued["code_class"], CODE_CLASS_MEMBER)
+        [entry] = self.manager.list_codes()
+        self.assertEqual(entry["code_class"], CODE_CLASS_MEMBER)
+
+    def test_bootstrap_code_carries_bootstrap_class(self):
+        self.manager.ensure_bootstrap_code()
+        [entry] = self.manager.list_codes()
+        self.assertEqual(entry["code_class"], CODE_CLASS_BOOTSTRAP)
+
+    def test_member_code_redeems_from_remote_source(self):
+        issued = self.manager.generate_code("user", rooms=["area_living"])
+        grant = self.manager.redeem(issued["code"], "tunnel-ip", remote_source=True)
+        self.assertEqual(grant["role"], "user")
+        self.assertEqual(grant["code_class"], CODE_CLASS_MEMBER)
+
+    def test_bootstrap_remote_redeem_refused_and_not_consumed(self):
+        code = self.manager.ensure_bootstrap_code()
+        # More attempts than the throttle allows: LanOnlyCodeError every time,
+        # never ThrottledError — a code that was actually right burns no slot
+        # (HubAlreadyClaimedError posture).
+        for _ in range(throttle_mod.MAX_FAILURES + 1):
+            with self.assertRaises(LanOnlyCodeError):
+                self.manager.redeem(code, "tunnel-ip", remote_source=True)
+        # NOT consumed: the legitimate on-LAN claim still works afterwards.
+        grant = self.manager.redeem(code, "tunnel-ip")
+        self.assertEqual(grant["role"], "admin")
+        self.assertEqual(grant["code_class"], CODE_CLASS_BOOTSTRAP)
+
+    def test_remote_policy_wins_over_claimed_answer(self):
+        # A remote caller must never learn the hub's claim state: the owner
+        # code on a CLAIMED hub gets the LAN-only refusal, not "already
+        # paired" (which only the on-LAN path may see).
+        code = self.manager.ensure_bootstrap_code()
+        self._admin = True
+        with self.assertRaises(LanOnlyCodeError):
+            self.manager.redeem(code, "tunnel-ip", remote_source=True)
+
+    def test_legacy_records_without_class_fail_closed(self):
+        # Pre-Phase-1 rows have no code_class field: user/sub-admin rows
+        # classify as member (only generate_code ever minted them); anything
+        # admin-role classifies as bootstrap — fail closed.
+        table = self.storage.table("pairing_codes")
+        issued = self.manager.generate_code("user")
+        legacy = dict(table[issued["code_id"]])
+        del legacy["code_class"]
+        table[issued["code_id"]] = legacy
+        grant = self.manager.redeem(issued["code"], "tunnel-ip", remote_source=True)
+        self.assertEqual(grant["code_class"], CODE_CLASS_MEMBER)
+        code = self.manager.ensure_bootstrap_code()
+        legacy = dict(table[BOOTSTRAP_CODE_ID])
+        del legacy["code_class"]
+        table[BOOTSTRAP_CODE_ID] = legacy
+        with self.assertRaises(LanOnlyCodeError):
+            self.manager.redeem(code, "tunnel-ip", remote_source=True)
 
 
 if __name__ == "__main__":

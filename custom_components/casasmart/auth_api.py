@@ -5,8 +5,12 @@ The plan's login chain:
 - ``POST /api/casasmart/auth/enroll`` — store a device's P-256 public key
   + name. B2: gated by a **single-use pairing code** (role + room scope
   are baked into the code at generation — the phone never picks its own
-  privileges) and **LAN-only** (plan decision 2026-06-10: a leaked
-  pairing QR is useless remotely).
+  privileges) and a **code-class network policy**: with the hub's
+  ``remote_pairing_enabled`` flag OFF (the default) every enroll is
+  LAN-only (plan decision 2026-06-10: a leaked pairing QR is useless
+  remotely); with it ON, admin-minted member codes redeem from any
+  source while the bootstrap owner claim stays LAN-only (physical
+  possession — pairing redesign Phase 1).
 - ``POST /api/casasmart/auth/challenge`` — hand out a one-time nonce.
 - ``POST /api/casasmart/auth/token`` — verify the signed nonce, mint the
   JWT. Failures are deliberately generic (don't reveal whether the
@@ -48,10 +52,16 @@ from .auth_engine import (
     UserManagementError,
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
-from .const import DOMAIN, EVENT_AUTH_CHANGED, PROVISION_SECRET_CONFIG_KEY
+from .const import (
+    DOMAIN,
+    EVENT_AUTH_CHANGED,
+    PROVISION_SECRET_CONFIG_KEY,
+    REMOTE_PAIRING_ENABLED_CONFIG_KEY,
+)
 from .pairing import (
     CodeInvalidError,
     HubAlreadyClaimedError,
+    LanOnlyCodeError,
     PairingError,
     PairingManager,
 )
@@ -202,6 +212,21 @@ def get_extra_lan_cidrs(hass: HomeAssistant) -> list[str]:
     return [cidr for cidr in cidrs if isinstance(cidr, str)]
 
 
+def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
+    """The hub_config ``remote_pairing_enabled`` flag (default False).
+
+    Pairing redesign Phase 1: when True, the enroll gate lets NON-LAN
+    requests through to ``pairing.redeem``, whose code-class policy still
+    keeps the bootstrap owner claim LAN-only. Strictly ``is True`` —
+    unset or malformed means today's LAN-only behavior, fail closed.
+    """
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return False
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.hub_config.get(REMOTE_PAIRING_ENABLED_CONFIG_KEY) is True
+
+
 def authenticate_request(
     hass: HomeAssistant, request: web.Request, permission: str
 ) -> tuple[dict[str, Any] | None, web.Response | None]:
@@ -258,7 +283,10 @@ class CasaSmartEnrollView(HomeAssistantView):
     """POST /api/casasmart/auth/enroll — pair a device (B2 flow).
 
     The pairing code IS the credential: role + room scope come from the
-    code, never from the request. LAN-only — see ``is_lan_request``.
+    code, never from the request. Network policy is per CODE CLASS (Phase 1):
+    ``remote_pairing_enabled`` off (default) = LAN-only for everything —
+    see ``is_lan_request``; on = member codes redeem from any source, the
+    bootstrap owner claim stays LAN-only (``pairing.redeem`` enforces it).
     """
 
     url = f"/api/{DOMAIN}/auth/enroll"
@@ -273,8 +301,13 @@ class CasaSmartEnrollView(HomeAssistantView):
         pairing = get_pairing(self._hass)
         if engine is None or pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
+        lan_source = is_lan_request(request, get_extra_lan_cidrs(self._hass))
+        if not lan_source and not is_remote_pairing_enabled(self._hass):
             # Plan: a leaked/photographed pairing QR is useless remotely.
+            # Flag OFF (the default) keeps this refusal byte-for-byte the
+            # 2026-06-10 behavior; flag ON lets the request through to
+            # redeem, whose code-class policy still refuses the bootstrap
+            # owner claim off-LAN.
             _LOGGER.warning(
                 "Pairing attempt refused (non-LAN source: %s)", request.remote
             )
@@ -303,10 +336,26 @@ class CasaSmartEnrollView(HomeAssistantView):
         source = request.remote or "unknown"
         try:
             grant = await self._hass.async_add_executor_job(
-                pairing.redeem, payload.get("pairing_code", ""), source
+                lambda: pairing.redeem(
+                    payload.get("pairing_code", ""),
+                    source,
+                    remote_source=not lan_source,
+                )
             )
         except ThrottledError as err:
             return _throttled_response(err)
+        except LanOnlyCodeError:
+            # Valid code, LAN-only class (the bootstrap owner claim) from a
+            # remote source — same refusal as the network gate; the code is
+            # NOT consumed, so the legitimate on-LAN claim still works.
+            _LOGGER.warning(
+                "Pairing refused: LAN-only code class from remote source %s",
+                request.remote,
+            )
+            return self.json_message(
+                "Pairing is only available on the hub's own network",
+                HTTPStatus.FORBIDDEN,
+            )
         except HubAlreadyClaimedError:
             # Correct owner code, but a DIFFERENT phone on a claimed hub — a
             # clear, distinct answer, never the generic "invalid".
