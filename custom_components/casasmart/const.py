@@ -49,11 +49,14 @@ HUB_NAME_CONFIG_KEY = "hub_name"
 # options flow. The contract is desired-state reconciliation — these record
 # what the tunnel SHOULD be; a background reconciler enforces it against the
 # cloudflared add-on via the Supervisor API (started + boot=auto when enabled,
-# stopped + boot=manual when disabled). The config flow seeds
-# ``tunnel_enabled: False`` whenever a domain is provided, so a fresh install
-# auto-stops the tunnel — pairing must be LAN-only (cloudflared traffic reaches
-# HA from loopback, which the LAN gate refuses; a phone on home WiFi that
-# resolves the CF domain would route out and back and get blocked).
+# stopped + boot=manual when disabled). Pairing redesign Phase 2: the config
+# flow (and the set_tunnel_url service mirror) seeds ``tunnel_enabled: True``
+# whenever a domain is provided — cloud stays on from install. The old
+# auto-disable (seed False, e3346eb) existed because the legacy app could
+# route pairing via the CF domain into the LAN gate; the current app pairs
+# against the hub's LAN address directly (mDNS → pinned TLS), so an active
+# tunnel no longer collides with pairing. The options toggle stays as a
+# manual emergency off-switch — the hub never disables the tunnel itself.
 # ``hub_config["tunnel_url"]`` stays the canonical *advertised* URL (tunnel.py);
 # setup/options-update derives it from the domain below.
 CONF_CLOUDFLARE_DOMAIN = "cloudflare_domain"

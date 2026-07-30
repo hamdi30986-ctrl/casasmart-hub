@@ -979,8 +979,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         URL is advertised on the very next handshake, and a reload would
         needlessly drop live app WS connections. A bare-origin URL is also
         mirrored into the entry options so the options flow shows reality;
-        a NEW domain seeds tunnel_enabled=False (same contract as setup:
-        fresh tunnel domains start disabled for LAN-only pairing).
+        a NEW domain seeds tunnel_enabled=True (same contract as setup,
+        pairing redesign Phase 2: cloud stays on from install; setdefault
+        still respects a toggle the owner already switched off manually).
         """
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
@@ -1012,7 +1013,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         if domain is not None and entry.options.get(CONF_CLOUDFLARE_DOMAIN) != domain:
             new_options = dict(entry.options)
             new_options[CONF_CLOUDFLARE_DOMAIN] = domain
-            new_options.setdefault(CONF_TUNNEL_ENABLED, False)
+            new_options.setdefault(CONF_TUNNEL_ENABLED, True)
             # Fires the update listener -> sync (no-op, same URL) + reconcile.
             hass.config_entries.async_update_entry(entry, options=new_options)
         elif domain is None:

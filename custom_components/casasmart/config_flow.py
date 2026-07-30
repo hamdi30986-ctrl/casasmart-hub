@@ -2,12 +2,14 @@
 
 One hub per HA instance (`single_config_entry` in the manifest). Setup asks
 one optional question — the hub's Cloudflare tunnel domain. Providing it
-seeds ``tunnel_enabled: False`` in the entry options, which the reconciler
-in ``__init__.py`` enforces by stopping the cloudflared add-on: pairing
-must be LAN-only (an active tunnel routes even local phones through
-Cloudflare, where the LAN gate refuses them), so a fresh install always
-starts with the tunnel down. The gear-icon options flow edits the domain
-and toggles the tunnel back on once pairing is done.
+seeds ``tunnel_enabled: True`` in the entry options, which the reconciler
+in ``__init__.py`` enforces by starting the cloudflared add-on: cloud stays
+on from day one (pairing redesign Phase 2). Pairing does not need the
+tunnel down — the app pairs against the hub's LAN address directly (mDNS →
+pinned TLS), never via the Cloudflare domain, and the enroll gate keeps its
+own policy (LAN-only unless ``remote_pairing_enabled``, ``auth_api.py``).
+The gear-icon options flow edits the domain and keeps the on/off toggle as
+a manual emergency switch — the hub never flips it off by itself.
 """
 
 from __future__ import annotations
@@ -67,15 +69,17 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
             if domain is None:
                 errors[CONF_CLOUDFLARE_DOMAIN] = "invalid_domain"
             else:
-                # tunnel_enabled=False IS the auto-disable feature: the
-                # first reconcile after setup stops the add-on (and parks
-                # it at boot=manual) so pairing happens over LAN only.
+                # Phase 2: cloud stays on. Seeding True (not omitting the
+                # key — the reconciler defaults an absent key to False and
+                # would stop the add-on) means the first reconcile after
+                # setup starts cloudflared + boot=auto. The options toggle
+                # below remains the manual emergency off-switch.
                 return self.async_create_entry(
                     title="CasaSmart Hub",
                     data={},
                     options={
                         CONF_CLOUDFLARE_DOMAIN: domain,
-                        CONF_TUNNEL_ENABLED: False,
+                        CONF_TUNNEL_ENABLED: True,
                     },
                 )
 

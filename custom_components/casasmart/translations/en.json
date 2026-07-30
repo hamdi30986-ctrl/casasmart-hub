@@ -8,7 +8,7 @@
           "cloudflare_domain": "Cloudflare tunnel domain (optional)"
         },
         "data_description": {
-          "cloudflare_domain": "The hub's public Cloudflare tunnel hostname, e.g. my-ha.example.com — leave empty if this hub has no tunnel. The tunnel is automatically disabled after setup (pairing must happen over the LAN); re-enable it from the integration options once pairing is done."
+          "cloudflare_domain": "The hub's public Cloudflare tunnel hostname, e.g. my-ha.example.com — leave empty if this hub has no tunnel. The tunnel is enabled right away and stays on (pairing happens over the LAN address directly, so remote access never has to be interrupted); the integration options keep a manual on/off switch for emergencies."
         }
       }
     },
@@ -23,7 +23,7 @@
     "step": {
       "init": {
         "title": "CasaSmart Hub options",
-        "description": "Cloudflare remote access for this hub.\n\n{tunnel_status}\n\nKeep the tunnel OFF while pairing new devices — pairing is LAN-only, and an active tunnel can route even local phones through Cloudflare where they get blocked.",
+        "description": "Cloudflare remote access for this hub.\n\n{tunnel_status}\n\nThe tunnel normally stays ON — phones pair against the hub's LAN address directly, so pairing does not require turning it off. Use this switch only as a manual emergency cut-off; the hub will keep enforcing whatever you set here.",
         "data": {
           "cloudflare_domain": "Cloudflare tunnel domain",
           "tunnel_enabled": "Cloudflare tunnel enabled"
