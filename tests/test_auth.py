@@ -464,6 +464,47 @@ class EngineTests(unittest.TestCase):
             self.engine.delete_device(device_id)
         self.assertTrue(self.engine.has_admin())
 
+    def test_leave_hub_lets_the_admin_hand_the_hub_back(self):
+        # The counterpart to test_admin_is_untouchable: an admin cannot be
+        # EVICTED by someone else, but it can remove ITSELF. Without this the
+        # owner's "Remove Hub" was unrecoverable — the hub kept the phone
+        # enrolled as its one admin, and a hub with an admin never mints
+        # another, so no phone could administer it again short of the recovery
+        # card or the physical reset button.
+        device_id = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        token = self._login(device_id)["token"]
+        self.assertTrue(self.engine.has_admin())
+
+        self.engine.leave_hub(device_id)
+
+        self.assertFalse(self.engine.has_admin())
+        self.assertIsNone(self.engine.get_device(device_id))
+        # Its tokens die instantly, same as any unpair.
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)
+        # And the hub is claimable again by a fresh admin enrollment.
+        self.engine.enroll_device("New Owner", "admin", self.public_pem)
+        self.assertTrue(self.engine.has_admin())
+
+    def test_leave_hub_is_not_a_way_to_evict_anyone_else(self):
+        # leave_hub is only ever called with the caller's OWN device id (the
+        # view takes it from the token subject, never from the body), so the
+        # admin guard it skips can't be turned on a third party. Removing a
+        # non-admin behaves exactly like the admin-driven unpair.
+        _, other_pem = make_keypair()
+        admin_id = self.engine.enroll_device("Owner", "admin", self.public_pem)
+        user_id = self.engine.enroll_device("Kid", "user", other_pem)
+
+        self.engine.leave_hub(user_id)
+
+        self.assertIsNone(self.engine.get_device(user_id))
+        self.assertIsNotNone(self.engine.get_device(admin_id))
+        self.assertTrue(self.engine.has_admin())
+
+    def test_leave_hub_unknown_device(self):
+        with self.assertRaises(UnknownDeviceError):
+            self.engine.leave_hub("dev-nope")
+
     def test_no_promotion_to_admin(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
         with self.assertRaises(UserManagementError):

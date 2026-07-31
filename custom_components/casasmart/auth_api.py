@@ -55,6 +55,7 @@ from .auth_engine import (
 )
 from .auth_tokens import ROLE_ADMIN, TokenError
 from .const import (
+    BOOTSTRAP_CODE_HASH_CONFIG_KEY,
     CONF_TUNNEL_ENABLED,
     DOMAIN,
     EVENT_AUTH_CHANGED,
@@ -806,6 +807,101 @@ class CasaSmartUserView(HomeAssistantView):
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json({"unpaired": device_id})
+
+
+class CasaSmartUnpairSelfView(HomeAssistantView):
+    """POST /api/casasmart/auth/unpair-self — this device hands the hub back.
+
+    The app's "Remove Hub" used to be purely phone-local: it wiped the app's
+    own data and (until the matching app fix) destroyed the phone's keypair,
+    but never told the hub anything. The hub therefore kept the phone enrolled
+    as its one admin — and a hub that HAS an admin will not enroll a second,
+    only issues sub-admin/user codes, and drops the bootstrap owner code. The
+    result was a hub no phone could ever administer again without the engraved
+    recovery card or physical access to the reset button. A site visit, for one
+    tap in Settings.
+
+    The caller's own token is the authority: it proves possession of this
+    device's private key, so any role may remove ITSELF (the admin included —
+    ``leave_hub`` skips the guard that stops an admin being evicted by someone
+    else). No device id is accepted from the body; the subject of the token is
+    the only device that can be unpaired here, so this can never become a way
+    to evict somebody else.
+
+    When the departing device was the last admin, the hub's PERMANENT sticker
+    code is re-armed from its stored hash — not rotated. The code printed on
+    the hub when it shipped starts working again, so the owner re-claims it by
+    typing what is on the box. (The factory-reset button rotates instead,
+    because there the intent is to invalidate the old sticker.)
+    """
+
+    url = f"/api/{DOMAIN}/auth/unpair-self"
+    name = f"api:{DOMAIN}:auth:unpair-self"
+    requires_auth = False  # CasaSmart JWT gate below
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        # Every role may leave; the permission is the weakest one every
+        # enrolled device holds, so the gate is really "a valid session".
+        claims, error = authenticate_request(self._hass, request, "devices.read")
+        if error is not None:
+            return error
+        engine = get_engine(self._hass)
+        if engine is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+
+        device_id = claims["sub"]
+        try:
+            member_id = await self._hass.async_add_executor_job(
+                engine.leave_hub, device_id
+            )
+        except UnknownDeviceError:
+            # Already gone — the app's teardown is idempotent, and a retry
+            # after a dropped response must not look like a failure.
+            return self.json({"unpaired": device_id, "hub_unclaimed": False})
+
+        push = _get_push_store(self._hass)
+        if push is not None:
+            await self._hass.async_add_executor_job(push.unregister, device_id)
+
+        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
+        runtime = entries[0].runtime_data if entries else None
+        unclaimed = False
+        if runtime is not None:
+
+            def _finish_leave() -> bool:
+                # Same orphan rule as an admin-driven unpair: a person's
+                # member_id-keyed rows go only when their LAST device leaves.
+                if engine.member_device_count(member_id) == 0:
+                    runtime.registry.delete_favorites(member_id)
+                    runtime.user_settings.delete(member_id)
+                if engine.has_admin():
+                    return False
+                # Last admin gone: re-arm the PERMANENT sticker code from its
+                # stored hash so the owner can re-claim with the printed code.
+                code_hash = runtime.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
+                if not code_hash:
+                    # Pre-sticker hub: nothing to re-install, and minting a
+                    # random code nobody can read would help no one. Say so —
+                    # recovery here is the hub's own reset button.
+                    _LOGGER.warning(
+                        "Last admin left but no stored bootstrap hash — "
+                        "re-claim needs the hub's reset button"
+                    )
+                    return True
+                runtime.pairing.install_bootstrap_hash(code_hash)
+                _LOGGER.info(
+                    "Last admin left — hub is unclaimed and the permanent "
+                    "pairing code is armed again"
+                )
+                return True
+
+            unclaimed = await self._hass.async_add_executor_job(_finish_leave)
+
+        self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
+        return self.json({"unpaired": device_id, "hub_unclaimed": unclaimed})
 
 
 class CasaSmartChallengeView(HomeAssistantView):

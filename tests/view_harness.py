@@ -145,6 +145,12 @@ class _Runtime:
         self.audio = audio
         self.hub_config = hub_config
         self.pairing = None
+        # Present-but-inert unless a suite wires them: the unpair paths prune
+        # a departing member's per-person rows through user_settings, drop its
+        # push token through push, and the self-unpair path re-arms the sticker
+        # code through pairing. Mirrors CasaSmartRuntimeData's defaults.
+        self.user_settings = None
+        self.push = None
         # Present-but-inert in view tests (no live MQTT/loop): the athan PUT
         # handler calls get_athan_scheduler(); None means "skip the reschedule".
         self.athan_scheduler = None

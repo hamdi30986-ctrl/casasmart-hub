@@ -693,6 +693,41 @@ class AuthEngine:
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
         return member_id
 
+    def leave_hub(self, device_id: str) -> str:
+        """Unpair a device AT ITS OWN REQUEST — the admin included.
+
+        Deliberately skips :meth:`delete_device`'s admin guard, and is the
+        ONLY path that may: that guard exists so one admin can't be evicted by
+        somebody else, which is not what is happening here — the caller proved
+        possession of this device's private key to get the token that names it.
+
+        Without this, "Remove Hub" on the owner's phone was unrecoverable. The
+        hub kept the phone enrolled as its one admin, and a hub that HAS an
+        admin refuses to enroll another, only ever issues sub-admin/user codes,
+        and kills the bootstrap owner code — so nobody could become admin
+        again short of the engraved recovery card or physically holding the
+        reset button. Letting the owner hand the hub back makes it re-claimable
+        with the sticker code that shipped with it.
+
+        Returns the departing device's ``member_id`` so the caller can prune
+        that person's rows if this was their last device — same contract as
+        :meth:`delete_device`.
+        """
+        with self._lock:
+            record = self._devices.get(device_id)
+            if record is None:
+                raise UnknownDeviceError("Unknown device")
+            member_id = record.get("member_id") or device_id
+            del self._devices[device_id]
+            self._device_cache.pop(device_id, None)
+            self.throttle.clear(device_id)
+        _LOGGER.info(
+            "Device %s left the hub at its own request (role=%s) — all tokens dead",
+            device_id,
+            record.get("role"),
+        )
+        return member_id
+
     def wipe_all_devices(self) -> list[str]:
         """Unpair EVERY device — admin included. The pairing factory reset.
 
