@@ -3,17 +3,18 @@
 ``async_call_later`` is CONTROLLABLE: every schedule is recorded into
 ``calls`` as ``{"delay", "action", "cancelled"}`` and the returned cancel
 handle flips ``cancelled``. A test fires the timer by invoking
-``calls[i]["action"](None)`` itself (see the push dispatcher's
-WidgetRefreshTests). Isolation hook: call :func:`reset` (or
+``calls[i]["action"](None)`` itself. Isolation hook: call :func:`reset` (or
 ``calls.clear()``) at the top of a test — ``calls`` is cleared in place and
 never rebound, so ``import homeassistant.helpers.event as ev`` aliases stay
 live across suites.
 
-Suites that want DIFFERENT timer semantics (the alarm adapter/panel drive
-their own recording fake with a hand-cranked clock) keep patching the
-*binding in the module under test* — e.g.
-``mock.patch.object(alarm_adapter, "async_call_later", fake)`` — exactly as
-before; this default only serves callers that did not patch.
+Suites patch the *binding in the module under test* — e.g.
+``mock.patch.object(alarm_adapter, "async_call_later", fake)``. That is now
+the rule rather than the exception: a suite leaning on this default only runs
+where this stub won, so against real Home Assistant in the hub container the
+genuine scheduler got called with a fake hass and raised. Every timer-driving
+suite (alarm adapter, alarm panel, push dispatcher, athan) owns its fake; this
+default just keeps an unpatched caller from exploding.
 
 The ``async_track_*`` trackers are inert (return a no-op unsubscribe): the
 athan suite patches ``A.async_track_point_in_time`` where it wants to

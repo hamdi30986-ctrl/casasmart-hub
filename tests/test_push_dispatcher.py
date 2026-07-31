@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _CC = Path(__file__).resolve().parent.parent / "custom_components"
 _PKG = _CC / "casasmart"
@@ -32,9 +33,15 @@ sys.path.insert(0, str(_CC))
 # -- shared homeassistant stubs (installed before importing the dispatcher) ---
 # The dispatcher's owner-only path lazily imports auth_api, which needs
 # ``homeassistant.components.persistent_notification`` + ``components.http`` —
-# only the package-shaped shared stub can serve those. Its
-# ``helpers.event.async_call_later`` is the controllable one: it records each
-# scheduled flush in ``ev.calls`` so the WidgetRefreshTests fire it manually.
+# only the package-shaped shared stub can serve those.
+#
+# The widget-flush timer is driven through ``_FakeTimer`` below, patched onto
+# the binding INSIDE push_dispatcher (the same discipline the alarm adapter and
+# panel suites use). It used to lean on the shared stub's recording
+# ``helpers.event.async_call_later`` default, which meant the suite only ran
+# where that stub had won — against real Home Assistant in the hub container
+# the real scheduler was called with a FakeHass and blew up before a single
+# assertion ran.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hastubs import install_casasmart_package, install_homeassistant_stubs  # noqa: E402
 
@@ -47,6 +54,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
     Ed25519PublicKey,
 )
 
+import casasmart.push_dispatcher as pd_mod  # noqa: E402
 from casasmart.push_crypto import PushSigner  # noqa: E402
 from casasmart.push_dispatcher import (  # noqa: E402
     PRIORITY_CRITICAL,
@@ -79,6 +87,28 @@ class FakeStates:
         self._states[entity_id] = state
 
 
+class _FakeTimer:
+    """Recording stand-in for ``async_call_later``.
+
+    Same shape the shared stub used to provide (``calls`` entries carrying
+    ``delay`` / ``action`` / ``cancelled``), so the WidgetRefreshTests still
+    fire a scheduled flush with ``calls[i]["action"](None)`` — but owned by
+    this suite, so it does not depend on which homeassistant is installed.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, hass, delay, action):
+        rec = {"delay": delay, "action": action, "cancelled": False}
+        self.calls.append(rec)
+
+        def _cancel() -> None:
+            rec["cancelled"] = True
+
+        return _cancel
+
+
 class FakeBus:
     def __init__(self) -> None:
         self._listeners: dict[str, list] = {}
@@ -95,7 +125,7 @@ class FakeBus:
         from homeassistant.core import Event
 
         for handler in list(self._listeners.get(event_type, [])):
-            handler(Event(data))
+            handler(Event(event_type, data))
 
 
 class _FakeConfigEntries:
@@ -167,6 +197,17 @@ _HUB_ID = "a1b2c3d4deadbeef"
 
 class DispatcherTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        # Controllable widget-flush timer: every schedule is recorded and the
+        # test fires it by calling `self.timer.calls[i]["action"](None)`.
+        # Patched on the module under test so it holds in BOTH environments
+        # (stubbed locally, real Home Assistant in the hub container).
+        self.timer = _FakeTimer()
+        self._timer_patch = mock.patch.object(
+            pd_mod, "async_call_later", self.timer
+        )
+        self._timer_patch.start()
+        self.addCleanup(self._timer_patch.stop)
+
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.storage = HubStorage(Path(self._tmp.name) / "test.db")
@@ -478,23 +519,20 @@ class WidgetRefreshTests(DispatcherTestCase):
         }
 
     async def test_control_edges_coalesce_into_one_silent_push(self) -> None:
-        import homeassistant.helpers.event as ev
-
-        ev.calls.clear()
         self.push_store.register("dev-1", "fcm-1", "ios")
         self._make_dispatcher()
 
         # Two settled control edges within the window → ONE flush scheduled.
         self.hass.bus.fire("state_changed", self._ev("light.kitchen", "off", "on"))
         self.hass.bus.fire("state_changed", self._ev("switch.fan", "off", "on"))
-        self.assertEqual(len(ev.calls), 1, "coalesced to a single flush")
+        self.assertEqual(len(self.timer.calls), 1, "coalesced to a single flush")
 
         # Nothing sent until the coalescing window elapses.
         await self._drain()
         self.assertEqual(len(self.session.calls), 0)
 
         # Fire the timer → exactly one silent update_widgets push.
-        ev.calls[0]["action"](None)
+        self.timer.calls[0]["action"](None)
         await self._drain()
         self.assertEqual(len(self.session.calls), 1)
         body = self.session.calls[0]["json"]
@@ -506,14 +544,11 @@ class WidgetRefreshTests(DispatcherTestCase):
         self._verify_signature(body)
 
     async def test_widget_push_goes_house_wide_not_owner_only(self) -> None:
-        import homeassistant.helpers.event as ev
-
-        ev.calls.clear()
         self.push_store.register("dev-owner", "fcm-owner", "ios")
         self.push_store.register("dev-room", "fcm-room", "android")
         self._make_dispatcher()
         self.hass.bus.fire("state_changed", self._ev("light.kitchen", "off", "on"))
-        ev.calls[0]["action"](None)
+        self.timer.calls[0]["action"](None)
         await self._drain()
 
         tokens = {
@@ -522,9 +557,6 @@ class WidgetRefreshTests(DispatcherTestCase):
         self.assertEqual(tokens, {"fcm-owner", "fcm-room"})
 
     async def test_irrelevant_changes_do_not_schedule(self) -> None:
-        import homeassistant.helpers.event as ev
-
-        ev.calls.clear()
         self.push_store.register("dev-1", "fcm-1", "ios")
         self._make_dispatcher()
 
@@ -533,7 +565,7 @@ class WidgetRefreshTests(DispatcherTestCase):
         self.hass.bus.fire("state_changed", self._ev("sensor.power", "100", "105"))
         self.hass.bus.fire("state_changed", self._ev("light.kitchen", "on", "on"))
         self.hass.bus.fire("state_changed", self._ev("light.kitchen", "unavailable", "on"))
-        self.assertEqual(len(ev.calls), 0)
+        self.assertEqual(len(self.timer.calls), 0)
         await self._drain()
         self.assertEqual(len(self.session.calls), 0)
 

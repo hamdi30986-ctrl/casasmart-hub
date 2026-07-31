@@ -151,6 +151,18 @@ class AlarmPanelTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.hass = _FakeHass()
         self.panel = CasaSmartAlarmPanel(self.hass, "entry-123", self.engine)
+        # Count repaints on the INSTANCE rather than through the stub base
+        # class's write_count. The real HA Entity.async_write_ha_state needs a
+        # fully registered entity (hass, platform, entity_id) and raises
+        # "Attribute hass is None" without one — so counting via the stub tied
+        # this suite to the stubbed environment. The panel only ever calls the
+        # method, so overriding it here works against both.
+        self.writes = 0
+
+        def _count_write() -> None:
+            self.writes += 1
+
+        self.panel.async_write_ha_state = _count_write
         await self.panel.async_added_to_hass()
 
     # -- state mapping ---------------------------------------------------------
@@ -197,11 +209,11 @@ class AlarmPanelTestCase(unittest.IsolatedAsyncioTestCase):
     # -- app-driven change reflects on the panel -------------------------------
 
     async def test_external_alarm_changed_repaints_panel(self):
-        before = self.panel.write_count
+        before = self.writes
         # Simulate the REST API firing the event after an app-driven arm.
         self.engine.arm(MODE_AWAY, exit_delay=0)
         self.hass.bus.async_fire(EVENT_ALARM_CHANGED, {})
-        self.assertGreater(self.panel.write_count, before)
+        self.assertGreater(self.writes, before)
         self.assertEqual(self.panel.alarm_state, State.ARMED_AWAY)
 
     # -- arming refresh timer --------------------------------------------------

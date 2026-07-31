@@ -21,13 +21,14 @@ class AlarmControlPanelState(enum.StrEnum):
 
 
 class AlarmControlPanelEntity:
-    """Minimal base: records async_write_ha_state calls.
+    """Minimal base: ``async_write_ha_state`` is a no-op the panel can call.
 
-    ``write_count`` is a class attribute (not set in __init__) because the
-    real-world entity, like ours, does not call ``super().__init__()``.
+    It does NOT count writes any more. A suite that wants to observe repaints
+    overrides the method on the instance (see test_alarm_control_panel), which
+    works against real Home Assistant too — counting through this base tied
+    the assertion to the stubbed environment, where the real Entity's
+    ``async_write_ha_state`` would have demanded a fully registered entity.
     """
 
-    write_count = 0
-
     def async_write_ha_state(self) -> None:
-        self.write_count += 1
+        """No-op — the panel only needs the call to succeed."""

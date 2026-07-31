@@ -101,7 +101,7 @@ class _Bus:
 
     def emit(self, event_type, data):
         for callback in list(self.listeners.get(event_type, [])):
-            callback(Event(data))
+            callback(Event(event_type, data))
 
 
 class _Services:

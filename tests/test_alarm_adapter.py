@@ -206,10 +206,10 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
     def _emit(self, event_type: str, data: dict) -> None:
         """Dispatch through the adapter's REAL registered listeners."""
-        from homeassistant.core import Event  # the stub
+        from homeassistant.core import Event  # stub locally, real HA in-container
 
         for cb in list(self.hass.bus.listeners.get(event_type, [])):
-            cb(Event(data))
+            cb(Event(event_type, data))
 
     async def _drain(self) -> None:
         """Run every coroutine the adapter scheduled via async_create_task."""

@@ -99,6 +99,14 @@ class _RestoresModuleGlobals:
             A.async_track_point_in_time,
             A.async_track_time_change,
         )
+        # Default both HA trackers to inert fakes. These used to fall through
+        # to the shared stub's no-op defaults, which meant any test that didn't
+        # install its own tracker only worked where the stub had won — against
+        # real Home Assistant the genuine scheduler ran and demanded a real
+        # ``hass.loop`` off the suite's ``_Hass`` fake. Tests that OBSERVE
+        # arming still overwrite these with recording versions.
+        A.async_track_point_in_time = lambda hass, action, when: (lambda: None)
+        A.async_track_time_change = lambda hass, action, **kw: (lambda: None)
 
     def tearDown(self):
         (
