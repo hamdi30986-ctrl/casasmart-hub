@@ -15,7 +15,8 @@ from typing import Any, Mapping
 # zigbee2mqtt's permit-join request topic. The app used to publish here
 # itself through ``mqtt.publish`` with the raw HA token — the hub now
 # owns the publish behind ``installer.manage``.
-PERMIT_JOIN_TOPIC = "zigbee2mqtt/bridge/request/permit_join"
+DEFAULT_ZIGBEE_BASE_TOPIC = "zigbee2mqtt"
+PERMIT_JOIN_TOPIC = f"{DEFAULT_ZIGBEE_BASE_TOPIC}/bridge/request/permit_join"
 DEFAULT_PERMIT_JOIN_SECONDS = 120
 MIN_PERMIT_JOIN_SECONDS = 10
 MAX_PERMIT_JOIN_SECONDS = 600
@@ -80,6 +81,77 @@ def permit_join_payload(enable: bool, duration: int) -> str:
     if enable:
         return json.dumps({"value": True, "time": duration})
     return json.dumps({"value": False})
+
+
+def permit_join_topic(base_topic: str) -> str:
+    """The permit-join request topic for one zigbee2mqtt instance."""
+    return f"{base_topic}/bridge/request/permit_join"
+
+
+def _valid_base_topic(value: Any) -> str | None:
+    """A usable z2m ``base_topic``, or None when it isn't one.
+
+    Deliberately strict. The value ends up as an MQTT publish topic, and the
+    caller is a phone (admin/sub-admin) or hub config — so wildcards (``+``,
+    ``#``), empty segments and leading/trailing slashes are refused rather
+    than normalised, and nothing outside ``[A-Za-z0-9_-]`` per segment is
+    accepted. That keeps a typo (or a hostile value) from turning permit-join
+    into a publish to an arbitrary topic.
+    """
+    if not isinstance(value, str):
+        return None
+    topic = value.strip().strip("/")
+    if not topic:
+        return None
+    segments = topic.split("/")
+    if any(not seg or not _SEGMENT_OK(seg) for seg in segments):
+        return None
+    return topic
+
+
+def _SEGMENT_OK(segment: str) -> bool:  # noqa: N802 — module-private predicate
+    return all(ch.isalnum() or ch in "_-" for ch in segment)
+
+
+def resolve_zigbee_base_topics(
+    configured: Any, requested: Any = None
+) -> list[str]:
+    """Which zigbee2mqtt instances a permit-join should open.
+
+    A villa commonly runs two or three zigbee2mqtt instances (one coordinator
+    per floor, sometimes per wing). permit_join is per-instance: publishing
+    only to the default ``zigbee2mqtt`` base topic opens floor 1's coordinator
+    and leaves every other one shut, so devices on the other floors can never
+    be paired from the app. That was the behaviour until this function existed.
+
+    * ``configured`` — the hub's ``zigbee_base_topics`` list. With no request
+      target, EVERY configured instance is opened, so an unmodified app that
+      sends no target now reaches all the coordinators instead of one.
+    * ``requested`` — a single base topic from the request body, for a client
+      that knows which instance it wants (floor -> instance mapping). It must
+      name one of the hub's KNOWN instances: a client may pick among the
+      coordinators the installer declared, never invent a topic. Anything
+      else falls back to opening them all, because the safe failure for
+      "add a device" is every coordinator listening, not none.
+    * Neither -> the single default topic, i.e. exactly the old behaviour on
+      a hub that was never configured for multi-instance.
+
+    Order is preserved and duplicates collapse, so the caller publishes once
+    per real instance.
+    """
+    topics: list[str] = []
+    if isinstance(configured, (list, tuple)):
+        for entry in configured:
+            valid = _valid_base_topic(entry)
+            if valid is not None and valid not in topics:
+                topics.append(valid)
+    if not topics:
+        topics = [DEFAULT_ZIGBEE_BASE_TOPIC]
+
+    target = _valid_base_topic(requested)
+    if target is not None and target in topics:
+        return [target]
+    return topics
 
 
 def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:

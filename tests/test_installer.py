@@ -18,6 +18,7 @@ sys.path.insert(
 from installer import (  # noqa: E402
     ALLOWED_FLOW_HANDLERS,
     DEFAULT_PERMIT_JOIN_SECONDS,
+    DEFAULT_ZIGBEE_BASE_TOPIC,
     MAX_PERMIT_JOIN_SECONDS,
     MIN_PERMIT_JOIN_SECONDS,
     PERMIT_JOIN_TOPIC,
@@ -27,9 +28,104 @@ from installer import (  # noqa: E402
     parse_permit_join,
     parse_remote_command,
     permit_join_payload,
+    permit_join_topic,
+    resolve_zigbee_base_topics,
     serialize_flow_result,
     serialize_progress_flow,
 )
+
+
+class TestZigbeeInstances(unittest.TestCase):
+    """permit_join is PER zigbee2mqtt instance.
+
+    A villa runs a coordinator per floor. Publishing only to the default base
+    topic opened floor 1 and left every other coordinator shut, so devices
+    upstairs could not be paired from the app at all.
+    """
+
+    def test_unconfigured_hub_keeps_the_single_default_instance(self):
+        for configured in (None, [], "zigbee2mqtt", {}, 7):
+            self.assertEqual(
+                resolve_zigbee_base_topics(configured),
+                [DEFAULT_ZIGBEE_BASE_TOPIC],
+                msg=f"configured={configured!r}",
+            )
+
+    def test_every_configured_instance_is_opened(self):
+        # No target from the app -> all three coordinators, so an unmodified
+        # client stops being limited to floor 1.
+        self.assertEqual(
+            resolve_zigbee_base_topics(
+                ["zigbee2mqtt", "zigbee2mqtt_f2", "zigbee2mqtt_f3"]
+            ),
+            ["zigbee2mqtt", "zigbee2mqtt_f2", "zigbee2mqtt_f3"],
+        )
+
+    def test_order_is_kept_and_duplicates_collapse(self):
+        self.assertEqual(
+            resolve_zigbee_base_topics(["z_b", "z_a", "z_b", " z_a "]),
+            ["z_b", "z_a"],
+        )
+
+    def test_a_requested_known_instance_narrows_to_just_that_one(self):
+        self.assertEqual(
+            resolve_zigbee_base_topics(["zigbee2mqtt", "z_f2"], "z_f2"),
+            ["z_f2"],
+        )
+
+    def test_malformed_entries_are_dropped_not_normalised(self):
+        self.assertEqual(
+            resolve_zigbee_base_topics(["", "  ", None, 5, "ok_one"]),
+            ["ok_one"],
+        )
+
+    def test_a_client_cannot_invent_an_instance(self):
+        # The request only PICKS among the coordinators the installer
+        # declared. An unknown target falls back to opening all of them —
+        # the safe failure for "add a device" is every coordinator
+        # listening, not a publish to a topic nobody vetted.
+        configured = ["zigbee2mqtt", "z_f2"]
+        self.assertEqual(
+            resolve_zigbee_base_topics(configured, "z_f9"), configured
+        )
+        self.assertEqual(
+            resolve_zigbee_base_topics(configured, "homeassistant/switch/x/set"),
+            configured,
+        )
+
+    def test_wildcards_and_junk_never_reach_the_broker(self):
+        # The value becomes part of an MQTT publish topic, so a typo — or a
+        # hostile value from an admin-authenticated client — must be refused
+        # rather than normalised into something publishable.
+        for hostile in (
+            "#",
+            "+",
+            "zigbee2mqtt/#",
+            "zigbee2mqtt/+/set",
+            "z/../../other",
+            "z topic",
+            "",
+        ):
+            self.assertEqual(
+                resolve_zigbee_base_topics(None, hostile),
+                [DEFAULT_ZIGBEE_BASE_TOPIC],
+                msg=f"hostile={hostile!r} must not be used as a topic",
+            )
+            self.assertEqual(
+                resolve_zigbee_base_topics([hostile]),
+                [DEFAULT_ZIGBEE_BASE_TOPIC],
+                msg=f"hostile={hostile!r} must not survive the config list",
+            )
+
+    def test_topic_is_built_per_instance(self):
+        self.assertEqual(
+            permit_join_topic("zigbee2mqtt_f2"),
+            "zigbee2mqtt_f2/bridge/request/permit_join",
+        )
+        # The default instance still produces the exact legacy topic.
+        self.assertEqual(
+            permit_join_topic(DEFAULT_ZIGBEE_BASE_TOPIC), PERMIT_JOIN_TOPIC
+        )
 
 
 class TestPermitJoin(unittest.TestCase):

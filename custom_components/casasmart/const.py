@@ -81,6 +81,14 @@ PROVISION_SECRET_CONFIG_KEY = "provision_secret"
 # Stays False until the Phase 6 field matrix passes on real hardware.
 REMOTE_PAIRING_ENABLED_CONFIG_KEY = "remote_pairing_enabled"
 
+# Every zigbee2mqtt instance on this hub, by base_topic — e.g.
+# ["zigbee2mqtt", "zigbee2mqtt_f2", "zigbee2mqtt_f3"]. A villa runs one
+# coordinator per floor and permit_join is PER instance, so with only the
+# default topic the app opened floor 1 and left the others shut: devices
+# upstairs could never be paired. Unset / malformed = just the default
+# ["zigbee2mqtt"], i.e. the single-coordinator behaviour, unchanged.
+ZIGBEE_BASE_TOPICS_CONFIG_KEY = "zigbee_base_topics"
+
 # -- Auth / enrollment (B2) -----------------------------------------------------
 # Fired on the HA bus whenever the enrolled-device set changes — a device
 # pairs, gets its role/rooms edited, is unpaired, the admin is recovered, or

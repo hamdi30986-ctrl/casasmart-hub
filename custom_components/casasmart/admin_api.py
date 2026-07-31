@@ -48,16 +48,17 @@ from homeassistant.helpers import (
 )
 
 from .auth_api import authenticate_request, json_body
-from .const import DOMAIN
+from .const import DOMAIN, ZIGBEE_BASE_TOPICS_CONFIG_KEY
 from .installer import (
     ALLOWED_FLOW_HANDLERS,
-    PERMIT_JOIN_TOPIC,
     InstallerError,
     filter_state_attributes,
     parse_entity_patch,
     parse_permit_join,
     parse_remote_command,
     permit_join_payload,
+    permit_join_topic,
+    resolve_zigbee_base_topics,
     serialize_flow_result,
     serialize_progress_flow,
 )
@@ -127,28 +128,49 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "MQTT is not available on this hub",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
-        failed = await self._call_service(
-            "mqtt",
-            "publish",
-            {
-                "topic": PERMIT_JOIN_TOPIC,
-                "payload": permit_join_payload(enable, duration),
-            },
+        # permit_join is PER zigbee2mqtt instance. A villa runs one
+        # coordinator per floor, so publishing only to the default base topic
+        # opened floor 1 and left the rest shut — devices upstairs simply
+        # could not be paired from the app. Open every configured instance
+        # (or the one the caller asked for).
+        topics = resolve_zigbee_base_topics(
+            self._zigbee_base_topics(), payload.get("base_topic")
         )
-        if failed is not None:
-            return failed
+        message = permit_join_payload(enable, duration)
+        for base_topic in topics:
+            failed = await self._call_service(
+                "mqtt",
+                "publish",
+                {
+                    "topic": permit_join_topic(base_topic),
+                    "payload": message,
+                },
+            )
+            if failed is not None:
+                return failed
         _LOGGER.info(
-            "Zigbee permit_join %s (duration=%s)",
+            "Zigbee permit_join %s (duration=%s) on %s",
             "enabled" if enable else "disabled",
             duration if enable else None,
+            ", ".join(topics),
         )
         return self.json(
             {
                 "ok": True,
                 "enable": enable,
                 "duration": duration if enable else None,
+                # Which coordinators actually got the message — an installer
+                # commissioning a multi-floor villa needs to see this.
+                "instances": topics,
             }
         )
+
+    def _zigbee_base_topics(self) -> Any:
+        """The hub's configured zigbee2mqtt base topics (None when unset)."""
+        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            return None
+        return entries[0].runtime_data.hub_config.get(ZIGBEE_BASE_TOPICS_CONFIG_KEY)
 
 
 class CasaSmartAdminRegistryView(_AdminView):
