@@ -103,6 +103,11 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     # B16 3c-3: recorded state history — read-only, same audience as the
     # device list (the energy screen is a user-facing surface).
     "history.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    # Energy Saving status is household-visible, but only the owner may
+    # activate/deactivate/re-apply a level or edit its setup wizard.
+    "energy.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
+    "energy.control": (ROLE_ADMIN,),
+    "energy.manage": (ROLE_ADMIN,),
     "users.manage": (ROLE_ADMIN,),
     "pairing.generate": (ROLE_ADMIN,),
     # B17: organize the home (floors/rooms/assignments/scenes). Users are

@@ -42,8 +42,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
 from .auth_api import authenticate_request, get_engine, json_body
+from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .entity_bridge import CommandError, validate_command
+from .energy_runtime import energy_lockout_applies
 from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
 from .registry import (
     UNSET,
@@ -70,6 +72,11 @@ def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.registry
+
+
+def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    return entries[0].runtime_data if entries else None
 
 
 class _RegistryView(HomeAssistantView):
@@ -108,6 +115,19 @@ class _RegistryView(HomeAssistantView):
         return self.json_message(
             "Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR
         )
+
+    def _energy_flag_reject(
+        self, claims: dict[str, Any], payload: dict[str, Any]
+    ) -> web.Response | None:
+        if (
+            "works_during_energy_saving" in payload
+            and not AuthEngine.authorize(claims, "energy.manage")
+        ):
+            return self.json_message(
+                "Energy Saving flags require admin access",
+                HTTPStatus.FORBIDDEN,
+            )
+        return None
 
     def _unserved_scene_entity(self, entities: Any) -> web.Response | None:
         """The is_served gate for scene WRITES — same rule as the single
@@ -809,6 +829,8 @@ class CasaSmartScenesView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
+        if (reject := self._energy_flag_reject(claims, payload)) is not None:
+            return reject
         unserved = self._unserved_scene_entity(payload.get("entities"))
         if unserved is not None:
             return unserved
@@ -826,6 +848,7 @@ class CasaSmartScenesView(_RegistryView):
                     payload.get("name"),
                     payload.get("entities"),
                     payload.get("icon"),
+                    payload.get("works_during_energy_saving", False),
                 )
             )
         except RegistryError as err:
@@ -856,6 +879,8 @@ class CasaSmartSceneView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
+        if (reject := self._energy_flag_reject(claims, payload)) is not None:
+            return reject
         if "entities" in payload:
             unserved = self._unserved_scene_entity(payload["entities"])
             if unserved is not None:
@@ -873,6 +898,9 @@ class CasaSmartSceneView(_RegistryView):
                     entities=payload.get("entities", ...),
                     icon=payload.get("icon", ...),
                     favorite=payload.get("favorite", ...),
+                    works_during_energy_saving=payload.get(
+                        "works_during_energy_saving", ...
+                    ),
                 )
             )
         except RegistryError as err:
@@ -938,6 +966,29 @@ class CasaSmartSceneActivateView(_RegistryView):
         ):
             # Same 404 as nonexistent — out-of-scope scenes are invisible.
             return self.json_message("Unknown scene", HTTPStatus.NOT_FOUND)
+
+        runtime = _runtime_data(self._hass)
+        energy = getattr(runtime, "energy", None)
+        if energy is not None and energy_lockout_applies(energy, claims):
+            return self.json(
+                {
+                    "error": "energy_lockout",
+                    "message": (
+                        "Energy saving is active — controls are locked "
+                        "by the admin"
+                    ),
+                },
+                HTTPStatus.FORBIDDEN,
+            )
+        if (
+            energy is not None
+            and energy.active_level is not None
+            and not scene.get("works_during_energy_saving", False)
+        ):
+            return self.json(
+                {"error": "scene_skipped_energy_saving", "scene_id": scene_id},
+                HTTPStatus.CONFLICT,
+            )
 
         return self.json(await async_execute_registry_scene(self._hass, scene))
 

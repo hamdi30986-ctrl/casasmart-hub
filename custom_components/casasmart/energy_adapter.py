@@ -433,6 +433,7 @@ class EnergyAdapter:
         ) = None,
         wall_clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        change_callback: Callable[[], None] | None = None,
     ) -> None:
         self._hass = hass
         self._engine = engine
@@ -444,6 +445,7 @@ class EnergyAdapter:
         )
         self._wall_clock = wall_clock
         self._monotonic_clock = monotonic_clock
+        self._change_callback = change_callback
 
         self._unsub_state_changed: Optional[Callable[[], None]] = None
         self._cancel_sun_timer: Optional[Callable[[], None]] = None
@@ -502,6 +504,14 @@ class EnergyAdapter:
                 item.get("entity_id") or "",
             ),
         )
+
+    def manages(self, entity_id: str) -> bool:
+        """Whether the active adapter context owns this device."""
+        return entity_id in self._managed_entities
+
+    def _notify_changed(self) -> None:
+        if self._change_callback is not None:
+            self._change_callback()
 
     # -- activation/re-apply ---------------------------------------------
 
@@ -906,9 +916,11 @@ class EnergyAdapter:
             return
         self._cancel_boost(room_id)
         await self._set_occupancy(room_id, False)
-        await self._hass.async_add_executor_job(
+        cleared = await self._hass.async_add_executor_job(
             self._engine.clear_room_releases, room_id
         )
+        if cleared:
+            self._notify_changed()
         await self._apply_energy_posture(room)
 
     async def _apply_energy_posture(self, room: RoomInventory) -> None:
@@ -1341,6 +1353,7 @@ class EnergyAdapter:
             )
         )
         if changed:
+            self._notify_changed()
             for room_id, boost in list(self._boosts.items()):
                 boost.entity_ids.discard(entity_id)
                 if not boost.entity_ids:
@@ -1537,13 +1550,16 @@ class EnergyAdapter:
         *,
         sensors_available: bool = True,
     ) -> bool:
-        return await self._hass.async_add_executor_job(
+        changed = await self._hass.async_add_executor_job(
             lambda: self._engine.set_room_occupancy(
                 room_id,
                 occupied,
                 sensors_available=sensors_available,
             )
         )
+        if changed:
+            self._notify_changed()
+        return changed
 
     async def _record_event(
         self,

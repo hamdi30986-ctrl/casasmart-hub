@@ -45,6 +45,7 @@ from .const import (
     DB_FILENAME,
     DOMAIN,
     EVENT_AUTH_CHANGED,
+    EVENT_ENERGY_CHANGED,
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
@@ -79,6 +80,13 @@ from .athan_scheduler import AthanScheduler
 from .recovery import RecoveryManager, hash_code as recovery_hash_code
 from .registry import RegistryEngine, RegistryError
 from .registry_api import async_execute_registry_scene
+from .energy import EnergyEngine
+from .energy_adapter import EnergyAdapter
+from .energy_runtime import (
+    EnergyAutomationManager,
+    EnergyController,
+    EnergyFlags,
+)
 from .storage import HubStorage, JsonConfigStore, StorageError
 from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
@@ -134,6 +142,9 @@ class CasaSmartRuntimeData:
     # B14 hub-side audio engine: broker/PA/athan config + speaker registry +
     # live-status mirror. The single source of truth the phone reads over REST.
     audio: AudioEngine
+    # Energy Saving's durable HA-free core + dedicated automation flag store.
+    energy: EnergyEngine
+    energy_flags: EnergyFlags
     # B13 alarm HA glue: drives the engine off state_changed + the entry-delay
     # timer. None only if setup failed before it was started.
     alarm_adapter: AlarmAdapter | None = None
@@ -141,6 +152,9 @@ class CasaSmartRuntimeData:
     # failed before it started, or while audio is unprovisioned (still set,
     # just inert — the object exists so the API can publish through it).
     audio_adapter: AudioAdapter | None = None
+    # P2 device rules and P3 transaction coordinator.
+    energy_adapter: EnergyAdapter | None = None
+    energy_controller: EnergyController | None = None
     # Hub-native athan scheduler: computes prayer times + fires broadcast plays
     # via the audio adapter. None only if setup failed before it was started.
     athan_scheduler: AthanScheduler | None = None
@@ -178,11 +192,13 @@ def _open_storage(
     PushTokenStore,
     AlarmEngine,
     AudioEngine,
+    EnergyEngine,
+    EnergyFlags,
     str | None,
     str | None,
 ]:
     """Open storage + config + auth + pairing + recovery + registry +
-    tanks + user settings + audio (blocking — executor only)."""
+    tanks + user settings + audio + energy (blocking — executor only)."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -261,6 +277,13 @@ def _open_storage(
         storage.table("audio_speakers"),
     )
     audio.warm_up()  # config + registry loaded — event-loop reads stay pure CPU
+    energy = EnergyEngine(
+        storage.table("energy_configs"),
+        storage.table("energy_state"),
+        storage.energy_events(),
+    )
+    energy.warm_up()
+    energy_flags = EnergyFlags(storage.table("energy_flags"))
     return (
         storage,
         hub_config,
@@ -273,6 +296,8 @@ def _open_storage(
         push,
         alarm,
         audio,
+        energy,
+        energy_flags,
         bootstrap_code,
         recovery_code,
     )
@@ -297,6 +322,8 @@ async def async_setup_entry(
             push,
             alarm,
             audio,
+            energy,
+            energy_flags,
             bootstrap_code,
             recovery_code,
         ) = await hass.async_add_executor_job(_open_storage, data_dir)
@@ -315,6 +342,8 @@ async def async_setup_entry(
         push=push,
         alarm=alarm,
         audio=audio,
+        energy=energy,
+        energy_flags=energy_flags,
     )
 
     # Cloudflare domain (entry options) -> advertised tunnel_url (hub_config),
@@ -366,6 +395,22 @@ async def async_setup_entry(
     alarm_adapter = AlarmAdapter(hass, alarm)
     alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
+
+    # Energy Saving: subscribe the P2 adapter, recover a persisted active mode,
+    # and reconcile the exact automation disable/restore ledger.
+    energy_adapter = EnergyAdapter(
+        hass,
+        energy,
+        registry,
+        change_callback=lambda: hass.bus.async_fire(EVENT_ENERGY_CHANGED),
+    )
+    energy_automations = EnergyAutomationManager(hass, energy, energy_flags)
+    energy_controller = EnergyController(
+        hass, energy, energy_adapter, energy_automations
+    )
+    entry.runtime_data.energy_adapter = energy_adapter
+    entry.runtime_data.energy_controller = energy_controller
+    await energy_controller.async_start()
 
     # B14: bring up the hub's single MQTT client. Inert (logged) when no broker
     # is provisioned yet — never aborts setup. connect_async/loop_start don't
@@ -954,6 +999,16 @@ def _async_register_services(hass: HomeAssistant) -> None:
             scene = await hass.async_add_executor_job(registry.get_scene, scene_id)
         except RegistryError as err:
             raise HomeAssistantError(str(err)) from err
+        runtime_data = entries[0].runtime_data
+        energy = getattr(runtime_data, "energy", None)
+        if (
+            energy is not None
+            and energy.active_level is not None
+            and not scene.get("works_during_energy_saving", False)
+        ):
+            raise HomeAssistantError(
+                "Scene is disabled while Energy Saving is active"
+            )
         result = await async_execute_registry_scene(hass, scene)
         if not result["ok"]:
             failed = [
@@ -1030,6 +1085,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("CasaSmart hub is not loaded")
         runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
 
+        # Never orphan HA automations in the disabled state. Deactivation does
+        # not restore devices, but it does restore exactly the automations this
+        # feature turned off before their ledger is wiped below.
+        if runtime_data.energy_controller is not None:
+            await runtime_data.energy_controller.async_deactivate(
+                actor="factory_reset"
+            )
+        pending_automations = await hass.async_add_executor_job(
+            runtime_data.energy_flags.disabled_automations
+        )
+        if pending_automations:
+            raise HomeAssistantError(
+                "Factory reset paused because Energy Saving could not restore: "
+                + ", ".join(pending_automations)
+            )
+
         def _wipe() -> None:
             runtime_data.storage.table("auth_devices").clear()
             runtime_data.storage.table("pairing_codes").clear()
@@ -1061,6 +1132,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
             # the new owner re-provisions speakers + reconfigures the broker.
             runtime_data.storage.table("audio_config").clear()
             runtime_data.storage.table("audio_speakers").clear()
+            # Energy config is owner-authored, state/release data is personal,
+            # flags belong to owner-authored scenes/automations, and its audit
+            # log must not cross an ownership transfer.
+            runtime_data.storage.table("energy_configs").clear()
+            runtime_data.storage.table("energy_state").clear()
+            runtime_data.storage.table("energy_flags").clear()
+            runtime_data.storage.energy_events().clear()
             # Full-blank reset (user choice): wipe the ENTIRE CasaSmart
             # organizational layer — floors, rooms, per-entity assignments,
             # grouped-device structure — and clear the one-time import flag so
@@ -1085,7 +1163,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.warning(
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
-            "audio config + speakers, and the registry org layer (floors/rooms/"
+            "audio config + speakers, Energy Saving data, and the registry "
+            "org layer (floors/rooms/"
             "assignments/grouping) — re-seeding from HA on reload; printed "
             "codes rotated"
         )
@@ -1106,6 +1185,8 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a config entry, stopping the mDNS/TLS listeners and storage."""
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if entry.runtime_data.energy_controller is not None:
+        entry.runtime_data.energy_controller.async_stop()
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
     if entry.runtime_data.tank_push_monitor is not None:

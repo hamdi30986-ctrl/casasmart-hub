@@ -103,6 +103,14 @@ from .audio_api import (
     CasaSmartAudioSpeakerView,
 )
 from .automation_api import CasaSmartAutomationConfigView
+from .energy_api import (
+    CasaSmartEnergyActivateView,
+    CasaSmartEnergyConfigView,
+    CasaSmartEnergyDeactivateView,
+    CasaSmartEnergyDiscoveryView,
+    CasaSmartEnergyReapplyView,
+    CasaSmartEnergyStateView,
+)
 from .push_api import CasaSmartPushTokenView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
@@ -110,6 +118,7 @@ from .camera_api import (
     CasaSmartCameraStreamView,
 )
 from .entity_bridge import CommandError, validate_command
+from .energy_runtime import energy_lockout_applies
 from .filtering import in_scope, is_served, serialize_device
 from .history import (
     HistoryQueryError,
@@ -169,6 +178,12 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartDeviceView(hass),
         CasaSmartCommandView(hass),
         CasaSmartHistoryView(hass),
+        CasaSmartEnergyStateView(hass),
+        CasaSmartEnergyDiscoveryView(hass),
+        CasaSmartEnergyConfigView(hass),
+        CasaSmartEnergyActivateView(hass),
+        CasaSmartEnergyDeactivateView(hass),
+        CasaSmartEnergyReapplyView(hass),
         CasaSmartAutomationConfigView(hass),
         CasaSmartCameraSnapshotView(hass),
         CasaSmartCameraStreamView(hass),
@@ -475,6 +490,20 @@ class CasaSmartCommandView(HomeAssistantView):
         ):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
+            )
+
+        runtime_data = _get_runtime_data(self._hass)
+        energy = getattr(runtime_data, "energy", None)
+        if energy is not None and energy_lockout_applies(energy, claims):
+            return self.json(
+                {
+                    "error": "energy_lockout",
+                    "message": (
+                        "Energy saving is active — controls are locked "
+                        "by the admin"
+                    ),
+                },
+                HTTPStatus.FORBIDDEN,
             )
 
         try:

@@ -94,6 +94,11 @@ EVENT_AUTH_CHANGED = "casasmart_auth_changed"
 # `registry_changed` frame so they re-fetch through their scoped GET.
 EVENT_REGISTRY_CHANGED = "casasmart_registry_changed"
 
+# -- Energy Saving -------------------------------------------------------------
+# Content-free nudge: authorized sockets re-fetch the permission-gated state
+# endpoint.  No released entity, room, or config is ever carried on the bus.
+EVENT_ENERGY_CHANGED = "casasmart_energy_changed"
+
 # -- Alarm (B13) ----------------------------------------------------------------
 # Fired on the HA bus after any arm-state transition (arm/disarm/pending/
 # triggered/tamper). The WS server forwards a content-free `alarm_changed`

@@ -314,6 +314,25 @@ class SceneTests(RegistryTestCase):
             reloaded.get_scene(scene["scene_id"])["favorite"], True
         )
 
+    def test_energy_flag_defaults_false_persists_and_validates(self):
+        scene = self.engine.create_scene("Movie", self.GOOD)
+        self.assertIs(scene["works_during_energy_saving"], False)
+        updated = self.engine.update_scene(
+            scene["scene_id"], works_during_energy_saving=True
+        )
+        self.assertIs(updated["works_during_energy_saving"], True)
+        reloaded = make_engine(self.storage)
+        self.assertIs(
+            reloaded.get_scene(scene["scene_id"])[
+                "works_during_energy_saving"
+            ],
+            True,
+        )
+        with self.assertRaises(RegistryError):
+            self.engine.update_scene(
+                scene["scene_id"], works_during_energy_saving="yes"
+            )
+
     def test_commands_validated_against_the_bridge_whitelist(self):
         cases = [
             [{"entity_id": "light.sofa", "action": "explode", "data": {}}],

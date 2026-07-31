@@ -27,6 +27,7 @@ from ws_protocol import (  # noqa: E402
     frame_auth_ok,
     frame_auth_required,
     frame_entity_removed,
+    frame_energy_changed,
     frame_error,
     frame_pong,
     frame_registry_changed,
@@ -191,6 +192,7 @@ class TestCoalesceKey(unittest.TestCase):
         )
         self.assertEqual(coalesce_key(frame_alarm_changed()), ("alarm_changed",))
         self.assertEqual(coalesce_key(frame_audio_changed()), ("audio_changed",))
+        self.assertEqual(coalesce_key(frame_energy_changed()), ("energy_changed",))
         self.assertEqual(
             coalesce_key(frame_entity_removed("light.z")),
             ("entity_removed", "light.z"),
@@ -242,11 +244,13 @@ class TestCoalescingSendQueue(unittest.IsolatedAsyncioTestCase):
         q = CoalescingSendQueue(maxsize=8)
         for _ in range(5):
             self.assertTrue(q.offer(frame_alarm_changed()))
+            self.assertTrue(q.offer(frame_energy_changed()))
         self.assertTrue(q.offer(frame_registry_changed("rooms")))
         self.assertTrue(q.offer(frame_registry_changed("rooms")))
         frames = await self._drain(q)
         self.assertEqual(
-            [f["type"] for f in frames], ["alarm_changed", "registry_changed"]
+            [f["type"] for f in frames],
+            ["alarm_changed", "energy_changed", "registry_changed"],
         )
 
     async def test_over_cap_drops_oldest_push_not_socket(self):

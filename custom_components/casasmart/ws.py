@@ -52,6 +52,7 @@ from .const import (
     EVENT_ALARM_CHANGED,
     EVENT_AUDIO_CHANGED,
     EVENT_AUTH_CHANGED,
+    EVENT_ENERGY_CHANGED,
     EVENT_REGISTRY_CHANGED,
     EVENT_TANK_CHANGED,
     WS_AUTH_TIMEOUT,
@@ -112,6 +113,7 @@ class WsConnection:
         self._unsub_registry_changed: Any = None
         self._unsub_alarm_changed: Any = None
         self._unsub_audio_changed: Any = None
+        self._unsub_energy_changed: Any = None
         self._unsub_tank_changed: Any = None
         self._unsub_auth_changed: Any = None
         # True once the client has sent a `subscribe` (so a re-auth knows whether
@@ -144,6 +146,9 @@ class WsConnection:
         self._unsub_audio_changed = self._hass.bus.async_listen(
             EVENT_AUDIO_CHANGED, self._on_audio_changed
         )
+        self._unsub_energy_changed = self._hass.bus.async_listen(
+            EVENT_ENERGY_CHANGED, self._on_energy_changed
+        )
         self._unsub_tank_changed = self._hass.bus.async_listen(
             EVENT_TANK_CHANGED, self._on_tank_changed
         )
@@ -174,6 +179,9 @@ class WsConnection:
         if self._unsub_audio_changed is not None:
             self._unsub_audio_changed()
             self._unsub_audio_changed = None
+        if self._unsub_energy_changed is not None:
+            self._unsub_energy_changed()
+            self._unsub_energy_changed = None
         if self._unsub_tank_changed is not None:
             self._unsub_tank_changed()
             self._unsub_tank_changed = None
@@ -454,6 +462,13 @@ class WsConnection:
         if not AuthEngine.authorize(self._claims or {}, "audio.read"):
             return
         self._offer_or_close(ws_protocol.frame_audio_changed())
+
+    @callback
+    def _on_energy_changed(self, event: Event) -> None:
+        """Energy Saving changed — only status-authorized sockets get nudged."""
+        if not AuthEngine.authorize(self._claims or {}, "energy.read"):
+            return
+        self._offer_or_close(ws_protocol.frame_energy_changed())
 
     async def _enqueue(self, frame: dict[str, Any]) -> None:
         """Route protocol replies through the same queue as pushes, preserving

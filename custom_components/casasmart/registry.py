@@ -116,6 +116,13 @@ def _clean_favorite(favorite: Any) -> bool:
     return favorite
 
 
+def _clean_energy_flag(value: Any) -> bool:
+    """Whether a scene may execute while Energy Saving is active."""
+    if not isinstance(value, bool):
+        raise RegistryError("works_during_energy_saving must be a boolean")
+    return value
+
+
 def _clean_entity_ids(
     value: Any, what: str = "entity_ids", max_count: int = _MAX_DEVICE_ENTITIES
 ) -> list[str]:
@@ -542,6 +549,9 @@ class RegistryEngine:
             "scene_id": scene_id,
             **record,
             "favorite": bool(record.get("favorite", False)),
+            "works_during_energy_saving": (
+                record.get("works_during_energy_saving") is True
+            ),
         }
 
     def list_scenes(self) -> list[dict[str, Any]]:
@@ -557,13 +567,20 @@ class RegistryEngine:
         return self._scene_out(scene_id, record)
 
     def create_scene(
-        self, name: Any, entities: Any, icon: Any = None
+        self,
+        name: Any,
+        entities: Any,
+        icon: Any = None,
+        works_during_energy_saving: Any = False,
     ) -> dict[str, Any]:
         record = {
             "name": _clean_name(name, "Scene"),
             "icon": _clean_icon(icon),
             "entities": _clean_scene_entities(entities),
             "favorite": False,
+            "works_during_energy_saving": _clean_energy_flag(
+                works_during_energy_saving
+            ),
         }
         with self._lock:
             scene_id = f"scene-{secrets.token_urlsafe(8)}"
@@ -578,6 +595,7 @@ class RegistryEngine:
         entities: Any = ...,
         icon: Any = ...,
         favorite: Any = ...,
+        works_during_energy_saving: Any = ...,
     ) -> dict[str, Any]:
         """Edit a scene. ``...`` sentinels mean "leave unchanged"."""
         with self._lock:
@@ -592,6 +610,10 @@ class RegistryEngine:
                 record["icon"] = _clean_icon(icon)
             if favorite is not ...:
                 record["favorite"] = _clean_favorite(favorite)
+            if works_during_energy_saving is not ...:
+                record["works_during_energy_saving"] = _clean_energy_flag(
+                    works_during_energy_saving
+                )
             self._scenes[scene_id] = record  # persist
         return self._scene_out(scene_id, record)
 

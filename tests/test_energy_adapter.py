@@ -222,7 +222,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.storage.open()
         self.addCleanup(self.storage.close)
         self.engine = EnergyEngine(
-            self.storage.table("energy_config"),
+            self.storage.table("energy_configs"),
             self.storage.table("energy_state"),
             self.storage.energy_events(),
         )
@@ -244,7 +244,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 coro.close()
             self.hass.pending.clear()
 
-    def make_adapter(self, states, rooms, groups=None):
+    def make_adapter(self, states, rooms, groups=None, change_callback=None):
         self.hass = _Hass(states)
         registry = _Registry(rooms, groups)
         adapter = EnergyAdapter(
@@ -254,6 +254,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             area_resolver=lambda _hass, _entity_id: None,
             wall_clock=self.wall,
             monotonic_clock=self.monotonic,
+            change_callback=change_callback,
         )
         return adapter, registry
 
@@ -950,6 +951,31 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             len(self.calls("light.two", "turn_off")),
             initial_off_calls,
         )
+
+    async def test_release_edge_emits_p3_change_nudge(self):
+        nudges = []
+        first = _State("light.one", "on", {"brightness": 255})
+        second = _State("light.two", "on", {"brightness": 255})
+        states = [first, second]
+        rooms = {state.entity_id: "room" for state in states}
+        adapter, _ = self.make_adapter(
+            states,
+            rooms,
+            change_callback=lambda: nudges.append(True),
+        )
+        self.activate(LEVEL_LOW, light_keepers={"room": ["light.one"]})
+        adapter.async_start()
+        await adapter.async_apply()
+        await self.drain()
+
+        self.monotonic.advance(16)
+        self.emit_change(
+            adapter,
+            second,
+            _State("light.two", "on", {"brightness": 200}),
+        )
+        await self.drain()
+        self.assertEqual(nudges, [True])
 
     async def test_one_gang_switch_is_never_managed_or_released(self):
         switch = _State("switch.single", "off")

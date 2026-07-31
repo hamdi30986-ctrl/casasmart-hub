@@ -55,6 +55,7 @@ from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.yaml import dump, load_yaml
 
 from .auth_api import authenticate_request, json_body
+from .auth_engine import AuthEngine
 from .automations import (
     CASA_AUTOMATION_PREFIX,
     delete_automation,
@@ -64,6 +65,8 @@ from .automations import (
     upsert_automation,
 )
 from .const import DOMAIN
+
+_UNSET = object()
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,6 +157,12 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             )
         return None
 
+    def _energy_flags(self):
+        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            return None
+        return getattr(entries[0].runtime_data, "energy_flags", None)
+
     @property
     def _config_path(self) -> str:
         return self._hass.config.path(AUTOMATION_CONFIG_PATH)
@@ -191,11 +200,19 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return self.json_message(
                 f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
             )
-        return self.json(value)
+        flags = self._energy_flags()
+        enabled = False
+        if flags is not None:
+            enabled = await self._hass.async_add_executor_job(
+                flags.works_during_energy_saving, config_key
+            )
+        return self.json(
+            {**value, "works_during_energy_saving": enabled}
+        )
 
     async def post(self, request: web.Request, config_key: str) -> web.Response:
         """Create or update — validate with HA's validator, write, reload."""
-        _, error = self._gate(request)
+        claims, error = self._gate(request)
         if error is not None:
             return error
         if (bad := self._check_key(config_key)) is not None:
@@ -204,6 +221,22 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         if payload is None:
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+
+        payload = dict(payload)
+        energy_flag = payload.pop("works_during_energy_saving", _UNSET)
+        if energy_flag is not _UNSET and not isinstance(energy_flag, bool):
+            return self.json_message(
+                "works_during_energy_saving must be a boolean",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if (
+            energy_flag is not _UNSET
+            and not AuthEngine.authorize(claims, "energy.manage")
+        ):
+            return self.json_message(
+                "Energy Saving flags require admin access",
+                HTTPStatus.FORBIDDEN,
             )
 
         # HA's own validator — the exact gate its native config API runs.
@@ -232,7 +265,25 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 )
 
         await self._reload(config_key)
-        return self.json({"result": "ok", "id": config_key})
+        flags = self._energy_flags()
+        effective_flag = False
+        if flags is not None and energy_flag is not _UNSET:
+            await self._hass.async_add_executor_job(
+                flags.set_works_during_energy_saving,
+                config_key,
+                energy_flag,
+            )
+        if flags is not None:
+            effective_flag = await self._hass.async_add_executor_job(
+                flags.works_during_energy_saving, config_key
+            )
+        return self.json(
+            {
+                "result": "ok",
+                "id": config_key,
+                "works_during_energy_saving": effective_flag,
+            }
+        )
 
     async def delete(self, request: web.Request, config_key: str) -> web.Response:
         """Remove from automations.yaml, reload, evict the ghost entity."""
@@ -269,6 +320,12 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         )
         if entity_id is not None:
             ent_reg.async_remove(entity_id)
+
+        flags = self._energy_flags()
+        if flags is not None:
+            await self._hass.async_add_executor_job(
+                flags.delete_automation, config_key
+            )
 
         return self.json({"result": "ok", "id": config_key})
 

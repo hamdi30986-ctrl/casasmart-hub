@@ -29,7 +29,7 @@ from homeassistant.helpers.entity import DeviceInfo, async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import slugify
 
-from .const import DOMAIN, EVENT_AUTH_CHANGED
+from .const import DOMAIN, EVENT_AUTH_CHANGED, EVENT_ENERGY_CHANGED
 
 if TYPE_CHECKING:
     from . import CasaSmartConfigEntry
@@ -54,9 +54,56 @@ async def async_setup_entry(
     entry: CasaSmartConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Seed the per-user sensors and keep them in sync with enrollment."""
+    """Seed the Energy Saving status plus per-user roster sensors."""
+    async_add_entities([CasaSmartEnergySavingsSensor(entry)])
     manager = _UserSensorManager(hass, entry, async_add_entities)
     await manager.async_start()
+
+
+class CasaSmartEnergySavingsSensor(SensorEntity):
+    """Native HA summary of the hub-authoritative Energy Saving state."""
+
+    _attr_name = "CasaSmart Energy Savings"
+    _attr_icon = "mdi:leaf"
+    _attr_should_poll = False
+    _attr_has_entity_name = False
+
+    def __init__(self, entry: CasaSmartConfigEntry) -> None:
+        self._entry = entry
+        self.entity_id = "sensor.casasmart_energy_savings"
+        self._attr_unique_id = f"{entry.entry_id}_energy_savings"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="CasaSmart Hub",
+            manufacturer="CasaSmart",
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_ENERGY_CHANGED, self._on_changed)
+        )
+
+    @callback
+    def _on_changed(self, _event: Event) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str:
+        return self._entry.runtime_data.energy.active_level or "off"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        state = self._entry.runtime_data.energy.snapshot()
+        adapter = self._entry.runtime_data.energy_adapter
+        return {
+            "active": state["active"],
+            "lockout_enabled": state["lockout_enabled"],
+            "released_devices": state["release_count"],
+            "room_occupancy": state["room_occupancy"],
+            "issues": adapter.issues() if adapter is not None else [],
+            "revision": state["revision"],
+        }
 
 
 class _UserSensorManager:
