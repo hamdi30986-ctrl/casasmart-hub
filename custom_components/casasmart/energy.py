@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -519,18 +521,21 @@ class EnergyEngine:
                 raise EnergyConfigError(
                     "smart_lockout_enabled applies only to Smart"
                 )
-            if smart_lockout_enabled is not None:
-                if not isinstance(smart_lockout_enabled, bool):
-                    raise EnergyConfigError(
-                        "smart_lockout_enabled must be a boolean"
-                    )
+            if smart_lockout_enabled is not None and not isinstance(
+                smart_lockout_enabled, bool
+            ):
+                raise EnergyConfigError(
+                    "smart_lockout_enabled must be a boolean"
+                )
             now = self._now()
-            if smart_lockout_enabled is not None:
-                if config["lockout_enabled"] != smart_lockout_enabled:
-                    config = copy.deepcopy(config)
-                    config["lockout_enabled"] = smart_lockout_enabled
-                    self._configs[level] = config
-                    self._config_table[level] = copy.deepcopy(config)
+            if (
+                smart_lockout_enabled is not None
+                and config["lockout_enabled"] != smart_lockout_enabled
+            ):
+                config = copy.deepcopy(config)
+                config["lockout_enabled"] = smart_lockout_enabled
+                self._configs[level] = config
+                self._config_table[level] = copy.deepcopy(config)
 
             lockout = (
                 config["lockout_enabled"] if level == LEVEL_SMART else True
@@ -973,8 +978,7 @@ class EnergyEngine:
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or value < 0
-            or value != value
-            or value in (float("inf"), float("-inf"))
+            or (isinstance(value, float) and not math.isfinite(value))
         ):
             raise EnergyError("clock must return a finite non-negative number")
         return int(value)

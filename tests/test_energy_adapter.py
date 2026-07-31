@@ -304,7 +304,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             _State("binary_sensor.presence", "off", {"device_class": "occupancy"}),
         ]
         rooms = {state.entity_id: "living" for state in states}
-        adapter, registry = self.make_adapter(
+        _, registry = self.make_adapter(
             states,
             rooms,
             [_group("wall", "living", "light.wall_1", "light.wall_2")],

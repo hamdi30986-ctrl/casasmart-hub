@@ -11,7 +11,6 @@ sys.path.insert(
 
 from energy import (  # noqa: E402
     CONFIG_SCHEMA_VERSION,
-    ENERGY_LEVELS,
     EVENT_ACTIVATED,
     EVENT_CONFIG_RESET,
     EVENT_CONFIG_UPDATED,

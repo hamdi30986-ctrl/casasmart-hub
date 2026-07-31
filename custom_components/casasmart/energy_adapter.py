@@ -24,9 +24,10 @@ import copy
 import logging
 import math
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
@@ -397,8 +398,7 @@ class EnergyInventoryBuilder:
             return device_class == "temperature"
         return (
             object_id in {"temp", "temperature"}
-            or object_id.endswith("_temp")
-            or object_id.endswith("_temperature")
+            or object_id.endswith(("_temp", "_temperature"))
         )
 
     @staticmethod
@@ -410,9 +410,7 @@ class EnergyInventoryBuilder:
         return device_class in _PRESENCE_CLASSES or (
             not device_class
             and (
-                object_id.endswith("_presence")
-                or object_id.endswith("_occupancy")
-                or object_id.endswith("_motion")
+                object_id.endswith(("_presence", "_occupancy", "_motion"))
                 or "mmwave" in object_id
             )
         )
@@ -447,8 +445,8 @@ class EnergyAdapter:
         self._monotonic_clock = monotonic_clock
         self._change_callback = change_callback
 
-        self._unsub_state_changed: Optional[Callable[[], None]] = None
-        self._cancel_sun_timer: Optional[Callable[[], None]] = None
+        self._unsub_state_changed: Callable[[], None] | None = None
+        self._cancel_sun_timer: Callable[[], None] | None = None
         self._empty_timers: dict[str, Callable[[], None]] = {}
         self._boosts: dict[str, _Boost] = {}
 

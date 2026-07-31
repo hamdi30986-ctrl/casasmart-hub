@@ -98,13 +98,13 @@ def validate_config_against_discovery(
     eligible_ac_rooms: set[str] = set()
     for room_id, room in rooms.items():
         candidates = {item["entity_id"] for item in room["climates"]}
-        if level == LEVEL_MEDIUM and room_id not in excluded and len(candidates) > 1:
-            eligible_ac_rooms.add(room_id)
-        elif (
-            level == LEVEL_SMART
-            and room_id not in excluded
-            and not room["automatic"]
-            and candidates
+        if room_id not in excluded and (
+            (level == LEVEL_MEDIUM and len(candidates) > 1)
+            or (
+                level == LEVEL_SMART
+                and not room["automatic"]
+                and bool(candidates)
+            )
         ):
             eligible_ac_rooms.add(room_id)
         if room_id in config["ac_keepers"] and not set(
