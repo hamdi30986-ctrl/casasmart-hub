@@ -189,11 +189,41 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migration_v4(conn: sqlite3.Connection) -> None:
+    """Append-only audit events for the Energy Saving engine.
+
+    Config and live state remain small JSON documents in ``kv``. Events are a
+    growing history, so they get a row-per-event table with indexed time/kind
+    queries instead of repeatedly rewriting one large JSON blob.
+    """
+    conn.execute(
+        """
+        CREATE TABLE energy_events (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            t         INTEGER NOT NULL,
+            kind      TEXT NOT NULL,
+            level     TEXT,
+            entity_id TEXT,
+            room_id   TEXT,
+            data      TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_energy_events_t ON energy_events (t DESC, id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_energy_events_kind_t "
+        "ON energy_events (kind, t DESC, id DESC)"
+    )
+
+
 #: Ordered list of all known migrations. Append-only — never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
     Migration(2, "append-only tank_readings table", _migration_v2),
     Migration(3, "fold flat gang maps into nested gangs", _migration_v3),
+    Migration(4, "append-only energy events table", _migration_v4),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)

@@ -27,6 +27,36 @@ storage.close()                # checkpoints WAL, closes
 - Values: anything `json.dumps` accepts — else `TypeError`, nothing written.
 - Thread-safe (RLock). HA's asyncio side calls via executor (B1.2 wraps this).
 
+## EnergyEventsTable — append-only Energy Saving audit history
+
+Migration v4 adds a row-per-event table for Energy Saving. Config and live
+state remain small JSON documents in KV namespaces; event history does not,
+because rewriting one growing JSON blob on every occupancy/release edge would
+increase flash wear and make filtering expensive.
+
+```python
+events = storage.energy_events()
+events.append(
+    t=1234,
+    kind="released",
+    level="smart",
+    entity_id="light.living",
+    room_id="living",
+    data={"source": "wall_press"},
+)
+events.recent(limit=100, since_t=1000, kinds=["released"])
+events.summary(since_t=1000)   # factual counts + first/last timestamp
+events.prune(before_t=1000)    # bounded retention
+events.clear()                 # factory-reset seam
+```
+
+- Event payloads must be JSON objects; NaN/Infinity are rejected.
+- Reads are newest first and capped at 1,000 rows per query.
+- Indexed by timestamp and `(kind, timestamp)`.
+- The Energy engine keeps 180 days at startup.
+- Aggregates are operational facts only; they never estimate kWh, money, or
+  carbon savings.
+
 ## Migrations — forward-only, backup-before-run
 
 - Version = `PRAGMA user_version`. Code's migrations live in

@@ -126,6 +126,10 @@ class HubStorage:
         """Append-only time-series store for tank readings (one row/reading)."""
         return TankReadingsTable(self)
 
+    def energy_events(self) -> "EnergyEventsTable":
+        """Append-only audit store for Energy Saving events."""
+        return EnergyEventsTable(self)
+
     # -- internals (used by the table views only) -----------------------------
 
     @property
@@ -342,3 +346,185 @@ class TankReadingsTable:
         self._storage._execute_write(
             "DELETE FROM tank_readings WHERE device_id = ?", (device_id,)
         )
+
+
+class EnergyEventsTable:
+    """Row-per-event Energy Saving audit history.
+
+    State/config remain in ``KeyValueTable`` namespaces. Events need ordered,
+    bounded queries and aggregate counts, so they use migration v4's dedicated
+    table while still keeping all SQL inside the storage layer.
+    """
+
+    _MAX_QUERY_LIMIT = 1000
+
+    def __init__(self, storage: HubStorage) -> None:
+        self._storage = storage
+
+    def append(
+        self,
+        *,
+        t: int,
+        kind: str,
+        level: str | None = None,
+        entity_id: str | None = None,
+        room_id: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one event and return its public record."""
+        if isinstance(t, bool) or not isinstance(t, int) or t < 0:
+            raise ValueError("t must be a non-negative integer timestamp")
+        kind = self._required_text(kind, "kind", max_length=64)
+        level = self._optional_text(level, "level", max_length=16)
+        entity_id = self._optional_text(entity_id, "entity_id", max_length=255)
+        room_id = self._optional_text(room_id, "room_id", max_length=255)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise TypeError("data must be a JSON object")
+        try:
+            payload = json.dumps(data, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as err:
+            raise TypeError(f"event data is not JSON-serializable: {err}") from err
+
+        cursor = self._storage._execute_write(
+            """
+            INSERT INTO energy_events
+                (t, kind, level, entity_id, room_id, data)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (t, kind, level, entity_id, room_id, payload),
+        )
+        return {
+            "id": int(cursor.lastrowid),
+            "t": t,
+            "kind": kind,
+            "level": level,
+            "entity_id": entity_id,
+            "room_id": room_id,
+            "data": json.loads(payload),
+        }
+
+    def recent(
+        self,
+        *,
+        limit: int = 100,
+        since_t: int | None = None,
+        kinds: list[str] | tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return newest-first events with optional time/kind filters."""
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= self._MAX_QUERY_LIMIT
+        ):
+            raise ValueError(
+                f"limit must be between 1 and {self._MAX_QUERY_LIMIT}"
+            )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_t is not None:
+            if (
+                isinstance(since_t, bool)
+                or not isinstance(since_t, int)
+                or since_t < 0
+            ):
+                raise ValueError("since_t must be a non-negative integer")
+            clauses.append("t >= ?")
+            params.append(since_t)
+        if kinds is not None:
+            if not isinstance(kinds, (list, tuple)) or not kinds:
+                raise ValueError("kinds must be a non-empty list or tuple")
+            clean_kinds = [
+                self._required_text(kind, "kind", max_length=64)
+                for kind in kinds
+            ]
+            clauses.append(f"kind IN ({','.join('?' for _ in clean_kinds)})")
+            params.extend(clean_kinds)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self._storage._fetchall(
+            "SELECT id, t, kind, level, entity_id, room_id, data "
+            f"FROM energy_events {where} "
+            "ORDER BY t DESC, id DESC LIMIT ?",
+            tuple(params),
+        )
+        return [self._row(row) for row in rows]
+
+    def summary(self, *, since_t: int | None = None) -> dict[str, Any]:
+        """Small factual aggregates only—never estimated energy or money."""
+        params: tuple[Any, ...] = ()
+        where = ""
+        if since_t is not None:
+            if (
+                isinstance(since_t, bool)
+                or not isinstance(since_t, int)
+                or since_t < 0
+            ):
+                raise ValueError("since_t must be a non-negative integer")
+            where = "WHERE t >= ?"
+            params = (since_t,)
+        kind_rows = self._storage._fetchall(
+            f"SELECT kind, COUNT(*), MIN(t), MAX(t) "
+            f"FROM energy_events {where} "
+            "GROUP BY kind ORDER BY kind",
+            params,
+        )
+        total = sum(int(row[1]) for row in kind_rows)
+        first = min((int(row[2]) for row in kind_rows), default=None)
+        last = max((int(row[3]) for row in kind_rows), default=None)
+        return {
+            "events_total": total,
+            "first_event_at": first,
+            "last_event_at": last,
+            "event_counts": {
+                kind: int(count) for kind, count, _first, _last in kind_rows
+            },
+        }
+
+    def prune(self, *, before_t: int) -> int:
+        """Delete events older than ``before_t``; return the number removed."""
+        if (
+            isinstance(before_t, bool)
+            or not isinstance(before_t, int)
+            or before_t < 0
+        ):
+            raise ValueError("before_t must be a non-negative integer")
+        cursor = self._storage._execute_write(
+            "DELETE FROM energy_events WHERE t < ?", (before_t,)
+        )
+        return cursor.rowcount
+
+    def clear(self) -> None:
+        """Delete the complete Energy Saving event history."""
+        self._storage._execute_write("DELETE FROM energy_events")
+
+    @staticmethod
+    def _row(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": int(row[0]),
+            "t": int(row[1]),
+            "kind": row[2],
+            "level": row[3],
+            "entity_id": row[4],
+            "room_id": row[5],
+            "data": json.loads(row[6]),
+        }
+
+    @staticmethod
+    def _required_text(value: Any, field: str, *, max_length: int) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be a non-empty string")
+        clean = value.strip()
+        if len(clean) > max_length:
+            raise ValueError(f"{field} must be <= {max_length} characters")
+        return clean
+
+    @classmethod
+    def _optional_text(
+        cls, value: Any, field: str, *, max_length: int
+    ) -> str | None:
+        if value is None:
+            return None
+        return cls._required_text(value, field, max_length=max_length)

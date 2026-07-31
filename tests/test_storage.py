@@ -274,15 +274,25 @@ class TestMigrations(StorageTestCase):
 
     def test_multi_step_migration_applies_in_order(self):
         order = []
+        first_extra = LATEST_VERSION + 1
+        second_extra = LATEST_VERSION + 2
         extra = MIGRATIONS + (
-            Migration(2, "step two", lambda c: order.append(2)),
-            Migration(3, "step three", lambda c: order.append(3)),
+            Migration(
+                first_extra,
+                "first extra step",
+                lambda c: order.append(first_extra),
+            ),
+            Migration(
+                second_extra,
+                "second extra step",
+                lambda c: order.append(second_extra),
+            ),
         )
         storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
         storage.open(migrations=extra)
         self.addCleanup(storage.close)
-        self.assertEqual(order, [2, 3])
-        self.assertEqual(storage.schema_version, 3)
+        self.assertEqual(order, [first_extra, second_extra])
+        self.assertEqual(storage.schema_version, second_extra)
 
 
 class TestJsonConfigStore(unittest.TestCase):

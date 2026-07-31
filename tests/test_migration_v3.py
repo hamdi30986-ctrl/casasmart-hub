@@ -16,7 +16,6 @@ sys.path.insert(
 )
 
 from storage.migrations import (  # noqa: E402
-    LATEST_VERSION,
     MIGRATIONS,
     _migration_v3,
     _v3_suffix_token,
@@ -44,7 +43,7 @@ class MigrationV3Tests(unittest.TestCase):
                     (key, json.dumps(rec)),
                 )
             conn.commit()
-        run_migrations(self.db_path, self.backup_dir, MIGRATIONS)
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:3])
         out = {}
         with sqlite3.connect(self.db_path) as conn:
             for key, val in conn.execute(
@@ -188,10 +187,10 @@ class MigrationV3Tests(unittest.TestCase):
     # ── version + framework ──
 
     def test_migrates_to_v3(self):
-        run_migrations(self.db_path, self.backup_dir, MIGRATIONS)
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:3])
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(get_user_version(conn), 3)
-        self.assertEqual(LATEST_VERSION, 3)
+        self.assertEqual(MIGRATIONS[2].version, 3)
 
     def test_malformed_record_is_skipped_not_fatal(self):
         run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:2])
@@ -202,7 +201,7 @@ class MigrationV3Tests(unittest.TestCase):
             )
             conn.commit()
         # Must not raise, and must still reach v3.
-        run_migrations(self.db_path, self.backup_dir, MIGRATIONS)
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:3])
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(get_user_version(conn), 3)
 
