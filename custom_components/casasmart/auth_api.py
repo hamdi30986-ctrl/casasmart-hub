@@ -68,6 +68,7 @@ from .pairing import (
     LanOnlyCodeError,
     PairingError,
     PairingManager,
+    hash_code,
 )
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
@@ -315,6 +316,21 @@ class CasaSmartEnrollView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
+    def _sticker_hash(self) -> str | None:
+        """This hub's PERMANENT bootstrap code hash, or None.
+
+        Still this hub's own code after the live entry is dropped on claim,
+        which is what keeps "the owner re-runs onboarding on their own hub"
+        working once the idempotent path checks the code.
+        """
+        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            return None
+        stored = entries[0].runtime_data.hub_config.get(
+            BOOTSTRAP_CODE_HASH_CONFIG_KEY
+        )
+        return stored if isinstance(stored, str) and stored else None
+
     async def post(self, request: web.Request) -> web.Response:
         engine = get_engine(self._hass)
         pairing = get_pairing(self._hass)
@@ -346,10 +362,41 @@ class CasaSmartEnrollView(HomeAssistantView):
         # public key is already enrolled, return its identity WITHOUT re-redeeming
         # the code; the app then logs in as usual. Safe: the device id grants
         # nothing — the token still requires the private key (login).
+        #
+        # The code is still checked, just not consumed. Recognising the key is
+        # NOT sufficient on its own: a hub that merely remembers a phone would
+        # otherwise accept a code minted by a DIFFERENT hub, and with two hubs
+        # on one LAN (bench hub + the client's real one, both holding the same
+        # key) the app's enroll chain takes the first hub that answers yes —
+        # so typing the RIGHT hub's code silently paired to the WRONG hub, with
+        # every layer reporting success and nothing to see in any log.
         existing = await self._hass.async_add_executor_job(
             engine.device_for_public_key, payload.get("public_key", "")
         )
         if existing is not None:
+            # Never part of the response — it only decides whether the code
+            # this device originally redeemed still authorises a re-pair.
+            own_code_hash = existing.pop("enrolled_code_hash", None)
+            allowed = tuple(
+                h for h in (self._sticker_hash(), own_code_hash) if h
+            )
+            try:
+                await self._hass.async_add_executor_job(
+                    lambda: pairing.authorize_known_device(
+                        payload.get("pairing_code", ""),
+                        request.remote or "unknown",
+                        not lan_source,
+                        allowed_hashes=allowed,
+                    )
+                )
+            except ThrottledError as err:
+                return _throttled_response(err)
+            except CodeInvalidError:
+                # Same generic verdict the redeem path gives — never reveal
+                # whether the key was recognised.
+                return self.json_message(
+                    "Invalid pairing code", HTTPStatus.UNAUTHORIZED
+                )
             return self.json(existing, HTTPStatus.CREATED)
 
         source = request.remote or "unknown"
@@ -396,6 +443,7 @@ class CasaSmartEnrollView(HomeAssistantView):
                     rooms=grant["rooms"],
                     enrolled_via=grant.get("code_id"),
                     member_id=grant.get("member_id"),
+                    code_hash=hash_code(payload.get("pairing_code", "")),
                 )
             )
         except EnrollError as err:

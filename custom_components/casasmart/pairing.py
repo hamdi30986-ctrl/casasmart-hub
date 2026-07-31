@@ -40,6 +40,7 @@ SQLite file. Storage-touching methods are synchronous: call via executor.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -292,6 +293,65 @@ class PairingManager:
         return count
 
     # -- enrollment gate ---------------------------------------------------------
+
+    def authorize_known_device(
+        self,
+        code: str,
+        source_key: str,
+        remote_source: bool = False,
+        *,
+        allowed_hashes: tuple[str, ...] = (),
+    ) -> None:
+        """Gate the idempotent re-pair: the code must be one THIS hub owns.
+
+        The enroll view short-circuits when it recognises a public key, so a
+        phone re-running onboarding against its own claimed hub isn't bounced
+        with "invalid code" (the bootstrap code is dead once an admin exists,
+        so there is no code it *could* type). That leniency was too wide: it
+        accepted ANY code, so a hub that merely REMEMBERS a phone would admit
+        it on a code minted by a DIFFERENT hub. With two hubs on one LAN —
+        an installer's bench hub and the client's real one, both holding the
+        same phone key — the app's enroll chain takes the first hub that says
+        yes, so typing the RIGHT hub's code could silently pair you to the
+        WRONG hub, with every layer reporting success. That is exactly what
+        happened on 2026-07-31.
+
+        So: consume nothing, but require the code to be this hub's —
+
+        * any code currently in the table (a member code we minted), or
+        * one of ``allowed_hashes``: the persisted bootstrap/owner code (still
+          this hub's own code although the live entry is dropped the moment an
+          admin exists — that is what keeps the owner's re-onboarding working)
+          and the hash of the code THIS device originally redeemed, so a
+          double-submit or a retry after a mid-redeem timeout still passes
+          even though that code was consumed on the first pass.
+
+        Raises [CodeInvalidError] otherwise, throttled exactly like
+        :meth:`redeem` so this path can't become a free code-guessing oracle.
+        """
+        throttle_key = _throttle_key(source_key, remote_source)
+        self.throttle.check(throttle_key)
+        if not isinstance(code, str) or not code.strip():
+            self.throttle.record_failure(throttle_key)
+            raise CodeInvalidError("Invalid pairing code")
+        code_hash = hash_code(code)
+
+        with self._lock:
+            self._purge_expired()
+            known = any(
+                record["code_hash"] == code_hash
+                for record in self._codes.values()
+            )
+        if not known:
+            known = any(
+                hmac.compare_digest(code_hash, allowed)
+                for allowed in allowed_hashes
+                if allowed
+            )
+        if not known:
+            self.throttle.record_failure(throttle_key)
+            raise CodeInvalidError("Invalid pairing code")
+        self.throttle.clear(throttle_key)
 
     def redeem(
         self, code: str, source_key: str, remote_source: bool = False

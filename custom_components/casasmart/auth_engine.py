@@ -254,6 +254,7 @@ class AuthEngine:
         rooms: list[str] | None = None,
         enrolled_via: str | None = None,
         member_id: str | None = None,
+        code_hash: str | None = None,
     ) -> str:
         """Store a device's identity; returns the new device id.
 
@@ -294,6 +295,12 @@ class AuthEngine:
                 "ver": 1,
                 "paired_at": time.time(),
                 "enrolled_via": enrolled_via,
+                # Hash of the code this device actually redeemed. The idempotent
+                # re-pair path accepts it forever, so a double-submit — or a
+                # retry after a mid-redeem timeout — still works once that path
+                # checks the code, even though the code itself was consumed on
+                # the first pass. None on records enrolled before this existed.
+                "enrolled_code_hash": code_hash,
                 # The PERSON this device belongs to. An "add device to member"
                 # pairing code carries an existing member_id (the device joins
                 # that person); a new-member code passes None and we mint one.
@@ -532,6 +539,10 @@ class AuthEngine:
                         "device_id": device_id,
                         "role": record.get("role"),
                         "rooms": record.get("rooms"),
+                        # Not part of the response body — the enroll view uses
+                        # it to accept the code this device originally redeemed
+                        # (already consumed) on an idempotent re-pair.
+                        "enrolled_code_hash": record.get("enrolled_code_hash"),
                     }
         return None
 

@@ -40,8 +40,11 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 import view_harness as H  # noqa: E402
 from casasmart.auth_api import CasaSmartEnrollView  # noqa: E402
 from casasmart.auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine  # noqa: E402
-from casasmart.const import REMOTE_PAIRING_ENABLED_CONFIG_KEY  # noqa: E402
-from casasmart.pairing import PairingManager  # noqa: E402
+from casasmart.const import (  # noqa: E402
+    BOOTSTRAP_CODE_HASH_CONFIG_KEY,
+    REMOTE_PAIRING_ENABLED_CONFIG_KEY,
+)
+from casasmart.pairing import PairingManager, hash_code  # noqa: E402
 from casasmart.storage import HubStorage  # noqa: E402
 from casasmart.throttle import MAX_FAILURES  # noqa: E402
 
@@ -332,6 +335,90 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await self._enroll(issued["code"], LAN_IP)
         self.assertEqual(status, 201)
         self.assertEqual(self.hass.created_tasks, [])
+
+
+class IdempotentRePairCodeTests(EnrollGateTests):
+    """A remembered keypair is NOT a licence to accept any code.
+
+    2026-07-31, in the field: an installer's bench hub and the client's real
+    hub were both on one LAN, both holding the same phone's key. The owner
+    removed the bench hub in the app and typed the REAL hub's code — and the
+    app came back paired to the BENCH hub. The enroll view recognised the key
+    and returned the existing identity before ever looking at the code, so the
+    bench hub said yes to a code minted somewhere else; the app's enroll chain
+    takes the first hub that answers. Every layer reported success, the home
+    was empty because that hub had no devices, and nothing anywhere logged an
+    error.
+    """
+
+    async def _repair(self, code: str, pem: str, remote: str = LAN_IP):
+        resp = await self.view.post(
+            H.FakeRequest(
+                body={"pairing_code": code, "public_key": pem, "name": "Phone"},
+                remote=remote,
+            )
+        )
+        return H.read_response(resp)
+
+    async def _enrolled_phone(self) -> tuple[str, str]:
+        """Enroll a phone the normal way; returns (its pem, the code it used)."""
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        pem = make_public_pem()
+        status, _ = await self._repair(issued["code"], pem)
+        self.assertEqual(status, 201)
+        return pem, issued["code"]
+
+    async def test_a_code_from_ANOTHER_hub_is_refused(self) -> None:
+        pem, _ = await self._enrolled_phone()
+        # A perfectly valid code — minted by a different hub, which this hub
+        # has never seen. Recognising the phone must not be enough.
+        status, body = await self._repair("OTHERHUB", pem)
+        self.assertEqual(status, 401)
+        self.assertEqual(body["message"], "Invalid pairing code")
+
+    async def test_re_submitting_the_consumed_code_still_works(self) -> None:
+        # The UI-glitch / double-tap / retry-after-timeout case the idempotent
+        # path exists for: the code is gone from the table, but it is the one
+        # that enrolled THIS device, so it still authorises.
+        pem, code = await self._enrolled_phone()
+        status, body = await self._repair(code, pem)
+        self.assertEqual(status, 201)
+        self.assertNotIn(
+            "enrolled_code_hash", body, "internal hash must never be returned"
+        )
+
+    async def test_a_fresh_code_from_THIS_hub_works(self) -> None:
+        pem, _ = await self._enrolled_phone()
+        issued = self.pairing.generate_code("user")
+        status, _ = await self._repair(issued["code"], pem)
+        self.assertEqual(status, 201)
+        # Not consumed — the phone was already enrolled, so the code stays
+        # available for the member it was actually minted for.
+        self.assertIn(issued["code_id"], self.pairing._codes)
+
+    async def test_the_owner_can_still_re_onboard_with_the_sticker_code(
+        self,
+    ) -> None:
+        # The case the leniency was written for: on a CLAIMED hub the bootstrap
+        # code is dropped from the live table, so the owner's printed code is
+        # only recognisable through the persisted hash.
+        sticker = "STICKER1"
+        self.hub_config.set(BOOTSTRAP_CODE_HASH_CONFIG_KEY, hash_code(sticker))
+        self.pairing.install_bootstrap_hash(hash_code(sticker))
+        pem = make_public_pem()
+        self.auth.enroll_device("Owner", "admin", pem)
+
+        status, _ = await self._repair(sticker, pem)
+        self.assertEqual(status, 201)
+
+    async def test_guessing_through_this_path_is_throttled(self) -> None:
+        pem, _ = await self._enrolled_phone()
+        for _ in range(6):
+            status, _ = await self._repair("NOPENOPE", pem)
+        # The wall goes up exactly as it does on the redeem path — a
+        # remembered key must not become a free code-guessing oracle.
+        self.assertEqual(status, 429)
 
 
 if __name__ == "__main__":
