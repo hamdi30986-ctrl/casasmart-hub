@@ -47,7 +47,6 @@ from the adapter's ingest path.
 from __future__ import annotations
 
 import hmac
-import ipaddress
 import logging
 import re
 import secrets
@@ -569,7 +568,7 @@ class CasaSmartAudioPaView(_AudioView):
         if adapter_not_ready is not None:
             return adapter_not_ready
 
-        filename, content_type, data, targets, read_error = await self._read_pa_parts(
+        _filename, content_type, data, targets, read_error = await self._read_pa_parts(
             request
         )
         if read_error is not None:

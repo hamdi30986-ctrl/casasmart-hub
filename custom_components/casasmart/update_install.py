@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import tempfile
 import zipfile
 from http import HTTPStatus

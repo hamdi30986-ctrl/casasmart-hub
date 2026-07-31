@@ -1,0 +1,34 @@
+# Lint config for the CasaSmart hub integration.
+#
+# Scope: the SHIPPED package (custom_components/casasmart). The rule set is
+# deliberately the defect-finding families rather than a style sweep —
+# these are the ones that catch real problems:
+#
+#   F   pyflakes      — dead imports/variables, undefined names, shadowing
+#   E9  syntax        — anything that won't parse or run
+#   B   bugbear       — mutable defaults, blind excepts, loop-variable capture
+#   C4  comprehensions — correctness/clarity of comprehension rewrites
+#
+# `ruff check custom_components/casasmart` passes clean at this rule set; keep
+# it that way. Style modernisation (UP*, SIM*, PERF*) is left OFF on purpose:
+# it would rewrite ~60 sites across the package for no behavioural gain, and
+# several of the SIM105 "use contextlib.suppress" hits are documented
+# best-effort heals whose inline comment explains why the failure is dropped.
+#
+# The tests/ tree is NOT gated yet — it still carries a handful of unused
+# aliases that may exist for module-registration side effects, which need a
+# per-case decision rather than a bulk fix.
+#
+# Install: pip install ruff        Run: ruff check custom_components/casasmart
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "C4"]
+
+[tool.ruff.lint.per-file-ignores]
+# The dual-import shim (package-relative first, flat fallback for the test
+# env) legitimately rebinds the same names in both branches.
+"custom_components/casasmart/*.py" = ["B904"]

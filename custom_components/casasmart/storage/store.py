@@ -143,9 +143,8 @@ class HubStorage:
             return self._connection.execute(sql, params)
 
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._lock:
-            with self._connection:  # commit/rollback transaction
-                return self._connection.execute(sql, params)
+        with self._lock, self._connection:  # commit/rollback transaction
+            return self._connection.execute(sql, params)
 
     def _fetchall(self, sql: str, params: tuple = ()) -> list[tuple]:
         """Execute and consume a read while holding the connection lock."""

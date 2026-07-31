@@ -61,7 +61,9 @@ try:
         VALID_ROLES,
         TokenError,
     )
-    from .throttle import FailureThrottle, ThrottledError
+    # ThrottledError is re-exported on purpose: callers (and test_auth) catch
+    # it as `auth_engine.ThrottledError` alongside the engine's own errors.
+    from .throttle import FailureThrottle, ThrottledError  # noqa: F401
 except ImportError:  # top-level import in the test env (no HA package init)
     import auth_keys  # type: ignore[no-redef]
     import auth_tokens  # type: ignore[no-redef]
@@ -72,7 +74,10 @@ except ImportError:  # top-level import in the test env (no HA package init)
         VALID_ROLES,
         TokenError,
     )
-    from throttle import FailureThrottle, ThrottledError  # type: ignore[no-redef]
+    from throttle import (  # type: ignore[no-redef]  # noqa: F401
+        FailureThrottle,
+        ThrottledError,
+    )
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -611,7 +616,7 @@ class AuthEngine:
         self,
         device_id: str,
         role: str | None = None,
-        rooms: list[str] | None | object = ...,
+        rooms: list[str] | object | None = ...,
     ) -> dict[str, Any]:
         """Edit a device's role and/or room scope; outstanding JWTs die.
 

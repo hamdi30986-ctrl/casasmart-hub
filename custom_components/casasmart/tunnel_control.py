@@ -37,7 +37,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .tunnel import (
-    EDGE_RESTART_COOLDOWN_SECONDS,
     edge_watchdog_decision,
     is_edge_origin_down,
     pick_cloudflared_slug,

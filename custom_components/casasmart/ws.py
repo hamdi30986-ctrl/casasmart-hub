@@ -367,7 +367,6 @@ class WsConnection:
         except ws_protocol.ProtocolError as err:
             await self._enqueue(ws_protocol.frame_error(str(err)))
             return
-        old_rooms = (self._claims or {}).get("rooms")
         if not await self._async_validate_token(token):
             await self._enqueue(
                 ws_protocol.frame_auth_failed("Invalid or expired token")

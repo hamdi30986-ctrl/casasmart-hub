@@ -16,13 +16,13 @@ from .migrations import LATEST_VERSION, MIGRATIONS, Migration
 from .store import EnergyEventsTable, HubStorage, KeyValueTable
 
 __all__ = [
+    "LATEST_VERSION",
+    "MIGRATIONS",
     "ConfigError",
     "EnergyEventsTable",
     "HubStorage",
     "JsonConfigStore",
     "KeyValueTable",
-    "LATEST_VERSION",
-    "MIGRATIONS",
     "Migration",
     "MigrationError",
     "StorageError",
