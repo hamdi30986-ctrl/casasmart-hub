@@ -307,14 +307,12 @@ class PairingManager:
         The enroll view short-circuits when it recognises a public key, so a
         phone re-running onboarding against its own claimed hub isn't bounced
         with "invalid code" (the bootstrap code is dead once an admin exists,
-        so there is no code it *could* type). That leniency was too wide: it
-        accepted ANY code, so a hub that merely REMEMBERS a phone would admit
-        it on a code minted by a DIFFERENT hub. With two hubs on one LAN —
-        an installer's bench hub and the client's real one, both holding the
-        same phone key — the app's enroll chain takes the first hub that says
-        yes, so typing the RIGHT hub's code could silently pair you to the
-        WRONG hub, with every layer reporting success. That is exactly what
-        happened on 2026-07-31.
+        so there is no code it *could* type). That leniency was too wide: a
+        hub that merely REMEMBERS a phone would admit it on a code minted by a
+        DIFFERENT hub. With two hubs on one LAN holding the same phone key,
+        the app's enroll chain takes the first hub that answers yes — so the
+        RIGHT hub's code could silently pair the phone to the WRONG one, every
+        layer reporting success (field failure, 2026-07-31).
 
         So: consume nothing, but require the code to be this hub's —
 

@@ -860,13 +860,11 @@ class CasaSmartUserView(HomeAssistantView):
 class CasaSmartUnpairSelfView(HomeAssistantView):
     """POST /api/casasmart/auth/unpair-self — this device hands the hub back.
 
-    The app's "Remove Hub" used to be purely phone-local: it wiped the app's
-    own data and (until the matching app fix) destroyed the phone's keypair,
-    but never told the hub anything. The hub therefore kept the phone enrolled
-    as its one admin — and a hub that HAS an admin will not enroll a second,
-    only issues sub-admin/user codes, and drops the bootstrap owner code. The
-    result was a hub no phone could ever administer again without the engraved
-    recovery card or physical access to the reset button. A site visit, for one
+    "Remove Hub" in the app is phone-local and never told the hub anything, so
+    the hub kept the phone enrolled as its one admin — and a hub that HAS an
+    admin will not enroll a second, only issues sub-admin/user codes, and drops
+    the bootstrap owner code. No phone could administer it again without the
+    engraved recovery card or the physical reset button: a site visit, for one
     tap in Settings.
 
     The caller's own token is the authority: it proves possession of this
