@@ -86,6 +86,33 @@ class TestCategoryPolicy(unittest.TestCase):
                 device_class,
             )
 
+    def test_diagnostic_filter_life_served(self):
+        # An air purifier's filter life is diagnostic AND classless, so the
+        # device_class whitelist alone hid the one reading its owner must act
+        # on. Matched by name, like the app does.
+        for entity_id in (
+            "sensor.core_300s_filter_lifetime",
+            "sensor.purifier_filter_life_remaining",
+            "sensor.purifier_filter_remaining",
+        ):
+            self.assertTrue(
+                is_category_served("diagnostic", entity_id, None), entity_id
+            )
+
+    def test_filter_match_does_not_widen_the_diagnostic_gate(self):
+        # Needs BOTH halves of the name — a stray "filter" or "life" must not
+        # reopen the classless-diagnostic firehose.
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_filter_status", None)
+        )
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_lifetime_energy", None)
+        )
+        # And still only for sensors.
+        self.assertFalse(
+            is_category_served("diagnostic", "switch.purifier_filter_life", None)
+        )
+
     def test_diagnostic_noise_stays_hidden(self):
         # linkquality has no device_class — the classic Z2M chatter source.
         self.assertFalse(is_category_served("diagnostic", "sensor.plug_lqi", None))

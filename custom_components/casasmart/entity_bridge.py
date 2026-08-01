@@ -272,6 +272,17 @@ DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
 )
 
 
+def is_filter_life_entity(entity_id: str) -> bool:
+    """True for an air purifier's remaining-filter-life sensor.
+
+    Matched by entity_id because HA publishes no device_class for it — brands
+    name it ``filter_lifetime``, ``filter_life_remaining``, ``filter_remaining``.
+    The app matches with the same rule.
+    """
+    name = entity_id.lower()
+    return "filter" in name and ("life" in name or "remain" in name)
+
+
 def is_category_served(
     category: str, entity_id: str, device_class: str | None
 ) -> bool:
@@ -285,6 +296,11 @@ def is_category_served(
     if category == "diagnostic":
         domain = entity_domain(entity_id)
         if domain == "sensor":
+            # An air purifier's filter life is the one thing about the device
+            # its owner has to act on, and HA files it under diagnostics with
+            # no device_class — so the class whitelist alone would hide it.
+            if is_filter_life_entity(entity_id):
+                return True
             return device_class in DIAGNOSTIC_SENSOR_CLASSES
         if domain == "binary_sensor":
             return device_class in DIAGNOSTIC_BINARY_SENSOR_CLASSES
