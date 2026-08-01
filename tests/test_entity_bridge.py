@@ -353,6 +353,23 @@ class TestStage3aWidening(unittest.TestCase):
         with self.assertRaises(CommandError):
             validate_command("select.sensitivity", "toggle", {})
 
+    def test_fan_set_preset_mode(self):
+        # An air purifier changes Auto/Sleep without being "turned on" again.
+        self.assertEqual(
+            validate_command(
+                "fan.purifier", "set_preset_mode", {"preset_mode": "auto"}
+            ),
+            ("fan", "set_preset_mode", {"preset_mode": "auto"}),
+        )
+
+    def test_fan_preset_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command(
+                "fan.purifier",
+                "set_preset_mode",
+                {"preset_mode": "auto", "percentage": 50},
+            )
+
     def test_installer_ops_not_exposed(self):
         # 3c-3: automation is exposed for state + toggle/trigger, but the
         # installer verbs (reload) are still never app commands.

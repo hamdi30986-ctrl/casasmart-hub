@@ -161,6 +161,10 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "turn_on": ("turn_on", frozenset({"percentage", "preset_mode"})),
         "turn_off": ("turn_off", frozenset()),
         "set_percentage": ("set_percentage", frozenset({"percentage"})),
+        # Auto / Sleep on an air purifier. Without this the app could only
+        # reach a preset through turn_on, i.e. "turning on" a fan that is
+        # already running just to change its mode.
+        "set_preset_mode": ("set_preset_mode", frozenset({"preset_mode"})),
     },
     "cover": {
         "open": ("open_cover", frozenset()),
