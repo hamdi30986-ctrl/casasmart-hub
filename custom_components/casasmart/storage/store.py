@@ -39,6 +39,15 @@ _VALID_NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # immediately — covers brief contention from backups or a second reader.
 _BUSY_TIMEOUT_MS = 5000
 
+# Keep acknowledged writes in the main database instead of allowing them to
+# live only in a long-running WAL until the next integration unload.  This is
+# intentionally tiny: CasaSmart runs on appliance hosts where /config may be a
+# Docker bind mount on removable storage, and an abrupt host restart can lose a
+# WAL sidecar even when the main database survives.  The storage layer has one
+# connection guarded by an RLock, so the normal passive auto-checkpoint can
+# complete immediately without reader contention.
+_WAL_AUTOCHECKPOINT_PAGES = 1
+
 
 class HubStorage:
     """Owns the SQLite connection, WAL setup, and migration run."""
@@ -79,16 +88,20 @@ class HubStorage:
             # high-frequency writer into a one-row INSERT, not a 270 KB blob.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(
+                f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}"
+            )
         except Exception:
             conn.close()
             raise
 
         self._conn = conn
         _LOGGER.info(
-            "Storage open: %s (schema v%d, journal=%s)",
+            "Storage open: %s (schema v%d, journal=%s, wal_autocheckpoint=%d)",
             self._db_path,
             schema_version,
             journal_mode,
+            _WAL_AUTOCHECKPOINT_PAGES,
         )
 
     def close(self) -> None:

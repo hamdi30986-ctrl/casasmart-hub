@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -344,6 +344,21 @@ async def async_setup_entry(
         audio=audio,
         energy=energy,
         energy_flags=energy_flags,
+    )
+
+    # Home Assistant does not unload every config entry during a host stop.
+    # Register an explicit stop listener so SQLite checkpoints and closes
+    # before Docker unmounts /config.  The normal config-entry unload path
+    # below remains in place; HubStorage.close() is deliberately idempotent.
+    async def _async_close_storage_on_stop(_event: Event) -> None:
+        await hass.async_add_executor_job(storage.close)
+        _LOGGER.info("CasaSmart Hub storage checkpointed and closed on HA stop")
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP,
+            _async_close_storage_on_stop,
+        )
     )
 
     # Cloudflare domain (entry options) -> advertised tunnel_url (hub_config),

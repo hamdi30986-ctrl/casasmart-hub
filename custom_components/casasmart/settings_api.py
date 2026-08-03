@@ -76,21 +76,15 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return mid, settings.get(mid)
 
         member_id, doc = await self._hass.async_add_executor_job(_load)
-        # widget_tiles parity with favorites (Phase 8): an ENTITY tile whose
-        # entity is gone/unserved is a phantom — drop it + self-heal storage so
-        # the widget never paints a dead tile, then scope to the caller. Non-HA
-        # pseudo-tiles (tank/scene/security) the hub can't gate pass through.
+        # Widget-tile parity with favorites: filter an absent/unserved ENTITY
+        # tile from this response, but do not mutate storage from GET. During
+        # HA startup entity states are populated incrementally; persisting the
+        # transient filtered view would permanently erase the user's layout.
+        # Non-HA pseudo-tiles (tank/scene/security) pass through.
         tiles = doc.get("widget_tiles")
         if tiles:
             served = [t for t in tiles if self._tile_alive(t)]
-            if served != tiles:
-                try:
-                    await self._hass.async_add_executor_job(
-                        settings.update, member_id, {"widget_tiles": served}
-                    )
-                except SettingsError:
-                    pass  # best-effort heal; the filtered response still holds
-                doc["widget_tiles"] = served
+            doc["widget_tiles"] = served
             scope = claims.get("rooms")
             doc["widget_tiles"] = [
                 t for t in doc["widget_tiles"] if self._tile_in_scope(t, scope)

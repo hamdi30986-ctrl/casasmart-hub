@@ -190,10 +190,10 @@ class SettingsPut(SettingsViewTestCase):
 
 class WidgetTileFilter(SettingsViewTestCase):
     """Phase 8 — widget_tiles get the favorites posture: phantom entity-tiles
-    drop + self-heal on GET, served+scope write-guard on PUT; non-HA pseudo-
-    tiles (tank/scene/security) pass through untouched."""
+    are filtered without mutation on GET, served+scope write-guard on PUT;
+    non-HA pseudo-tiles (tank/scene/security) pass through untouched."""
 
-    async def test_get_drops_phantom_entity_tile_and_self_heals(self) -> None:
+    async def test_get_filters_phantom_without_mutating_storage(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="admin")
         member = self.rt.auth.member_id_for(dev)
         self.settings.update(member, {"widget_tiles": [
@@ -209,9 +209,12 @@ class WidgetTileFilter(SettingsViewTestCase):
             status, body = await self._get(hdr)
         self.assertEqual(status, 200)
         self.assertEqual([t["entityId"] for t in body["widget_tiles"]], ["light.a"])
-        # Self-heal: storage itself lost the phantom.
+        # The absent state may be a startup transient, so GET keeps storage.
         stored = self.settings.get(member)["widget_tiles"]
-        self.assertEqual([t["entityId"] for t in stored], ["light.a"])
+        self.assertEqual(
+            [t["entityId"] for t in stored],
+            ["light.a", "switch.gone"],
+        )
 
     async def test_get_keeps_pseudo_tiles(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="admin")

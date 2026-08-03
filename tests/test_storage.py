@@ -5,6 +5,7 @@ Run from the repo root:
 """
 
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -55,6 +56,31 @@ class TestWalAndLifecycle(StorageTestCase):
         storage = self.make_storage()
         mode = storage._connection.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode.lower(), "wal")
+
+    def test_acknowledged_write_is_checkpointed_into_main_database(self):
+        """A lost WAL sidecar must not erase an acknowledged settings write."""
+        storage = self.make_storage()
+        pages = storage._connection.execute(
+            "PRAGMA wal_autocheckpoint"
+        ).fetchone()[0]
+        self.assertEqual(pages, 1)
+
+        storage.table("favorites")["member-1"] = {
+            "entity_ids": ["light.kitchen"]
+        }
+
+        # Copy ONLY the main file while the source connection is still open.
+        # This simulates the host-restart incident where hub.db survived but
+        # its WAL sidecar did not.
+        main_only = self.dir / "main-only.db"
+        shutil.copy2(self.db_path, main_only)
+        with sqlite3.connect(main_only) as conn:
+            row = conn.execute(
+                "SELECT value FROM kv WHERE namespace = ? AND key = ?",
+                ("favorites", "member-1"),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(json.loads(row[0]), {"entity_ids": ["light.kitchen"]})
 
     def test_schema_at_latest_version(self):
         storage = self.make_storage()

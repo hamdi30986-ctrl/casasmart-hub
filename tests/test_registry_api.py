@@ -1,7 +1,8 @@
 """View-layer tests for ``registry_api`` — the favorites wire contract.
 
 Pins the Phase 6/7 logic that lives in the VIEW, not the engine:
-* GET filters phantom (gone/unserved) favorites, self-heals storage, scopes.
+* GET filters phantom (gone/unserved) favorites without mutating storage, and
+  scopes the response.
 * PUT validates served+in-scope, is member-keyed (Phase 5), preserves a scoped
   caller's out-of-scope favorites (Phase 7), and fires the re-pull nudge.
 
@@ -77,7 +78,7 @@ class FavoritesGet(FavoritesViewTestCase):
         status, _ = await self._get({})
         self.assertEqual(status, 401)
 
-    async def test_drops_phantom_and_self_heals_storage(self) -> None:
+    async def test_drops_phantom_without_mutating_storage(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="admin")
         member = self.rt.auth.member_id_for(dev)
         # light.a is real+served; switch.gone was deleted (no state at all).
@@ -91,8 +92,11 @@ class FavoritesGet(FavoritesViewTestCase):
             status, body = await self._get(hdr)
         self.assertEqual(status, 200)
         self.assertEqual(body["entity_ids"], ["light.a"])  # phantom dropped
-        # SELF-HEAL: the stored list itself lost the phantom.
-        self.assertEqual(self.rt.registry.get_favorites(member), ["light.a"])
+        # Read-time filtering must not destroy a temporarily absent favorite.
+        self.assertEqual(
+            self.rt.registry.get_favorites(member),
+            ["light.a", "switch.gone"],
+        )
 
     async def test_drops_unserved_but_keeps_existing(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="admin")
@@ -107,6 +111,10 @@ class FavoritesGet(FavoritesViewTestCase):
         ):
             status, body = await self._get(hdr)
         self.assertEqual(body["entity_ids"], ["light.a"])
+        self.assertEqual(
+            self.rt.registry.get_favorites(member),
+            ["light.a", "switch.hidden"],
+        )
 
     async def test_scopes_to_caller_without_healing_out_of_scope(self) -> None:
         dev, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
