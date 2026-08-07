@@ -132,7 +132,7 @@ EVENT_AUDIO_CHANGED = "casasmart_audio_changed"
 # The hub checks this GitHub repo's latest release to tell the app an update
 # exists. ``owner/name`` form — the installer can repoint it per-fleet via the
 # hub_config key below without a code change.
-UPDATE_GITHUB_REPO = "casasmart/casasmart-hub"
+UPDATE_GITHUB_REPO = "hamdi30986-ctrl/casasmart-hub"
 UPDATE_REPO_CONFIG_KEY = "update_repo"
 # Latest-release lookups are cached this long. The status endpoint serves the
 # cache and refreshes lazily past this age — GitHub is polled at most once per

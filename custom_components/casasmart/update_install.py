@@ -48,8 +48,12 @@ _LOGGER = logging.getLogger(__name__)
 # Downloading a release tarball is heavier than the status poll — give it
 # room, but still bounded so a wedged transfer can't hang forever.
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120)
+# GitHub's zipball API endpoint (our fallback when a release ships no packaged
+# ``.zip`` asset) rejects ``application/octet-stream`` with a 415 — it wants a
+# GitHub media type. ``browser_download_url`` asset downloads ignore Accept, so
+# ``vnd.github+json`` is correct for both artifact paths.
 _DOWNLOAD_HEADERS = {
-    "Accept": "application/octet-stream",
+    "Accept": "application/vnd.github+json",
     "User-Agent": "CasaSmart-Hub",
 }
 # Seconds to let the HTTP response flush to the app before we pull the rug.
