@@ -1,0 +1,7 @@
+{
+  "filename": "casasmart.zip",
+  "zip_release": true,
+  "name": "CasaSmart Hub",
+  "render_readme": true,
+  "homeassistant": "2025.1.0"
+}

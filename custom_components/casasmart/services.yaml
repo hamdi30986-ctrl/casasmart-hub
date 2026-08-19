@@ -1,0 +1,30 @@
+factory_reset:
+  name: Factory reset (app layer)
+  description: >-
+    Reset CasaSmart app pairing and recovery data without changing Home
+    Assistant devices or automations.
+set_tunnel_url:
+  name: Set tunnel URL
+  description: >-
+    Validate and store the HTTPS tunnel origin advertised by the hub.
+  fields:
+    url:
+      name: Tunnel URL
+      description: The hub's public https tunnel origin (e.g. https://abc123.example.com).
+      required: true
+      example: https://abc123.example.com
+      selector:
+        text:
+activate_scene:
+  name: Activate CasaSmart scene
+  description: >-
+    Run a CasaSmart registry scene through the same validated executor used by
+    the owner app. Intended for CasaSmart-created Home Assistant automations.
+  fields:
+    scene_id:
+      name: Scene ID
+      description: Stable CasaSmart registry scene identifier.
+      required: true
+      example: scene-AbCdEf123
+      selector:
+        text:
