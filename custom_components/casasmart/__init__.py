@@ -104,6 +104,7 @@ from .tunnel import (
 )
 from .tunnel_control import CloudflaredController, TunnelControlError
 from .user_settings import UserSettingsEngine
+from .now_data import NowDataEngine
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class CasaSmartRuntimeData:
     registry: RegistryEngine
     tanks: TankEngine
     user_settings: UserSettingsEngine
+    now_data: NowDataEngine
 
     push: PushTokenStore
 
@@ -203,6 +205,7 @@ def _open_storage(
     RegistryEngine,
     TankEngine,
     UserSettingsEngine,
+    NowDataEngine,
     PushTokenStore,
     AlarmEngine,
     AudioEngine,
@@ -271,6 +274,13 @@ def _open_storage(
         storage.tank_readings(),
     )
     user_settings = UserSettingsEngine(storage.table("user_settings"))
+    now_data = NowDataEngine(
+        storage.table("now_recents"),
+        storage.table("now_room_policies"),
+        storage.table("now_config"),
+        storage.table("now_restore_sets"),
+        storage.table("now_idempotency"),
+    )
     push = PushTokenStore(storage.table("push_tokens"))
 
 
@@ -306,6 +316,7 @@ def _open_storage(
         registry,
         tanks,
         user_settings,
+        now_data,
         push,
         alarm,
         audio,
@@ -392,6 +403,7 @@ async def async_setup_entry(
             registry,
             tanks,
             user_settings,
+            now_data,
             push,
             alarm,
             audio,
@@ -412,6 +424,7 @@ async def async_setup_entry(
         registry=registry,
         tanks=tanks,
         user_settings=user_settings,
+        now_data=now_data,
         push=push,
         alarm=alarm,
         audio=audio,
@@ -1261,6 +1274,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
 
             runtime_data.storage.table("user_settings").clear()
+            runtime_data.storage.table("now_recents").clear()
+            runtime_data.storage.table("now_room_policies").clear()
+            runtime_data.storage.table("now_config").clear()
+            runtime_data.storage.table("now_restore_sets").clear()
+            runtime_data.storage.table("now_idempotency").clear()
 
             runtime_data.storage.table("push_tokens").clear()
 

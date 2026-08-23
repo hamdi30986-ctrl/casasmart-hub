@@ -38,6 +38,7 @@ from .auth_api import (
     CasaSmartWhoamiView,
     CasaSmartWidgetTokenView,
     authenticate_request,
+    get_engine,
 )
 from .admin_api import (
     CasaSmartAdminConfigFlowsView,
@@ -110,6 +111,12 @@ from .registry_api import (
     CasaSmartUserDeviceView,
 )
 from .settings_api import CasaSmartUserSettingsView
+from .now_api import (
+    CasaSmartNowConfigView,
+    CasaSmartNowView,
+    CasaSmartRoomActivityCommandView,
+    CasaSmartRoomActivityPolicyView,
+)
 from .update_api import (
     CasaSmartUpdateInstallView,
     CasaSmartUpdateStatusView,
@@ -177,6 +184,10 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartSceneActivateView(hass),
         CasaSmartFavoritesView(hass),
         CasaSmartUserSettingsView(hass),
+        CasaSmartNowView(hass),
+        CasaSmartNowConfigView(hass),
+        CasaSmartRoomActivityPolicyView(hass),
+        CasaSmartRoomActivityCommandView(hass),
         CasaSmartUpdateStatusView(hass, get_or_create_checker(hass, hub_version)),
         CasaSmartUpdateInstallView(hass, get_or_create_checker(hass, hub_version)),
         CasaSmartAlarmStateView(hass),
@@ -500,6 +511,18 @@ class CasaSmartCommandView(HomeAssistantView):
 
 
         new_state = self._hass.states.get(entity_id)
+        now_data = getattr(_get_runtime_data(self._hass), "now_data", None)
+        if now_data is not None:
+            engine = get_engine(self._hass)
+            member_id = engine.member_id_for(claims["sub"]) if engine else claims["sub"]
+            try:
+                await self._hass.async_add_executor_job(
+                    now_data.record_successful_control, member_id, entity_id
+                )
+            except Exception:
+                # A control already succeeded; keep that result truthful even if
+                # optional recency persistence is temporarily unavailable.
+                _LOGGER.exception("Now recency recording failed for %s", entity_id)
         return self.json(
             {
                 "ok": True,
