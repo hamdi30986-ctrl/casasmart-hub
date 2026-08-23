@@ -45,8 +45,16 @@ class NowDataEngineTest(unittest.TestCase):
         engine = make_engine()
         self.assertFalse(engine.room_participates("room-kitchen"))
         self.assertEqual(
-            engine.set_room_policy("room-kitchen", True),
-            {"room_id": "room-kitchen", "participates": True},
+            engine.set_room_policy("room-kitchen", True, ["light.kitchen", "fan.kitchen"]),
+            {
+                "room_id": "room-kitchen",
+                "participates": True,
+                "eligible_entity_ids": ["light.kitchen", "fan.kitchen"],
+            },
+        )
+        self.assertEqual(
+            engine.room_policy("room-kitchen")["eligible_entity_ids"],
+            ["light.kitchen", "fan.kitchen"],
         )
         config = engine.configure(
             {
@@ -68,22 +76,26 @@ class NowDataEngineTest(unittest.TestCase):
         engine.save_restore_set("room-kitchen", ["light.kitchen", "fan.kitchen"])
         self.assertEqual(engine.restore_set("room-kitchen"), ["light.kitchen", "fan.kitchen"])
         result = {"ok": True, "outcomes": [{"entity_id": "light.kitchen", "outcome": "changed"}]}
-        engine.save_idempotent_result("member-a", "room-kitchen", key, result)
-        self.assertEqual(engine.idempotent_result("member-a", "room-kitchen", key), result)
-        self.assertIsNone(engine.idempotent_result("member-b", "room-kitchen", key))
+        engine.save_idempotent_result("member-a", "room-kitchen", "turn_off", key, result)
+        self.assertEqual(engine.idempotent_result("member-a", "room-kitchen", "turn_off", key), result)
+        self.assertIsNone(engine.idempotent_result("member-a", "room-kitchen", "turn_on", key))
+        self.assertIsNone(engine.idempotent_result("member-b", "room-kitchen", "turn_off", key))
         self.assertEqual(engine.consume_restore_set("room-kitchen"), ["light.kitchen", "fan.kitchen"])
         self.assertEqual(engine.restore_set("room-kitchen"), [])
 
 
 class RoomActivityContractTest(unittest.TestCase):
-    def test_allowlist_excludes_risky_and_non_control_domains(self) -> None:
-        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "light.kitchen", "state": "on"}))
-        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "fan.kitchen", "state": "on"}))
-        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "switch.lamp", "state": "on"}))
-        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "switch.coffee_machine", "attributes": {"device_class": "outlet"}}))
-        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "lock.front_door"}))
-        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "cover.curtain"}))
-        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "camera.gate"}))
+    def test_allowlist_requires_hub_policy_and_excludes_generic_switches(self) -> None:
+        allowed = ["light.kitchen", "fan.kitchen", "switch.wall"]
+        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "light.kitchen", "state": "on"}, allowed))
+        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "fan.kitchen", "state": "on"}, allowed))
+        self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "switch.wall", "attributes": {"device_class": "switch"}}, allowed))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "light.unlisted", "state": "on"}, allowed))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "switch.generic"}, ["switch.generic"]))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "switch.coffee_machine", "attributes": {"device_class": "outlet"}}, ["switch.coffee_machine"]))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "lock.front_door"}, ["lock.front_door"]))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "cover.curtain"}, ["cover.curtain"]))
+        self.assertFalse(_NOW.is_room_activity_eligible({"entity_id": "camera.gate"}, ["camera.gate"]))
 
     def test_fixed_layout_contract(self) -> None:
         rooms = [{"room_id": f"room-{index}"} for index in range(6)]

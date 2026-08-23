@@ -21,6 +21,7 @@ from .filtering import area_id_of, in_scope, is_served, serialize_device
 from .now_data import (
     NowDataEngine,
     NowDataError,
+    is_room_activity_candidate,
     is_room_activity_eligible,
     is_running_room_activity,
     room_activity_layout,
@@ -123,7 +124,7 @@ class CasaSmartNowView(_NowView):
                 registry.list_rooms(),
                 registry.list_scenes(),
                 registry.get_favorites(member_id),
-                {room["room_id"]: now_data.room_participates(room["room_id"]) for room in registry.list_rooms()},
+                {room["room_id"]: now_data.room_policy(room["room_id"]) for room in registry.list_rooms()},
             )
         )
         rooms = [room for room in rooms if scope is None or room["room_id"] in scope]
@@ -148,21 +149,24 @@ class CasaSmartNowView(_NowView):
         active_rooms: list[dict[str, Any]] = []
         for room in rooms:
             room_id = room["room_id"]
-            if not policies.get(room_id, False):
+            policy = policies.get(room_id, {})
+            if not policy.get("participates", False):
                 continue
+            eligible_entity_ids = policy.get("eligible_entity_ids", [])
             devices = [
                 state
                 for state in self._hass.states.async_all()
                 if area_id_of(self._hass, state.entity_id) == room_id
                 and is_served(self._hass, state.entity_id)
                 and in_scope(self._hass, state.entity_id, scope)
-                and is_running_room_activity(state)
+                and is_running_room_activity(state, eligible_entity_ids)
             ]
-            if not devices:
-                continue
             timestamps = [
                 state.last_changed for state in devices if isinstance(state.last_changed, datetime)
             ]
+            restore_pending_count = len(
+                await self._hass.async_add_executor_job(now_data.restore_set, room_id)
+            )
             active_rooms.append(
                 {
                     "room_id": room_id,
@@ -170,6 +174,7 @@ class CasaSmartNowView(_NowView):
                     "icon": room.get("icon"),
                     "active_count": len(devices),
                     "most_recent_activity_at": max(timestamps).astimezone(timezone.utc).isoformat() if timestamps else None,
+                    "restore_pending_count": restore_pending_count,
                 }
             )
         active_rooms.sort(
@@ -197,7 +202,7 @@ class CasaSmartNowView(_NowView):
                 "recently_used": {"source": recent_source, "items": recent_items},
                 "pinned_moments": [scene for scene_id in config.get("pinned_scene_ids", []) if (scene := visible_scene(scene_id)) is not None],
                 "suggested_routine": visible_scene(config.get("suggested_scene_id")),
-                "room_activity": {"rooms": active_rooms, "layout": room_activity_layout(active_rooms), "configured_room_count": sum(1 for room_id in room_ids if policies.get(room_id, False))},
+                "room_activity": {"rooms": active_rooms, "layout": room_activity_layout(active_rooms), "configured_room_count": sum(1 for room_id in room_ids if policies.get(room_id, {}).get("participates", False))},
                 "outdoor_weather": weather,
                 "air_quality": air_quality,
                 "doors_windows": contacts,
@@ -356,11 +361,40 @@ class CasaSmartRoomActivityPolicyView(_NowView):
         payload = await json_body(request)
         if payload is None:
             return self.json_message("Body must be a JSON object", HTTPStatus.BAD_REQUEST)
+        eligible_entity_ids = payload.get("eligible_entity_ids")
+        if not isinstance(eligible_entity_ids, list):
+            return self.json_message("eligible_entity_ids must be an explicit list of approved entities", HTTPStatus.BAD_REQUEST)
+        invalid = await self._invalid_eligible_entities(room_id, eligible_entity_ids)
+        if invalid is not None:
+            return self.json_message(invalid, HTTPStatus.BAD_REQUEST)
         try:
-            policy = await self._hass.async_add_executor_job(now_data.set_room_policy, room_id, payload.get("participates"))
+            policy = await self._hass.async_add_executor_job(
+                now_data.set_room_policy,
+                room_id,
+                payload.get("participates"),
+                eligible_entity_ids,
+            )
         except NowDataError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json(policy)
+
+    async def _invalid_eligible_entities(
+        self, room_id: str, entity_ids: list[Any]
+    ) -> str | None:
+        if len(entity_ids) > 64 or any(not isinstance(entity_id, str) for entity_id in entity_ids):
+            return "eligible_entity_ids must contain at most 64 entity ids"
+        if len(set(entity_ids)) != len(entity_ids):
+            return "eligible_entity_ids must not contain duplicates"
+        for entity_id in entity_ids:
+            state = self._hass.states.get(entity_id)
+            if (
+                state is None
+                or area_id_of(self._hass, entity_id) != room_id
+                or not is_served(self._hass, entity_id)
+                or not is_room_activity_candidate(state)
+            ):
+                return f"Entity {entity_id!r} is not an eligible room-activity device"
+        return None
 
     async def _room_accessible(self, room_id: str, scope: list[str] | None) -> bool:
         registry = self._registry()
@@ -405,7 +439,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         member_id = _member_id(self._hass, claims)
         lock = self._room_locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            existing = await self._hass.async_add_executor_job(now_data.idempotent_result, member_id, room_id, key)
+            existing = await self._hass.async_add_executor_job(
+                now_data.idempotent_result, member_id, room_id, action, key
+            )
             if existing is not None:
                 return self.json(existing)
             participates = await self._hass.async_add_executor_job(now_data.room_participates, room_id)
@@ -413,19 +449,23 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 return self.json({"error": "room_activity_disabled", "message": "Room activity is not enabled for this room"}, HTTPStatus.CONFLICT)
             result = await self._run(room_id, action, now_data)
             result["idempotency_key"] = key
-            await self._hass.async_add_executor_job(now_data.save_idempotent_result, member_id, room_id, key, result)
+            await self._hass.async_add_executor_job(
+                now_data.save_idempotent_result, member_id, room_id, action, key, result
+            )
             for outcome in result["outcomes"]:
                 if outcome["outcome"] == "changed":
                     await self._hass.async_add_executor_job(now_data.record_successful_control, member_id, outcome["entity_id"])
             return self.json(result)
 
     async def _run(self, room_id: str, action: str, now_data: NowDataEngine) -> dict[str, Any]:
+        policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
+        eligible_entity_ids = policy["eligible_entity_ids"]
         eligible = {
             state.entity_id: state
             for state in self._hass.states.async_all()
             if area_id_of(self._hass, state.entity_id) == room_id
             and is_served(self._hass, state.entity_id)
-            and is_room_activity_eligible(state)
+            and is_room_activity_eligible(state, eligible_entity_ids)
         }
         restore_ids: list[str] = []
         if action == "turn_off":

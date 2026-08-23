@@ -41,6 +41,16 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn("consume_restore_set", source)
         self.assertIn("energy_lockout_applies", source)
 
+    def test_bulk_membership_and_idempotency_are_server_owned_and_action_scoped(self) -> None:
+        source = (ROOT / "custom_components" / "casasmart" / "now_api.py").read_text()
+        data = (ROOT / "custom_components" / "casasmart" / "now_data.py").read_text()
+        self.assertIn("eligible_entity_ids must be an explicit list", source)
+        self.assertIn("is_room_activity_candidate", source)
+        self.assertIn("now_data.room_policy", source)
+        self.assertIn("member_id, room_id, action, key", source)
+        self.assertIn('f"{room_id}:{action}:{key}"', data)
+        self.assertIn('"restore_pending_count"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
