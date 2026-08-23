@@ -24,6 +24,7 @@ from .const import (
     MIN_APP_VERSION,
     SUPPORTED_API_VERSIONS,
 )
+from .capabilities import handshake_capabilities
 from .auth_api import (
     CasaSmartChallengeView,
     CasaSmartEnrollView,
@@ -257,6 +258,10 @@ class CasaSmartHandshakeView(HomeAssistantView):
             "min_app_version": MIN_APP_VERSION,
             "hub_version": self._hub_version,
             "supported_api_versions": list(SUPPORTED_API_VERSIONS),
+            # Additive capability negotiation.  Existing API-v1 clients ignore
+            # this key; new clients fail closed when a protected feature is
+            # absent or unavailable instead of guessing from ``api_version``.
+            "capabilities": handshake_capabilities(),
         }
 
         runtime_data = _get_runtime_data(self._hass)
