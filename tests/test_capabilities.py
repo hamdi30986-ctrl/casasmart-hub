@@ -17,7 +17,7 @@ _SPEC.loader.exec_module(_CAPABILITIES)
 
 
 class CapabilityContractTest(unittest.TestCase):
-    def test_foundation_advertises_all_orbit_features_as_unavailable(self) -> None:
+    def test_only_complete_now_endpoints_are_advertised(self) -> None:
         contract = _CAPABILITIES.handshake_capabilities()
 
         self.assertEqual(contract["contract_version"], 1)
@@ -30,24 +30,31 @@ class CapabilityContractTest(unittest.TestCase):
                 "push_relay_optional_v1",
             },
         )
+        self.assertEqual(
+            {
+                name: feature["available"]
+                for name, feature in contract["features"].items()
+            },
+            {
+                "admin_password_v1": False,
+                "room_activity_bulk_v1": True,
+                "now_data_v1": True,
+                "push_relay_optional_v1": False,
+            },
+        )
         self.assertTrue(
             all(
-                feature
-                == {
-                    "version": 1,
-                    "minimum_api_version": 1,
-                    "available": False,
-                }
+                feature["version"] == 1 and feature["minimum_api_version"] == 1
                 for feature in contract["features"].values()
             )
         )
 
     def test_callers_cannot_mutate_future_handshake_responses(self) -> None:
         first = _CAPABILITIES.handshake_capabilities()
-        first["features"]["admin_password_v1"]["available"] = True
+        first["features"]["now_data_v1"]["available"] = False
 
         fresh = _CAPABILITIES.handshake_capabilities()
-        self.assertFalse(fresh["features"]["admin_password_v1"]["available"])
+        self.assertTrue(fresh["features"]["now_data_v1"]["available"])
 
 
 if __name__ == "__main__":

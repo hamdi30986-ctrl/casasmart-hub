@@ -28,13 +28,19 @@ ORBIT_CAPABILITIES: Final = (
     "push_relay_optional_v1",
 )
 
+# These capability values are an endpoint-completeness gate, not a roadmap.
+# Keep protected admin-password and optional-relay support fail-closed until
+# their own server-side enforcement exists.
+_IMPLEMENTED_CAPABILITIES: Final = frozenset(
+    {"room_activity_bulk_v1", "now_data_v1"}
+)
+
 
 def handshake_capabilities() -> dict[str, object]:
     """Return the safe baseline capability block for ``/handshake``.
 
-    Every feature is explicitly unavailable in the foundation release.  This
-    is intentional: a client must not infer security, relay, activity, or Now
-    support from the Hub API version alone.
+    Only complete server endpoints are available.  Clients must not infer
+    security or relay support from the Hub API version alone.
     """
 
     return {
@@ -43,7 +49,7 @@ def handshake_capabilities() -> dict[str, object]:
             name: {
                 "version": 1,
                 "minimum_api_version": _FOUNDATION_MINIMUM_API_VERSION,
-                "available": False,
+                "available": name in _IMPLEMENTED_CAPABILITIES,
             }
             for name in ORBIT_CAPABILITIES
         },
