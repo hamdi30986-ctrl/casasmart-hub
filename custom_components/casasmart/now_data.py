@@ -20,7 +20,11 @@ _MAX_CONTACTS = 64
 _MAX_IDEMPOTENCY_ENTRIES = 64
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
-_ELIGIBLE_DOMAINS = frozenset({"light", "fan", "switch"})
+_ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
+# Home Assistant permits a switch to have no device class.  That generic value
+# is not a safety classification, so it must never be admitted to a room bulk
+# operation.  The Hub policy must additionally name every participating entity.
+_SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
 class NowDataError(Exception):
     """Raised when persisted Now configuration is invalid."""
 
@@ -48,32 +52,36 @@ def _state_attributes(state: Any) -> dict[str, Any]:
     return attributes if isinstance(attributes, dict) else {}
 
 
-def is_room_activity_eligible(state: Any) -> bool:
-    """Return whether an entity is safe for a room-wide Now command.
-
-    The allowlist is deliberately narrow.  A generic ``switch`` can represent
-    a dangerous appliance, so switch device classes that imply power delivery
-    are never admitted.  Covers, locks, climate, media, cameras, sensors and
-    all other domains remain excluded by construction.
-    """
+def is_room_activity_candidate(state: Any) -> bool:
+    """Return whether an entity can be added to the explicit Hub allowlist."""
 
     entity_id = _state_value(state, "entity_id", "")
     domain = entity_id.split(".", 1)[0]
-    if domain not in _ELIGIBLE_DOMAINS:
+    if domain not in _ROOM_ACTIVITY_DOMAINS:
         return False
     attributes = _state_attributes(state)
     if attributes.get("casasmart_room_activity_exclude") is True:
         return False
     if domain == "switch":
-        device_class = attributes.get("device_class")
-        return device_class is None
+        return attributes.get("device_class") in _SAFE_SWITCH_DEVICE_CLASSES
     return True
 
 
-def is_running_room_activity(state: Any) -> bool:
+def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
+    """Return whether an entity is both a safe candidate and Hub-authorized.
+
+    A client cannot make an entity eligible by sending it in a command.  The
+    entity must appear in the persisted per-room policy selected by an admin.
+    """
+
+    entity_id = _state_value(state, "entity_id", "")
+    return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(state)
+
+
+def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
     """A running room device is an eligible device whose state is ``on``."""
 
-    return is_room_activity_eligible(state) and _state_value(state, "state") == "on"
+    return is_room_activity_eligible(state, eligible_entity_ids) and _state_value(state, "state") == "on"
 
 
 def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
@@ -142,16 +150,36 @@ class NowDataEngine:
             and isinstance(item.get("at"), str)
         ]
 
-    def set_room_policy(self, room_id: str, participates: Any) -> dict[str, Any]:
+    def set_room_policy(
+        self, room_id: str, participates: Any, eligible_entity_ids: Any
+    ) -> dict[str, Any]:
         if not isinstance(participates, bool):
             raise NowDataError("participates must be a boolean")
+        if not isinstance(eligible_entity_ids, list) or any(
+            not isinstance(entity_id, str) or "." not in entity_id
+            for entity_id in eligible_entity_ids
+        ):
+            raise NowDataError("eligible_entity_ids must be a list of entity ids")
         with self._lock:
-            self._policies[room_id] = {"participates": participates}
-        return {"room_id": room_id, "participates": participates}
+            policy = {
+                "participates": participates,
+                "eligible_entity_ids": list(dict.fromkeys(eligible_entity_ids)),
+            }
+            self._policies[room_id] = policy
+        return {"room_id": room_id, **policy}
+
+    def room_policy(self, room_id: str) -> dict[str, Any]:
+        record = self._policies.get(room_id) or {}
+        entity_ids = record.get("eligible_entity_ids") if isinstance(record, dict) else []
+        return {
+            "participates": bool(record.get("participates") is True),
+            "eligible_entity_ids": [
+                entity_id for entity_id in entity_ids if isinstance(entity_id, str)
+            ] if isinstance(entity_ids, list) else [],
+        }
 
     def room_participates(self, room_id: str) -> bool:
-        record = self._policies.get(room_id) or {}
-        return bool(record.get("participates") is True)
+        return self.room_policy(room_id)["participates"]
 
     def configure(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -215,19 +243,19 @@ class NowDataEngine:
         return value
 
     def idempotent_result(
-        self, member_id: str, room_id: str, key: str
+        self, member_id: str, room_id: str, action: str, key: str
     ) -> dict[str, Any] | None:
         record = self._idempotency.get(member_id) or {}
-        result = (record.get("results") or {}).get(f"{room_id}:{key}")
+        result = (record.get("results") or {}).get(f"{room_id}:{action}:{key}")
         return dict(result) if isinstance(result, dict) else None
 
     def save_idempotent_result(
-        self, member_id: str, room_id: str, key: str, result: dict[str, Any]
+        self, member_id: str, room_id: str, action: str, key: str, result: dict[str, Any]
     ) -> None:
         with self._lock:
             record = self._idempotency.get(member_id) or {}
             results = record.get("results") if isinstance(record.get("results"), dict) else {}
-            results[f"{room_id}:{key}"] = result
+            results[f"{room_id}:{action}:{key}"] = result
             # Deterministic bounded persistence; insertion order is preserved by JSON.
             while len(results) > _MAX_IDEMPOTENCY_ENTRIES:
                 results.pop(next(iter(results)))

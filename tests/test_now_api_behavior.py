@@ -141,17 +141,22 @@ class NowBulkBehaviorTest(unittest.TestCase):
             [
                 _State("light.kitchen", "on", "room-kitchen"),
                 _State("fan.kitchen", "on", "room-kitchen"),
+                _State("light.unlisted", "on", "room-kitchen"),
+                _State("switch.generic", "on", "room-kitchen"),
                 _State("camera.kitchen", "on", "room-kitchen"),
             ]
         )
         hass = _Hass(states, fail_domains={"fan"})
         engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        engine.set_room_policy("room-kitchen", True, ["light.kitchen", "fan.kitchen"])
         view = _API.CasaSmartRoomActivityCommandView(hass)
 
         off = asyncio.run(view._run("room-kitchen", "turn_off", engine))
         self.assertFalse(off["ok"])
         self.assertEqual(off["restore_pending_count"], 1)
         self.assertEqual(engine.restore_set("room-kitchen"), ["light.kitchen"])
+        self.assertEqual(states.get("light.unlisted").state, "on")
+        self.assertEqual(states.get("switch.generic").state, "on")
         self.assertEqual(states.get("camera.kitchen").state, "on")
 
         hass.services._fail_domains.clear()
