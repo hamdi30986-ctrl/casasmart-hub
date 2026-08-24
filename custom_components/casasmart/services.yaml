@@ -28,3 +28,16 @@ activate_scene:
       example: scene-AbCdEf123
       selector:
         text:
+configure_hq_notifications:
+  name: Configure Hamdi HQ notifications
+  description: >-
+    Trust the independent Ed25519 public key used by the owner-local Hamdi HQ
+    reminder sender. Requires a Home Assistant administrator.
+  fields:
+    public_key:
+      name: HQ notification public key
+      description: PEM-encoded Ed25519 public key. Never submit a private key.
+      required: true
+      selector:
+        text:
+          multiline: true
