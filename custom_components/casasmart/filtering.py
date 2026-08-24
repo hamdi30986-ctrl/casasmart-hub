@@ -78,7 +78,13 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return True
-    if entry.hidden_by is not None:
+    # OpenWeatherMap creates diagnostic child sensors that Home Assistant may
+    # hide from normal dashboards. The tablet still needs its real outdoor
+    # temperature/humidity readings, so admit only those semantically verified
+    # measurements. Other registry-hidden entities remain private.
+    if entry.hidden_by is not None and not is_openweathermap_measurement(
+        hass, entity_id
+    ):
         return False
     if entry.entity_category is None:
         return True
@@ -110,12 +116,45 @@ def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
     )
 
 
+def is_openweathermap_measurement(
+    hass: HomeAssistant, entity_id: str
+) -> bool:
+    """Return true for live OWM temperature/humidity child sensors only.
+
+    This deliberately uses registry semantics rather than installation-specific
+    entity ids. Disabled or missing entities have no state and therefore fail
+    closed until Home Assistant makes a real reading available.
+    """
+    if not entity_id.startswith("sensor."):
+        return False
+    state = hass.states.get(entity_id)
+    if state is None:
+        return False
+    registry = er.async_get(hass)
+    entry = registry.async_get(entity_id)
+    if entry is None or entry.device_id is None:
+        return False
+    device_class = state.attributes.get("device_class") or entry.original_device_class
+    if device_class not in {"temperature", "humidity"}:
+        return False
+    for sibling in er.async_entries_for_device(
+        registry, entry.device_id, include_disabled_entities=True
+    ):
+        if not sibling.entity_id.startswith("weather.") or not sibling.config_entry_id:
+            continue
+        config_entry = hass.config_entries.async_get_entry(sibling.config_entry_id)
+        if config_entry is not None and config_entry.domain == "openweathermap":
+            return True
+    return False
+
+
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
     """CasaSmart runtime component."""
+    weather_measurement = is_openweathermap_measurement(hass, entity_id)
     return (
         is_exposed(entity_id)
         and is_visible(hass, entity_id)
-        and not is_weather_service_entity(hass, entity_id)
+        and (weather_measurement or not is_weather_service_entity(hass, entity_id))
     )
 
 
