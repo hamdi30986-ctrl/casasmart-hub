@@ -79,7 +79,7 @@ from .energy_api import (
     CasaSmartEnergyReapplyView,
     CasaSmartEnergyStateView,
 )
-from .push_api import CasaSmartPushTokenView
+from .push_api import CasaSmartHqNotificationView, CasaSmartPushTokenView
 from .camera_api import (
     CasaSmartCameraHlsProxyView,
     CasaSmartCameraSnapshotView,
@@ -163,6 +163,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartUsersView(hass),
         CasaSmartUserView(hass),
         CasaSmartPushTokenView(hass),
+        CasaSmartHqNotificationView(hass),
         CasaSmartRegistryView(hass),
         CasaSmartFloorsView(hass),
         CasaSmartFloorView(hass),
