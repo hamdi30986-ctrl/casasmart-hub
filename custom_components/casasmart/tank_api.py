@@ -24,6 +24,7 @@ from .const import DOMAIN, EVENT_TANK_CHANGED
 from .tank import (
     TANK_INGEST_URL_CONFIG_KEY,
     TANK_SCRIPT_NAME,
+    DuplicateTankError,
     TankEngine,
     TankError,
     UnknownTankError,
@@ -293,6 +294,8 @@ class CasaSmartTankProvisionView(_TankView):
                 ip,
                 info.get("model"),
             )
+        except DuplicateTankError as err:
+            return self.json_message(str(err), HTTPStatus.CONFLICT)
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 

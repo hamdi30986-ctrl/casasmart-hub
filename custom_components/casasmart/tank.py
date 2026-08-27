@@ -98,6 +98,10 @@ class UnknownTankError(TankError):
     """CasaSmart runtime component."""
 
 
+class DuplicateTankError(TankError):
+    """Raised when provisioning would replace an existing tank/token."""
+
+
 class UnknownTokenError(Exception):
     """CasaSmart runtime component."""
 
@@ -191,10 +195,13 @@ class TankEngine:
         device_id = device_id.strip().lower()
         if not isinstance(ip, str) or not ip.strip():
             raise TankError("ip is required")
-        token = secrets.token_hex(16)
         now = int(time.time())
         with self._lock:
-            existing = self._devices.get(device_id) or {}
+            existing = self._devices.get(device_id)
+            if existing is not None:
+                raise DuplicateTankError("Tank is already registered")
+            token = secrets.token_hex(16)
+            existing = {}
             record = {
                 "name": _clean_name(name),
                 "ip": ip.strip(),
