@@ -256,7 +256,14 @@ class CasaSmartNowView(_NowView):
             elif state.state == "on":
                 opened += 1
         status = "open" if opened else ("unknown" if unknown else "all_closed")
-        return {"available": True, "status": status, "configured_count": len(entity_ids), "open_count": opened, "unknown_count": unknown}
+        return {
+            "available": True,
+            "status": status,
+            "entity_ids": list(entity_ids),
+            "configured_count": len(entity_ids),
+            "open_count": opened,
+            "unknown_count": unknown,
+        }
 
 
 class CasaSmartNowConfigView(_NowView):
