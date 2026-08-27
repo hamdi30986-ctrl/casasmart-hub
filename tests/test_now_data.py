@@ -60,15 +60,24 @@ class NowDataEngineTest(unittest.TestCase):
             {
                 "outdoor_weather_entity_id": "weather.openweathermap",
                 "air_quality_entity_id": "sensor.air_quality",
-                "contact_entity_ids": ["binary_sensor.front_door"],
+                "contact_entity_ids": ["binary_sensor.front_door", "lock.gate"],
                 "suggested_scene_id": "scene-leave",
                 "pinned_scene_ids": ["scene-arrive", "scene-night"],
             }
         )
         self.assertEqual(config["outdoor_weather_entity_id"], "weather.openweathermap")
-        self.assertEqual(config["contact_entity_ids"], ["binary_sensor.front_door"])
-        with self.assertRaises(_NOW.NowDataError):
-            engine.configure({"contact_entity_ids": ["sensor.not_a_contact"]})
+        self.assertEqual(
+            config["contact_entity_ids"],
+            ["binary_sensor.front_door", "lock.gate"],
+        )
+        for unrelated in (
+            "sensor.not_a_contact",
+            "switch.gate",
+            "cover.gate",
+            "alarm_control_panel.home",
+        ):
+            with self.subTest(unrelated=unrelated), self.assertRaises(_NOW.NowDataError):
+                engine.configure({"contact_entity_ids": [unrelated]})
 
     def test_restore_and_idempotency_are_durable_and_bounded_to_actor(self) -> None:
         engine = make_engine()
@@ -85,6 +94,34 @@ class NowDataEngineTest(unittest.TestCase):
 
 
 class RoomActivityContractTest(unittest.TestCase):
+    def test_opening_aggregate_distinguishes_lock_truth_from_transient_states(self) -> None:
+        self.assertEqual(
+            _NOW.summarize_openings(
+                [
+                    ("binary_sensor.front_door", "on"),
+                    ("binary_sensor.window", "off"),
+                    ("lock.gate", "unlocked"),
+                    ("lock.side_door", "locked"),
+                ]
+            ),
+            {"status": "open", "open_count": 2, "unknown_count": 0},
+        )
+        self.assertEqual(
+            _NOW.summarize_openings(
+                [
+                    ("binary_sensor.front_door", "off"),
+                    ("lock.gate", "locked"),
+                ]
+            ),
+            {"status": "all_closed", "open_count": 0, "unknown_count": 0},
+        )
+        for state in ("locking", "unlocking", "jammed", "unavailable", "unknown", None):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    _NOW.summarize_openings([("lock.gate", state)]),
+                    {"status": "unknown", "open_count": 0, "unknown_count": 1},
+                )
+
     def test_allowlist_requires_hub_policy_and_excludes_generic_switches(self) -> None:
         allowed = ["light.kitchen", "fan.kitchen", "switch.wall"]
         self.assertTrue(_NOW.is_room_activity_eligible({"entity_id": "light.kitchen", "state": "on"}, allowed))

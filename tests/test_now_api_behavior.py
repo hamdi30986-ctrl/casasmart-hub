@@ -130,12 +130,68 @@ class _Hass:
     def __init__(self, states: _States, fail_domains=()) -> None:
         self.states = states
         self.services = _Services(states, fail_domains)
+        self.config_entries = type(
+            "ConfigEntries",
+            (),
+            {"async_loaded_entries": staticmethod(lambda domain: [])},
+        )()
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)
 
 
 class NowBulkBehaviorTest(unittest.TestCase):
+    def test_contact_config_accepts_real_locks_and_rejects_unrelated_domains(self) -> None:
+        hass = _Hass(
+            _States(
+                [
+                    _State("lock.gate", "locked", "outdoor"),
+                    _State("sensor.gate", "locked", "outdoor"),
+                ]
+            )
+        )
+        view = _API.CasaSmartNowConfigView(hass)
+
+        accepted = asyncio.run(
+            view._validate_configuration({"contact_entity_ids": ["lock.gate"]})
+        )
+        rejected = asyncio.run(
+            view._validate_configuration({"contact_entity_ids": ["sensor.gate"]})
+        )
+
+        self.assertIsNone(accepted)
+        self.assertEqual(rejected["status"].value, 400)
+        self.assertIn("not a door/window contact", rejected["message"])
+
+    def test_contact_api_counts_unlocked_as_open_and_never_closes_transients(self) -> None:
+        hass = _Hass(
+            _States(
+                [
+                    _State("binary_sensor.window", "off", "living"),
+                    _State("lock.gate", "unlocked", "outdoor"),
+                    _State("lock.side_door", "locked", "outdoor"),
+                ]
+            )
+        )
+        view = _API.CasaSmartNowView(hass)
+
+        open_payload = view._contacts_payload(
+            ["binary_sensor.window", "lock.gate", "lock.side_door"], None
+        )
+        self.assertEqual(open_payload["status"], "open")
+        self.assertEqual(open_payload["open_count"], 1)
+        self.assertEqual(open_payload["unknown_count"], 0)
+
+        for transient in ("locking", "unlocking", "jammed", "unavailable", "unknown"):
+            with self.subTest(transient=transient):
+                hass.states.get("lock.gate").state = transient
+                payload = view._contacts_payload(
+                    ["binary_sensor.window", "lock.gate", "lock.side_door"], None
+                )
+                self.assertEqual(payload["status"], "unknown")
+                self.assertEqual(payload["open_count"], 0)
+                self.assertEqual(payload["unknown_count"], 1)
+
     def test_off_captures_only_confirmed_changes_and_on_restores_once(self) -> None:
         states = _States(
             [
