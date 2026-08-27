@@ -25,6 +25,7 @@ from .now_data import (
     is_room_activity_eligible,
     is_running_room_activity,
     room_activity_layout,
+    summarize_openings,
 )
 from .registry import RegistryEngine
 
@@ -247,22 +248,25 @@ class CasaSmartNowView(_NowView):
     def _contacts_payload(self, entity_ids: list[str], scope: list[str] | None) -> dict[str, Any]:
         if not entity_ids:
             return {"available": False}
-        opened = 0
-        unknown = 0
+        contact_states: list[tuple[str, str | None]] = []
         for entity_id in entity_ids:
             state = self._hass.states.get(entity_id)
-            if state is None or not in_scope(self._hass, entity_id, scope) or state.state in {"unknown", "unavailable"}:
-                unknown += 1
-            elif state.state == "on":
-                opened += 1
-        status = "open" if opened else ("unknown" if unknown else "all_closed")
+            contact_states.append(
+                (
+                    entity_id,
+                    state.state
+                    if state is not None and in_scope(self._hass, entity_id, scope)
+                    else None,
+                )
+            )
+        aggregate = summarize_openings(contact_states)
         return {
             "available": True,
-            "status": status,
+            "status": aggregate["status"],
             "entity_ids": list(entity_ids),
             "configured_count": len(entity_ids),
-            "open_count": opened,
-            "unknown_count": unknown,
+            "open_count": aggregate["open_count"],
+            "unknown_count": aggregate["unknown_count"],
         }
 
 
@@ -346,10 +350,14 @@ class CasaSmartNowConfigView(_NowView):
         return device_class in _AIR_QUALITY_DEVICE_CLASSES
 
     def _is_contact_sensor(self, entity_id: object) -> bool:
-        if not isinstance(entity_id, str) or not entity_id.startswith("binary_sensor."):
+        if not isinstance(entity_id, str):
             return False
         state = self._hass.states.get(entity_id)
         if state is None:
+            return False
+        if entity_id.startswith("lock."):
+            return True
+        if not entity_id.startswith("binary_sensor."):
             return False
         entry = er.async_get(self._hass).async_get(entity_id)
         device_class = state.attributes.get("device_class")

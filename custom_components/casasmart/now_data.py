@@ -84,6 +84,38 @@ def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> 
     return is_room_activity_eligible(state, eligible_entity_ids) and _state_value(state, "state") == "on"
 
 
+def summarize_openings(
+    entity_states: Iterable[tuple[str, str | None]],
+) -> dict[str, str | int]:
+    """Aggregate door/window sensors and locks without inventing closure.
+
+    Binary sensors use Home Assistant's contact convention (on=open,
+    off=closed). Locks are open only when unlocked and closed only when locked.
+    Every transient, error, unavailable, or unknown value remains unknown.
+    """
+
+    opened = 0
+    unknown = 0
+    for entity_id, state in entity_states:
+        if entity_id.startswith("binary_sensor."):
+            if state == "on":
+                opened += 1
+            elif state != "off":
+                unknown += 1
+        elif entity_id.startswith("lock."):
+            if state == "unlocked":
+                opened += 1
+            elif state != "locked":
+                unknown += 1
+        else:
+            unknown += 1
+    return {
+        "status": "open" if opened else ("unknown" if unknown else "all_closed"),
+        "open_count": opened,
+        "unknown_count": unknown,
+    }
+
+
 def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply the fixed 0--4 / 5 / 6+ Now layout contract."""
 
@@ -213,8 +245,14 @@ class NowDataEngine:
                 raw = payload["contact_entity_ids"]
                 if not isinstance(raw, list) or len(raw) > _MAX_CONTACTS:
                     raise NowDataError(f"contact_entity_ids must contain at most {_MAX_CONTACTS} entity ids")
-                if any(not isinstance(item, str) or not item.startswith("binary_sensor.") for item in raw):
-                    raise NowDataError("contact_entity_ids must be binary_sensor entity ids")
+                if any(
+                    not isinstance(item, str)
+                    or not item.startswith(("binary_sensor.", "lock."))
+                    for item in raw
+                ):
+                    raise NowDataError(
+                        "contact_entity_ids must be binary_sensor or lock entity ids"
+                    )
                 record["contact_entity_ids"] = list(dict.fromkeys(raw))
             if "pinned_scene_ids" in payload:
                 raw = payload["pinned_scene_ids"]
