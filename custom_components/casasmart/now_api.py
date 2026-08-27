@@ -172,6 +172,12 @@ class CasaSmartNowView(_NowView):
                     "room_id": room_id,
                     "name": room["name"],
                     "icon": room.get("icon"),
+                    # The tablet derives the visible switch/count from its
+                    # live state feed so a successful command repaints in the
+                    # same frame. Exposing the already-validated policy list
+                    # lets it preserve both the Hub policy and its own strict
+                    # actuator allowlist instead of guessing membership.
+                    "eligible_entity_ids": list(eligible_entity_ids),
                     "active_count": len(devices),
                     "most_recent_activity_at": max(timestamps).astimezone(timezone.utc).isoformat() if timestamps else None,
                     "restore_pending_count": restore_pending_count,

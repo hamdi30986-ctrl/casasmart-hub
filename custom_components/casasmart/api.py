@@ -596,7 +596,12 @@ class CasaSmartHistoryView(HomeAssistantView):
                 allowed,
                 include_start_time_state=True,
                 significant_changes_only=significant,
-                minimal_response=True,
+                # CasaSmart's public history contract serializes full
+                # `state`/`last_changed` rows. HA's minimal form compresses
+                # subsequent rows (for example to `s`/`lu`), which caused the
+                # serializer to discard real Maan/POWCT counter samples and
+                # made a populated timeline look unavailable.
+                minimal_response=False,
                 no_attributes=True,
             )
         )
