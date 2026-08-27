@@ -57,6 +57,10 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn("minimal_response=False", api)
         self.assertNotIn("minimal_response=True", api)
 
+    def test_contact_snapshot_exposes_the_persisted_selection(self) -> None:
+        source = (ROOT / "custom_components" / "casasmart" / "now_api.py").read_text()
+        self.assertIn('"entity_ids": list(entity_ids)', source)
+
 
 if __name__ == "__main__":
     unittest.main()
