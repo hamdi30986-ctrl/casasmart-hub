@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.casasmart.hub-tls-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__REPO_ROOT__/deploy/macos/tls_relay.py</string>
+    <string>--listen-port</string><string>8443</string>
+    <string>--upstream-port</string><string>18443</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/casasmart-hub-tls-relay.log</string>
+  <key>StandardErrorPath</key><string>/tmp/casasmart-hub-tls-relay.log</string>
+</dict>
+</plist>
