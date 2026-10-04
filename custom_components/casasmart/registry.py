@@ -27,6 +27,12 @@ _MAX_ROOM_TAGS = 64
 _MAX_TAG_ROOMS = 128
 _TAG_COLORS = frozenset(
     {
+        # Bright tablet palette. Keep legacy presets valid for existing clients
+        # and stored tags; changing the UI must never recolor existing data.
+        "#FFD45C",  # yellow
+        "#85E0A3",  # green
+        "#F5F3ED",  # white
+        "#FF7777",  # red
         "#2563EB",  # blue
         "#EA580C",  # orange
         "#7C3AED",  # purple
