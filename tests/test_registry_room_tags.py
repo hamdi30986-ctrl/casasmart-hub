@@ -81,6 +81,27 @@ class RegistryRoomTagTest(unittest.TestCase):
         self.assertEqual(self.engine.list_room_tags(), [])
         self.assertEqual(self.tags, {})
 
+    def test_bright_palette_creates_updates_and_survives_reload(self) -> None:
+        for color in ("#FFD45C", "#85E0A3", "#F5F3ED", "#FF7777"):
+            with self.subTest(color=color):
+                tag = self.engine.create_room_tag(color, color.lower(), ["living"])
+                self.assertEqual(tag["color"], color)
+                updated = self.engine.update_room_tag(tag["tag_id"], color=color)
+                self.assertEqual(updated["color"], color)
+                reloaded = make_engine(rooms=self.rooms, tags=self.tags)
+                saved = next(t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"])
+                self.assertEqual(saved["color"], color)
+                self.engine.delete_room_tag(tag["tag_id"])
+
+    def test_all_legacy_colors_remain_valid_without_migration(self) -> None:
+        for color in ("#2563EB", "#EA580C", "#7C3AED", "#0F766E", "#475569", "#A16207"):
+            with self.subTest(color=color):
+                tag = self.engine.create_room_tag(color, color, ["living"])
+                reloaded = make_engine(rooms=self.rooms, tags=self.tags)
+                saved = next(t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"])
+                self.assertEqual(saved["color"], color)
+                self.engine.delete_room_tag(tag["tag_id"])
+
     def test_corrupt_legacy_tag_rows_are_sanitized_without_breaking_snapshot(self) -> None:
         self.tags["all"] = {
             "missing-name": {"color": "not-a-color", "room_ids": "living"},
