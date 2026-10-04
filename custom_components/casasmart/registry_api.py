@@ -151,16 +151,17 @@ class CasaSmartRegistryView(_RegistryView):
             return not_ready
         scope = claims.get("rooms")
 
-        def _read() -> tuple[list, list, dict, list]:
+        def _read() -> tuple[list, list, list, dict, list]:
             return (
                 registry.list_floors(),
                 registry.list_rooms(),
+                registry.list_room_tags(),
                 registry.list_assignments(),
                 registry.list_scenes(),
             )
 
         try:
-            floors, rooms, assignments, scenes = (
+            floors, rooms, room_tags, assignments, scenes = (
                 await self._hass.async_add_executor_job(_read)
             )
         except (StorageError, sqlite3.Error) as err:
@@ -175,6 +176,19 @@ class CasaSmartRegistryView(_RegistryView):
 
         if scope is not None:
             rooms = [room for room in rooms if room["room_id"] in scope]
+        visible_room_ids = {room["room_id"] for room in rooms}
+        room_tags = [
+            {
+                **tag,
+                "room_ids": [
+                    room_id
+                    for room_id in tag.get("room_ids", [])
+                    if room_id in visible_room_ids
+                ],
+            }
+            for tag in room_tags
+            if any(room_id in visible_room_ids for room_id in tag.get("room_ids", []))
+        ]
         visible_floors = {room["floor_id"] for room in rooms} - {None}
         if scope is not None:
             floors = [
@@ -215,7 +229,7 @@ class CasaSmartRegistryView(_RegistryView):
                 )
             ]
 
-        for collection in (floors, rooms, scenes):
+        for collection in (floors, rooms, room_tags, scenes):
             collection.sort(
                 key=lambda item: (item.get("sort_order", 0), item.get("name", ""))
             )
@@ -254,6 +268,7 @@ class CasaSmartRegistryView(_RegistryView):
             {
                 "floors": floors,
                 "rooms": rooms,
+                "room_tags": room_tags,
                 "devices": devices,
                 "scenes": scenes,
                 "user_devices": user_devices,
@@ -450,6 +465,90 @@ class CasaSmartRoomView(_RegistryView):
             return self._storage_failure(err)
         self._notify_change("rooms")
         return self.json({"deleted": room_id, "devices_unassigned": unassigned})
+
+
+class CasaSmartRoomTagsView(_RegistryView):
+    """POST /api/casasmart/registry/tags — create a multi-room tag."""
+
+    url = f"/api/{DOMAIN}/registry/tags"
+    name = f"api:{DOMAIN}:registry:tags"
+
+    async def post(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            tag = await self._hass.async_add_executor_job(
+                registry.create_room_tag,
+                payload.get("name"),
+                payload.get("color"),
+                payload.get("room_ids"),
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("room-tags")
+        return self.json(tag, HTTPStatus.CREATED)
+
+
+class CasaSmartRoomTagView(_RegistryView):
+    """PATCH/DELETE /api/casasmart/registry/tags/{tag_id}."""
+
+    url = f"/api/{DOMAIN}/registry/tags/{{tag_id}}"
+    name = f"api:{DOMAIN}:registry:tag"
+
+    async def patch(self, request: web.Request, tag_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if payload is None:
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
+        try:
+            tag = await self._hass.async_add_executor_job(
+                lambda: registry.update_room_tag(
+                    tag_id,
+                    name=payload.get("name", ...),
+                    color=payload.get("color", ...),
+                    room_ids=payload.get("room_ids", ...),
+                )
+            )
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("room-tags")
+        return self.json(tag)
+
+    async def delete(self, request: web.Request, tag_id: str) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        try:
+            await self._hass.async_add_executor_job(registry.delete_room_tag, tag_id)
+        except RegistryError as err:
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        self._notify_change("room-tags")
+        return self.json({"deleted": tag_id})
 
 
 class CasaSmartDeviceAssignmentView(_RegistryView):

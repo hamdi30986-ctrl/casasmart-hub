@@ -272,6 +272,7 @@ def _open_storage(
         storage.table("registry_scenes"),
         storage.table("registry_favorites"),
         storage.table("registry_user_devices"),
+        storage.table("registry_room_tags"),
     )
     registry.warm_up()
     tanks = TankEngine(

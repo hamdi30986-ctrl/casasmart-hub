@@ -23,6 +23,18 @@ _ICON_MAX = 64
 _MAX_FAVORITES = 200
 _MAX_SCENE_ENTITIES = 50
 _MAX_DEVICE_ENTITIES = 100
+_MAX_ROOM_TAGS = 64
+_MAX_TAG_ROOMS = 128
+_TAG_COLORS = frozenset(
+    {
+        "#2563EB",  # blue
+        "#EA580C",  # orange
+        "#7C3AED",  # purple
+        "#0F766E",  # teal
+        "#475569",  # slate
+        "#A16207",  # amber/brown
+    }
+)
 
 
 class RegistryError(Exception):
@@ -75,6 +87,12 @@ def _clean_sort_order(sort_order: Any) -> int:
     if isinstance(sort_order, bool) or not isinstance(sort_order, int):
         raise RegistryError("sort_order must be an integer")
     return sort_order
+
+
+def _clean_tag_color(color: Any) -> str:
+    if not isinstance(color, str) or color.upper() not in _TAG_COLORS:
+        raise RegistryError("tag color is not an allowed preset")
+    return color.upper()
 
 
 def _clean_favorite(favorite: Any) -> bool:
@@ -236,6 +254,7 @@ class RegistryEngine:
         scenes_table: Any,
         favorites_table: Any,
         user_devices_table: Any,
+        room_tags_table: Any,
     ) -> None:
         self._floors = floors_table
         self._rooms = rooms_table
@@ -243,6 +262,7 @@ class RegistryEngine:
         self._scenes = scenes_table
         self._favorites = favorites_table
         self._user_devices = user_devices_table
+        self._room_tags = room_tags_table
 
         self._lock = threading.RLock()
 
@@ -419,6 +439,22 @@ class RegistryEngine:
 
                     self._mirror_assignment(entity_id, record)
                     cleared += 1
+            tags = self._room_tags_doc()
+            tags_changed = False
+            for tag_id, tag in list(tags.items()):
+                assigned = tag.get("room_ids", [])
+                if room_id not in assigned:
+                    continue
+                remaining = [candidate for candidate in assigned if candidate != room_id]
+                if remaining:
+                    tag["room_ids"] = remaining
+                else:
+                    # A tag cannot be created without a room, so deleting its
+                    # last room removes the now-unusable tag as well.
+                    del tags[tag_id]
+                tags_changed = True
+            if tags_changed:
+                self._room_tags["all"] = tags
             del self._rooms[room_id]
         with self._mirror_lock:
             self._room_names.pop(room_id, None)
@@ -426,6 +462,143 @@ class RegistryEngine:
             "Registry: room %s deleted (%d device(s) unassigned)", room_id, cleared
         )
         return cleared
+
+    # Room tags are stored as one small document so a multi-room edit is one
+    # SQLite write. That prevents an interrupted update from leaving different
+    # rooms with half of the requested tag assignment.
+    def _room_tags_doc(self) -> dict[str, dict[str, Any]]:
+        raw = self._room_tags.get("all")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(tag_id): dict(record)
+            for tag_id, record in raw.items()
+            if isinstance(tag_id, str) and isinstance(record, dict)
+        }
+
+    def list_room_tags(self) -> list[dict[str, Any]]:
+        with self._lock:
+            known_rooms = set(self._rooms)
+            tags = self._room_tags_doc()
+            result: list[dict[str, Any]] = []
+            for tag_id, record in tags.items():
+                name = record.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                color = record.get("color")
+                if not isinstance(color, str) or color.upper() not in _TAG_COLORS:
+                    color = "#475569"
+                raw_room_ids = record.get("room_ids")
+                room_ids = raw_room_ids if isinstance(raw_room_ids, list) else []
+                result.append(
+                    {
+                        "tag_id": tag_id,
+                        "name": name.strip(),
+                        "color": color.upper(),
+                        "room_ids": list(
+                            dict.fromkeys(
+                                room_id
+                                for room_id in room_ids
+                                if isinstance(room_id, str)
+                                and room_id in known_rooms
+                            )
+                        ),
+                    }
+                )
+            return result
+
+    def _clean_tag_room_ids(self, room_ids: Any) -> list[str]:
+        if not isinstance(room_ids, list) or any(
+            not isinstance(room_id, str) for room_id in room_ids
+        ):
+            raise RegistryError("room_ids must be a list of room ids")
+        unique = list(dict.fromkeys(room_ids))
+        if not unique:
+            raise RegistryError("Select at least one room")
+        if len(unique) > _MAX_TAG_ROOMS:
+            raise RegistryError(f"A tag may include at most {_MAX_TAG_ROOMS} rooms")
+        unknown = [room_id for room_id in unique if room_id not in self._rooms]
+        if unknown:
+            raise RegistryError("Unknown room_id")
+        return unique
+
+    def _assign_tag_rooms(
+        self,
+        tags: dict[str, dict[str, Any]],
+        tag_id: str,
+        room_ids: list[str],
+    ) -> None:
+        selected = set(room_ids)
+        for other_id, record in tags.items():
+            if other_id == tag_id:
+                continue
+            record["room_ids"] = [
+                room_id
+                for room_id in record.get("room_ids", [])
+                if room_id not in selected
+            ]
+
+    def create_room_tag(self, name: Any, color: Any, room_ids: Any) -> dict[str, Any]:
+        with self._lock:
+            tags = self._room_tags_doc()
+            if len(tags) >= _MAX_ROOM_TAGS:
+                raise RegistryError(f"At most {_MAX_ROOM_TAGS} room tags")
+            clean_name = _clean_name(name, "Tag")
+            if any(
+                str(record.get("name", "")).casefold() == clean_name.casefold()
+                for record in tags.values()
+            ):
+                raise RegistryError("Tag name already exists")
+            clean_rooms = self._clean_tag_room_ids(room_ids)
+            tag_id = f"tag-{secrets.token_urlsafe(8)}"
+            record = {
+                "name": clean_name,
+                "color": _clean_tag_color(color),
+                "room_ids": clean_rooms,
+            }
+            self._assign_tag_rooms(tags, tag_id, clean_rooms)
+            tags[tag_id] = record
+            self._room_tags["all"] = tags
+        return {"tag_id": tag_id, **record}
+
+    def update_room_tag(
+        self,
+        tag_id: str,
+        name: Any = ...,
+        color: Any = ...,
+        room_ids: Any = ...,
+    ) -> dict[str, Any]:
+        with self._lock:
+            tags = self._room_tags_doc()
+            record = tags.get(tag_id)
+            if record is None:
+                raise UnknownItemError("Unknown room tag")
+            if name is not ...:
+                clean_name = _clean_name(name, "Tag")
+                if any(
+                    other_id != tag_id
+                    and str(other.get("name", "")).casefold() == clean_name.casefold()
+                    for other_id, other in tags.items()
+                ):
+                    raise RegistryError("Tag name already exists")
+                record["name"] = clean_name
+            if color is not ...:
+                record["color"] = _clean_tag_color(color)
+            if room_ids is not ...:
+                clean_rooms = self._clean_tag_room_ids(room_ids)
+                self._assign_tag_rooms(tags, tag_id, clean_rooms)
+                record["room_ids"] = clean_rooms
+            tags[tag_id] = record
+            self._room_tags["all"] = tags
+        return {"tag_id": tag_id, **record}
+
+    def delete_room_tag(self, tag_id: str) -> None:
+        with self._lock:
+            tags = self._room_tags_doc()
+            if tag_id not in tags:
+                raise UnknownItemError("Unknown room tag")
+            del tags[tag_id]
+            self._room_tags["all"] = tags
 
     def _checked_floor_id(self, floor_id: Any) -> str | None:
         if floor_id is None:
