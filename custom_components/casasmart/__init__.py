@@ -63,6 +63,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .dev_enroll import ensure_dev_devices
 from .entity_bridge import is_exposed
+from .hq_notifications import (
+    HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY,
+    HqNotificationError,
+    normalize_public_key,
+)
 from .pairing import PairingManager, hash_code as pairing_hash_code
 from .push import PushTokenStore
 from .push_crypto import PushIdentityError, ensure_push_identity
@@ -1153,7 +1158,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
     """CasaSmart runtime component."""
     if all(
         hass.services.has_service(DOMAIN, service)
-        for service in ("factory_reset", "set_tunnel_url", "activate_scene")
+        for service in (
+            "factory_reset",
+            "set_tunnel_url",
+            "activate_scene",
+            "configure_hq_notifications",
+        )
     ):
         return
 
@@ -1234,6 +1244,35 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 url,
             )
 
+    async def _handle_configure_hq_notifications(call) -> None:
+        """Trust one independent HQ signing key after an HA-admin action."""
+
+        user_id = call.context.user_id
+        user = await hass.auth.async_get_user(user_id) if user_id else None
+        if user is None or not user.is_admin:
+            raise HomeAssistantError(
+                "CasaSmart HQ notification trust requires a Home Assistant admin"
+            )
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if not entries:
+            raise HomeAssistantError("CasaSmart hub is not loaded")
+        try:
+            public_key, fingerprint = normalize_public_key(call.data.get("public_key"))
+        except HqNotificationError as err:
+            raise HomeAssistantError("A valid Ed25519 public key is required") from err
+        runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+
+        def _install_key() -> None:
+            runtime_data.hub_config.set(
+                HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY, public_key
+            )
+            runtime_data.storage.table("hq_notifications").clear()
+
+        await hass.async_add_executor_job(_install_key)
+        _LOGGER.info(
+            "Hamdi HQ notification trust configured (fingerprint=%s)", fingerprint
+        )
+
     async def _handle_factory_reset(call) -> None:
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
@@ -1281,6 +1320,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("now_idempotency").clear()
 
             runtime_data.storage.table("push_tokens").clear()
+            runtime_data.storage.table("hq_notifications").clear()
 
 
 
@@ -1318,6 +1358,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
             runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
+            runtime_data.hub_config.delete(HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY)
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(
@@ -1338,6 +1379,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         hass.services.async_register(DOMAIN, "set_tunnel_url", _handle_set_tunnel_url)
     if not hass.services.has_service(DOMAIN, "activate_scene"):
         hass.services.async_register(DOMAIN, "activate_scene", _handle_activate_scene)
+    if not hass.services.has_service(DOMAIN, "configure_hq_notifications"):
+        hass.services.async_register(
+            DOMAIN,
+            "configure_hq_notifications",
+            _handle_configure_hq_notifications,
+        )
 
 
 async def async_unload_entry(

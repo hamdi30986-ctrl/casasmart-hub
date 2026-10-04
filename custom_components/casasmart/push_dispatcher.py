@@ -46,6 +46,8 @@ PUSH_TYPE_LOCK = "lock"
 
 PUSH_TYPE_DEVICE_PAIRED = "device_paired"
 
+PUSH_TYPE_HQ_REMINDER = "hq_reminder"
+
 
 
 
@@ -57,6 +59,7 @@ _OWNER_ONLY_TYPES = frozenset(
         PUSH_TYPE_TANK_LOW,
         PUSH_TYPE_TANK_OFFLINE,
         PUSH_TYPE_DEVICE_PAIRED,
+        PUSH_TYPE_HQ_REMINDER,
     }
 )
 
@@ -290,9 +293,9 @@ class PushDispatcher:
 
 
 
-    async def async_send(self, data: dict[str, str], priority: str) -> None:
+    async def async_send(self, data: dict[str, str], priority: str) -> dict[str, str]:
         """CasaSmart runtime component."""
-        await self._dispatch(data, priority)
+        return await self._dispatch(data, priority)
 
     async def async_send_device_paired(
         self, name: str, role: str, device_id: str
@@ -308,23 +311,24 @@ class PushDispatcher:
             PRIORITY_NORMAL,
         )
 
-    async def _dispatch(self, data: dict[str, str], priority: str) -> None:
+    async def _dispatch(self, data: dict[str, str], priority: str) -> dict[str, str]:
         """CasaSmart runtime component."""
         try:
-            await self._dispatch_inner(data, priority)
+            return await self._dispatch_inner(data, priority)
         except Exception:
             _LOGGER.exception("Push dispatch failed for a %s event", data.get("type"))
+            return {"delivery": "failed", "reason": "dispatcher_error"}
 
-    async def _dispatch_inner(self, data: dict[str, str], priority: str) -> None:
+    async def _dispatch_inner(self, data: dict[str, str], priority: str) -> dict[str, str]:
         if not self._active:
-            return
+            return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         try:
             tokens = await self._hass.async_add_executor_job(
                 self._push_store.get_all_tokens
             )
         except Exception:
             _LOGGER.exception("Push dispatch: reading device tokens failed")
-            return
+            return {"delivery": "failed", "reason": "token_store_error"}
 
 
 
@@ -344,19 +348,22 @@ class PushDispatcher:
             for dev_id, rec in tokens.items()
             if isinstance(rec.get("fcm_token"), str)
             and rec["fcm_token"]
-            and (not owner_only or engine is None or engine.is_owner_device(dev_id))
+            and (
+                not owner_only
+                or (engine is not None and engine.is_owner_device(dev_id))
+            )
         ]
         if not device_tokens:
             _LOGGER.debug(
                 "Push dispatch: no registered tokens — %s push dropped",
                 data.get("type"),
             )
-            return
+            return {"delivery": "no_registered_tokens"}
 
         body = self._build_request(device_tokens, data, priority)
         if not self._active:
-            return
-        await self._send(body)
+            return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
+        return await self._send(body)
 
     def _build_request(
         self, device_tokens: list[str], data: dict[str, str], priority: str
@@ -379,10 +386,10 @@ class PushDispatcher:
         )
         return {**signed, "signature": signature}
 
-    async def _send(self, body: dict[str, Any]) -> None:
+    async def _send(self, body: dict[str, Any]) -> dict[str, str]:
         """CasaSmart runtime component."""
         if not self._active:
-            return
+            return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         timeout = aiohttp.ClientTimeout(total=PUSH_RELAY_TIMEOUT_SECONDS)
         try:
             async with self._session.post(
@@ -392,12 +399,13 @@ class PushDispatcher:
                 payload = await self._read_json(resp)
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.warning("Push relay unreachable (%s): %s", self._relay_url, err)
-            return
+            return {"delivery": "failed", "reason": "relay_unreachable"}
 
         if status != 200:
             _LOGGER.warning("Push relay rejected batch: HTTP %s %s", status, payload)
-            return
+            return {"delivery": "failed", "reason": "relay_rejected"}
         await self._cleanup_dead_tokens(payload)
+        return {"delivery": "relay_accepted"}
 
     @staticmethod
     async def _read_json(resp: aiohttp.ClientResponse) -> Any:
