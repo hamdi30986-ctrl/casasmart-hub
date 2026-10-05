@@ -7,6 +7,7 @@ import logging
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ class HubStorage:
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
         self._tables: dict[str, KeyValueTable] = {}
+        self._transaction_depth = 0
 
 
 
@@ -139,8 +141,32 @@ class HubStorage:
             return self._connection.execute(sql, params)
 
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._lock, self._connection:
-            return self._connection.execute(sql, params)
+        with self._lock:
+            if self._transaction_depth:
+                return self._connection.execute(sql, params)
+            with self._connection:
+                return self._connection.execute(sql, params)
+
+    @contextmanager
+    def transaction(self):
+        """Commit all KV writes together; nested callers use savepoints.
+
+        Hold the connection lock throughout: another executor job must never
+        accidentally commit a partially applied logical operation.
+        """
+        with self._lock:
+            name = f"casasmart_tx_{self._transaction_depth}"
+            self._connection.execute(f"SAVEPOINT {name}")
+            self._transaction_depth += 1
+            try:
+                yield
+                self._connection.execute(f"RELEASE SAVEPOINT {name}")
+            except BaseException:
+                self._connection.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                self._connection.execute(f"RELEASE SAVEPOINT {name}")
+                raise
+            finally:
+                self._transaction_depth -= 1
 
     def _fetchall(self, sql: str, params: tuple = ()) -> list[tuple]:
         """CasaSmart runtime component."""

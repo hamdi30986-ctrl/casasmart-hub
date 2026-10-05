@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ from .registry import (
     RegistryEngine,
     RegistryError,
     UnknownItemError,
+    RoomMoveDenied,
 )
 from .storage import StorageError
 
@@ -272,6 +274,7 @@ class CasaSmartRegistryView(_RegistryView):
                 "devices": devices,
                 "scenes": scenes,
                 "user_devices": user_devices,
+                "features": ["atomic_room_move_v1"],
             }
         )
 
@@ -549,6 +552,62 @@ class CasaSmartRoomTagView(_RegistryView):
             return self._storage_failure(err)
         self._notify_change("room-tags")
         return self.json({"deleted": tag_id})
+
+
+class CasaSmartRoomMoveView(_RegistryView):
+    """Atomic, compare-and-set logical room move; never controls hardware."""
+
+    url = f"/api/{DOMAIN}/registry/room-moves"
+    name = f"api:{DOMAIN}:registry:room-move"
+
+    async def post(self, request: web.Request) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return error
+        registry, not_ready = self._registry_or_503()
+        if not_ready is not None:
+            return not_ready
+        payload = await json_body(request)
+        if not isinstance(payload, dict):
+            return self.json_message("Body must be a JSON object", HTTPStatus.BAD_REQUEST)
+        key = payload.get("idempotency_key")
+        request_id = key[:12] if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key) else "invalid"
+        runtime = _runtime_data(self._hass)
+        if runtime is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        # HA registry/state APIs are read on the event loop. The engine checks
+        # exact saved membership and room scope again under its lock.
+        expected = payload.get("expected_rooms")
+        ids = list(expected) if isinstance(expected, dict) else []
+        if len(ids) > 100 or any(not isinstance(eid, str) for eid in ids):
+            return self.json_message("Invalid expected_rooms", HTTPStatus.BAD_REQUEST)
+        assignable = {eid for eid in ids if is_assignable(self._hass, eid)}
+        fallback = {eid: ha_area_id_of(self._hass, eid) for eid in assignable}
+        auth = get_engine(self._hass)
+        sub = claims["sub"]
+        try:
+            actor = await self._hass.async_add_executor_job(
+                lambda: auth.member_id_for(sub) if auth else sub
+            )
+            result = await self._hass.async_add_executor_job(
+                lambda: registry.move_device_room(
+                    runtime.storage, actor, payload, assignable_ids=assignable,
+                    fallback_rooms=fallback, scope=claims.get("rooms"),
+                )
+            )
+        except RoomMoveDenied as err:
+            _LOGGER.info("Room move %s rejected: forbidden", request_id)
+            return self.json_message(str(err), HTTPStatus.FORBIDDEN)
+        except RegistryError as err:
+            _LOGGER.info("Room move %s rejected: %s", request_id, type(err).__name__)
+            return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            _LOGGER.warning("Room move %s failed: storage", request_id)
+            return self._storage_failure(err)
+        _LOGGER.debug("Room move %s acknowledged (replayed=%s)", request_id, result["replayed"])
+        if not result["replayed"]:
+            self._notify_change("devices")
+        return self.json(result)
 
 
 class CasaSmartDeviceAssignmentView(_RegistryView):

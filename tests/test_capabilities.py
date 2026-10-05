@@ -27,6 +27,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "admin_password_v1",
                 "room_activity_bulk_v1",
                 "now_data_v1",
+                "atomic_room_move_v1",
                 "push_relay_optional_v1",
             },
         )
@@ -39,6 +40,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "admin_password_v1": False,
                 "room_activity_bulk_v1": True,
                 "now_data_v1": True,
+                "atomic_room_move_v1": True,
                 "push_relay_optional_v1": False,
             },
         )

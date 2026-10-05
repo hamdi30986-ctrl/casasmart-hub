@@ -98,6 +98,7 @@ from .history import (
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 from .registry_api import (
     CasaSmartDeviceAssignmentView,
+    CasaSmartRoomMoveView,
     CasaSmartFavoritesView,
     CasaSmartFloorsView,
     CasaSmartFloorView,
@@ -182,6 +183,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartRoomTagsView(hass),
         CasaSmartRoomTagView(hass),
         CasaSmartDeviceAssignmentView(hass),
+        CasaSmartRoomMoveView(hass),
         CasaSmartUserDeviceView(hass),
         CasaSmartUserDeviceGangView(hass),
         CasaSmartScenesView(hass),

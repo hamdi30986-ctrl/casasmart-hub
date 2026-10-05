@@ -25,6 +25,7 @@ ORBIT_CAPABILITIES: Final = (
     "admin_password_v1",
     "room_activity_bulk_v1",
     "now_data_v1",
+    "atomic_room_move_v1",
     "push_relay_optional_v1",
 )
 
@@ -32,7 +33,7 @@ ORBIT_CAPABILITIES: Final = (
 # Keep protected admin-password and optional-relay support fail-closed until
 # their own server-side enforcement exists.
 _IMPLEMENTED_CAPABILITIES: Final = frozenset(
-    {"room_activity_bulk_v1", "now_data_v1"}
+    {"room_activity_bulk_v1", "now_data_v1", "atomic_room_move_v1"}
 )
 
 
