@@ -258,19 +258,39 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             policies.get(r["room_id"], {}).get("participates") for r in rooms
         )
         gang_types = {}
+        control_ids = set()
+        suffixes = (
+            "left",
+            "right",
+            "center",
+            "l1",
+            "l2",
+            "l3",
+            "endpoint_1",
+            "endpoint_2",
+            "endpoint_3",
+            "gang_1",
+            "gang_2",
+            "gang_3",
+        )
         for device in devices:
-            gang_types.update(device.get("gang_types", {}))
-            gang_types.update(
-                {
-                    eid: g.get("type")
-                    for eid, g in device.get("gangs", {}).items()
-                    if g.get("presentation") != "hidden"
-                }
-            )
+            gangs = device.get("gangs", {})
+            legacy_types = device.get("gang_types", {})
+            config_ids = set(device.get("config_entity_ids", []))
+            for eid in device.get("control_entity_ids", device.get("entity_ids", [])):
+                gang = gangs.get(eid, {})
+                if eid in config_ids or gang.get("presentation") == "hidden":
+                    continue
+                control_ids.add(eid)
+                local = eid.split(".", 1)[-1]
+                key = next(
+                    (s for s in suffixes if local == s or local.endswith("_" + s)), eid
+                )
+                gang_types[eid] = gang.get("type", legacy_types.get(key))
         states = {
             s.entity_id: s
             for s in self.hass.states.async_all()
-            if self.visible(scope)(s.entity_id)
+            if s.entity_id in control_ids and self.visible(scope)(s.entity_id)
         }
         grouped = {r["room_id"]: [] for r in rooms}
         for state in states.values():
@@ -318,7 +338,9 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
 
         ranked, grouped, states = await self.room_context(scope)
         now = self.clock()
-        scope_key = digest(sorted(scope) if scope is not None else None)
+        scope_key = digest(
+            ["imported_controls_v1", sorted(scope) if scope is not None else None]
+        )
         selected = await self.hass.async_add_executor_job(
             self.store.select_generated_rooms,
             scope_key,
