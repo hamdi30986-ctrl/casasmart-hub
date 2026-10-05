@@ -74,6 +74,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
 
 
     "registry.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
+    "suggestions.manage": (ROLE_ADMIN,),
 
 
 

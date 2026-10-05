@@ -203,12 +203,25 @@ class CasaSmartNowView(_NowView):
         weather = self._weather_payload(config.get("outdoor_weather_entity_id"))
         air_quality = self._air_quality_payload(config.get("air_quality_entity_id"))
         contacts = self._contacts_payload(config.get("contact_entity_ids") or [], scope)
+        suggestions = getattr(_runtime_data(self._hass), "suggestions", None)
+        contextual = await suggestions.payload(member_id, scope) if suggestions else {
+            "version": 1, "status": "unavailable", "suggestion": None,
+        }
+        # Keep the old nullable scene contract. Its explicit static/manual
+        # selection is only a fallback, never silently promoted to a time rule.
+        legacy = (
+            visible_scene(config.get("suggested_scene_id"))
+            if suggestions is None or contextual["status"] == "not_configured"
+            else None
+        )
         return self.json(
             {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "recently_used": {"source": recent_source, "items": recent_items},
                 "pinned_moments": [scene for scene_id in config.get("pinned_scene_ids", []) if (scene := visible_scene(scene_id)) is not None],
-                "suggested_routine": visible_scene(config.get("suggested_scene_id")),
+                "suggested_routine": legacy,
+                "suggested_routine_source": "featured_manual" if legacy else None,
+                "contextual_suggestion": contextual,
                 "room_activity": {"rooms": active_rooms, "layout": room_activity_layout(active_rooms), "configured_room_count": sum(1 for room_id in room_ids if policies.get(room_id, {}).get("participates", False))},
                 "outdoor_weather": weather,
                 "air_quality": air_quality,

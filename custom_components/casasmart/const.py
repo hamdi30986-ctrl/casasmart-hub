@@ -186,6 +186,7 @@ EVENT_TANK_OFFLINE = "casasmart_tank_offline"
 
 
 EVENT_TANK_CHANGED = "casasmart_tank_changed"
+EVENT_SUGGESTIONS_CHANGED = "casasmart_suggestions_changed"
 
 
 PUSH_TYPE_TANK_LOW = "tank_low"

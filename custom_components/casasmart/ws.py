@@ -23,6 +23,7 @@ from .const import (
     EVENT_AUTH_CHANGED,
     EVENT_ENERGY_CHANGED,
     EVENT_REGISTRY_CHANGED,
+    EVENT_SUGGESTIONS_CHANGED,
     EVENT_TANK_CHANGED,
     WS_AUTH_TIMEOUT,
     WS_CLOSE_AUTH_EXPIRED,
@@ -80,6 +81,7 @@ class WsConnection:
         self._sender_task: asyncio.Task | None = None
         self._unsub_state_changed: Any = None
         self._unsub_registry_changed: Any = None
+        self._unsub_suggestions_changed: Any = None
         self._unsub_alarm_changed: Any = None
         self._unsub_audio_changed: Any = None
         self._unsub_energy_changed: Any = None
@@ -109,6 +111,9 @@ class WsConnection:
         self._unsub_registry_changed = self._hass.bus.async_listen(
             EVENT_REGISTRY_CHANGED, self._on_registry_changed
         )
+        self._unsub_suggestions_changed = self._hass.bus.async_listen(
+            EVENT_SUGGESTIONS_CHANGED, self._on_suggestions_changed
+        )
         self._unsub_alarm_changed = self._hass.bus.async_listen(
             EVENT_ALARM_CHANGED, self._on_alarm_changed
         )
@@ -136,6 +141,9 @@ class WsConnection:
 
     def cleanup(self) -> None:
         """CasaSmart runtime component."""
+        if self._unsub_suggestions_changed is not None:
+            self._unsub_suggestions_changed()
+            self._unsub_suggestions_changed = None
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
@@ -375,6 +383,11 @@ class WsConnection:
         """CasaSmart runtime component."""
         kind = event.data.get("kind", "registry")
         self._offer_or_close(ws_protocol.frame_registry_changed(kind))
+
+    @callback
+    def _on_suggestions_changed(self, event: Event) -> None:
+        if self._subscribed:
+            self._offer_or_close({"type": "suggestions_changed", "version": 1})
 
     @callback
     def _on_tank_changed(self, event: Event) -> None:

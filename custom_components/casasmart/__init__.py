@@ -110,6 +110,8 @@ from .tunnel import (
 from .tunnel_control import CloudflaredController, TunnelControlError
 from .user_settings import UserSettingsEngine
 from .now_data import NowDataEngine
+from .suggestion_store import SuggestionStore
+from .suggestion_runtime import SuggestionRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -163,6 +165,7 @@ class CasaSmartRuntimeData:
 
 
     alarm_adapter: AlarmAdapter | None = None
+    suggestions: SuggestionRuntime | None = None
 
 
 
@@ -443,7 +446,14 @@ async def async_setup_entry(
 
 
 
+    suggestion_store = SuggestionStore(storage)
+    await hass.async_add_executor_job(suggestion_store.recover)
+    entry.runtime_data.suggestions = SuggestionRuntime(hass, suggestion_store, registry)
+    await entry.runtime_data.suggestions.start()
+    entry.async_on_unload(entry.runtime_data.suggestions.stop)
+
     async def _async_close_storage_on_stop(_event: Event) -> None:
+        entry.runtime_data.suggestions.stop()
         await hass.async_add_executor_job(storage.close)
         _LOGGER.info("CasaSmart Hub storage checkpointed and closed on HA stop")
 
@@ -1319,6 +1329,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("now_config").clear()
             runtime_data.storage.table("now_restore_sets").clear()
             runtime_data.storage.table("now_idempotency").clear()
+            runtime_data.storage.table("suggestions_v1").clear()
 
             runtime_data.storage.table("push_tokens").clear()
             runtime_data.storage.table("hq_notifications").clear()
@@ -1393,6 +1404,8 @@ async def async_unload_entry(
 ) -> bool:
     """CasaSmart runtime component."""
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if entry.runtime_data.suggestions is not None:
+        entry.runtime_data.suggestions.stop()
     if entry.runtime_data.energy_controller is not None:
         entry.runtime_data.energy_controller.async_stop()
     if entry.runtime_data.alarm_adapter is not None:

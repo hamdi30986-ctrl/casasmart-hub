@@ -114,6 +114,12 @@ from .registry_api import (
     CasaSmartUserDeviceView,
 )
 from .settings_api import CasaSmartUserSettingsView
+from .suggestion_api import (
+    CasaSmartSuggestionsView,
+    CasaSmartSuggestionRulesView,
+    CasaSmartSuggestionPreviewView,
+    CasaSmartSuggestionActionView,
+)
 from .now_api import (
     CasaSmartNowConfigView,
     CasaSmartNowView,
@@ -193,6 +199,10 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartUserSettingsView(hass),
         CasaSmartNowView(hass),
         CasaSmartNowConfigView(hass),
+        CasaSmartSuggestionsView(hass),
+        CasaSmartSuggestionRulesView(hass),
+        CasaSmartSuggestionPreviewView(hass),
+        CasaSmartSuggestionActionView(hass),
         CasaSmartRoomActivityPolicyView(hass),
         CasaSmartRoomActivityCommandView(hass),
         CasaSmartUpdateStatusView(hass, get_or_create_checker(hass, hub_version)),
