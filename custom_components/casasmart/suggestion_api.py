@@ -27,6 +27,13 @@ class _SuggestionView(HomeAssistantView):
     def __init__(self, hass):
         self.hass = hass
 
+    def json(self, result, status=200):
+        # Keep the machine code and the common CasaSmart error envelope.
+        # Tablet transports deliberately do not trust a bare HTTP status.
+        if status >= 400 and isinstance(result, dict) and "error" in result:
+            result = {"message": str(result["error"]).replace("_", " "), **result}
+        return super().json(result, status)
+
     async def handle(self, request, permission, operation):
         claims, error = authenticate_request(self.hass, request, permission)
         if error is not None:
