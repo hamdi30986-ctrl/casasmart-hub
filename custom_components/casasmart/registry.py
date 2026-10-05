@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
+import re
+import time
 import secrets
 import threading
 from typing import Any
@@ -53,6 +57,14 @@ class UnknownItemError(RegistryError):
 
 class InUseError(RegistryError):
     """CasaSmart runtime component."""
+
+
+class RoomMoveConflict(InUseError):
+    """The reviewed room assignments no longer match the hub."""
+
+
+class RoomMoveDenied(RegistryError):
+    """A room move would cross the caller's authorized room scope."""
 
 
 def _clean_name(name: Any, what: str) -> str:
@@ -186,6 +198,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
             "name": name,
             "presentation": presentation,
             "room_id": _clean_optional_room(gang.get("room_id")),
+            **({"room_override": True} if gang.get("room_override") is True else {}),
         }
     return out
 
@@ -445,6 +458,17 @@ class RegistryEngine:
 
                     self._mirror_assignment(entity_id, record)
                     cleared += 1
+            # Solo cards carry their room on the gang, not the entity
+            # assignment. Keep them explicitly Unassigned when that room is
+            # removed; leaving a dangling id hides them from every room.
+            for device_id, device in list(self._user_devices.items()):
+                gangs = device.get("gangs", {})
+                if any(gang.get("room_id") == room_id for gang in gangs.values()):
+                    self._user_devices[device_id] = {**device, "gangs": {
+                        key: ({**gang, "room_id": None, "room_override": True}
+                              if gang.get("room_id") == room_id else gang)
+                        for key, gang in gangs.items()
+                    }}
             tags = self._room_tags_doc()
             tags_changed = False
             for tag_id, tag in list(tags.items()):
@@ -655,8 +679,155 @@ class RegistryEngine:
             if sort_order is not ...:
                 record["sort_order"] = _clean_sort_order(sort_order)
             self._devices[entity_id] = record
-        self._mirror_assignment(entity_id, record)
+            self._mirror_assignment(entity_id, record)
         return {"entity_id": entity_id, **record}
+
+    def move_device_room(
+        self, storage, actor: str, payload: dict[str, Any], *,
+        assignable_ids: set[str], fallback_rooms: dict[str, str | None],
+        scope: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Move one saved device (or solo gang) in one durable transaction.
+
+        expected_rooms is the client's reviewed entity membership AND source
+        room map. Compare it inside the registry lock, not against an earlier
+        snapshot. The idempotency receipt is committed with the assignments.
+        No HA control or entity-registry mutation is performed here.
+        """
+        allowed = {"ha_device_id", "gang_entity_id", "room_id",
+                   "expected_rooms", "expected_gang_override", "idempotency_key"}
+        if set(payload) - allowed or "room_id" not in payload:
+            raise RegistryError("Invalid room move fields")
+        device_id = payload.get("ha_device_id")
+        gang_id = payload.get("gang_entity_id")
+        key = payload.get("idempotency_key")
+        room_id = payload.get("room_id")
+        expected = payload.get("expected_rooms")
+        expected_override = payload.get("expected_gang_override")
+        if not isinstance(actor, str) or not actor:
+            raise RoomMoveDenied("Missing caller identity")
+        if not isinstance(device_id, str) or not 0 < len(device_id) <= 255:
+            raise RegistryError("ha_device_id is required")
+        if gang_id is not None and (not isinstance(gang_id, str) or len(gang_id) > 255):
+            raise RegistryError("Invalid gang_entity_id")
+        if gang_id is not None and not isinstance(expected_override, bool):
+            raise RegistryError("expected_gang_override is required for a solo gang")
+        if gang_id is None and expected_override is not None:
+            raise RegistryError("expected_gang_override requires a solo gang")
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+            raise RegistryError("Invalid idempotency_key")
+        if room_id is not None and (not isinstance(room_id, str) or not room_id):
+            raise RegistryError("Invalid room_id")
+        if not isinstance(expected, dict) or not 0 < len(expected) <= _MAX_DEVICE_ENTITIES:
+            raise RegistryError("expected_rooms must contain 1-100 primary entities")
+        if any(not isinstance(k, str) or len(k) > 255 or "." not in k
+               or (v is not None and not isinstance(v, str)) for k, v in expected.items()):
+            raise RegistryError("Invalid expected_rooms")
+        fingerprint = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        receipt_key = hashlib.sha256(f"{actor}:{key}".encode()).hexdigest()
+        receipts = storage.table("registry_room_moves")
+        now = time.time()
+        with self._lock:
+            record = self._user_devices.get(device_id)
+            if record is None:
+                raise UnknownItemError("Device is no longer imported")
+            primary_entities = list(dict.fromkeys(
+                eid for eid in record.get("entity_ids", [])
+                if eid not in record.get("config_entity_ids", [])
+            ))
+            entities = primary_entities
+            gang = None
+            if gang_id is not None:
+                gang = record.get("gangs", {}).get(gang_id)
+                if gang_id not in entities or not gang or gang.get("presentation") != "solo":
+                    raise RoomMoveConflict("Device presentation changed; refresh and retry")
+                entities = [gang_id]
+            if not entities or set(entities) != set(expected):
+                raise RoomMoveConflict("Device membership changed; refresh and retry")
+            if any(eid not in assignable_ids for eid in entities):
+                raise UnknownItemError("A primary device entity is no longer available")
+            if room_id is not None and room_id not in self._rooms:
+                raise UnknownItemError("Destination room no longer exists")
+            current = {}
+            for eid in entities:
+                assignment = self._devices.get(eid)
+                current[eid] = (assignment.get("room_id") if assignment is not None
+                                else fallback_rooms.get(eid) if fallback_rooms.get(eid) in self._rooms else None)
+            permission_rooms = dict(current)
+            if gang is not None:
+                if gang.get("room_id") is not None or gang.get("room_override") is True:
+                    current[gang_id] = gang.get("room_id")
+                    permission_rooms[gang_id] = gang.get("room_id")
+                # The acknowledgment contains the owning record, so require
+                # access to its other primary members too (as registry GET
+                # does). Never leak another room's gang metadata in the echo.
+                for eid in primary_entities:
+                    other = record.get("gangs", {}).get(eid, {})
+                    assignment = self._devices.get(eid)
+                    inherited = (assignment.get("room_id") if assignment is not None
+                                 else fallback_rooms.get(eid))
+                    permission_rooms[eid] = (
+                        other.get("room_id")
+                        if other.get("room_override") is True or other.get("room_id") is not None
+                        else inherited
+                    )
+            if scope is not None and (
+                room_id not in scope or any(value not in scope for value in permission_rooms.values())
+            ):
+                raise RoomMoveDenied("Room move is outside your allowed rooms")
+            receipt = receipts.get(receipt_key)
+            if receipt and receipt.get("expires_at", 0) > now:
+                if receipt["fingerprint"] != fingerprint:
+                    raise RoomMoveConflict("Idempotency key was used for another move")
+                # Do not replay a stale receipt over a later, unrelated move.
+                return {**receipt["result"], "replayed": True}
+            if current != expected:
+                raise RoomMoveConflict("Room assignment changed; refresh and retry")
+            if gang is not None and (gang.get("room_override") is True) != expected_override:
+                raise RoomMoveConflict("Gang room inheritance changed; refresh and retry")
+            assignments = []
+            updated_record = None
+            with storage.transaction():
+                if gang is not None:
+                    updated_record = {**record, "gangs": {
+                        **record.get("gangs", {}),
+                        gang_id: {**gang, "room_id": room_id, "room_override": True},
+                    }}
+                    self._user_devices[device_id] = updated_record
+                else:
+                    for eid in entities:
+                        assignment = {**(self._devices.get(eid) or {
+                            "display_name": None, "sort_order": 0,
+                        }), "room_id": room_id}
+                        self._devices[eid] = assignment
+                        assignments.append({"entity_id": eid, **assignment})
+                result = {
+                    "ha_device_id": device_id, "gang_entity_id": gang_id,
+                    "room_id": room_id, "assignments": assignments,
+                    "user_device": (self._serve_user_device(device_id, updated_record)
+                                    if updated_record is not None else None),
+                    "replayed": False,
+                }
+                # Bounded receipts. Pruning and receipt creation share the
+                # transaction, so disk failure cannot produce a false receipt.
+                entries = sorted(receipts.items(), key=lambda item: item[1].get("expires_at", 0))
+                for old_key, value in entries:
+                    if value.get("expires_at", 0) <= now:
+                        del receipts[old_key]
+                while len(receipts) >= 1024:
+                    old_key = min(receipts.items(), key=lambda item: item[1]["expires_at"])[0]
+                    del receipts[old_key]
+                receipts[receipt_key] = {"fingerprint": fingerprint,
+                                         "expires_at": now + 86400, "result": result}
+            # Publish the in-memory room mirror only after SQLite commits.
+            with self._mirror_lock:
+                self._assignment_cache.update({
+                    item["entity_id"]: (item.get("room_id"), item.get("display_name"))
+                    for item in assignments
+                })
+            return result
 
     def remove_assignment(self, entity_id: str) -> None:
         """CasaSmart runtime component."""
@@ -849,6 +1020,8 @@ class RegistryEngine:
 
         record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
         with self._lock:
+            previous = self._user_devices.get(ha_device_id) or {}
+            self._retain_room_overrides(record["gangs"], previous.get("gangs", {}))
 
 
 
@@ -918,7 +1091,9 @@ class RegistryEngine:
             if gang_names is not ...:
                 record["gang_names"] = _clean_gang_map(gang_names, "gang_names")
             if gangs is not ...:
-                record["gangs"] = _clean_gangs(gangs)
+                cleaned = _clean_gangs(gangs)
+                self._retain_room_overrides(cleaned, record.get("gangs", {}))
+                record["gangs"] = cleaned
             if config_entity_ids is not ...:
                 record["config_entity_ids"] = _clean_entity_ids(
                     config_entity_ids or [], "config_entity_ids"
@@ -1015,8 +1190,17 @@ class RegistryEngine:
 
         def mutate(gang: dict[str, Any]) -> None:
             gang["room_id"] = _clean_optional_room(room_id)
+            gang["room_override"] = True
 
         return self._mutate_gang(ha_device_id, gang_key, mutate)
+
+    @staticmethod
+    def _retain_room_overrides(gangs, previous):
+        # Older clients do not know this additive field. A rename/full PUT
+        # must not turn an explicitly Unassigned gang back into inheritance.
+        for key, gang in gangs.items():
+            if previous.get(key, {}).get("room_override") is True:
+                gang["room_override"] = True
 
     def delete_user_device(self, ha_device_id: str) -> None:
         """CasaSmart runtime component."""
