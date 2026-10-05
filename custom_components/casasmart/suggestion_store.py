@@ -73,7 +73,9 @@ class SuggestionStore:
         with self.storage.transaction():
             data = self.snapshot()
             self._prune(data, now)
-            key = self.suppression_key(member, suggestion["occurrence_id"])
+            key = self.suppression_key(
+                member, suggestion.get("suppression_id", suggestion["occurrence_id"])
+            )
             if key not in data["suppressions"] and len(data["suppressions"]) >= 4096:
                 raise SuggestionError("suppression_capacity", 429)
             expires = datetime.fromisoformat(suggestion["expires_at"])
@@ -99,6 +101,15 @@ class SuggestionStore:
             data = self.snapshot()
             self._prune(data, now)
             receipt = data["executions"].get(occurrence)
+            if receipt is None and suggestion.get("suppression_id"):
+                receipt = next(
+                    (
+                        r
+                        for r in data["executions"].values()
+                        if r.get("suppression_id") == suggestion["suppression_id"]
+                    ),
+                    None,
+                )
             if receipt:
                 return False, receipt
             if len(data["executions"]) >= 2048:
@@ -109,10 +120,39 @@ class SuggestionStore:
                 "ok": False,
                 "expires_at": suggestion["expires_at"],
                 "started_at": now.isoformat(),
+                "suppression_id": suggestion.get("suppression_id", occurrence),
             }
             data["executions"][occurrence] = receipt
             self.table["state"] = data
             return True, receipt
+
+    def select_generated_rooms(self, scope_key, start, ranked_ids):
+        """Freeze targets for two hours, including across a hub restart."""
+        with self.storage.transaction():
+            data = self.snapshot()
+            selections = {
+                k: v
+                for k, v in data.get("generated_selections", {}).items()
+                if v["start"] == start
+            }
+            if scope_key not in selections:
+                if len(selections) >= 1024:
+                    raise SuggestionError("selection_capacity", 429)
+                selections[scope_key] = {"start": start, "room_ids": ranked_ids[:2]}
+            elif len(selections[scope_key]["room_ids"]) < 2:
+                # Startup may precede the first device state. Fill vacant slots
+                # when activity arrives; never reshuffle already chosen rooms.
+                chosen = selections[scope_key]["room_ids"]
+                selections[scope_key] = {
+                    "start": start,
+                    "room_ids": (
+                        chosen + [rid for rid in ranked_ids if rid not in chosen]
+                    )[:2],
+                }
+            if selections != data.get("generated_selections"):
+                data["generated_selections"] = selections
+                self.table["state"] = data
+            return selections[scope_key]["room_ids"]
 
     def finish(self, occurrence, result):
         with self.storage.transaction():

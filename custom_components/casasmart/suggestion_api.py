@@ -23,6 +23,7 @@ def runtime_for(hass):
 
 class _SuggestionView(HomeAssistantView):
     requires_auth = False
+    generated = False
 
     def __init__(self, hass):
         self.hass = hass
@@ -44,6 +45,8 @@ class _SuggestionView(HomeAssistantView):
             return self.json({"error": "unrestricted_admin_required"}, 403)
         runtime = runtime_for(self.hass)
         service = getattr(runtime, "suggestions", None)
+        if self.generated:
+            service = getattr(service, "generated", None)
         if service is None:
             return self.json({"error": "suggestions_unavailable"}, 503)
         try:
@@ -185,7 +188,11 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 if error is not None:
                     return error
             member, scope = self.member(claims), claims.get("rooms")
-            context = await service.context()
+            context = (
+                await service.context(scope)
+                if self.generated
+                else await service.context()
+            )
             candidate = next(
                 (
                     s
@@ -204,7 +211,9 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                     receipt, 202 if receipt["status"] == "executing" else 200
                 )
             previous = context[0]["suppressions"].get(
-                service.store.suppression_key(member, occurrence)
+                service.store.suppression_key(
+                    member, candidate.get("suppression_id", occurrence)
+                )
             )
             if (
                 action in ("dismiss", "snooze")
@@ -218,8 +227,9 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                         "until": previous["until"],
                     }
                 )
-            selected = service.payload_from(context, member, scope)["suggestion"]
-            if selected is None or selected["occurrence_id"] != occurrence:
+            payload = service.payload_from(context, member, scope)
+            selected = payload.get("suggestions", [payload["suggestion"]])
+            if not any(s and s["occurrence_id"] == occurrence for s in selected):
                 raise SuggestionError("occurrence_expired_or_ineligible", 409)
             if action != "run":
                 result = await self.hass.async_add_executor_job(
@@ -241,7 +251,6 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 # Executor scheduling is an async gap: re-read rules, scene,
                 # conditions, time and token privileges before the first action.
                 await service.refresh()
-                fresh = await service.context()
                 fresh_claims, error = authenticate_request(
                     self.hass, request, "devices.control"
                 )
@@ -250,6 +259,11 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                         service.store.abort_before_dispatch, occurrence
                     )
                     return error
+                fresh = (
+                    await service.context(fresh_claims.get("rooms"))
+                    if self.generated
+                    else await service.context()
+                )
                 fresh_candidate = next(
                     (
                         s
@@ -263,7 +277,10 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 if fresh_candidate is None:
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
                 suppressed = fresh[0]["suppressions"].get(
-                    service.store.suppression_key(self.member(fresh_claims), occurrence)
+                    service.store.suppression_key(
+                        self.member(fresh_claims),
+                        candidate.get("suppression_id", occurrence),
+                    )
                 )
                 if (
                     suppressed
@@ -303,3 +320,15 @@ class CasaSmartSuggestionActionView(_SuggestionView):
             and not scene.get("works_during_energy_saving", False)
         ):
             raise SuggestionError("scene_skipped_energy_saving", 409)
+
+
+class CasaSmartGeneratedSuggestionsView(CasaSmartSuggestionsView):
+    generated = True
+    url = f"/api/{DOMAIN}/now/suggestions/generated"
+    name = f"api:{DOMAIN}:now:suggestions:generated"
+
+
+class CasaSmartGeneratedSuggestionActionView(CasaSmartSuggestionActionView):
+    generated = True
+    url = f"/api/{DOMAIN}/now/suggestions/generated/actions"
+    name = f"api:{DOMAIN}:now:suggestions:generated:actions"

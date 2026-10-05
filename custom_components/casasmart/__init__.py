@@ -448,7 +448,7 @@ async def async_setup_entry(
 
     suggestion_store = SuggestionStore(storage)
     await hass.async_add_executor_job(suggestion_store.recover)
-    entry.runtime_data.suggestions = SuggestionRuntime(hass, suggestion_store, registry)
+    entry.runtime_data.suggestions = SuggestionRuntime(hass, suggestion_store, registry, now_data=now_data)
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
 

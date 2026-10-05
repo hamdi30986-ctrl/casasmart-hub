@@ -29,6 +29,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "now_data_v1",
                 "atomic_room_move_v1",
                 "contextual_suggestions_v1",
+                "generated_room_suggestions_v1",
                 "push_relay_optional_v1",
             },
         )
@@ -43,6 +44,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "now_data_v1": True,
                 "atomic_room_move_v1": True,
                 "contextual_suggestions_v1": True,
+                "generated_room_suggestions_v1": True,
                 "push_relay_optional_v1": False,
             },
         )

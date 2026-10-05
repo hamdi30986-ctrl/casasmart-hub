@@ -15,6 +15,8 @@ class WiringTest(unittest.TestCase):
             "CasaSmartSuggestionRulesView",
             "CasaSmartSuggestionPreviewView",
             "CasaSmartSuggestionActionView",
+            "CasaSmartGeneratedSuggestionsView",
+            "CasaSmartGeneratedSuggestionActionView",
         ):
             self.assertIn(f"{name}(hass)", source)
         setup = (ROOT / "__init__.py").read_text()

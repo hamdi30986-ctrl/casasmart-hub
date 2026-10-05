@@ -115,6 +115,8 @@ from .registry_api import (
 )
 from .settings_api import CasaSmartUserSettingsView
 from .suggestion_api import (
+    CasaSmartGeneratedSuggestionsView,
+    CasaSmartGeneratedSuggestionActionView,
     CasaSmartSuggestionsView,
     CasaSmartSuggestionRulesView,
     CasaSmartSuggestionPreviewView,
@@ -200,6 +202,8 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartNowView(hass),
         CasaSmartNowConfigView(hass),
         CasaSmartSuggestionsView(hass),
+        CasaSmartGeneratedSuggestionsView(hass),
+        CasaSmartGeneratedSuggestionActionView(hass),
         CasaSmartSuggestionRulesView(hass),
         CasaSmartSuggestionPreviewView(hass),
         CasaSmartSuggestionActionView(hass),

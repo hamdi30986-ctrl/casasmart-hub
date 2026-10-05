@@ -27,6 +27,7 @@ ORBIT_CAPABILITIES: Final = (
     "now_data_v1",
     "atomic_room_move_v1",
     "contextual_suggestions_v1",
+    "generated_room_suggestions_v1",
     "push_relay_optional_v1",
 )
 
@@ -37,6 +38,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
     {
         "room_activity_bulk_v1", "now_data_v1", "atomic_room_move_v1",
         "contextual_suggestions_v1",
+        "generated_room_suggestions_v1",
     }
 )
 
