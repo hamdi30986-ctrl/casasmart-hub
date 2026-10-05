@@ -78,7 +78,9 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "max_temp",
         }
     ),
-    "cover": frozenset({"current_position", "current_tilt_position", "device_class"}),
+    "cover": frozenset(
+        {"current_position", "current_tilt_position", "device_class", "supported_features"}
+    ),
     "fan": frozenset({"percentage", "percentage_step", "preset_mode", "preset_modes"}),
     "lock": frozenset({}),
     "media_player": frozenset(
