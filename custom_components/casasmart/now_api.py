@@ -204,6 +204,12 @@ class CasaSmartNowView(_NowView):
         air_quality = self._air_quality_payload(config.get("air_quality_entity_id"))
         contacts = self._contacts_payload(config.get("contact_entity_ids") or [], scope)
         suggestions = getattr(_runtime_data(self._hass), "suggestions", None)
+        generated = getattr(suggestions, "generated", None)
+        if generated is not None:
+            # Same authoritative ranking used for generated scene targets.
+            ranked, _, _ = await generated.room_context(scope)
+            previous = {r["room_id"]: r for r in active_rooms}
+            active_rooms = [{**r, "restore_pending_count": previous.get(r["room_id"], {}).get("restore_pending_count", 0)} for r in ranked]
         contextual = await suggestions.payload(member_id, scope) if suggestions else {
             "version": 1, "status": "unavailable", "suggestion": None,
         }

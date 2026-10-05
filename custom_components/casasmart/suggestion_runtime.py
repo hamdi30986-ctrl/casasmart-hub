@@ -18,7 +18,7 @@ from .const import (
     EVENT_REGISTRY_CHANGED,
     EVENT_SUGGESTIONS_CHANGED,
 )
-from .filtering import in_scope, is_served
+from .filtering import area_id_of, in_scope, is_served
 from .storage import StorageError
 from .suggestions import SuggestionError, evaluate, next_boundary, state_value
 
@@ -26,7 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class SuggestionRuntime:
-    def __init__(self, hass, store, registry, *, clock=None, sunset=None):
+    def __init__(
+        self, hass, store, registry, *, clock=None, sunset=None, now_data=None
+    ):
         self.hass, self.store, self.registry = hass, store, registry
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.sunset = sunset or self._sunset
@@ -37,6 +39,11 @@ class SuggestionRuntime:
         self._stopped = False
         self._fingerprint = None
         self._lock = asyncio.Lock()
+        self.generated = (
+            GeneratedSuggestionRuntime(hass, store, registry, now_data, clock=clock)
+            if now_data is not None
+            else None
+        )
 
     def _sunset(self, day):
         sun = self.hass.states.get("sun.sun")
@@ -122,6 +129,8 @@ class SuggestionRuntime:
             return {"version": 1, "status": "unavailable", "suggestion": None}
 
     async def start(self):
+        if self.generated:
+            await self.generated.start()
         for event in (
             EVENT_REGISTRY_CHANGED,
             EVENT_ENERGY_CHANGED,
@@ -188,6 +197,12 @@ class SuggestionRuntime:
                         next_boundary(data["rules"], now, zone, self.sunset) - now
                     ).total_seconds(),
                 )
+                if isinstance(self, GeneratedSuggestionRuntime):
+                    from .generated_suggestions import window
+
+                    delay = min(
+                        delay, max(0.05, (window(now)[1] - now).total_seconds())
+                    )
                 # Wake exactly at snooze expiry, even if the home is quiet.
                 for suppression in data["suppressions"].values():
                     seconds = (
@@ -204,6 +219,8 @@ class SuggestionRuntime:
                 self._timer = self.hass.loop.call_later(delay, self._kick)
 
     def stop(self):
+        if self.generated:
+            self.generated.stop()
         self._stopped = True
         for cancel in self._unsubs:
             cancel()
@@ -214,3 +231,176 @@ class SuggestionRuntime:
         for handle in (self._timer, self._debounce, self._task):
             if handle:
                 handle.cancel()
+
+
+class GeneratedSuggestionRuntime(SuggestionRuntime):
+    """Separate versioned endpoint; old clients retain the existing rule contract."""
+
+    def __init__(self, hass, store, registry, now_data, *, clock=None):
+        super().__init__(hass, store, registry, clock=clock)
+        self.now_data = now_data
+
+    async def room_context(self, scope):
+        from .now_data import is_room_activity_candidate
+
+        rooms, policies, devices = await self.hass.async_add_executor_job(
+            lambda: (
+                self.registry.list_rooms(),
+                {
+                    r["room_id"]: self.now_data.room_policy(r["room_id"])
+                    for r in self.registry.list_rooms()
+                },
+                self.registry.list_user_devices(),
+            )
+        )
+        rooms = [r for r in rooms if scope is None or r["room_id"] in scope]
+        configured = any(
+            policies.get(r["room_id"], {}).get("participates") for r in rooms
+        )
+        gang_types = {}
+        for device in devices:
+            gang_types.update(device.get("gang_types", {}))
+            gang_types.update(
+                {
+                    eid: g.get("type")
+                    for eid, g in device.get("gangs", {}).items()
+                    if g.get("presentation") != "hidden"
+                }
+            )
+        states = {
+            s.entity_id: s
+            for s in self.hass.states.async_all()
+            if self.visible(scope)(s.entity_id)
+        }
+        grouped = {r["room_id"]: [] for r in rooms}
+        for state in states.values():
+            rid = area_id_of(self.hass, state.entity_id)
+            if rid in grouped:
+                grouped[rid].append(state)
+        ranked = []
+        for room in rooms:
+            rid = room["room_id"]
+            policy = policies.get(rid, {})
+            if configured and not policy.get("participates"):
+                continue
+            eligible = []
+            for state in grouped[rid]:
+                eid = state.entity_id
+                domain = eid.split(".")[0]
+                safe = domain in {"light", "fan"} or (
+                    domain == "switch"
+                    and gang_types.get(eid) in {"light", "fan", "switch", "outlet"}
+                )
+                if not safe or state.state in {"unknown", "unavailable"}:
+                    continue
+                if configured and (
+                    eid not in policy.get("eligible_entity_ids", [])
+                    or not is_room_activity_candidate(state)
+                ):
+                    continue
+                eligible.append(eid)
+            count = sum(states[eid].state == "on" for eid in eligible)
+            if count or configured:
+                ranked.append(
+                    {
+                        **room,
+                        "active_count": count,
+                        "eligible_entity_ids": eligible,
+                        "restore_pending_count": 0,
+                        "most_recent_activity_at": None,
+                    }
+                )
+        ranked.sort(key=lambda r: (-r["active_count"], r["room_id"]))
+        return ranked, grouped, states
+
+    async def context(self, scope=None):
+        from .generated_suggestions import digest, make_suggestion, window
+
+        ranked, grouped, states = await self.room_context(scope)
+        now = self.clock()
+        scope_key = digest(sorted(scope) if scope is not None else None)
+        selected = await self.hass.async_add_executor_job(
+            self.store.select_generated_rooms,
+            scope_key,
+            window(now)[0],
+            [r["room_id"] for r in ranked if r["active_count"]],
+        )
+        rooms = {r["room_id"]: r for r in ranked}
+        plans = []
+        for index, rid in enumerate(selected):
+            if rid not in rooms:
+                continue
+            for kind in ["room_off", "room_eco"] if index == 0 else ["room_off"]:
+                plan = make_suggestion(
+                    rooms[rid],
+                    kind,
+                    grouped[rid],
+                    now,
+                    temperature_unit=getattr(
+                        getattr(self.hass.config, "units", None),
+                        "temperature_unit",
+                        "°C",
+                    ),
+                )
+                if plan:
+                    plans.append(plan)
+        data = await self.hass.async_add_executor_job(self.store.snapshot)
+        data = {**data, "rules": [], "_generated_plans": plans}
+        scenes = {
+            p["scene_id"]: {
+                **p["scene"],
+                "entities": p["actions"],
+                "works_during_energy_saving": True,
+                "generated_room_v1": True,
+                "room_id": p["room_id"],
+                "kind": p["kind"],
+            }
+            for p in plans
+        }
+        return data, scenes, states, now, ZoneInfo(self.hass.config.time_zone)
+
+    def candidates(self, context, scope, *, policy_checks=True):
+        for plan in context[0]["_generated_plans"]:
+            if all(self.visible(scope)(a["entity_id"]) for a in plan["actions"]):
+                yield {}, dict(plan), "eligible"
+
+    def payload_from(self, context, member, scope):
+        from .generated_suggestions import window
+
+        data, _, _, now, _ = context
+        plans = []
+        for _, plan, _ in self.candidates(context, scope):
+            slot = plan["suppression_id"]
+            suppression = data["suppressions"].get(
+                self.store.suppression_key(member, slot)
+            )
+            if suppression and datetime.fromisoformat(suppression["until"]) > now:
+                continue
+            # Any attempted execution blocks a changed version of this slot too.
+            receipts = [
+                r
+                for r in data["executions"].values()
+                if r.get("suppression_id") == slot
+            ]
+            if receipts:
+                continue
+            plans.append(plan)
+        return {
+            "version": 1,
+            "source": "generated_room_v1",
+            "status": "available" if plans else "no_match",
+            "suggestion": plans[0] if plans else None,
+            "suggestions": plans,
+            "refresh_at": window(now)[1].isoformat(),
+        }
+
+    async def payload(self, member, scope):
+        try:
+            return self.payload_from(await self.context(scope), member, scope)
+        except (StorageError, sqlite3.Error, SuggestionError, ZoneInfoNotFoundError):
+            return {
+                "version": 1,
+                "status": "unavailable",
+                "suggestion": None,
+                "suggestions": [],
+            }

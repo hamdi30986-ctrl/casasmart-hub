@@ -65,6 +65,7 @@ def load_boundaries():
     module("homeassistant.helpers.sun", get_astral_event_date=lambda *args: None)
     module(
         "phase4_fixture.filtering",
+        area_id_of=lambda h, e: h.rooms.get(e),
         is_served=lambda h, e: e in h.states.values,
         in_scope=lambda h, e, s: s is None or h.rooms.get(e) in s,
     )
@@ -79,6 +80,7 @@ def load_boundaries():
         energy_lockout_applies=lambda energy, claims: getattr(energy, "locked", False),
     )
     executor = load_api()
+    executor.__package__ = "phase4_fixture"
     spec = importlib.util.spec_from_file_location(
         "phase4_bridge", fixtures.ROOT / "entity_bridge.py"
     )
@@ -86,6 +88,7 @@ def load_boundaries():
     spec.loader.exec_module(bridge)
     executor.validate_command = bridge.validate_command
     executor.is_served = lambda h, e: e in h.states.values
+    executor.area_id_of = lambda h, e: h.rooms.get(e)
     module(
         "phase4_fixture.registry_api",
         async_execute_registry_scene=executor.async_execute_registry_scene,

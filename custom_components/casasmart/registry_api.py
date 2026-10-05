@@ -1113,12 +1113,45 @@ async def async_execute_registry_scene(
             item["entity_id"].split(".", 1)[0] == "climate"
             and item.get("action") == "set_fan_mode"
             and item["entity_id"] in _climate_with_state
+            and not scene.get("generated_room_v1", False)
         )
     ]
 
     results = []
     for item in entities_to_run:
         entity_id = item["entity_id"]
+
+        if scene.get("generated_room_v1"):
+            # Each service call yields: a room move or another scene can occur
+            # between commands. Never brighten/re-enable an interveningly off
+            # light, cool harder, or continue controlling a moved device.
+            from .generated_suggestions import room_actions
+
+            state = hass.states.get(entity_id)
+            valid = state is not None and area_id_of(hass, entity_id) == scene["room_id"]
+            if valid and entity_id.startswith("light."):
+                valid = (
+                    state.state == "on"
+                    and state.attributes.get("casasmart_room_activity_exclude") is not True
+                )
+                if valid and item["action"] == "turn_on":
+                    valid = any(
+                        a["action"] == item["action"] and a["data"] == item.get("data", {})
+                        for a in room_actions([state], "room_eco")
+                    )
+            elif valid:
+                unit = getattr(getattr(hass.config, "units", None), "temperature_unit", "°C")
+                valid = any(
+                    a["action"] == item["action"] and a["data"] == item.get("data", {})
+                    for a in room_actions([state], scene["kind"], temperature_unit=unit)
+                )
+            if not valid:
+                results.append({
+                    "entity_id": entity_id,
+                    "ok": False,
+                    "error": "Device changed since preview",
+                })
+                continue
 
 
         if hass.states.get(entity_id) is None or not is_served(hass, entity_id):
