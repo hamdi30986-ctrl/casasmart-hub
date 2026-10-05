@@ -107,7 +107,9 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
             {"room_id": "a", "name": "Living"},
             {"room_id": "b", "name": "Kitchen"},
         ]
-        self.registry.list_user_devices = lambda: []
+        self.registry.list_user_devices = lambda: [
+            {"control_entity_ids": list(self.states.values)}
+        ]
         self.runtime.generated = RUNTIME.GeneratedSuggestionRuntime(
             self.hass,
             self.store,
@@ -224,6 +226,50 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
             "eligible_entity_ids": ["light.other"],
         }
         self.assertEqual({p["room_id"] for p in await self.plans()}, {"b"})
+
+    async def test_unimported_and_hidden_controls_never_rank_or_execute(self):
+        await self.setup_generated()
+        ids = list(self.states.values)
+        self.registry.list_user_devices = lambda: [
+            {
+                "control_entity_ids": ids,
+                "gangs": {"light.two": {"presentation": "hidden"}},
+                "config_entity_ids": ["climate.ac"],
+            }
+        ]
+        self.states.values["light.unimported"] = light("light.unimported")
+        self.hass.rooms["light.unimported"] = "b"
+        ranked, _, _ = await self.runtime.generated.room_context(None)
+        self.assertEqual(
+            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 1), ("b", 1)]
+        )
+        actions = [a for p in await self.plans() for a in p["actions"]]
+        self.assertFalse(
+            {"light.unimported", "light.two", "climate.ac"}
+            & {a["entity_id"] for a in actions}
+        )
+
+    async def test_legacy_gang_suffixes_rank_but_never_enter_actions(self):
+        await self.setup_generated()
+        self.states.values["switch.relay_left"] = light("switch.relay_left")
+        self.hass.rooms["switch.relay_left"] = "b"
+        self.registry.list_user_devices = lambda: [
+            {
+                "control_entity_ids": list(self.states.values),
+                "gang_types": {"left": "switch"},
+            },
+        ]
+        ranked, _, _ = await self.runtime.generated.room_context(None)
+        self.assertEqual(
+            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 2), ("b", 2)]
+        )
+        self.assertFalse(
+            any(
+                a["entity_id"].startswith("switch.")
+                for p in await self.plans()
+                for a in p["actions"]
+            )
+        )
 
     async def test_energy_lockout_and_expiry_never_dispatch(self):
         await self.setup_generated()
