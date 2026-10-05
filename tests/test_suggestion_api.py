@@ -34,11 +34,18 @@ def load_boundaries():
     def authenticate(hass, request, permission):
         claims = request.claims
         if claims is None:
-            return None, NS(data={"error": "unauthenticated"}, status=401)
+            return None, NS(
+                data={"error": "unauthenticated", "message": "Unauthenticated"},
+                status=401,
+            )
         if permission == "suggestions.manage" and claims.get("role") != "admin":
-            return None, NS(data={"error": "forbidden"}, status=403)
+            return None, NS(
+                data={"error": "forbidden", "message": "Permission denied"}, status=403
+            )
         if permission == "devices.control" and not claims.get("control", True):
-            return None, NS(data={"error": "forbidden"}, status=403)
+            return None, NS(
+                data={"error": "forbidden", "message": "Permission denied"}, status=403
+            )
         return claims, None
 
     async def body(request):
@@ -114,6 +121,17 @@ class Bus:
 
 
 class ApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_errors_keep_common_transport_envelope(self):
+        stale = await self.rules.put(
+            self.request({"expected_revision": 0, "rules": []})
+        )
+        self.assertEqual(stale.status, 409)
+        self.assertEqual(stale.data["error"], "revision_conflict")
+        self.assertTrue(stale.data["message"])
+        scoped = await self.rules.get(self.request(rooms=["a"]))
+        self.assertEqual(scoped.status, 403)
+        self.assertTrue(scoped.data["message"])
+
     async def test_now_snapshot_keeps_static_selection_as_manual_fallback_only(self):
         import test_now_api_behavior as old
 
