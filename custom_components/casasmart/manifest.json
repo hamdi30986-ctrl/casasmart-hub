@@ -4,12 +4,12 @@
   "after_dependencies": ["automation", "camera", "hassio", "recorder", "stream"],
   "codeowners": ["@casasmart"],
   "config_flow": true,
-  "dependencies": ["http", "zeroconf"],
+  "dependencies": ["http", "network", "zeroconf"],
   "documentation": "https://github.com/hamdi30986-ctrl/casasmart-hub",
   "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/hamdi30986-ctrl/casasmart-hub/issues",
-  "requirements": ["paho-mqtt>=1.6.1", "prayer-times-calculator-offline==1.0.3"],
+  "requirements": ["paho-mqtt>=1.6.1", "prayer-times-calculator-offline>=1.0.3"],
   "single_config_entry": true,
   "version": "2.1.0"
 }

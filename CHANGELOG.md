@@ -31,7 +31,10 @@ storage schema (version 4) are unchanged, so existing apps keep working.
 
 ### Changed
 - `manifest.json` documentation and issue-tracker links point at this
-  repository, and its keys are in hassfest order.
+  repository, and its keys are in hassfest order. hassfest now passes:
+  `network` is declared as a dependency (zeroconf already loaded it), the
+  prayer-times requirement is `>=1.0.3` (Home Assistant ships 1.0.3), and the
+  relay help texts use a `{example_url}` placeholder instead of a literal URL.
 - `hacs.json` hides branch installs, so HACS always records a release tag.
 - A startup warning is logged whenever `CASASMART_DEV_ENROLL` enables dev
   auto-enrollment.

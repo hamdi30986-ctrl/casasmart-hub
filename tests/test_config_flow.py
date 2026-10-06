@@ -337,6 +337,20 @@ class FreshInstallSeeding(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {CONF_PUSH_RELAY_URL: "invalid_relay_url"})
 
+    async def test_relay_help_text_gets_its_example_url(self) -> None:
+        # strings.json keeps URLs out of translations ({example_url}); every
+        # form that shows the relay field must supply the placeholder.
+        result = await _user_flow().async_step_user(None)
+        self.assertEqual(
+            result["description_placeholders"]["example_url"],
+            "https://relay.example.com",
+        )
+        strings = (
+            Path(__file__).resolve().parents[1]
+            / "custom_components/casasmart/strings.json"
+        ).read_text()
+        self.assertNotRegex(strings, r"https://[\w-]+\.[\w.-]+")  # no literal URLs
+
     async def test_activation_schema_uses_password_selector(self) -> None:
         marker = next(
             marker
