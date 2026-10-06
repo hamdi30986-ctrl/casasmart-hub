@@ -7,9 +7,13 @@
 # so every step below refuses to continue on any mismatch.
 #
 #   scripts/release.sh check   X.Y.Z   gates only (clean main, manifest, tests); no changes
-#   scripts/release.sh tag     X.Y.Z   gates + annotated tag + build/sign/verify dist/ (local)
+#   scripts/release.sh tag     X.Y.Z   gates + build/sign/verify dist/, then the annotated tag (local)
 #   scripts/release.sh publish X.Y.Z   push the tag + create the GitHub release as a PRERELEASE
 #   scripts/release.sh promote X.Y.Z   mark the prerelease as the latest release (same tag/asset)
+#
+# Needs: git, python3 (or uv), unzip, OpenSSL 3 (for `pkeyutl -rawin`; macOS's
+# built-in LibreSSL lacks it), the release signing key, and an authenticated
+# GitHub CLI (`gh`) for publish/promote.
 #
 # Tags and published assets are never moved or replaced: fix forward with X.Y.Z+1.
 set -euo pipefail
@@ -26,6 +30,7 @@ tag="v$version"
 
 die() { echo "release: $*" >&2; exit 1; }
 step() { echo "==> $*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required: $2"; }
 
 [[ "$cmd" =~ ^(check|tag|publish|promote)$ ]] || die "usage: $0 {check|tag|publish|promote} X.Y.Z"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be three-part X.Y.Z (got '$version')"
@@ -54,10 +59,17 @@ gates() {
 }
 
 build_and_verify() {
-  step "build $dist/casasmart.zip from $tag"
+  # Built from HEAD before the tag exists, so a failed build or signature never
+  # leaves a tag behind. The tag is created on this same commit afterwards.
+  local commit
+  commit="$(git rev-parse HEAD)"
+  step "build $dist/casasmart.zip from ${commit:0:12}"
+  need unzip "to inspect the built zip"
+  openssl pkeyutl -help 2>&1 | grep -q -- '-rawin' \
+    || die "openssl must be OpenSSL 3 (pkeyutl -rawin); found: $(openssl version)"
   rm -rf "$dist" && mkdir -p "$dist"
-  # Files at the zip root, exactly the tagged integration tree (reproduces v2.1's asset).
-  git archive --format=zip -o "$dist/casasmart.zip" "$tag:custom_components/casasmart"
+  # Files at the zip root, exactly the integration tree (the layout HACS expects).
+  git archive --format=zip -o "$dist/casasmart.zip" "$commit:custom_components/casasmart"
   local zv
   zv="$(unzip -p "$dist/casasmart.zip" manifest.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')"
   [ "$zv" = "$version" ] || die "zip manifest.json says $zv"
@@ -79,6 +91,7 @@ print("signature OK")
 PY
   awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > "$dist/notes.md"
   [ -s "$dist/notes.md" ] || die "empty release notes for $version"
+  echo "$commit" > "$dist/COMMIT"
   (cd "$dist" && shasum -a 256 casasmart.zip casasmart.zip.sig)
 }
 
@@ -91,19 +104,23 @@ case "$cmd" in
     gates
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "tag $tag already exists"
     git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && die "tag $tag already exists on origin"
-    git tag -a "$tag" -m "CasaSmart Hub $tag"
     build_and_verify
-    step "OK: $tag tagged locally and dist/ built — next: $0 publish $version"
+    git tag -a "$tag" -m "CasaSmart Hub $tag"
+    step "OK: dist/ built and $tag tagged locally — next: $0 publish $version"
     ;;
   publish)
+    need gh "GitHub CLI, authenticated (gh auth login)"
     [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse origin/main)" ] || die "$tag is not origin/main"
     [ -f "$dist/casasmart.zip" ] && [ -f "$dist/casasmart.zip.sig" ] || die "run '$0 tag $version' first"
+    [ "$(cat "$dist/COMMIT" 2>/dev/null)" = "$(git rev-parse "$tag^{commit}")" ] \
+      || die "dist/ was not built from $tag; run '$0 tag $version' again from a clean checkout"
     git push origin "$tag"
     gh release create "$tag" "$dist/casasmart.zip" "$dist/casasmart.zip.sig" \
       --verify-tag --prerelease --title "CasaSmart Hub $tag" --notes-file "$dist/notes.md"
     step "OK: $tag published as a PRERELEASE — verify it, then: $0 promote $version"
     ;;
   promote)
+    need gh "GitHub CLI, authenticated (gh auth login)"
     gh release edit "$tag" --prerelease=false --latest
     latest="$(gh api "repos/{owner}/{repo}/releases/latest" --jq .tag_name)"
     [ "$latest" = "$tag" ] || die "latest release is $latest, expected $tag"
