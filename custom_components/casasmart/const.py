@@ -79,6 +79,11 @@ EVENT_AUDIO_CHANGED = "casasmart_audio_changed"
 
 UPDATE_REPO_CONFIG_KEY = "update_repo"
 
+# Ed25519 public key that signs every published casasmart.zip. The release
+# script signs with the matching private key, which lives only on the release
+# host; the built-in updater refuses any artifact this key did not sign.
+UPDATE_SIGNING_PUBLIC_KEY_B64 = "uqXZj9IlXOTMEdaJ4gest3HawiuRsc62GNxORB5HIAY="
+
 
 UPDATE_CHECK_TTL_SECONDS = 6 * 3600
 
