@@ -33,7 +33,7 @@ class FactoryResetTablesTests(unittest.TestCase):
         self.assertEqual(len(FACTORY_RESET_TABLES), len(set(FACTORY_RESET_TABLES)))
 
     def test_room_tags_and_move_receipts_are_wiped(self) -> None:
-        # v2.2.0: the whole registry organization layer goes, tags included.
+        # Since 2.3.0: the whole registry organization layer goes, tags included.
         for table in ("registry_room_tags", "registry_room_moves", "registry_rooms"):
             self.assertIn(table, FACTORY_RESET_TABLES)
 

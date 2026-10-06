@@ -123,7 +123,7 @@ class TestParseRelease(unittest.TestCase):
         self.assertEqual(info.signature_url, SIG_URL)
 
     def test_zipball_is_never_used(self):
-        # v2.2.0: the source zipball is not the release artifact and is never
+        # Since 2.3.0: the source zipball is not the release artifact and is never
         # signed, so a release without casasmart.zip has nothing to install.
         info = parse_release(self._payload(assets=[]))
         self.assertIsNone(info.download_url)

@@ -433,7 +433,7 @@ CLOUDFLARE_HEADERS = {"CF-Connecting-IP": "203.0.113.9", "CF-Ray": "8c1f2e3d4a5b
 
 
 class CloudflareProxiedTests(EnrollGateTests):
-    """v2.2.0: a request that crossed Cloudflare is never treated as LAN, even
+    """Since 2.3.0: a request that crossed Cloudflare is never treated as LAN, even
     when the last hop is a private address (a tunnel into the TLS listener)."""
 
     async def _enroll_via(self, code: str, headers: dict, remote: str):
@@ -516,7 +516,7 @@ SYNTHETIC_PUBLIC_IP = "8.8.4.4"
 
 
 class TrustedLanIngressTests(EnrollGateTests):
-    """v2.2.0: on a TLS listener trusted as LAN ingress, the listener is the
+    """Since 2.3.0: on a TLS listener trusted as LAN ingress, the listener is the
     LAN proof; anywhere else the source address still decides."""
 
     def _request(self, body, remote, *, listener=None, headers=None):
