@@ -28,6 +28,9 @@ from .relay_registration import is_activation_code_format
 from .tunnel import normalize_cloudflare_domain
 from .tunnel_control import CloudflaredController, TunnelControlError
 
+# Shown in the relay field's help text; hassfest wants URLs out of strings.json.
+_EXAMPLE_RELAY_URL = "https://relay.example.com"
+
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_PUSH_RELAY_URL): str,
@@ -114,6 +117,7 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             ),
             errors=errors,
+            description_placeholders={"example_url": _EXAMPLE_RELAY_URL},
         )
 
 
@@ -205,7 +209,8 @@ class CasaSmartOptionsFlow(OptionsFlow):
             data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, suggested),
             errors=errors,
             description_placeholders={
-                "tunnel_status": await self._async_tunnel_status()
+                "tunnel_status": await self._async_tunnel_status(),
+                "example_url": _EXAMPLE_RELAY_URL,
             },
         )
 
