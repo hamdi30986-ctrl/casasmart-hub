@@ -1,43 +1,205 @@
 # CasaSmart Hub
 
-Home Assistant integration for CasaSmart systems.
+A Home Assistant integration that turns a Home Assistant installation into a
+CasaSmart hub, the home server behind the CasaSmart phone and tablet apps. It
+adds what the apps need:
 
-The hub TLS endpoint must be reachable from client devices on port `8443`, and
-`_casasmart._tcp` must be advertised on the LAN. Native Home Assistant hosts do
-this through the integration. Docker Desktop for macOS requires the companion
-[LAN pairing bridge](deploy/macos/README.md) because its port publishing and
-multicast behavior hide the client network from the container.
+- secure pairing for each person's phone;
+- rooms, favorites and scenes;
+- a hub-side security alarm;
+- water-tank monitoring;
+- speaker announcements and prayer-time athan;
+- Energy Saving;
+- push notifications through the CasaSmart relay;
+- optional remote access through a Cloudflare tunnel.
+
+## What you need
+
+- **Home Assistant 2025.3 or newer**, installed through [HACS](https://hacs.xyz).
+- **A push relay address and a hub activation code from CasaSmart.** Setup
+  can't finish without them. Your installer gets both from the CasaSmart
+  Installer Console: a relay URL such as `https://relay.example.com`, and a
+  single-use `CSACT1…` code.
+- **The CasaSmart app** on the phones and tablets that will use the hub.
+- **A local network the phones share with the hub.** Phones reach the hub on
+  **TCP port 8443** and find it through **mDNS** (`_casasmart._tcp`, UDP 5353).
+  Pairing only works on that network.
 
 ## Install
 
-Requires Home Assistant **2025.3** or newer.
+1. In HACS, open the menu and choose **Custom repositories**. Add
+   `https://github.com/hamdi30986-ctrl/casasmart-hub` with category
+   **Integration**.
+2. Download **CasaSmart Hub**. HACS offers releases only; branch installs are
+   hidden on purpose.
+3. Restart Home Assistant.
 
-1. In HACS, add this repository as a custom repository (category *Integration*).
-2. Download **CasaSmart Hub**, choosing a release (never a branch).
-3. Restart Home Assistant, then add the *CasaSmart Hub* integration. Setup asks
-   for the push relay URL and its activation code, and optionally a Cloudflare
-   tunnel domain.
+Update through HACS as well. HACS records which release it installed, so files
+copied in by hand leave HACS showing the wrong version.
 
-Update through HACS. HACS records the release tag it installed, so copying files
-in by hand or using the hub's own updater leaves HACS showing the wrong version.
+## Set up
 
-Pairing, owner recovery and keyless speaker provisioning are LAN-only. The hub
-decides "LAN" from the client's address, except on Docker Desktop, where it
-trusts its loopback-published TLS port behind the LAN relay instead (see the
-bridge README; `lan_relay_ingress` overrides). Requests through Cloudflare are
-never LAN. Remote pairing of member codes is opt-in (`remote_pairing_enabled`).
+1. Go to **Settings → Devices & services → Add integration → CasaSmart Hub**.
+2. Enter the push relay URL and the activation code. Optionally enter the
+   hub's Cloudflare tunnel hostname (see [Remote access](#remote-access)).
+3. Two notifications appear in Home Assistant:
+   - **pairing code**: the owner's one-time code, which claims the hub;
+   - **recovery code**: the owner's recovery code. Write it down and keep it
+     safe.
+4. On a phone **on the same network**, open the CasaSmart app, choose the hub
+   and enter the owner pairing code. That phone becomes the owner.
+5. Invite everyone else from the app (Family → Invite member). Each invite is a
+   single-use code that carries the person's role and rooms.
+
+The activation code is used once to register the hub with the relay, then
+deleted. To register again (for example after changing relays), open the
+integration's **Configure** dialog and paste a fresh code.
+
+## What it adds to Home Assistant
+
+| Kind | Name | Purpose |
+|---|---|---|
+| Alarm panel | `alarm_control_panel.casasmart_hub_security` | The hub's alarm, armed and disarmed from the app or HA |
+| Button | `button.casasmart_regenerate_pairing_code` | Unpair every phone and issue a new owner code (the old printed code stops working) |
+| Button | `button.casasmart_factory_reset` | Wipe the app layer (see below) and issue new owner and recovery codes |
+| Sensor | `sensor.casasmart_energy_savings` | Whether Energy Saving is active |
+| Sensors | `sensor.casasmart_user_*` | One per paired phone |
+| Service | `casasmart.factory_reset` | The same reset as the button |
+| Service | `casasmart.activate_scene` | Run a CasaSmart scene from an automation |
+| Service | `casasmart.set_tunnel_url` | Store the tunnel address the hub gives to phones |
+| Service | `casasmart.configure_hq_notifications` | Trust a signing key for HQ reminder notifications |
+
+**Automation events:**
+- `casasmart_alarm_triggered`: an armed zone or a life-safety sensor tripped.
+  Hook your siren here.
+- `casasmart_tank_low` and `casasmart_tank_offline`.
+- `casasmart_alarm_changed`, `casasmart_registry_changed`,
+  `casasmart_audio_changed`, `casasmart_energy_changed`,
+  `casasmart_tank_changed` and `casasmart_suggestions_changed`: state changes.
+
+**Factory reset clears:**
+- paired phones and pairing and recovery codes (both codes rotate);
+- favorites, scenes, per-person settings, Now and suggestion data;
+- push tokens, HQ notification data, the alarm log and armed state;
+- audio and Energy Saving data;
+- the room layout, which re-seeds from Home Assistant.
+
+**It keeps** tanks, alarm zones and settings, the hub's identity, relay
+registration, tunnel settings, and everything in Home Assistant itself.
+
+## Networking
+
+The hub serves the apps on its own TLS port (8443). That's separate from Home
+Assistant's port 8123, which only the tunnel uses.
+
+| Home Assistant install | What to do |
+|---|---|
+| Home Assistant OS / Supervised | Nothing. Port 8443 and mDNS work out of the box. |
+| Container on Linux | Use `network_mode: host` (recommended for HA anyway). mDNS needs it; otherwise also publish `8443:8443`. |
+| Docker Desktop (macOS) | Follow [deploy/macos](deploy/macos/README.md). Docker Desktop hides phones' addresses and can't announce mDNS, so two small helpers run on the Mac. |
+
+### Pairing stays on the local network
+
+Pairing a phone, owner recovery and keyless speaker provisioning are only
+accepted from the hub's own network.
+
+- **Normally** the hub checks the client's address: private or link-local
+  addresses count, loopback doesn't.
+- **On Docker Desktop**, where addresses are hidden, it trusts its own TLS port
+  behind the LAN-only relay instead (`lan_relay_ingress`, below).
+- **Through Cloudflare**, requests are never local, so a tunnel can't be used
+  to pair.
+
+To let invited members pair from anywhere, set `remote_pairing_enabled`. The
+owner claim always stays local.
+
+### Remote access
+
+Phones reach the hub from outside the home through a Cloudflare tunnel to Home
+Assistant. Enter the tunnel's hostname during setup or in **Configure**. On
+Home Assistant OS the integration then starts the cloudflared add-on and
+keeps it on boot; the Configure dialog has an emergency on/off switch. On other
+installs, run cloudflared yourself and point it at Home Assistant.
+
+## Hub settings
+
+Advanced settings live in `/config/casasmart/hub_config.json`. Most hubs need
+none of them.
+
+**To change one:**
+1. Stop Home Assistant. The hub keeps this file in memory and rewrites it, so
+   edits made while it runs can be lost.
+2. Edit the JSON.
+3. Start Home Assistant.
+
+| Key | Value | Effect |
+|---|---|---|
+| `hub_name` | string | Name shown when phones discover the hub (default "CasaSmart Hub") |
+| `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. |
+| `lan_relay_ingress` | `"auto"` / `"on"` / `"off"` | Whether the TLS port counts as local network. See below. |
+| `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
+| `pairing_extra_lan_cidrs` | list of private CIDRs | Extra address ranges that count as local, e.g. `["10.8.0.0/24"]` for a VPN. Public ranges are refused. |
+| `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
+| `tank_ingest_url` | `http(s)://…` | Address tank sensors report to (default: the hub's LAN address on HA's port) |
+| `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
+
+**`lan_relay_ingress` values:**
+- `"auto"` (the default) trusts the TLS port as local when the hub runs under
+  Docker Desktop. Everywhere else it checks addresses.
+- `"on"` always trusts the TLS port as local. Use it only when that port is
+  reachable through a LAN-only relay and nothing else.
+- `"off"` always checks addresses.
+
+The hub logs a WARNING at startup whenever the TLS port is trusted.
+
+Don't edit the other keys in the file. They hold the hub's secrets, code hashes
+and relay state.
+
+## Data, backups and removal
+
+Everything the hub stores is in `/config/casasmart/`:
+- the database;
+- its TLS and push identity keys;
+- `hub_config.json`;
+- automatic database backups before migrations.
+
+Home Assistant backups include it. Keep that folder intact when you move the
+hub, or every phone will have to pair again.
+
+Removing the integration leaves `/config/casasmart/` in place, so reinstalling
+keeps the pairings. Delete the folder (with Home Assistant stopped) to start
+from scratch.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| "Pairing is only available on the hub's own network" | The phone must be on the hub's Wi-Fi/LAN, not mobile data, a VPN or the tunnel. On Docker Desktop, check the relay from [deploy/macos](deploy/macos/README.md). |
+| "Too many failed attempts" | Five wrong codes in a row from one phone lock that phone out for a minute, and repeats for longer. Behind the Docker Desktop relay all phones share one lockout. |
+| Phones can't find the hub | mDNS isn't reaching them: check host networking (Container) or the mDNS helper (Docker Desktop), and that the Wi-Fi doesn't isolate clients. |
+| No push notifications | Look for a "relay" notification in Home Assistant. Registration may need a fresh activation code (Configure). |
+
+For detail, enable debug logging:
+
+```yaml
+logger:
+  logs:
+    custom_components.casasmart: debug
+```
 
 ## Development
 
-Tests stub Home Assistant, so they run without it installed:
+The tests stub Home Assistant, so they run without it:
 
 ```sh
 uv run --python 3.13 --no-project --with-requirements requirements_test.txt -- python -m pytest -q
-uvx ruff check . && uvx ruff format --check .
+uvx ruff@0.16.10 check . && uvx ruff@0.16.10 format --check .
 ```
 
-About 150 view-layer tests skip unless a real Home Assistant is importable (see
-`tests/conftest.py`). API contracts for the app live in [`docs/api/`](docs/api/).
+About 150 view-layer tests skip unless a real Home Assistant is importable. CI
+also runs the suite against Home Assistant itself (`test-ha` in
+`.github/workflows/ci.yml`). Contracts for some app features are in
+[`docs/api/`](docs/api/).
 
 ## Releasing
 
@@ -46,10 +208,11 @@ Releases are cut only with `scripts/release.sh` (`check`, `tag`, `publish`,
 
 - Use three-part versions. The tag `vX.Y.Z` must equal `manifest.json`'s
   `X.Y.Z`, and `CHANGELOG.md` must have a `## [X.Y.Z]` section.
-- `casasmart.zip` is built from the tag with
-  `git archive vX.Y.Z:custom_components/casasmart`, with files at the zip root.
-  It is signed with the release key (`casasmart.zip.sig`).
+- `casasmart.zip` contains exactly the integration folder (files at the zip
+  root). It is signed with the release key (`casasmart.zip.sig`).
 - Publish first as a prerelease, verify on a hub, then promote it to latest.
 - Never move or delete a published tag or asset; fix forward with a new version.
 
-Proprietary software. © CasaSmart. All rights reserved.
+## License
+
+Proprietary software. © CasaSmart. All rights reserved. See [LICENSE](LICENSE).
