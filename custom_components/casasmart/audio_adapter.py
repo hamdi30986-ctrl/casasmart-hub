@@ -204,7 +204,7 @@ class AudioAdapter:
             return
         client.subscribe([(_TOPIC_ANNOUNCE, 0), (_SUB_STATUS, 1), (_SUB_STATE, 0)])
         client.publish(_TOPIC_PING, "", qos=0)
-        # Re-push the stored athan config retained on every (re)connect (M4).
+        # Re-push the stored athan config retained on every (re)connect.
         # The PUT relays it once when the bus is up, but a config saved while
         # the bus was down — or a scheduler that restarted and lost its retained
         # copy — would otherwise silently never see it. Re-publishing here makes
@@ -307,7 +307,7 @@ class AudioAdapter:
         self._client.publish(topic, body, qos=qos, retain=retain)
 
     def clear_speaker_retained(self, mac6: str) -> None:
-        """Wipe a removed speaker's retained ``status``/``state`` topics (M3).
+        """Wipe a removed speaker's retained ``status``/``state`` topics.
 
         Publishing an empty retained payload tells the broker to drop the
         retained message, so a deleted speaker can't resurrect as a discovery

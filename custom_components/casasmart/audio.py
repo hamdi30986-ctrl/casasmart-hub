@@ -134,12 +134,12 @@ _ATHAN_MAX_SPEAKERS = 64
 # Live-mirror string fields (room/title/...) from the broker — capped so a
 # giant retained value can't bloat what the hub serves the app.
 _LIVE_STR_MAX = 128
-# The agent's play-priority vocabulary (H2 arbitration), taken verbatim — an
+# The agent's play-priority vocabulary, taken verbatim — an
 # arbitrary priority would defeat the speaker-side ranking.
 PRIORITY_VALUES = frozenset({"athan", "pa", "normal"})
 # A discovered (un-enrolled) speaker that announced once then died must not
 # clutter the add-flow forever. Entries not heard from within this window are
-# dropped from ``discovered()`` (M6). Generous enough that a healthy speaker
+# dropped from ``discovered()``. Generous enough that a healthy speaker
 # pinged on every ``/audio/discover`` never ages out between refreshes.
 _DISCOVERY_TTL_SECONDS = 600
 # A mac6 is the last 6 hex of the speaker's MAC, lower-case (matches the
@@ -703,7 +703,7 @@ class AudioEngine:
         talking to the broker, and moves out of this list into ``speakers()``
         the moment it is enrolled. Id-sorted; each entry is ``{mac6, ...live}``.
 
-        Stale ghosts are filtered out (M6): an entry whose ``last_seen`` is
+        Stale ghosts are filtered out: an entry whose ``last_seen`` is
         older than ``ttl`` seconds is dropped, so a speaker that announced once
         then died stops cluttering the add list. ``ttl=None`` disables the
         filter (returns everything ever seen). An entry with no ``last_seen``
