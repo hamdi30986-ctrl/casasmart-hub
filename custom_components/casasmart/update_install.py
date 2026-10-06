@@ -102,22 +102,10 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
         signature = staging_path / "release.zip.sig"
         await _download_archive(hass, signature_url, signature)
         await hass.async_add_executor_job(_verify_archive, archive, signature)
-
-        extracted = staging_path / "extracted"
-        _extract_zip(archive, extracted)
-
-        new_dir = locate_integration_dir(extracted, DOMAIN)
-        if new_dir is None:
-            raise InstallError("downloaded release has no custom_components/casasmart")
-
-        new_version = read_manifest_version(new_dir)
-        if not versions_match(target_version, new_version):
-            raise InstallError(
-                f"version mismatch: release tag {target_version!r} but "
-                f"downloaded manifest is {new_version!r}"
-            )
-
-        backup = swap_integration_dir(_integration_dir(), new_dir)
+        # File work (extract, inspect, copy the tree in) stays off the event loop.
+        backup = await hass.async_add_executor_job(
+            _stage_and_swap, archive, staging_path / "extracted", target_version
+        )
 
     _LOGGER.warning(
         "Self-update: integration swapped to %s (backup at %s); restarting HA",
@@ -154,6 +142,28 @@ def _verify_archive(archive: Path, signature: Path) -> None:
     if not sig or len(sig) > _MAX_SIGNATURE_BYTES:
         raise InstallError("release signature is missing or malformed")
     verify_release_signature(archive.read_bytes(), sig, UPDATE_SIGNING_PUBLIC_KEY_B64)
+
+
+def _stage_and_swap(archive: Path, extracted: Path, target_version: str) -> Path:
+    """Executor: extract the verified zip, check it, swap it in; returns the backup.
+
+    Raises InstallError (nothing swapped) if the archive holds no casasmart
+    integration or its manifest version doesn't match the release tag.
+    """
+    _extract_zip(archive, extracted)
+    new_dir = locate_integration_dir(extracted, DOMAIN)
+    if new_dir is None:
+        raise InstallError(
+            "downloaded release has no casasmart integration (no manifest.json "
+            "at the zip root or under custom_components/casasmart)"
+        )
+    new_version = read_manifest_version(new_dir)
+    if not versions_match(target_version, new_version):
+        raise InstallError(
+            f"version mismatch: release tag {target_version!r} but "
+            f"downloaded manifest is {new_version!r}"
+        )
+    return swap_integration_dir(_integration_dir(), new_dir)
 
 
 def _extract_zip(archive: Path, dest: Path) -> None:
