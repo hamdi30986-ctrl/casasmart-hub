@@ -174,6 +174,18 @@ def arm_recovery(hass: HomeAssistant) -> None:
         hass.loop.call_soon_threadsafe(notify_recovery_code, hass, code)
 
 
+# Headers Cloudflare adds to every request it proxies to an origin. A LAN client
+# that sends them only makes itself look remote — the safe direction.
+_CLOUDFLARE_HEADERS = ("CF-Connecting-IP", "CF-Ray")
+
+
+def _arrived_through_cloudflare(request: web.Request) -> bool:
+    headers = request.headers
+    if any(name in headers for name in _CLOUDFLARE_HEADERS):
+        return True
+    return "cloudflare" in str(headers.get("CDN-Loop", "")).lower()
+
+
 def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -> bool:
     """True when the request came from the hub's own network.
 
@@ -189,7 +201,15 @@ def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -
     every inbound connection as its VM interface IP, which can land in
     public space. Production (HAOS/LXC) sees real peer IPs and never
     needs this.
+
+    A request carrying Cloudflare's proxy headers is never LAN, whatever
+    source address the last hop shows: it crossed the internet. HA's own
+    port resolves the real client IP from ``X-Forwarded-For`` when the proxy
+    is trusted, but the hub's TLS listener is a bare aiohttp app — a tunnel
+    pointed at it would arrive from a private Docker/add-on address.
     """
+    if _arrived_through_cloudflare(request):
+        return False
     try:
         remote = ipaddress.ip_address(request.remote or "")
     except ValueError:

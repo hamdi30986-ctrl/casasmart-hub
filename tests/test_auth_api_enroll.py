@@ -426,3 +426,83 @@ class IdempotentRePairCodeTests(EnrollGateTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DOCKER_GATEWAY_IP = "172.18.0.1"  # what HA sees for host-forwarded connections
+CLOUDFLARE_HEADERS = {"CF-Connecting-IP": "203.0.113.9", "CF-Ray": "8c1f2e3d4a5b-AMS"}
+
+
+class CloudflareProxiedTests(EnrollGateTests):
+    """v2.2.0: a request that crossed Cloudflare is never treated as LAN, even
+    when the last hop is a private address (a tunnel into the TLS listener)."""
+
+    async def _enroll_via(self, code: str, headers: dict, remote: str):
+        resp = await self.view.post(
+            H.FakeRequest(
+                headers=headers,
+                body={
+                    "pairing_code": code,
+                    "public_key": make_public_pem(),
+                    "name": "Phone",
+                },
+                remote=remote,
+            )
+        )
+        return H.read_response(resp)
+
+    async def test_proxied_member_code_from_private_hop_is_refused(self) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll_via(
+            issued["code"], CLOUDFLARE_HEADERS, DOCKER_GATEWAY_IP
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(body["message"], LAN_ONLY_MSG)
+        # Refused before redeem: the code still works from the LAN.
+        status, _ = await self._enroll(issued["code"], LAN_IP)
+        self.assertEqual(status, 201)
+
+    async def test_proxied_owner_claim_from_private_hop_is_refused(self) -> None:
+        code = self.pairing.ensure_bootstrap_code()
+        status, body = await self._enroll_via(
+            code, {"CDN-Loop": "cloudflare"}, DOCKER_GATEWAY_IP
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(body["message"], LAN_ONLY_MSG)
+
+    async def test_remote_pairing_through_the_tunnel_still_works(self) -> None:
+        # The tunnel path itself is unchanged: with remote pairing enabled an
+        # admin-minted member code still enrolls through Cloudflare.
+        self._claim_hub()
+        self.hub_config.set(REMOTE_PAIRING_ENABLED_CONFIG_KEY, True)
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll_via(
+            issued["code"], CLOUDFLARE_HEADERS, DOCKER_GATEWAY_IP
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "user")
+
+
+class LanSourceTests(unittest.TestCase):
+    def _is_lan(self, remote: str, headers: dict | None = None) -> bool:
+        from casasmart.auth_api import is_lan_request
+
+        return is_lan_request(H.FakeRequest(headers=headers or {}, remote=remote))
+
+    def test_private_hop_without_proxy_headers_is_lan(self) -> None:
+        self.assertTrue(self._is_lan(DOCKER_GATEWAY_IP))
+        self.assertTrue(self._is_lan(LAN_IP))
+
+    def test_any_cloudflare_header_makes_it_remote(self) -> None:
+        for headers in (
+            {"CF-Connecting-IP": "203.0.113.9"},
+            {"CF-Ray": "8c1f2e3d4a5b-AMS"},
+            {"CDN-Loop": "cloudflare; loops=1"},
+        ):
+            self.assertFalse(self._is_lan(LAN_IP, headers), headers)
+
+    def test_loopback_and_public_stay_remote(self) -> None:
+        self.assertFalse(self._is_lan(TUNNEL_IP))
+        # A routable address (PUBLIC_IP above is a documentation range, which
+        # Python's ipaddress classifies as private).
+        self.assertFalse(self._is_lan("8.8.8.8"))
