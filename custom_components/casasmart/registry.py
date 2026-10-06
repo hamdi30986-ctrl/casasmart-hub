@@ -1,3 +1,9 @@
+"""Registry engine: the hub's floors, rooms, room tags, devices and scenes.
+
+Also stores per-member favorites. No Home Assistant imports; storage-touching
+methods are synchronous (call via executor).
+"""
+
 from __future__ import annotations
 
 import hashlib

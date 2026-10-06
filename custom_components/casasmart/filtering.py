@@ -1,3 +1,9 @@
+"""HA-aware entity filtering: what is served, which room it is in, and scope.
+
+Combines the pure ``entity_bridge`` rules with HA's registries and the CasaSmart
+registry to resolve rooms, check room scope and serialize devices.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any

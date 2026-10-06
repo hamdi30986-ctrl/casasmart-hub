@@ -1,3 +1,9 @@
+"""Constants shared across the CasaSmart integration.
+
+Domain, storage paths, API versions, config and hub_config keys, event names,
+factory-reset tables, and push relay and WebSocket settings.
+"""
+
 from __future__ import annotations
 
 DOMAIN = "casasmart"

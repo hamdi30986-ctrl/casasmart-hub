@@ -1,3 +1,9 @@
+"""Self-update status and install endpoints.
+
+The status view compares the running version with the latest GitHub release
+(cached for ``UPDATE_CHECK_TTL_SECONDS``); install runs ``update_install``.
+"""
+
 from __future__ import annotations
 
 import asyncio

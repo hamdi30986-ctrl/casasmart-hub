@@ -1,3 +1,9 @@
+"""Push notifications sent through the relay.
+
+``PushDispatcher`` turns alarm, lock, new-pairing and widget-relevant events
+into signed relay pushes; ``TankPushMonitor`` runs the timer-driven tank checks.
+"""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,9 @@
+"""CasaSmart registry REST endpoints: floors, rooms, devices, scenes, favorites.
+
+The app's thin-client surface over ``RegistryEngine``. Reads are room-scoped;
+writes fire ``EVENT_REGISTRY_CHANGED`` so connected apps re-fetch.
+"""
+
 from __future__ import annotations
 
 import asyncio

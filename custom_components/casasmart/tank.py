@@ -1,3 +1,9 @@
+"""Water-tank engine: Shelly tank devices, readings and calibration.
+
+Stores devices with hashed ingest tokens and their voltage readings, converts
+voltage to a water-level percent, and builds the Shelly monitoring script.
+"""
+
 from __future__ import annotations
 
 import hashlib
