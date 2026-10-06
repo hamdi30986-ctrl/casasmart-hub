@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -208,6 +209,57 @@ class TestKeyValueTable(StorageTestCase):
         storage2.open()
         self.addCleanup(storage2.close)
         self.assertEqual(storage2.table("scenes")["movie_night"], {"lights": "off"})
+
+
+class TestConcurrentAccess(StorageTestCase):
+    """HA runs storage calls on many executor threads over ONE connection.
+
+    Found pairing several phones at once against a live hub: a read whose
+    cursor was stepped outside the connection lock came back torn (an empty
+    row -> IndexError -> HTTP 500 on auth/token) or empty (a just-enrolled
+    device "unknown" -> 404 on auth/challenge) while another thread wrote.
+    """
+
+    THREADS = 8
+    ROUNDS = 400
+
+    def test_reads_never_tear_under_concurrent_writes(self):
+        storage = self.make_storage()
+        devices = storage.table("auth_devices")
+        readings = storage.tank_readings()
+        stable = {f"stable-{i}": {"n": i, "pad": "x" * 64} for i in range(16)}
+        for key, value in stable.items():
+            devices[key] = value
+        errors: list[BaseException] = []
+        start = threading.Barrier(self.THREADS)
+
+        def worker(index: int) -> None:
+            try:
+                start.wait()
+                for r in range(self.ROUNDS):
+                    churn = f"churn-{index}-{r}"
+                    devices[churn] = {"n": r}  # write + commit on the shared conn
+                    for key, value in stable.items():
+                        self.assertEqual(devices[key], value)
+                        self.assertIn(key, devices)
+                    self.assertEqual(devices.get(churn), {"n": r})
+                    self.assertGreaterEqual(len(devices), len(stable))
+                    self.assertTrue(set(stable) <= set(devices))
+                    readings.append(f"tank-{index}", r, float(r))
+                    self.assertEqual(readings.latest_t(f"tank-{index}"), r)
+                    self.assertEqual(readings.last(f"tank-{index}")["t"], r)
+                    del devices[churn]
+            except BaseException as err:  # surfaced in the main thread below
+                errors.append(err)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(self.THREADS)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors[:3], [], f"{len(errors)} torn read(s)")
 
 
 class TestMigrations(StorageTestCase):
