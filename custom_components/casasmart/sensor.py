@@ -63,10 +63,10 @@ async def async_setup_entry(
 class CasaSmartEnergySavingsSensor(SensorEntity):
     """Native HA summary of the hub-authoritative Energy Saving state."""
 
-    _attr_name = "CasaSmart Energy Savings"
+    _attr_name = "Energy savings"
     _attr_icon = "mdi:leaf"
     _attr_should_poll = False
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, entry: CasaSmartConfigEntry) -> None:
         self._entry = entry
@@ -196,7 +196,7 @@ class _UserSensorManager:
 class CasaSmartUserSensor(SensorEntity):
     """One enrolled device: role as state, enrollment detail as attributes."""
 
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
     _attr_icon = "mdi:account-key"
     # Polled (SCAN_INTERVAL) ONLY to refresh the live `last_seen` clock; role /
     # name / enrollment changes still repaint instantly via update_record.
@@ -214,7 +214,7 @@ class CasaSmartUserSensor(SensorEntity):
         self._engine = engine
         self._attr_unique_id = f"{entry_id}_user_{self._device_id}"
         name = record.get("name") or self._device_id
-        self._attr_name = f"CasaSmart User {name}"
+        self._attr_name = f"User {name}"
         # Pin the exact ``sensor.casasmart_user_<name>`` id (a
         # device-named entity would become ``sensor.casasmart_hub_…``). Set on
         # first registration only; still groups under the hub device below.

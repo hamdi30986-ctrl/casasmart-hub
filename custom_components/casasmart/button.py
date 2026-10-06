@@ -61,8 +61,10 @@ async def async_setup_entry(
 class CasaSmartRegeneratePairingButton(ButtonEntity):
     """The owner's one-press 'factory-reset pairing' control."""
 
-    _attr_has_entity_name = False
-    _attr_name = "CasaSmart Regenerate Pairing Code"
+    # Shown as "CasaSmart Hub Regenerate pairing code" (device + entity name);
+    # the entity id is pinned in __init__.
+    _attr_has_entity_name = True
+    _attr_name = "Regenerate pairing code"
     _attr_icon = "mdi:key-change"
 
     def __init__(self, hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
@@ -175,8 +177,8 @@ class CasaSmartFactoryResetButton(ButtonEntity):
     over remote Home Assistant access), never the CasaSmart API.
     """
 
-    _attr_has_entity_name = False
-    _attr_name = "CasaSmart Factory Reset"
+    _attr_has_entity_name = True
+    _attr_name = "Factory reset"
     _attr_icon = "mdi:alert-octagon"  # danger: wipes the app layer
 
     def __init__(self, hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
