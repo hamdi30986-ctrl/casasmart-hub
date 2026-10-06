@@ -1,4 +1,4 @@
-"""Unit tests for B2: pairing codes + the shared failure throttle.
+"""Unit tests for pairing codes + the shared failure throttle.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -221,7 +221,7 @@ class PairingTests(unittest.TestCase):
         grant = manager2.redeem(issued["code"], "ip-1")
         self.assertEqual(grant["role"], "user")
 
-    # -- Phase 1: code classes + the remote-source policy ----------------------
+    # -- Code classes + the remote-source policy -------------------------------
 
     def test_minted_code_carries_member_class(self):
         issued = self.manager.generate_code("user")
@@ -263,7 +263,7 @@ class PairingTests(unittest.TestCase):
             self.manager.redeem(code, "tunnel-ip", remote_source=True)
 
     def test_legacy_records_without_class_fail_closed(self):
-        # Pre-Phase-1 rows have no code_class field: user/sub-admin rows
+        # Older rows have no code_class field: user/sub-admin rows
         # classify as member (only generate_code ever minted them); anything
         # admin-role classifies as bootstrap — fail closed.
         table = self.storage.table("pairing_codes")
@@ -280,7 +280,7 @@ class PairingTests(unittest.TestCase):
         with self.assertRaises(LanOnlyCodeError):
             self.manager.redeem(code, "tunnel-ip", remote_source=True)
 
-    # -- Phase 5 (D5): (source, purpose) throttle buckets -----------------------
+    # -- (source, purpose) throttle buckets -------------------------------------
 
     def _lock_bucket(self, source, *, remote):
         """Burn MAX_FAILURES garbage redemptions into ONE (source, purpose)

@@ -1,4 +1,4 @@
-"""Unit tests for B17: the device-registry engine.
+"""Unit tests for the device-registry engine.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -325,7 +325,7 @@ class SceneTests(RegistryTestCase):
         cases = [
             [{"entity_id": "light.sofa", "action": "explode", "data": {}}],
             [{"entity_id": "sensor.temp", "action": "turn_on", "data": {}}],
-            # 'effect' became legal in stage 3a — 'flash' is still banned.
+            # 'effect' is legal — 'flash' is still banned.
             [
                 {
                     "entity_id": "light.sofa",
@@ -388,7 +388,7 @@ class ImportTests(RegistryTestCase):
 
     def test_import_is_lenient_about_ha_input(self):
         """A weird HA name/icon/sort must never raise — a rejection here
-        would abort integration setup on every restart (audit H1)."""
+        would abort integration setup on every restart."""
         counts = self.engine.import_initial(
             [{"floor_id": "f1", "name": "x" * 500, "sort_order": "huh"}],
             [
@@ -434,7 +434,7 @@ class ImportTests(RegistryTestCase):
 
 class PatchSemanticsTests(RegistryTestCase):
     def test_explicit_null_name_is_rejected_not_ignored(self):
-        """`{"name": null}` must 400, not silently no-op (audit L5)."""
+        """`{"name": null}` must 400, not silently no-op."""
         floor = self.engine.create_floor("First")
         room = self.engine.create_room("Living")
         scene = self.engine.create_scene("Movie", SceneTests.GOOD)

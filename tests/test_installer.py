@@ -1,4 +1,4 @@
-"""Unit tests for the installer-surface helpers (B16 3c-4b).
+"""Unit tests for the installer-surface helpers.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -190,7 +190,7 @@ class TestEntityPatch(unittest.TestCase):
         self.assertEqual(parse_entity_patch({"name": None}), {"name": None})
 
     def test_switch_as_x_swap_now_rejected(self):
-        # Phase 7: the domain swap is gone — options_domain/options are unknown.
+        # The domain swap is gone — options_domain/options are unknown.
         with self.assertRaises(InstallerError):
             parse_entity_patch({"options_domain": "light", "options": {}})
         with self.assertRaises(InstallerError):

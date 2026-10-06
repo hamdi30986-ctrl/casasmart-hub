@@ -1,4 +1,4 @@
-"""Unit tests for B8 Piece 4: the Ed25519 push-identity key.
+"""Unit tests for the Ed25519 push-identity key.
 
 Covers key creation/persistence, file permissions, the never-re-key failure
 posture, signing, and — crucially — the cross-language signature vector that

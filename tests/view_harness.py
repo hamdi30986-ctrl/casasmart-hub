@@ -1,6 +1,6 @@
 """Shared harness for VIEW-layer tests — the ``*_api`` ``HomeAssistantView``s.
 
-The audit's recurring gap: every suite imports an ENGINE directly, so the
+The gap it closes: every suite imports an ENGINE directly, so the
 wire-JSON seam where the contract lives (auth gate, response shapes, the
 filter/scope/redaction logic in the views) was never pinned. This harness lets
 a test drive a real view with a fake ``hass`` + ``web.Request``:
@@ -9,7 +9,7 @@ a test drive a real view with a fake ``hass`` + ``web.Request``:
   ``set_favorites``, ``member_id_for``, ``set_athan`` etc. run for real.
 * Tokens are REAL HMAC JWTs minted via ``auth_tokens.issue_token`` and validated
   through the real ``AuthEngine`` (signature + device-cache ``ver`` check), so
-  401/403 and the Phase-5 ``member_id`` keying are exercised, not stubbed.
+  401/403 and the ``member_id`` keying are exercised, not stubbed.
 * Only ``hass`` and the request are faked. ``is_served`` / ``in_scope`` are
   patched per test (their own logic is pinned in ``test_filtering``).
 

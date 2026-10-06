@@ -1,4 +1,4 @@
-"""Unit tests for B3: owner recovery codes + admin replacement.
+"""Unit tests for owner recovery codes + admin replacement.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -46,7 +46,7 @@ class RecoveryManagerTests(unittest.TestCase):
         self.assertRegex(code, r"^[2-9A-HJKMNP-Z]{5}-[2-9A-HJKMNP-Z]{5}$")
         self.assertTrue(self.manager.is_armed())
         self.manager.redeem(code, "ip-1")  # no raise = success
-        # PERMANENT (decision 3a): the engraved card stays valid after redeem.
+        # PERMANENT: the engraved card stays valid after redeem.
         self.assertTrue(self.manager.is_armed())
 
     def test_arm_is_idempotent(self):
@@ -66,7 +66,7 @@ class RecoveryManagerTests(unittest.TestCase):
             self.manager.redeem(code, "ip-1")  # previous owner's card is dead
 
     def test_permanent_reusable(self):
-        # PERMANENT (decision 3a): the recovery card is reusable, not single-use —
+        # PERMANENT: the recovery card is reusable, not single-use —
         # a second redeem of the same code succeeds and the code stays armed.
         code = self.manager.ensure_armed()
         self.manager.redeem(code, "ip-1")

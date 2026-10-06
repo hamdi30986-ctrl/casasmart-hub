@@ -1,4 +1,4 @@
-"""Unit tests for the B1.6 auth engine (stdlib unittest + cryptography).
+"""Unit tests for the auth engine (stdlib unittest + cryptography).
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -321,7 +321,7 @@ class EngineTests(unittest.TestCase):
         claims = engine2.validate_token(token)
         self.assertEqual(claims["sub"], device_id)
 
-    # -- B2: user management + instant revocation -----------------------------
+    # -- User management + instant revocation ---------------------------------
 
     def test_list_devices_has_no_keys(self):
         device_id = self.engine.enroll_device("Phone", "admin", self.public_pem)
@@ -672,7 +672,7 @@ class EngineTests(unittest.TestCase):
             ("sub-admin", "devices.control", True),
             ("user", "pairing.generate", False),
             ("user", "devices.read", True),
-            # B14 audio: read+control are household-wide, manage is admin tier.
+            # Audio: read+control are household-wide, manage is admin tier.
             ("user", "audio.read", True),
             ("user", "audio.control", True),
             ("user", "audio.manage", False),

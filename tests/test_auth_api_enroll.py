@@ -1,11 +1,11 @@
-"""View-layer tests for the enroll gate — Phase 1 of the pairing redesign.
+"""View-layer tests for the enroll gate's code-class network policy.
 
 Pins the ``remote_pairing_enabled`` code-class policy at the WIRE seam
 (``CasaSmartEnrollView``), not just the manager:
 
 * Flag OFF (default / unset / malformed) — every non-LAN source gets the
-  2026-06-10 LAN-only 403 byte-for-byte, member and bootstrap codes alike;
-  the LAN path enrolls exactly as before. Zero behavior change at merge.
+  original LAN-only 403 byte-for-byte, member and bootstrap codes alike;
+  the LAN path enrolls exactly as before.
 * Flag ON — an admin-minted MEMBER code enrolls from a tunnel source
   (cloudflared presents as loopback) and from a public source; the
   BOOTSTRAP owner claim still 403s off-LAN and is NOT consumed, so the
@@ -68,7 +68,7 @@ def make_public_pem() -> str:
 
 class RecordingDispatcher:
     """Stands in for ``runtime_data.push_dispatcher`` — records the enroll
-    view's device-paired sends (Phase 5 / D6) without a relay."""
+    view's device-paired sends without a relay."""
 
     def __init__(self) -> None:
         self.sent: list[dict[str, str]] = []
@@ -201,7 +201,7 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "user")
 
-    # -- Phase 5 (D5): throttle-bucket isolation at the wire seam ---------------
+    # -- Throttle-bucket isolation at the wire seam -----------------------------
 
     async def test_remote_lockout_does_not_block_lan_owner_claim(self) -> None:
         # ONE source string ("127.0.0.1"), classified remote first and LAN
@@ -236,7 +236,7 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "admin")
 
-    # -- Phase 5 (D6): admin notification fires on enroll -----------------------
+    # -- Admin notification fires on enroll -------------------------------------
 
     async def _drain_tasks(self) -> None:
         """Run the fire-and-forget work the view spawned (the push send)."""
@@ -265,7 +265,7 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_remote_enroll_fires_admin_notification(self) -> None:
-        # The D6 story itself: a member code redeemed through the tunnel
+        # The core case: a member code redeemed through the tunnel
         # (flag on) — the owner's phone hears about it.
         recorder = RecordingDispatcher()
         self.runtime.push_dispatcher = recorder

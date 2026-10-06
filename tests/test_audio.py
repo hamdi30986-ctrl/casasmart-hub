@@ -1,4 +1,4 @@
-"""Unit tests for B14: the hub-side audio engine.
+"""Unit tests for the hub-side audio engine.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -328,7 +328,7 @@ class LiveStatusTests(AudioTestCase):
         self.assertFalse(self.engine.live_status("a1b2c3").get("online", False))
 
     def test_ingest_state_drops_non_finite_and_wrong_types(self):
-        # A bad broker blob must not poison the served mirror (Phase 7).
+        # A bad broker blob must not poison the served mirror.
         self.engine.ingest_state(
             "a1b2c3",
             {"volume": float("nan"), "playing": "yes", "room": "Office"},
@@ -381,7 +381,7 @@ class DiscoveryTests(AudioTestCase):
         self.assertEqual(discovered[0]["volume"], 55)
         self.assertTrue(discovered[0]["online"])
 
-    # -- M6: stale ghosts age out of the discover list ------------------------
+    # -- Stale ghosts age out of the discover list ----------------------------
 
     def test_stale_ghost_filtered_out(self):
         self.engine.ingest_announce("a1b2c3", "Work Room")  # seen at t=1000

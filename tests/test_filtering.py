@@ -1,6 +1,6 @@
 """Unit tests for the exposure / assignability filter.
 
-Phase 1 (device-organize persistence): the registry WRITE surface is wider
+Device-organize persistence: the registry WRITE surface is wider
 than the read/feed surface. ``is_served`` gates the feed — entities the
 integration hid (``hidden_by``) or uncurated diagnostics are invisible.
 ``is_assignable`` gates registry WRITES (assign a room, rename, reorder,

@@ -1,9 +1,9 @@
-"""View-layer tests for the mint endpoint — Phase 3 of the pairing redesign.
+"""View-layer tests for the pairing-code mint endpoint (payload v2).
 
 Pins the pairing payload v2 at the WIRE seam (``CasaSmartPairingCodesView``):
 
 * Every v1 mint field is still present and unchanged — the current app keeps
-  working against a Phase-3 hub with zero changes.
+  working against a v2 hub with zero changes.
 * The response gains ``payload_version`` / ``identity_fingerprint`` /
   ``tunnel_url`` / ``qr_payload``; the fingerprint is EXACTLY the TLS
   identity the handshake serves (the value the app pins at TOFU), and the
@@ -147,7 +147,7 @@ class PairingCodesViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_v1_scanner_still_reads_the_code(self) -> None:
         # The current app parses casasmart://<type>?code=... and ignores
-        # unknown params (qr_scanner_screen.dart) — pin that a v2 QR keeps
+        # unknown params — pin that a v2 QR keeps
         # satisfying that contract.
         self._tunnel_on()
         _, body = await self._mint()
@@ -156,7 +156,7 @@ class PairingCodesViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parts.netloc, "family")
         params = parse_qs(parts.query)
         self.assertEqual(params["code"], [body["code"]])
-        # And the v2 params round-trip for the Phase-4 parser.
+        # And the v2 params round-trip for a v2-aware parser.
         self.assertEqual(params["v"], ["2"])
         self.assertEqual(params["fp"], [FINGERPRINT])
         self.assertEqual(params["tunnel"], [TUNNEL_URL])

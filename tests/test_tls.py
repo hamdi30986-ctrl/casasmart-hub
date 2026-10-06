@@ -1,4 +1,4 @@
-"""Tests for tls.py — identity key + leaf cert lifecycle (B10).
+"""Tests for tls.py — identity key + leaf cert lifecycle.
 
 Covers the material layer only (pure crypto + files); the aiohttp
 listener is verified live against the dev hub, like the other servers.

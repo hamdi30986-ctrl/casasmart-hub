@@ -1,4 +1,4 @@
-"""Unit tests for MB-2: the per-user settings engine.
+"""Unit tests for the per-user settings engine.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

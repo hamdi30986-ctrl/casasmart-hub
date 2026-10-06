@@ -1,4 +1,4 @@
-"""Unit tests for the history query contract (B16 stage 3c-3).
+"""Unit tests for the history query contract.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

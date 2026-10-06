@@ -1,3 +1,9 @@
+"""Tests for the macOS LAN bridge scripts in ``deploy/macos``.
+
+Covers the Bonjour publisher (``mdns_publish.py``) and the TLS relay
+(``tls_relay.py``), loaded straight from their files.
+"""
+
 from __future__ import annotations
 
 import asyncio

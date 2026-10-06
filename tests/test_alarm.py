@@ -1,4 +1,4 @@
-"""Unit tests for B13: the hub-side alarm state machine.
+"""Unit tests for the hub-side alarm state machine.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

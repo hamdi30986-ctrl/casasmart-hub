@@ -1,4 +1,4 @@
-"""Unit tests for B13 piece 3: the alarm_control_panel HA entity.
+"""Unit tests for the alarm_control_panel HA entity.
 
 Like the adapter, the panel imports ``homeassistant.*`` at module top, so HA
 symbols are stubbed into ``sys.modules`` before import. The engine underneath

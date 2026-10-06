@@ -1,4 +1,4 @@
-"""Unit tests for B13 piece 2: the hub-side alarm adapter (HA glue).
+"""Unit tests for the hub-side alarm adapter (HA glue).
 
 The adapter is pure Home Assistant glue, so unlike the engine it imports
 ``homeassistant.*`` at module top. HA isn't installed in the test env, so we
