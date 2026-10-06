@@ -415,11 +415,20 @@ class RegistryFeed(RegistryWritesTestCase):
             resp = await view.get(H.FakeRequest(headers=hdr))
         status, body = H.read_response(resp)
         self.assertEqual(status, 200)
-        # Projection shape.
+        # Projection shape (room_tags since 1.9.0, features since 2.1).
         self.assertEqual(
             set(body.keys()),
-            {"floors", "rooms", "devices", "scenes", "user_devices"},
+            {
+                "floors",
+                "rooms",
+                "devices",
+                "scenes",
+                "user_devices",
+                "room_tags",
+                "features",
+            },
         )
+        self.assertEqual(body["features"], ["atomic_room_move_v1"])
         eids = [d["entity_id"] for d in body["devices"]]
         self.assertEqual(eids, ["light.a"])  # unserved dropped
         device = body["devices"][0]
