@@ -164,11 +164,12 @@ class CasaSmartFactoryResetButton(ButtonEntity):
     per-user settings, Now data and suggestion rules, push tokens, HQ
     notifications + the trusted HQ key, the alarm log + armed state, audio
     config + speakers, Energy Saving data, and the registry organization layer
-    (floors, rooms, device assignments and grouping), which re-seeds from Home
-    Assistant on reload. The printed admin sticker + metal recovery card are
+    (floors, rooms, room tags, device assignments and grouping), which re-seeds
+    from Home Assistant on reload (``const.FACTORY_RESET_TABLES``). The printed admin sticker + metal recovery card are
     ROTATED — fresh codes are surfaced after the reset and the OLD printed
-    codes are dead. KEPT: tanks, HA devices/automations/Zigbee mesh, the hub's
-    TLS/push identities and relay registration, and the tunnel settings.
+    codes are dead. KEPT: tanks, alarm zones + settings, HA devices/automations/
+    Zigbee mesh, the hub's TLS/push identities and relay registration, and the
+    tunnel settings.
     Operator-only: reachable through Home Assistant (admin login / on-site /
     Tailscale), never the CasaSmart API.
     """
