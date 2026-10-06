@@ -201,11 +201,12 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         persistent_notification.async_create(
             self._hass,
             "Factory reset triggered — the app layer (paired phones, codes, "
-            "favorites, settings, push tokens, alarm log/state) is being wiped "
-            "and the previous owner's device labels scrubbed. House data (rooms, "
-            "scenes, tanks) and device wiring are kept. FRESH admin + recovery "
-            "codes will be posted here after the reset — the OLD printed sticker "
-            "and metal card are now dead; re-sticker the hub with the new code.",
+            "favorites, scenes, settings, push tokens, alarm log/state) is being "
+            "wiped and the previous owner's device labels scrubbed. Rooms re-seed "
+            "from Home Assistant; tanks, alarm zones and everything in Home "
+            "Assistant are kept. FRESH admin + recovery codes will be posted here "
+            "after the reset — the OLD printed sticker and metal card are now "
+            "dead; re-sticker the hub with the new code.",
             title="CasaSmart Hub — factory reset",
             notification_id=f"{DOMAIN}_factory_reset",
         )
