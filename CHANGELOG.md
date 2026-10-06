@@ -34,7 +34,8 @@ published; everything it contained is in 2.3.0.
 - `lan_relay_ingress` hub setting: `"on"` trusts the hub's TLS port as the LAN
   proof behind the Docker Desktop relay; `"off"` (the default) checks client
   addresses. Any other value logs a warning and counts as `"off"`.
-- `sender_name` for `casasmart.configure_hq_notifications`.
+- `sender_name` for `casasmart.configure_hq_notifications`: one line of up to
+  40 characters, without control characters or bidi overrides.
 
 ### Fixed
 - Pairing a new phone, owner recovery and keyless speaker provisioning can work
@@ -69,8 +70,9 @@ published; everything it contained is in 2.3.0.
   and the reset button now describe what is cleared and kept.
 - The built-in updater only installs the signed `casasmart.zip` release asset.
   It finds the integration at the zip root (the HACS layout), never falls back
-  to GitHub's source zipball, and extracts with strict path containment. It
-  remains off unless `update_repo` is configured; update through HACS.
+  to GitHub's source zipball, extracts with strict path containment, and does
+  the extraction and swap off Home Assistant's event loop. It remains off
+  unless `update_repo` is configured; update through HACS.
 
 ### Changed
 - The home's coordinates are no longer logged at INFO when prayer times are
@@ -97,7 +99,7 @@ published; everything it contained is in 2.3.0.
   the code is provably unchanged (AST-checked). Comments no longer carry
   internal plan references, and the ones that described old behaviour were
   corrected.
-- Restored the original test suite: 1,337 tests, about 155 of which need a real
+- Restored the original test suite: 1,344 tests, about 155 of which need a real
   Home Assistant. Test data no longer contains anyone's network, names or
   devices.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest with
