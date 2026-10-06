@@ -117,10 +117,6 @@ class HubStorage:
             raise StorageError("Storage is not open — call open() first")
         return self._conn
 
-    def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._lock:
-            return self._connection.execute(sql, params)
-
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
             if self._transaction_depth:
@@ -149,6 +145,15 @@ class HubStorage:
             finally:
                 self._transaction_depth -= 1
 
+    # Reads are executed AND consumed under the lock. HA calls storage from many
+    # executor threads over this one connection; a cursor stepped outside the
+    # lock while another thread writes comes back torn or empty (an enrolled
+    # device reads as missing). Never hand a live read cursor to a caller.
+    def _fetchone(self, sql: str, params: tuple = ()) -> tuple | None:
+        """Execute and consume a single-row read while holding the lock."""
+        with self._lock:
+            return self._connection.execute(sql, params).fetchone()
+
     def _fetchall(self, sql: str, params: tuple = ()) -> list[tuple]:
         """Execute and consume a read while holding the connection lock."""
         with self._lock:
@@ -175,10 +180,10 @@ class KeyValueTable(MutableMapping):
 
     def __getitem__(self, key: str) -> Any:
         self._check_key(key)
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT value FROM kv WHERE namespace = ? AND key = ?",
             (self._namespace, key),
-        ).fetchone()
+        )
         if row is None:
             raise KeyError(key)
         return json.loads(row[0])
@@ -215,16 +220,16 @@ class KeyValueTable(MutableMapping):
             raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
-        rows = self._storage._execute(
+        rows = self._storage._fetchall(
             "SELECT key FROM kv WHERE namespace = ? ORDER BY key",
             (self._namespace,),
-        ).fetchall()
+        )
         return iter(row[0] for row in rows)
 
     def __len__(self) -> int:
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT COUNT(*) FROM kv WHERE namespace = ?", (self._namespace,)
-        ).fetchone()
+        )
         return int(row[0])
 
     def items(self) -> list[tuple[str, Any]]:
@@ -248,10 +253,10 @@ class KeyValueTable(MutableMapping):
         # not a crash. Also saves fetching + JSON-parsing the whole value.
         if not isinstance(key, str) or not key:
             return False
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT 1 FROM kv WHERE namespace = ? AND key = ?",
             (self._namespace, key),
-        ).fetchone()
+        )
         return row is not None
 
     def __repr__(self) -> str:
@@ -268,10 +273,10 @@ class KeyValueTable(MutableMapping):
     def updated_at(self, key: str) -> str:
         """Return the ISO-8601 UTC timestamp of the key's last write."""
         self._check_key(key)
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT updated_at FROM kv WHERE namespace = ? AND key = ?",
             (self._namespace, key),
-        ).fetchone()
+        )
         if row is None:
             raise KeyError(key)
         return row[0]
@@ -308,30 +313,30 @@ class TankReadingsTable:
     def latest_t(self, device_id: str) -> int | None:
         """The newest reading's timestamp, or None — lets ingest keep t
         monotonic across a clock step-back (an NTP correction after reboot)."""
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT MAX(t) FROM tank_readings WHERE device_id = ?",
             (device_id,),
-        ).fetchone()
+        )
         return int(row[0]) if row and row[0] is not None else None
 
     def last(self, device_id: str) -> dict[str, Any] | None:
         """The newest reading as ``{"t":..., "v":...}``, or None."""
-        row = self._storage._execute(
+        row = self._storage._fetchone(
             "SELECT t, v FROM tank_readings WHERE device_id = ? "
             "ORDER BY t DESC LIMIT 1",
             (device_id,),
-        ).fetchone()
+        )
         return {"t": int(row[0]), "v": float(row[1])} if row else None
 
     def recent(self, device_id: str, since_t: int) -> list[dict[str, Any]]:
         """Readings at/after ``since_t``, NEWEST first (the app's history shape).
 
         ORDER BY t makes 'newest first' robust to an out-of-order ingest t."""
-        rows = self._storage._execute(
+        rows = self._storage._fetchall(
             "SELECT t, v FROM tank_readings WHERE device_id = ? AND t >= ? "
             "ORDER BY t DESC",
             (device_id, int(since_t)),
-        ).fetchall()
+        )
         return [{"t": int(t), "v": float(v)} for t, v in rows]
 
     def prune(self, device_id: str, before_t: int) -> int:
