@@ -336,7 +336,8 @@ class PairingManager:
         with self._lock:
             self._purge_expired()
             known = any(
-                record["code_hash"] == code_hash for record in self._codes.values()
+                hmac.compare_digest(record["code_hash"], code_hash)
+                for record in self._codes.values()
             )
         if not known:
             known = any(
@@ -385,7 +386,7 @@ class PairingManager:
                 (
                     (code_id, record)
                     for code_id, record in self._codes.items()
-                    if record["code_hash"] == code_hash
+                    if hmac.compare_digest(record["code_hash"], code_hash)
                 ),
                 None,
             )

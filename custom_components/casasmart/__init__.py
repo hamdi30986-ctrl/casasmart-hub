@@ -599,6 +599,11 @@ async def _async_setup_dev_enroll(
     """
     if not _dev_enroll_enabled():
         return
+    _LOGGER.warning(
+        "%s is set: dev device auto-enrollment is ACTIVE on this hub — never "
+        "enable it on a customer hub",
+        _DEV_ENROLL_ENV,
+    )
 
     auth = entry.runtime_data.auth
 
