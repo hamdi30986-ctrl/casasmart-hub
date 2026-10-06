@@ -44,3 +44,13 @@ class FactoryResetTablesTests(unittest.TestCase):
     def test_reset_handler_wipes_the_listed_tables(self) -> None:
         init = (_PKG / "__init__.py").read_text()
         self.assertIn("for table in FACTORY_RESET_TABLES:", init)
+
+    def test_reset_handler_drops_the_hq_trust(self) -> None:
+        init = (_PKG / "__init__.py").read_text()
+        handler = init[init.index("async def _handle_factory_reset") :]
+        handler = handler[: handler.index("async def ", 10)]
+        for key in (
+            "HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY",
+            "HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY",
+        ):
+            self.assertIn(f"hub_config.delete({key})", handler)
