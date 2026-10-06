@@ -466,7 +466,7 @@ class AlarmEngine:
     ) -> dict[str, Any] | None:
         """A mapped sensor dropped offline. While armed, that is tamper.
 
-        Per plan: log + push, but do NOT trigger the full alarm — a dead
+        Log + push, but do NOT trigger the full alarm — a dead
         battery should not wake the house. Ignored while disarmed.
         """
         now = self._clock() if now is None else now
@@ -611,7 +611,7 @@ class AlarmEngine:
                 "mode": s["mode"],
                 "since": s["since"],
                 "active_zones": sorted(active_zones_for_mode(s["mode"])),
-                # Exit-delay grace deadline (option A countdown): the absolute
+                # Exit-delay grace deadline (arming countdown): the absolute
                 # time a freshly armed mode goes live. The app renders the arming
                 # countdown as ``max(0, arming_until - now)`` — no extra endpoint,
                 # no hub-side ticking; a value already in the past simply means

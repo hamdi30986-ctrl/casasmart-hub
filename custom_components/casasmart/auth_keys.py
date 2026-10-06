@@ -1,11 +1,11 @@
-"""Device public-key handling (Track B — B1.6): P-256 validate + verify.
+"""Device public-key handling: P-256 validate + verify.
 
 The only module that touches the ``cryptography`` package (an HA core
 dependency — present in every HA install, nothing to add to the
 manifest). Keeping the crypto in one seam means the engine and the API
 layer stay testable and the primitive is swappable in one place.
 
-Contract with the app (plan, "Phone Identity"):
+Contract with the app:
 
 - Phone generates a P-256 keypair on first launch; the PUBLIC key crosses
   the wire once, at pairing, as SubjectPublicKeyInfo PEM.

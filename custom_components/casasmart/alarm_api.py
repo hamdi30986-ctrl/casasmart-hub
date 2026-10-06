@@ -1,11 +1,11 @@
-"""CasaSmart alarm REST endpoints (Phase 6, block B13).
+"""CasaSmart alarm REST endpoints.
 
 The app's thin-client surface over the hub-side ``AlarmEngine``. Matches the
 established API pattern (``tank_api`` / ``registry_api``): plain views on HA's
-port and the B10 TLS port both serve these, every handler gates in-band with
+port and the dedicated TLS port both serve these, every handler gates in-band with
 ``authenticate_request``, and storage-touching engine calls hop the executor.
 
-Endpoints (one panel with zone attributes — plan B13):
+Endpoints (one panel with zone attributes):
 
 - ``GET    /api/casasmart/alarm/state``            — arm-state snapshot
 - ``POST   /api/casasmart/alarm/arm``              — arm away/home/night
@@ -17,7 +17,7 @@ Endpoints (one panel with zone attributes — plan B13):
 - ``PUT    /api/casasmart/alarm/settings``         — edit default delays
 - ``GET    /api/casasmart/alarm/history``          — event history
 
-Role gates (plan roles table — a plain user has NO alarm access):
+Role gates (a plain user has NO alarm access):
 ``alarm.read`` for state/zones/history, ``alarm.arm`` for arm/disarm,
 ``alarm.manage`` for zone configuration. Every mutation fires
 ``EVENT_ALARM_CHANGED`` so the WS server nudges connected apps and the alarm

@@ -1,4 +1,4 @@
-"""Push-token storage for B8 — encrypted push notifications.
+"""Push-token storage for encrypted push notifications.
 
 Each paired device can register one FCM token (keyed by device_id).
 The hub stores these so it can fan out encrypted push payloads via

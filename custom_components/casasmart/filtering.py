@@ -42,7 +42,7 @@ def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve an entity's room (B17: registry first, HA area fallback).
+    """Resolve an entity's room (registry first, HA area fallback).
 
     A registry assignment is the installer's word and wins outright —
     including an explicit ``None`` ("Unassigned"), which must NOT snap
@@ -73,7 +73,7 @@ def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bool:
-    """Room-scope check (B1.6): is this entity inside the token's scope?
+    """Room-scope check: is this entity inside the token's scope?
 
     ``rooms`` is the JWT's ``rooms`` claim — a list of area ids, or None
     for an unrestricted token (admin/sub-admin and unscoped users).
@@ -199,9 +199,9 @@ def device_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
     """Serialize a state into the wire device dict — area resolved,
-    the installer's registry display name (B17) overriding the HA
+    the installer's registry display name overriding the HA
     friendly name when one is set, and the HA device-registry id as
-    the app's tile-grouping key (B16)."""
+    the app's tile-grouping key."""
     entry = er.async_get(hass).async_get(state.entity_id)
     device = serialize_state(
         state,

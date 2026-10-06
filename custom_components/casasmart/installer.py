@@ -1,4 +1,4 @@
-"""Installer-surface helpers (Track B — B16 3c-4b): the pure logic
+"""Installer-surface helpers: the pure logic
 behind the admin endpoints that replace the app's raw-HA-token installer
 calls (pairing sheet, switch domain swap, IR wizard, discovered devices).
 
@@ -30,7 +30,7 @@ ALLOWED_FLOW_HANDLERS = frozenset({"broadlink", "easy_ir"})
 
 # State attributes that never cross the API boundary, even on the
 # admin-only raw dump: ``entity_picture`` embeds an HA-signed camera
-# token (the 3c-3 doctrine) and ``access_token``/``token`` are exactly
+# token and ``access_token``/``token`` are exactly
 # what they say. Same reasoning as the entity-bridge allowlist, applied
 # as a denylist because installer flows need everything else verbatim.
 STRIPPED_STATE_ATTRS = frozenset({"entity_picture", "access_token", "token"})
@@ -156,8 +156,8 @@ def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[s
 def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Validate an entity-registry patch body — a name rename only.
 
-    The switch_as_x domain swap (``options_domain``/``options``) is gone
-    (Phase 7): the app never re-domains an entity, because a gang's type is
+    The switch_as_x domain swap (``options_domain``/``options``) is gone:
+    the app never re-domains an entity, because a gang's type is
     presentation metadata, never an HA rename. The only operation left is:
 
     - ``name`` — rename (string, or null to clear back to the device name)

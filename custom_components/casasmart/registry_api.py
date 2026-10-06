@@ -122,8 +122,8 @@ class _RegistryView(HomeAssistantView):
     def _scope_reject(self, claims, *entity_lists):
         """Reject a write touching an entity outside the caller's scope — same
         no-enumeration message as the favorites/assignment writes. An admin
-        (rooms=None) passes the scope test. Assignability is NOT checked
-        (Phase 9): a gang's type is presentation metadata, so a grouped/typed
+        (rooms=None) passes the scope test. Assignability is NOT checked:
+        a gang's type is presentation metadata, so a grouped/typed
         record must stay writable even when its underlying entities aren't
         individually servable (a dead/hidden relay, an all-dead device on DELETE,
         a presentation flip that writes no HA entity). Returns an error response,
@@ -1190,10 +1190,10 @@ class CasaSmartFavoritesView(_RegistryView):
     """GET/PUT /api/casasmart/me/favorites — the caller's own list.
 
     Keyed by ``member_id`` (the PERSON, resolved from the request's device
-    ``sub`` — Phase 5), so a member's devices share one list. PUT replaces the
+    ``sub``), so a member's devices share one list. PUT replaces the
     whole list; order is the display order. GET drops gone/unserved + out-of-
     scope ids for the response without mutating storage — the ONE source of
-    truth for device favorites (plan B17). A GET must remain read-only because
+    truth for device favorites. A GET must remain read-only because
     integrations are still populating HA states while the hub starts; treating
     a temporarily absent state as a permanent deletion erased favorites during
     host restarts.
@@ -1210,7 +1210,7 @@ class CasaSmartFavoritesView(_RegistryView):
         if not_ready is not None:
             return not_ready
         # Favorites roam per PERSON: resolve the request's device sub to its
-        # member_id (Phase 5) inside the executor — a legacy device is its own
+        # member_id inside the executor — a legacy device is its own
         # one-device member, so it falls back to the sub.
         engine = get_engine(self._hass)
         sub = claims["sub"]
@@ -1285,7 +1285,7 @@ class CasaSmartFavoritesView(_RegistryView):
             return self._storage_failure(err)
         # A room-scoped caller only SEES + submits its in-scope slice (the GET
         # filters out-of-scope). A plain replace would silently delete the
-        # member's favorites in rooms it can't see (Phase 7) — preserve those,
+        # member's favorites in rooms it can't see — preserve those,
         # appended after the caller's now-authoritative in-scope list.
         out_of_scope = [eid for eid in stored if not in_scope(self._hass, eid, scope)]
         try:
@@ -1296,7 +1296,7 @@ class CasaSmartFavoritesView(_RegistryView):
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # Nudge the member's other devices to re-pull (Phase 5). The app
+        # Nudge the member's other devices to re-pull. The app
         # re-fetches favorites + settings on any registry_changed, so under
         # per-account keying the shared change lands on the sibling phone.
         self._notify_change("favorites")

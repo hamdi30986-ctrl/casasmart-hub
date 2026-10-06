@@ -273,14 +273,14 @@ class PushDispatcher:
     async def async_send_device_paired(
         self, name: str, role: str, device_id: str
     ) -> None:
-        """Owner notification for a successful NEW device enroll (Phase 5, D6).
+        """Owner notification for a successful NEW device enroll.
 
         "New device paired: <name> (<role>)" — the enroll view calls this
         after ``enroll_device`` lands, so a member code redeemed anywhere
         (LAN or, with ``remote_pairing_enabled`` on, remotely) is always
         visible to the owner. Rides the same signed relay path and the same
-        owner-only audience filter as alarm/lock/tank; notification-only by
-        locked decision #6 — no approval gate. Never raises.
+        owner-only audience filter as alarm/lock/tank; notification-only —
+        no approval gate. Never raises.
         """
         await self._dispatch(
             {
@@ -457,7 +457,7 @@ TANK_OFFLINE_POLL = timedelta(minutes=5)
 
 
 class TankPushMonitor:
-    """Water-tank low-level + offline push notifications (B8 Piece 4b).
+    """Water-tank low-level + offline push notifications.
 
     Unlike the alarm/lock dispatcher this is **timer-driven, not event-driven**:
     tank readings arrive on a 5-minute REST cadence, and "low at 6pm" / "silent

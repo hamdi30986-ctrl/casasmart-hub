@@ -60,7 +60,7 @@ _LOGGER = logging.getLogger(__name__)
 # reconciler makes (against .value strings) is explicit at the usage site.
 _RUNNING_STATES = frozenset({"started", "startup"})
 
-# --- Edge-liveness watchdog (Phase 9) ---------------------------------------
+# --- Edge-liveness watchdog -------------------------------------------------
 # The pure logic (which statuses mean origin-down, and the probe/restart
 # decision) lives in tunnel.py so it's unit-testable without HA. Only the
 # HTTP-probe timeout is glue and stays here.
@@ -188,7 +188,7 @@ class CloudflaredController:
         )
 
     async def async_edge_alive(self, tunnel_url: str) -> bool | None:
-        """Probe the public tunnel URL through Cloudflare's edge (Phase 9).
+        """Probe the public tunnel URL through Cloudflare's edge.
 
         The request loops hub -> Cloudflare edge -> tunnel -> hub, so it tests
         the thing the add-on's ``running`` state can't: is cloudflared actually

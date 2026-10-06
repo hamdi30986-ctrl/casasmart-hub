@@ -69,7 +69,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         self._hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_regenerate_pairing_code"
-        # Pin the exact entity id the plan/app expect, independent of the hub
+        # Pin the exact entity id the app expects, independent of the hub
         # device name (a device-named entity would become
         # ``button.casasmart_hub_…``). Set on first registration only; the
         # entity still groups under the hub device below.
@@ -91,10 +91,10 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             wiped_codes = pairing.clear_all_codes()
             # The unpaired phones' push tokens are now dead — drop them so the
             # dispatcher can't keep pushing alarm/lock events to a departed
-            # owner's phone (Phase 3).
+            # owner's phone.
             data.storage.table("push_tokens").clear()
             # Every member just left, so their per-person favorites + settings
-            # (member_id-keyed) would orphan — clear them too (Phase 5).
+            # (member_id-keyed) would orphan — clear them too.
             data.storage.table("registry_favorites").clear()
             data.storage.table("user_settings").clear()
             # No admin remains after the wipe, so this mints a fresh ADMIN
@@ -157,7 +157,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
 
 
 class CasaSmartFactoryResetButton(ButtonEntity):
-    """Nuclear reset (B3 tier 3 / ownership transfer) — wipes the app layer.
+    """Nuclear reset (last-resort recovery / ownership transfer) — wipes the app layer.
 
     Presses ``casasmart.factory_reset`` (``__init__._handle_factory_reset``).
     Cleared: every paired device, pairing + recovery codes, favorites, scenes,

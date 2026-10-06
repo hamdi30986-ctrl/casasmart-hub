@@ -1,4 +1,4 @@
-"""Pure automation-config logic (B16 stage 3c-3) — no HA imports.
+"""Pure automation-config logic — no HA imports.
 
 The list surgery behind ``automation_api.py``'s read-modify-write on
 automations.yaml, kept import-free so the unit tests run without a

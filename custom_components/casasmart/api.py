@@ -381,7 +381,7 @@ class CasaSmartDevicesView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/devices"
     name = f"api:{DOMAIN}:devices"
-    # CasaSmart JWT gate (B1.6) — validated in-handler, not by HA's middleware.
+    # CasaSmart JWT gate — validated in-handler, not by HA's middleware.
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -408,7 +408,7 @@ class CasaSmartDeviceView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}"
     name = f"api:{DOMAIN}:device"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass

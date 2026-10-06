@@ -1,9 +1,9 @@
-"""Hub-side audio adapter (Phase 6, block B14) — the MQTT/HA glue.
+"""Hub-side audio adapter — the MQTT/HA glue.
 
 The pure decision+state engine lives in ``audio.py`` (stdlib only, no network,
 unit-tested on a temp DB). This module is everything that engine deliberately
 does NOT do: it is the hub's **single, only** MQTT client — the whole point of
-B14 is that the phone stops holding broker creds and opening its own
+hub-side audio is that the phone stops holding broker creds and opening its own
 ``MqttServerClient``; the hub owns the one connection and the phone just reads
 hub state over REST/WS.
 
@@ -22,7 +22,7 @@ What it does:
   ``EVENT_AUDIO_CHANGED`` on the HA loop (the ingest itself runs on paho's
   network thread; the engine is ``RLock``-guarded so that's safe, but the bus
   fire must hop to the loop thread).
-- Provides ``publish`` for the REST API (B14 piece 3) to send the topic+payload
+- Provides ``publish`` for the REST API (``audio_api``) to send the topic+payload
   the engine's ``build_command`` / ``build_play`` produced, and ``async_discover``
   to provoke a fresh round of announces (publishes ``speakers/ping``).
 
@@ -290,7 +290,7 @@ class AudioAdapter:
         """Fire EVENT_AUDIO_CHANGED on the loop thread (we're on paho's)."""
         self._hass.loop.call_soon_threadsafe(self._fire_changed)
 
-    # -- outbound (used by the REST API, B14 piece 3) --------------------------
+    # -- outbound (used by the REST API) ---------------------------------------
 
     def publish(
         self, topic: str, payload: Any, *, qos: int = 1, retain: bool = False

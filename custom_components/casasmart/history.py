@@ -1,4 +1,4 @@
-"""History query contract (B16 stage 3c-3): parse + serialize, no HA imports.
+"""History query contract: parse + serialize, no HA imports.
 
 The history endpoint replaces the app's raw-token ``GET
 /api/history/period/<ts>`` call (energy screen's weekly sampling). This

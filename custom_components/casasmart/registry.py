@@ -1260,8 +1260,7 @@ class RegistryEngine:
         rooms: list[dict[str, Any]],
         assignments: list[dict[str, Any]],
     ) -> dict[str, int]:
-        """Seed the registry from HA's own registries (B17: "Auto-populate
-        from HA entities on first setup").
+        """Seed the registry from HA's own registries on first setup.
 
         Imported floors/rooms KEEP their HA ids — room-scope JWT claims
         already use HA area ids, so imported layouts work with existing

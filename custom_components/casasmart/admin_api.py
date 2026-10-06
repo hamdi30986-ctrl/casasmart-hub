@@ -1,4 +1,4 @@
-"""Installer admin endpoints (Track B — B16 3c-4b).
+"""Installer admin endpoints.
 
 The REST surface that retires the app's last raw-HA-token call sites —
 the five installer screens (pairing sheet, switch domain swap, IR
@@ -16,7 +16,7 @@ these reshape the home's hardware):
   import/pairing diff (unfiltered except the token-bearing attributes —
   see ``installer.STRIPPED_STATE_ATTRS``).
 - ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — entity
-  rename only (the switch_as_x domain swap was removed in Phase 7), a
+  rename only (the switch_as_x domain swap was removed), a
   scoped subset of HA's WS ``config/entity_registry/update``.
 - ``GET/POST /api/casasmart/admin/config_flow`` and
   ``POST .../config_flow/{flow_id}`` — the config-flow proxy,
@@ -264,7 +264,7 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # Name rename only — the switch_as_x options swap is gone (Phase 7), so
+        # Name rename only — the switch_as_x options swap is gone, so
         # parse_entity_patch yields exactly {"name": ...}.
         # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:

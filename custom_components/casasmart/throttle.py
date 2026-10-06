@@ -26,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Failures inside a window before the wall goes up.
 MAX_FAILURES = 5
-# Escalating lockout windows (plan: 1 min -> 5 -> 30 -> 1 hr). Repeat
+# Escalating lockout windows (1 min -> 5 -> 30 -> 1 hr). Repeat
 # offenders stay at the last step.
 LOCKOUT_STEPS = (60.0, 5 * 60.0, 30 * 60.0, 60 * 60.0)
 # Keys are attacker-influenced (device ids, source IPs) — cap the table so
@@ -75,7 +75,7 @@ class FailureThrottle:
                 entry["locked_until"] = time.monotonic() + lockout
                 entry["failures"] = 0.0
                 entry["level"] = min(step + 1, len(LOCKOUT_STEPS) - 1)
-                # Plan: failed bursts must be visible, not silent.
+                # Failed bursts must be visible, not silent.
                 _LOGGER.warning(
                     "[%s] lockout for %r after %d failures (%.0f min, level %d)",
                     self._name,
@@ -86,7 +86,7 @@ class FailureThrottle:
                 )
 
     def clear(self, key: str) -> None:
-        """Success — failures AND escalation level reset (plan: resets on success)."""
+        """Success — failures AND escalation level reset."""
         with self._lock:
             self._entries.pop(key, None)
 

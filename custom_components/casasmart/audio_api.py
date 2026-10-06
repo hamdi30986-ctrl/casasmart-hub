@@ -1,15 +1,15 @@
-"""CasaSmart audio REST endpoints (Phase 6, block B14) — piece 3.
+"""CasaSmart audio REST endpoints.
 
 The app's thin-client surface over the hub-side ``AudioEngine`` +
 ``AudioAdapter``. This is what flips the speaker stack: the phone stops
-holding broker creds and opening its own ``MqttServerClient`` (B14 piece 4
-deletes that), and instead reads hub state + fires commands here. The hub is
+holding broker creds and opening its own ``MqttServerClient``, and instead
+reads hub state + fires commands here. The hub is
 the only MQTT client (the adapter), the only place the broker/PA creds live
 (the engine), and — through ``GET /audio/provision`` — the cred source the Pi
 pulls on boot instead of the dead Supabase edge function.
 
 Matches the established API pattern (``alarm_api`` / ``tank_api``): plain views
-served on both HA's port and the B10 TLS port, every handler gates in-band with
+served on both HA's port and the dedicated TLS port, every handler gates in-band with
 ``authenticate_request``, storage-touching engine calls hop the executor, and
 pure in-memory reads (the live mirror) do not.
 
@@ -272,7 +272,7 @@ class CasaSmartAudioSpeakersView(_AudioView):
         scope = claims.get("rooms")
         if scope is not None:
             # A room-scoped user (e.g. a guest/kids phone) sees only its rooms'
-            # speakers (Phase 8). Preferred path: the speaker's ``area_id`` (==
+            # speakers. Preferred path: the speaker's ``area_id`` (==
             # the app's room_id / HA area id) is matched EXACTLY against the
             # caller's room scope — robust, no name-string fuzziness. Legacy
             # fallback: a speaker with no area_id but a free-text ``room`` label

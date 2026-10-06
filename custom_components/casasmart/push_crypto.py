@@ -1,11 +1,11 @@
-"""Ed25519 push-identity key for B8 relay dispatch.
+"""Ed25519 push-identity key for relay dispatch.
 
 The hub signs every push batch it sends to the relay with a permanent
 Ed25519 key generated on first boot. The relay verifies that signature
 against the hub's public key, which the hub registers itself when it is
 activated (``relay_registration.py``: a P-256 TLS-identity proof plus a
-single-use activation code — this replaced plan B8's out-of-band
-registration in 1.7.0). The private
+single-use activation code — this replaced out-of-band registration
+in 1.7.0). The private
 key never leaves the box (``push_identity_key.bin``, 0600); the public
 key (lowercase hex) is mirrored into ``hub_config`` so the registration
 tooling and the admin API have a stable place to read it.

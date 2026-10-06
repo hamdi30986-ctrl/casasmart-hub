@@ -1,4 +1,4 @@
-"""Automation config endpoints (Track B — B16 stage 3c-3).
+"""Automation config endpoints.
 
 The REST surface that replaces the app's raw-token calls to HA's own
 ``/api/config/automation/config/{id}`` (create / edit / delete) and the
@@ -82,7 +82,7 @@ def _read_yaml(path: str) -> list[dict[str, Any]]:
 
     A present-but-non-list file (hand-edited into a dict/scalar) raises
     instead of coercing to ``[]`` — silently treating corrupt content as
-    empty would DISCARD it on the next write (audit finding, 3c-3).
+    empty would DISCARD it on the next write.
     """
     if not os.path.isfile(path):
         return []
@@ -111,7 +111,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/automations/{{config_key}}/config"
     name = f"api:{DOMAIN}:automation:config"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass

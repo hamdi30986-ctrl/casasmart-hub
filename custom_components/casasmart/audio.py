@@ -1,4 +1,4 @@
-"""Hub-side audio engine (Phase 6, block B14) — the pure half.
+"""Hub-side audio engine — the pure half.
 
 Flips the speaker stack to match the rest of Phase 6: hub = brain, phone =
 display, Pi = dumb endpoint. Today it is inverted — the phone holds the MQTT
@@ -10,7 +10,7 @@ truth that ends all three.
 Like ``alarm.py``/``registry.py``/``tank.py`` this is the flat-importable
 engine: **stdlib only, no Home Assistant imports, no network I/O**. It owns
 the *decisions* and the *state*; it never touches MQTT, the broker, the PA
-service or the LAN. Those live in the adapter (a later B14 piece), exactly as
+service or the LAN. Those live in the adapter (``audio_adapter.py``), exactly as
 ``alarm_adapter.py`` is the HA glue for the pure ``AlarmEngine``. The split is
 what lets this be unit-tested on a temp SQLite file with a hand-cranked clock.
 

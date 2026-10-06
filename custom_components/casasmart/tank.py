@@ -395,8 +395,8 @@ class TankEngine:
 
         Each entry is ``{"t": unix_seconds, "v": voltage, "p": percent}`` — the
         hub computes the percent for every reading from the same calibration so
-        the app's history charts read it instead of doing the math (B8 Piece
-        4b). ``p`` is ``None`` for an uncalibrated tank."""
+        the app's history charts read it instead of doing the math. ``p`` is
+        ``None`` for an uncalibrated tank."""
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             raise TankError("days must be a positive integer")
         with self._lock:
