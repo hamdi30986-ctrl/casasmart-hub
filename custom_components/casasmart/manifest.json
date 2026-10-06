@@ -2,7 +2,7 @@
   "domain": "casasmart",
   "name": "CasaSmart Hub",
   "after_dependencies": ["automation", "camera", "hassio", "recorder", "stream"],
-  "codeowners": ["@casasmart"],
+  "codeowners": ["@hamdi30986-ctrl"],
   "config_flow": true,
   "dependencies": ["http", "network", "zeroconf"],
   "documentation": "https://github.com/hamdi30986-ctrl/casasmart-hub",
