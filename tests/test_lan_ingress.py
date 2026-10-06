@@ -22,6 +22,7 @@ from aiohttp import web  # noqa: E402
 from casasmart.auth_api import is_lan_request  # noqa: E402
 from casasmart.lan_ingress import (  # noqa: E402
     is_docker_desktop_kernel,
+    is_recognized_lan_relay_ingress,
     resolve_lan_relay_ingress,
 )
 from casasmart.tls import CasaSmartTlsServer, ensure_tls_material  # noqa: E402
@@ -61,6 +62,13 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("unrecognized", reason)
         trusted, _ = resolve_lan_relay_ingress(1, HAOS)
         self.assertFalse(trusted)
+
+    def test_recognized_values(self) -> None:
+        # Setup warns about anything else, so a typo is not silently "auto".
+        for setting in (None, "auto", "on", "off", True, False):
+            self.assertTrue(is_recognized_lan_relay_ingress(setting), setting)
+        for setting in ("yes", "On", "true", "", 1, 0, [], {}):
+            self.assertFalse(is_recognized_lan_relay_ingress(setting), setting)
 
 
 class _Hass:
