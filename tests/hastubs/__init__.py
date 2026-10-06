@@ -53,6 +53,7 @@ _HA_MODULES = (
     "homeassistant.helpers",
     "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
+    "homeassistant.helpers.aiohttp_client",
     "homeassistant.components",
     "homeassistant.components.http",
     "homeassistant.components.persistent_notification",

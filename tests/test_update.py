@@ -16,6 +16,8 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
 )
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from update import (
     InstallError,
     ReleaseInfo,
@@ -24,8 +26,14 @@ from update import (
     parse_release,
     read_manifest_version,
     swap_integration_dir,
+    verify_release_signature,
     versions_match,
 )
+
+ZIP_URL = (
+    "https://github.com/casasmart/casasmart-hub/releases/download/v0.2.0/casasmart.zip"
+)
+SIG_URL = ZIP_URL + ".sig"
 
 
 class TestIsNewer(unittest.TestCase):
@@ -80,8 +88,14 @@ class TestParseRelease(unittest.TestCase):
         base.update(overrides)
         return base
 
+    def _assets(self):
+        return [
+            {"name": "casasmart.zip", "browser_download_url": ZIP_URL},
+            {"name": "casasmart.zip.sig", "browser_download_url": SIG_URL},
+        ]
+
     def test_full_release(self):
-        info = parse_release(self._payload())
+        info = parse_release(self._payload(assets=self._assets()))
         self.assertEqual(
             info,
             ReleaseInfo(
@@ -89,28 +103,36 @@ class TestParseRelease(unittest.TestCase):
                 changelog="## What's new\n- Faster pairing",
                 published_at="2026-06-14T12:00:00Z",
                 release_url="https://github.com/casasmart/casasmart-hub/releases/tag/v0.2.0",
-                download_url="https://api.github.com/repos/casasmart/casasmart-hub/zipball/v0.2.0",
+                download_url=ZIP_URL,
+                signature_url=SIG_URL,
             ),
         )
 
-    def test_download_url_prefers_zip_asset_over_zipball(self):
-        asset = "https://github.com/casasmart/casasmart-hub/releases/download/v0.2.0/casasmart-0.2.0.zip"
+    def test_only_the_casasmart_zip_asset_is_the_artifact(self):
+        # The HACS release asset by name; other zips (and checksums) are not it.
         info = parse_release(
             self._payload(
                 assets=[
                     {"name": "checksums.txt", "browser_download_url": "x"},
-                    {"name": "casasmart-0.2.0.zip", "browser_download_url": asset},
+                    {"name": "casasmart-0.2.0.zip", "browser_download_url": "y"},
+                    *self._assets(),
                 ]
             )
         )
-        self.assertEqual(info.download_url, asset)
+        self.assertEqual(info.download_url, ZIP_URL)
+        self.assertEqual(info.signature_url, SIG_URL)
 
-    def test_download_url_falls_back_to_zipball(self):
+    def test_zipball_is_never_used(self):
+        # v2.2.0: the source zipball is not the release artifact and is never
+        # signed, so a release without casasmart.zip has nothing to install.
         info = parse_release(self._payload(assets=[]))
-        self.assertEqual(
-            info.download_url,
-            "https://api.github.com/repos/casasmart/casasmart-hub/zipball/v0.2.0",
-        )
+        self.assertIsNone(info.download_url)
+        self.assertIsNone(info.signature_url)
+
+    def test_unsigned_release_has_no_signature_url(self):
+        info = parse_release(self._payload(assets=self._assets()[:1]))
+        self.assertEqual(info.download_url, ZIP_URL)
+        self.assertIsNone(info.signature_url)
 
     def test_download_url_none_when_no_artifact(self):
         payload = self._payload()
@@ -178,6 +200,22 @@ class TestLocateAndReadManifest(unittest.TestCase):
             found = locate_integration_dir(root, "casasmart")
             self.assertEqual(found, expected)
             self.assertEqual(read_manifest_version(found), "0.2.0")
+
+    def test_locates_integration_at_the_zip_root(self):
+        # The packaged casasmart.zip (HACS layout) holds the files at the root.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manifest.json").write_text(
+                json.dumps({"domain": "casasmart", "version": "2.2.0"})
+            )
+            self.assertEqual(locate_integration_dir(root, "casasmart"), root)
+            self.assertEqual(read_manifest_version(root), "2.2.0")
+
+    def test_root_manifest_of_another_domain_is_not_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manifest.json").write_text(json.dumps({"domain": "other"}))
+            self.assertIsNone(locate_integration_dir(root, "casasmart"))
 
     def test_returns_none_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,3 +285,42 @@ class TestSwapIntegrationDir(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVerifyReleaseSignature(unittest.TestCase):
+    def setUp(self):
+        self.key = Ed25519PrivateKey.generate()
+        raw = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        self.pub_b64 = __import__("base64").b64encode(raw).decode()
+        self.archive = b"PK\x03\x04 casasmart.zip bytes"
+
+    def test_valid_signature_passes(self):
+        verify_release_signature(
+            self.archive, self.key.sign(self.archive), self.pub_b64
+        )
+
+    def test_tampered_archive_is_refused(self):
+        sig = self.key.sign(self.archive)
+        with self.assertRaises(InstallError):
+            verify_release_signature(self.archive + b"!", sig, self.pub_b64)
+
+    def test_other_key_is_refused(self):
+        sig = Ed25519PrivateKey.generate().sign(self.archive)
+        with self.assertRaises(InstallError):
+            verify_release_signature(self.archive, sig, self.pub_b64)
+
+    def test_unusable_key_is_refused(self):
+        with self.assertRaises(InstallError):
+            verify_release_signature(self.archive, b"x" * 64, "not base64!")
+
+    def test_pinned_key_is_a_valid_ed25519_key(self):
+        import re
+
+        const = (
+            Path(__file__).resolve().parent.parent
+            / "custom_components/casasmart/const.py"
+        ).read_text()
+        pinned = re.search(r'UPDATE_SIGNING_PUBLIC_KEY_B64 = "([^"]+)"', const).group(1)
+        with self.assertRaises(InstallError) as ctx:  # a random sig never verifies
+            verify_release_signature(self.archive, b"\0" * 64, pinned)
+        self.assertIn("does not verify", str(ctx.exception))

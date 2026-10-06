@@ -17,6 +17,8 @@ owns the aiohttp fetch + caching and leans on these for the decisions.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -30,14 +32,21 @@ from typing import Any
 # (-beta.1) is parsed out and used solely as a tiebreak (see _split).
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)(?:[-+](.+))?$")
 
+# The packaged release asset (hacs.json ``filename``) and its detached
+# signature. HACS installs exactly this file; so does the built-in updater.
+RELEASE_ASSET_NAME = "casasmart.zip"
+SIGNATURE_ASSET_NAME = RELEASE_ASSET_NAME + ".sig"
+
 
 @dataclass(frozen=True)
 class ReleaseInfo:
     """The fields the app's update UI needs, distilled from a release.
 
-    ``download_url`` is the artifact the installer (Piece 3) pulls: a
-    ``.zip`` release asset if the release ships one, otherwise GitHub's
-    source ``zipball_url``. ``None`` only if the payload has neither.
+    ``download_url`` is the packaged ``casasmart.zip`` release asset (the
+    same file HACS installs) and ``signature_url`` its detached Ed25519
+    signature. GitHub's auto-generated source zipball is never used: it is
+    not the release artifact and is never signed. Either is ``None`` when
+    the release doesn't ship it, and the installer then refuses.
     """
 
     version: str
@@ -45,6 +54,7 @@ class ReleaseInfo:
     published_at: str | None
     release_url: str | None
     download_url: str | None
+    signature_url: str | None = None
 
 
 def _split(raw: Any) -> tuple[tuple[int, ...], str | None] | None:
@@ -134,16 +144,13 @@ def parse_release(payload: Any) -> ReleaseInfo | None:
         published_at=published if isinstance(published, str) else None,
         release_url=url if isinstance(url, str) else None,
         download_url=_pick_download_url(payload),
+        signature_url=_asset_urls(payload).get(SIGNATURE_ASSET_NAME),
     )
 
 
-def _pick_download_url(payload: dict) -> str | None:
-    """The best artifact to install from: a ``.zip`` asset, else the zipball.
-
-    A release that ships a packaged integration ``.zip`` is preferred (it
-    holds just what the hub needs); failing that we fall back to GitHub's
-    auto-generated source ``zipball_url``. ``None`` if neither is present.
-    """
+def _asset_urls(payload: dict) -> dict[str, str]:
+    """``{asset name: download URL}`` for a release's uploaded assets."""
+    urls: dict[str, str] = {}
     assets = payload.get("assets")
     if isinstance(assets, list):
         for asset in assets:
@@ -151,15 +158,14 @@ def _pick_download_url(payload: dict) -> str | None:
                 continue
             name = asset.get("name")
             href = asset.get("browser_download_url")
-            if (
-                isinstance(name, str)
-                and name.lower().endswith(".zip")
-                and isinstance(href, str)
-                and href.strip()
-            ):
-                return href.strip()
-    zipball = payload.get("zipball_url")
-    return zipball.strip() if isinstance(zipball, str) and zipball.strip() else None
+            if isinstance(name, str) and isinstance(href, str) and href.strip():
+                urls.setdefault(name, href.strip())
+    return urls
+
+
+def _pick_download_url(payload: dict) -> str | None:
+    """The packaged ``casasmart.zip`` asset, or None — never the zipball."""
+    return _asset_urls(payload).get(RELEASE_ASSET_NAME)
 
 
 # --- Piece 3: install-side filesystem logic (pure, no HA / no network) -------
@@ -173,20 +179,54 @@ class InstallError(Exception):
     """A self-update step failed in a way the caller should surface verbatim."""
 
 
-def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
-    """Find ``custom_components/<domain>`` (with a manifest) in an extracted release.
+def verify_release_signature(
+    archive: bytes, signature: bytes, public_key_b64: str
+) -> None:
+    """Raise InstallError unless ``signature`` is the release key's signature.
 
-    A GitHub source zipball extracts under a single top-level folder
-    (``owner-repo-<sha>/``), so the integration sits some levels deep. A
-    packaged asset may put it at the root. We search for the manifest and
-    take the shallowest hit, ignoring any nested test fixtures.
+    Pure Ed25519 over the exact bytes of the downloaded ``casasmart.zip``
+    (``openssl pkeyutl -sign -rawin`` in scripts/release.sh produces it).
+    """
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        key = Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(public_key_b64, validate=True)
+        )
+    except (ValueError, binascii.Error) as err:
+        raise InstallError(f"release signing key is unusable: {err}") from err
+    try:
+        key.verify(signature, archive)
+    except InvalidSignature as err:
+        raise InstallError("release signature does not verify") from err
+
+
+def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
+    """Find the integration dir (the one holding its manifest) in an extracted release.
+
+    The packaged ``casasmart.zip`` asset — the HACS layout — holds the
+    integration files at the zip root, so a root ``manifest.json`` for this
+    domain wins. Otherwise look for ``custom_components/<domain>`` (a source
+    tree) and take the shallowest hit, ignoring any nested test fixtures.
     """
     root = Path(extracted_root)
+    if _manifest_domain(root / "manifest.json") == domain:
+        return root
     matches = sorted(
         root.rglob(f"custom_components/{domain}/manifest.json"),
         key=lambda p: len(p.parts),
     )
     return matches[0].parent if matches else None
+
+
+def _manifest_domain(manifest: Path) -> str | None:
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    domain = data.get("domain") if isinstance(data, dict) else None
+    return domain if isinstance(domain, str) else None
 
 
 def read_manifest_version(integration_dir: Any) -> str | None:

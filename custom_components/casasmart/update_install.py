@@ -4,15 +4,22 @@
 turns the "update available" state Piece 1 reports into an actual upgrade:
 
     1. Re-check the latest release; refuse (409) if nothing is newer.
-    2. Download the release artifact (a ``.zip`` asset, else the source
-       zipball) to a temp file.
-    3. Extract it, locate ``custom_components/casasmart`` inside, and verify
-       its ``manifest.json`` version matches the tag we fetched.
-    4. Atomically swap the live integration dir for the new tree, keeping a
+    2. Download the release's ``casasmart.zip`` asset (the file HACS
+       installs) and its ``casasmart.zip.sig``. No signature, no install —
+       the source zipball is never used.
+    3. Verify the Ed25519 signature against the pinned release key
+       (``const.UPDATE_SIGNING_PUBLIC_KEY_B64``) BEFORE extracting anything.
+    4. Extract it (every member must stay inside the staging dir), locate
+       the integration, and verify its ``manifest.json`` version matches
+       the tag we fetched.
+    5. Atomically swap the live integration dir for the new tree, keeping a
        ``.bak`` rollback.
-    5. Schedule an HA restart *after* the HTTP response flushes, so the app
+    6. Schedule an HA restart *after* the HTTP response flushes, so the app
        gets a clean "installing" reply before the connection drops; the
        container's restart policy brings HA back on the new code.
+
+A hub managed by HACS should be updated through HACS: a self-update swaps
+the files without HACS knowing, so HACS keeps reporting the old version.
 
 The filesystem mechanics (locate / version-match / atomic swap) are pure and
 live in ``update.py`` so they unit-test with temp dirs. This module owns the
@@ -32,12 +39,13 @@ from pathlib import Path
 import aiohttp
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, UPDATE_SIGNING_PUBLIC_KEY_B64
 from .update import (
     InstallError,
     locate_integration_dir,
     read_manifest_version,
     swap_integration_dir,
+    verify_release_signature,
     versions_match,
 )
 from .update_api import UpdateChecker
@@ -47,14 +55,14 @@ _LOGGER = logging.getLogger(__name__)
 # Downloading a release tarball is heavier than the status poll — give it
 # room, but still bounded so a wedged transfer can't hang forever.
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120)
-# GitHub's zipball API endpoint (our fallback when a release ships no packaged
-# ``.zip`` asset) rejects ``application/octet-stream`` with a 415 — it wants a
-# GitHub media type. ``browser_download_url`` asset downloads ignore Accept, so
-# ``vnd.github+json`` is correct for both artifact paths.
+# ``browser_download_url`` asset downloads ignore Accept; a GitHub media type is
+# kept so the request looks like every other GitHub API call the hub makes.
 _DOWNLOAD_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "CasaSmart-Hub",
 }
+# An Ed25519 signature is 64 bytes; anything much larger is not one.
+_MAX_SIGNATURE_BYTES = 1024
 # Seconds to let the HTTP response flush to the app before we pull the rug.
 _RESTART_GRACE_SECONDS = 2.0
 
@@ -76,9 +84,11 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
         raise InstallError("no update available")
 
     target_version = status.get("latest_version")
-    download_url = await checker.async_download_url()
+    download_url, signature_url = await checker.async_artifact_urls()
     if not download_url:
-        raise InstallError("release has no downloadable artifact")
+        raise InstallError("release has no casasmart.zip asset")
+    if not signature_url:
+        raise InstallError("release is not signed (no casasmart.zip.sig)")
 
     _LOGGER.info("Self-update: installing %s from %s", target_version, download_url)
 
@@ -89,6 +99,9 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
         staging_path = Path(staging)
         archive = staging_path / "release.zip"
         await _download_archive(hass, download_url, archive)
+        signature = staging_path / "release.zip.sig"
+        await _download_archive(hass, signature_url, signature)
+        await hass.async_add_executor_job(_verify_archive, archive, signature)
 
         extracted = staging_path / "extracted"
         _extract_zip(archive, extracted)
@@ -135,14 +148,25 @@ async def _download_archive(hass: HomeAssistant, url: str, dest: Path) -> None:
         raise InstallError(f"download failed: {err}") from err
 
 
+def _verify_archive(archive: Path, signature: Path) -> None:
+    """Refuse an archive the release key didn't sign (runs in the executor)."""
+    sig = signature.read_bytes()
+    if not sig or len(sig) > _MAX_SIGNATURE_BYTES:
+        raise InstallError("release signature is missing or malformed")
+    verify_release_signature(archive.read_bytes(), sig, UPDATE_SIGNING_PUBLIC_KEY_B64)
+
+
 def _extract_zip(archive: Path, dest: Path) -> None:
-    """Extract ``archive`` into ``dest``, rejecting path-traversal entries."""
+    """Extract ``archive`` into ``dest``, rejecting any entry that escapes it."""
     dest.mkdir(parents=True, exist_ok=True)
+    root = dest.resolve()
     try:
         with zipfile.ZipFile(archive) as bundle:
             for member in bundle.namelist():
                 target = (dest / member).resolve()
-                if not str(target).startswith(str(dest.resolve())):
+                # Path containment, not a string prefix: "<dest>_x/..." shares
+                # the prefix but is outside the staging dir.
+                if not target.is_relative_to(root):
                     raise InstallError(f"unsafe path in archive: {member}")
             bundle.extractall(dest)
     except zipfile.BadZipFile as err:

@@ -71,11 +71,13 @@ class UpdateChecker:
             await self._async_refresh()
         return self._build_status()
 
-    async def async_download_url(self) -> str | None:
-        """The latest release's install artifact URL (Piece 3), refreshing if stale."""
+    async def async_artifact_urls(self) -> tuple[str | None, str | None]:
+        """``(casasmart.zip URL, signature URL)`` of the latest release, refreshing if stale."""
         if not self._is_fresh():
             await self._async_refresh()
-        return self._latest.download_url if self._latest is not None else None
+        if self._latest is None:
+            return None, None
+        return self._latest.download_url, self._latest.signature_url
 
     async def _async_refresh(self) -> None:
         async with self._lock:
