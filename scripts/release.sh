@@ -53,7 +53,8 @@ gates() {
   local mv
   mv="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$manifest")"
   [ "$mv" = "$version" ] || die "manifest.json version is $mv, expected $version"
-  grep -q "^## \[$version\]" CHANGELOG.md || die "CHANGELOG.md has no '## [$version]' section"
+  grep -qE "^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md \
+    || die "CHANGELOG.md needs a dated '## [$version] - YYYY-MM-DD' section"
   step "tests"
   run_python -m pytest -q
 }
