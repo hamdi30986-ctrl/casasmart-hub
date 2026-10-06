@@ -1,3 +1,9 @@
+"""Hub TLS identity and the dedicated HTTPS listener.
+
+A permanent P-256 identity key (what paired phones pin) signs a renewable leaf
+certificate; ``CasaSmartTlsServer`` serves the CasaSmart views behind it.
+"""
+
 from __future__ import annotations
 
 import logging

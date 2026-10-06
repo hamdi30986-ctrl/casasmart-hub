@@ -1,3 +1,9 @@
+"""Config and options flows for the CasaSmart Hub integration.
+
+Setup asks for the push relay URL, its activation code and an optional
+Cloudflare tunnel domain; options edit the same settings plus the tunnel toggle.
+"""
+
 from __future__ import annotations
 
 import secrets

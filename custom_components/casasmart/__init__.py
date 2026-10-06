@@ -1,3 +1,9 @@
+"""CasaSmart Hub integration: config-entry setup, teardown and services.
+
+Opens the hub's storage and engines, registers the REST/WS views and
+``casasmart.*`` services, and starts the TLS, mDNS, push and tunnel runtimes.
+"""
+
 from __future__ import annotations
 
 import logging

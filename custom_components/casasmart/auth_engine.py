@@ -1,3 +1,9 @@
+"""Auth engine: device enrollment, challenge-response login and JWT checks.
+
+Owns the paired-device records and the role permission table. No Home
+Assistant imports; storage-touching methods are synchronous (call via executor).
+"""
+
 from __future__ import annotations
 
 import logging

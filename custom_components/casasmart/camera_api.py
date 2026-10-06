@@ -1,3 +1,9 @@
+"""Camera endpoints: JWT-gated snapshots, HLS stream tickets and the HLS proxy.
+
+The proxy authenticates by the short-lived ticket in its URL path, because the
+app's HLS player cannot send an ``Authorization`` header.
+"""
+
 from __future__ import annotations
 
 import logging

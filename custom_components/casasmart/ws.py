@@ -1,3 +1,9 @@
+"""CasaSmart WebSocket server (``/api/casasmart/ws``).
+
+Authenticates in-band with the first frame, then pushes room-scoped state
+changes and content-free change nudges. Frame shapes live in ``ws_protocol``.
+"""
+
 from __future__ import annotations
 
 import asyncio

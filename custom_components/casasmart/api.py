@@ -1,3 +1,9 @@
+"""Core CasaSmart REST views and the list of every view the hub serves.
+
+Handshake, health, devices, device commands and history live here;
+``build_views`` collects them together with the other ``*_api`` modules' views.
+"""
+
 from __future__ import annotations
 
 import asyncio

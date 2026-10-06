@@ -1,3 +1,9 @@
+"""CasaSmart water-tank REST endpoints.
+
+Shelly provisioning, the token-authenticated reading ingest the Shelly posts
+to, and the app's device, readings, calibration and status views.
+"""
+
 from __future__ import annotations
 
 import asyncio

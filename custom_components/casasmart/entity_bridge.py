@@ -1,3 +1,9 @@
+"""Entity bridge: which HA entities the app sees and how they are shaped.
+
+Exposed domains, per-domain attribute allowlists, state serialization and
+command validation. No Home Assistant imports, so it is unit-testable alone.
+"""
+
 from __future__ import annotations
 
 from typing import Any

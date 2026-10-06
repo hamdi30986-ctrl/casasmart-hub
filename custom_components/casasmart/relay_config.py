@@ -1,3 +1,9 @@
+"""Push relay configuration helpers.
+
+Validates the relay base URL (a public HTTPS origin), derives its endpoints,
+decides when a settings change needs a reload, and migrates legacy options.
+"""
+
 from __future__ import annotations
 
 import ipaddress

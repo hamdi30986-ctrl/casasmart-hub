@@ -1,3 +1,9 @@
+"""Hub registration with the push relay.
+
+``RelayRegistrar`` sends the push public key, signed by the hub's TLS identity,
+and retries with backoff until the relay accepts or permanently refuses it.
+"""
+
 from __future__ import annotations
 
 import asyncio
