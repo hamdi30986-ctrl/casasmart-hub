@@ -25,7 +25,9 @@ class WiringTest(unittest.TestCase):
         self.assertIn(
             "entry.async_on_unload(entry.runtime_data.suggestions.stop)", setup
         )
-        self.assertIn('storage.table("suggestions_v1").clear()', setup)
+        # Factory reset clears the suggestion rules (const.FACTORY_RESET_TABLES).
+        self.assertIn("for table in FACTORY_RESET_TABLES:", setup)
+        self.assertIn('"suggestions_v1",', (ROOT / "const.py").read_text())
 
     def test_real_websocket_callback_never_transmits_private_event_data(self):
         tree = ast.parse((ROOT / "ws.py").read_text())

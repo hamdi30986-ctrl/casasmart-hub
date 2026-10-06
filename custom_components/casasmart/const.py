@@ -79,6 +79,42 @@ EVENT_AUDIO_CHANGED = "casasmart_audio_changed"
 
 UPDATE_REPO_CONFIG_KEY = "update_repo"
 
+# Storage tables ``casasmart.factory_reset`` clears: the app layer plus the
+# registry organization layer (floors, rooms, tags, assignments, grouping and
+# the room-move receipts), which re-seeds from Home Assistant on reload.
+FACTORY_RESET_TABLES = (
+    "auth_devices",
+    "pairing_codes",
+    "recovery_codes",
+    "registry_favorites",
+    "registry_scenes",
+    "user_settings",
+    "now_recents",
+    "now_room_policies",
+    "now_config",
+    "now_restore_sets",
+    "now_idempotency",
+    "suggestions_v1",
+    "push_tokens",
+    "hq_notifications",
+    "alarm_history",
+    "alarm_state",
+    "audio_config",
+    "audio_speakers",
+    "energy_configs",
+    "energy_state",
+    "energy_flags",
+    "registry_floors",
+    "registry_rooms",
+    "registry_room_tags",
+    "registry_room_moves",
+    "registry_devices",
+    "registry_user_devices",
+)
+# Tables a factory reset deliberately keeps: house configuration rather than
+# owner data — the alarm's sensor zones and settings, and the tanks.
+FACTORY_RESET_KEPT_TABLES = ("alarm_settings", "alarm_zones", "tank_devices")
+
 # Ed25519 public key that signs every published casasmart.zip. The release
 # script signs with the matching private key, which lives only on the release
 # host; the built-in updater refuses any artifact this key did not sign.

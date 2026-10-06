@@ -57,6 +57,7 @@ from .const import (
     DOMAIN,
     EVENT_AUTH_CHANGED,
     EVENT_ENERGY_CHANGED,
+    FACTORY_RESET_TABLES,
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
@@ -1237,40 +1238,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
 
         def _wipe() -> None:
-            runtime_data.storage.table("auth_devices").clear()
-            runtime_data.storage.table("pairing_codes").clear()
-            runtime_data.storage.table("recovery_codes").clear()
-
-            runtime_data.storage.table("registry_favorites").clear()
-
-            runtime_data.storage.table("registry_scenes").clear()
-
-            runtime_data.storage.table("user_settings").clear()
-            runtime_data.storage.table("now_recents").clear()
-            runtime_data.storage.table("now_room_policies").clear()
-            runtime_data.storage.table("now_config").clear()
-            runtime_data.storage.table("now_restore_sets").clear()
-            runtime_data.storage.table("now_idempotency").clear()
-            runtime_data.storage.table("suggestions_v1").clear()
-
-            runtime_data.storage.table("push_tokens").clear()
-            runtime_data.storage.table("hq_notifications").clear()
-
-            runtime_data.storage.table("alarm_history").clear()
-            runtime_data.storage.table("alarm_state").clear()
-
-            runtime_data.storage.table("audio_config").clear()
-            runtime_data.storage.table("audio_speakers").clear()
-
-            runtime_data.storage.table("energy_configs").clear()
-            runtime_data.storage.table("energy_state").clear()
-            runtime_data.storage.table("energy_flags").clear()
+            for table in FACTORY_RESET_TABLES:
+                runtime_data.storage.table(table).clear()
             runtime_data.storage.energy_events().clear()
-
-            runtime_data.storage.table("registry_floors").clear()
-            runtime_data.storage.table("registry_rooms").clear()
-            runtime_data.storage.table("registry_devices").clear()
-            runtime_data.storage.table("registry_user_devices").clear()
             runtime_data.hub_config.delete("registry_imported")
 
             runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
@@ -1282,7 +1252,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
             "audio config + speakers, Energy Saving data, and the registry "
-            "org layer (floors/rooms/"
+            "org layer (floors/rooms/tags/"
             "assignments/grouping) — re-seeding from HA on reload; printed "
             "codes rotated"
         )
