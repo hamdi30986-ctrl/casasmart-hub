@@ -359,7 +359,7 @@ class CasaSmartAudioSpeakerView(_AudioView):
         # also doubles as the existence check (404 for an unknown id). Then drop
         # it from the registry and, best-effort, tell the Pi to wipe + re-enter
         # setup and clear its retained topics so it can't resurrect as a
-        # discovery ghost on the next reconnect (M3).
+        # discovery ghost on the next reconnect.
         try:
             reset_topic, reset_msg = audio.build_command(mac6, CMD_RESET)
             norm_mac6 = normalize_mac6(mac6)
