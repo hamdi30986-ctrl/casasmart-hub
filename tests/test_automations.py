@@ -1,4 +1,4 @@
-"""Unit tests for the pure automation-config logic (B16 stage 3c-3).
+"""Unit tests for the pure automation-config logic.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

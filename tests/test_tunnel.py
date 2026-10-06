@@ -1,4 +1,4 @@
-"""Tests for tunnel.py — the B7 tunnel-URL validation (pure, stdlib).
+"""Tests for tunnel.py — the tunnel-URL validation (pure, stdlib).
 
 The handshake's tunnel block itself is verified live (curl against the
 dev hub with/without the config key); this covers the fail-closed
@@ -85,7 +85,7 @@ class TestNormalizeTunnelUrl(unittest.TestCase):
         self.assertIsNone(normalize_tunnel_url("https://host.example#frag"))
 
     def test_empty_query_and_fragment_delimiters_rejected(self) -> None:
-        # AUDIT regression: urlsplit reports `https://host?` as an EMPTY
+        # Regression: urlsplit reports `https://host?` as an EMPTY
         # (falsy) query — the delimiter itself must be the gate, or a
         # degenerate URL gets advertised that the app rejects.
         self.assertIsNone(normalize_tunnel_url("https://host.example?"))

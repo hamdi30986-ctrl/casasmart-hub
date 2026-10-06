@@ -1,4 +1,4 @@
-"""Unit tests for the B1.1 storage layer (stdlib unittest, no dependencies).
+"""Unit tests for the storage layer (stdlib unittest, no dependencies).
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

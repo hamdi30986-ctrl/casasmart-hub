@@ -1,16 +1,16 @@
-"""Config-flow tests — Phase 2 of the pairing redesign (cloud stays on).
+"""Config-flow tests — a fresh install with a domain keeps the tunnel on.
 
 Pins the fresh-install seeding contract of ``config_flow.py``:
 
 * Providing a Cloudflare domain at setup seeds ``tunnel_enabled: True`` —
   the reconciler in ``__init__.py`` reads options with a False fallback, so
   the key must be PRESENT and True or a fresh install would still stop the
-  add-on. This is the Phase 2 change (was: seed False = auto-disable).
+  add-on.
 * No domain / invalid domain behave exactly as before.
 * The gear-icon options flow KEEPS the on/off toggle as a manual emergency
   switch: submitting OFF persists OFF, ON persists ON, and the toggle is
-  still part of the options schema. Phase 2 removes only the automatic
-  disable, never the manual one.
+  still part of the options schema. Only the automatic disable is gone,
+  never the manual one.
 
 Harness note: Home Assistant's real ``ConfigFlow``/``OptionsFlow`` can only
 run under the flow *manager* (``async_create_entry`` dereferences
@@ -251,11 +251,11 @@ def _options_input(
 
 
 # --------------------------------------------------------------------------- #
-# Fresh install (async_step_user) — the Phase 2 contract
+# Fresh install (async_step_user) — the seeding contract
 # --------------------------------------------------------------------------- #
 class FreshInstallSeeding(unittest.IsolatedAsyncioTestCase):
     async def test_domain_seeds_tunnel_enabled_true(self) -> None:
-        """THE Phase 2 assertion: cloud stays on at fresh install.
+        """THE core assertion: cloud stays on at fresh install.
 
         The key must be PRESENT and True — the reconciler falls back to
         False on an absent key and would stop the add-on.
@@ -363,7 +363,7 @@ class FreshInstallSeeding(unittest.IsolatedAsyncioTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Options flow — the manual emergency switch survives Phase 2
+# Options flow — the manual emergency switch is kept
 # --------------------------------------------------------------------------- #
 class OptionsFlowKeepsManualSwitch(unittest.IsolatedAsyncioTestCase):
     async def test_toggle_still_in_options_schema(self) -> None:

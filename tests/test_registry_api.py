@@ -1,10 +1,10 @@
 """View-layer tests for ``registry_api`` — the favorites wire contract.
 
-Pins the Phase 6/7 logic that lives in the VIEW, not the engine:
+Pins the logic that lives in the VIEW, not the engine:
 * GET filters phantom (gone/unserved) favorites without mutating storage, and
   scopes the response.
-* PUT validates served+in-scope, is member-keyed (Phase 5), preserves a scoped
-  caller's out-of-scope favorites (Phase 7), and fires the re-pull nudge.
+* PUT validates served+in-scope, is member-keyed, preserves a scoped
+  caller's out-of-scope favorites, and fires the re-pull nudge.
 
 Container/CI only (imports Home Assistant). Run:
     docker exec homeassistant python3 -m unittest tests.test_registry_api -v
@@ -187,7 +187,7 @@ class FavoritesPut(FavoritesViewTestCase):
         self.assertEqual(body["entity_ids"], [])  # different member → empty
 
     async def test_scoped_put_preserves_out_of_scope(self) -> None:
-        # Phase 7: a room-scoped caller's replace must not delete favorites in
+        # A room-scoped caller's replace must not delete favorites in
         # rooms it can't see.
         dev, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
         member = self.rt.auth.member_id_for(dev)

@@ -1,4 +1,4 @@
-"""Unit tests for MB-1: the Shelly tank engine + script builder.
+"""Unit tests for the Shelly tank engine + script builder.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -232,7 +232,7 @@ class ScriptBuilderTests(unittest.TestCase):
 
     def test_script_name_constant(self):
         # The app's legacy cleanup path removes scripts by this exact name;
-        # renaming it would orphan Supabase-era scripts on devices.
+        # renaming it would orphan scripts already installed on devices.
         self.assertEqual(TANK_SCRIPT_NAME, "CasaSmart")
 
 

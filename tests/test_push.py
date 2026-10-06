@@ -1,4 +1,4 @@
-"""Unit tests for B8: push-token store.
+"""Unit tests for the push-token store.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

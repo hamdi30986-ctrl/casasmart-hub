@@ -1,4 +1,4 @@
-"""P3 wire-contract tests for Energy Saving REST and lockout responses.
+"""Wire-contract tests for Energy Saving REST and lockout responses.
 
 These use the shared real-HA view harness and therefore run in the hub/CI
 environment; the HA-free local suite skips them consistently with other views.

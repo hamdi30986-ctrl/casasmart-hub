@@ -1,4 +1,4 @@
-"""Unit tests for the pure self-update logic (B5).
+"""Unit tests for the pure self-update logic.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

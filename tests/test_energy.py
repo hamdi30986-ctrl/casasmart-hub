@@ -1,4 +1,4 @@
-"""P1 tests for the persistent, Home-Assistant-free Energy Saving engine."""
+"""Tests for the persistent, Home-Assistant-free Energy Saving engine."""
 
 import sys
 import tempfile

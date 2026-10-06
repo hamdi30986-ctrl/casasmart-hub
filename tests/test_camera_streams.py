@@ -1,4 +1,4 @@
-"""Unit tests for camera stream tickets + HLS path validation (B16 3c-3).
+"""Unit tests for camera stream tickets + HLS path validation.
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

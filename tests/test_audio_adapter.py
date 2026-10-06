@@ -1,4 +1,4 @@
-"""Unit tests for B14 piece 2: the hub-side audio adapter (MQTT/HA glue).
+"""Unit tests for the hub-side audio adapter (MQTT/HA glue).
 
 Like the alarm adapter, this is pure glue, so it imports ``homeassistant.*`` at
 module top and we inject light stubs into ``sys.modules`` BEFORE importing it.
@@ -211,7 +211,7 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.client.fire_connect(rc=5)  # auth rejected
         self.assertEqual(self.client.subscriptions, [])
 
-    # -- M4: stored athan re-published retained on every (re)connect ----------
+    # -- Stored athan re-published retained on every (re)connect --------------
 
     async def test_on_connect_republishes_stored_athan_retained(self):
         self.engine.set_broker(host="h", port=1883)
@@ -240,7 +240,7 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.client.fire_connect(rc=5)
         self.assertFalse(any(p[0] == "athan/config" for p in self.client.published))
 
-    # -- M3: clearing a removed speaker's retained ghosts ---------------------
+    # -- Clearing a removed speaker's retained ghosts -------------------------
 
     async def test_clear_speaker_retained_wipes_status_and_state(self):
         await self._started()

@@ -1,4 +1,4 @@
-"""Tests for discovery.py — the mDNS advertiser's pure builder (B6).
+"""Tests for discovery.py — the mDNS advertiser's pure builder.
 
 Covers descriptor/TXT/instance-name construction only; the zeroconf
 lifecycle wrapper (:class:`MdnsAdvertiser`) is verified live — the app

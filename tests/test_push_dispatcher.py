@@ -1,4 +1,4 @@
-"""Unit tests for B8 Piece 4: the hub push dispatcher.
+"""Unit tests for the hub push dispatcher.
 
 The dispatcher is Home Assistant glue, so (like the alarm adapter) it imports
 ``homeassistant.*`` at module top. HA isn't installed in the test env, so the
@@ -528,7 +528,7 @@ class TransitionMatrixTests(unittest.TestCase):
 
 
 class WidgetRefreshTests(DispatcherTestCase):
-    """Coalesced silent widget-refresh push (Phase 8)."""
+    """Coalesced silent widget-refresh push."""
 
     def _ev(self, entity_id, old, new):
         return {
@@ -615,7 +615,7 @@ class _EntriesWithEngine:
 
 
 class DevicePairedTests(DispatcherTestCase):
-    """Phase 5 (D6): the device-paired owner notification."""
+    """The device-paired owner notification."""
 
     async def test_device_paired_reaches_owner_only(self) -> None:
         self.push_store.register("dev-owner", "fcm-owner", "ios")

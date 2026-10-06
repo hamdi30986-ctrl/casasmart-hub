@@ -1,4 +1,4 @@
-"""Unit tests for the B1.5 WebSocket protocol layer (stdlib unittest).
+"""Unit tests for the WebSocket protocol layer (stdlib unittest).
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v

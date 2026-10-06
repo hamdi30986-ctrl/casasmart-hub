@@ -1,4 +1,4 @@
-"""P2 tests for the Home Assistant Energy Saving adapter.
+"""Tests for the Home Assistant Energy Saving adapter.
 
 The real EnergyEngine runs over temporary SQLite storage.  Only HA's event
 bus, state machine, service registry, and timers are faked, which keeps the

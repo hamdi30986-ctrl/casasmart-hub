@@ -148,7 +148,7 @@ def _new_code() -> str:
 def _code_class(code_id: str, record: dict[str, Any]) -> str:
     """A stored code's class, fail-closed.
 
-    Pre-Phase-1 records lack the ``code_class`` field, so classify by
+    Older records lack the ``code_class`` field, so classify by
     identity: the bootstrap code has the one fixed id, everything else was
     admin-minted (``generate_code`` only issues ISSUABLE_ROLES). Anything
     carrying the admin role is bootstrap-class regardless of stored metadata —

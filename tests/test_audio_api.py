@@ -1,10 +1,10 @@
 """View-layer tests for ``audio_api`` — the speaker/athan/broker wire contract.
 
-Pins the Phase 6/7 logic that lives in the VIEW + the thin engine validation it
+Pins the logic that lives in the VIEW + the thin engine validation it
 surfaces as HTTP status codes:
 * speakers GET/POST (enroll), speaker PUT/DELETE — registry round-trip + bad-mac
   rejection.
-* athan GET/PUT — the Phase-7 opaque-blob round-trip (extra scheduler keys
+* athan GET/PUT — the opaque-blob round-trip (extra scheduler keys
   survive) + the enabled/lat validation path.
 * broker + pa-config GET — secret REDACTION (never plaintext).
 * command + broadcast — command vocabulary (volume/stop ok, unknown 400, play is
@@ -309,7 +309,7 @@ class AthanView(AudioViewTestCase):
         self.assertEqual(body["location"]["timezone"], "Europe/Istanbul")
 
     async def test_put_stores_and_extra_keys_survive(self) -> None:
-        # Phase-7 opaque-blob round-trip: the hub does NOT model per_prayer / a
+        # Opaque-blob round-trip: the hub does NOT model per_prayer / a
         # nested override map, yet those EXTRA keys must survive PUT -> GET.
         config = {
             "enabled": True,
@@ -785,7 +785,7 @@ class ProvisionView(AudioViewTestCase):
 
 
 class SpeakerScope(AudioViewTestCase):
-    """Phase 8 — a room-scoped user sees only its rooms' speakers (the speaker's
+    """A room-scoped user sees only its rooms' speakers (the speaker's
     free-text room label matched vs the caller's scoped area names); an unroomed
     speaker is shared house infra; admin/unscoped sees all; fail-closed."""
 

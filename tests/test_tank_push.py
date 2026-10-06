@@ -1,4 +1,4 @@
-"""Unit tests for B8 Piece 4b: the tank low-water + offline push monitor.
+"""Unit tests for the tank low-water + offline push monitor.
 
 ``TankPushMonitor`` lives in ``push_dispatcher.py`` (HA glue), so — like the
 dispatcher tests — the shared ``homeassistant`` stub package (``tests/hastubs``)

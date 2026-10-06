@@ -1,4 +1,4 @@
-"""HA-free P3 tests for wizard discovery/config cross-validation."""
+"""HA-free tests for wizard discovery/config cross-validation."""
 
 import sys
 import unittest

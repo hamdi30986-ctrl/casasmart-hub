@@ -2,7 +2,7 @@
 
 Favorites live in ``test_registry_api``; this suite pins the floors/rooms/
 scenes CRUD, the device-assignment PATCH/DELETE, the registry FEED projection,
-and the auth gates. The crown jewel is the Phase-1 assignment fix: the device
+and the auth gates. The crown jewel is the assignment fix: the device
 PATCH gates on ``is_assignable`` (registry-exists), NOT ``is_served`` — so an
 entity the integration HID (hidden_by set, is_served False) but that EXISTS in
 the registry stays editable, while a genuine ghost (no registry, no state) 404s.
@@ -221,11 +221,11 @@ class RoomsCrud(RegistryWritesTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Device assignment PATCH/DELETE — THE Phase-1 is_assignable regression
+# Device assignment PATCH/DELETE — THE is_assignable regression
 # --------------------------------------------------------------------------- #
 class DeviceAssignment(RegistryWritesTestCase):
     async def test_patch_hidden_but_registered_entity_succeeds(self) -> None:
-        """The Phase-1 fix: a HIDDEN entity (is_served False) that still EXISTS
+        """The fix: a HIDDEN entity (is_served False) that still EXISTS
         in the registry (is_assignable True) must remain assignable."""
         _, hdr = H.session(self.rt.auth, role="admin")
         # Pre-create a room to assign into.

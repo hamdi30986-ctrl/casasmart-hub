@@ -1,4 +1,4 @@
-"""Unit tests for the B1.4 entity bridge (stdlib unittest, no dependencies).
+"""Unit tests for the entity bridge (stdlib unittest, no dependencies).
 
 Run from the repo root:
     python3 -m unittest discover -s tests -v
@@ -47,7 +47,7 @@ class TestExposure(unittest.TestCase):
     def test_exposed_domains(self):
         self.assertTrue(is_exposed("light.living1"))
         self.assertTrue(is_exposed("climate.bedroom"))
-        # 3c-3: automation joined the surface (routines tab state feed).
+        # Automation is on the surface (routines tab state feed).
         self.assertTrue(is_exposed("automation.athan"))
         self.assertFalse(is_exposed("persistent_notification.x"))
         self.assertFalse(is_exposed("update.core"))
@@ -58,7 +58,7 @@ class TestExposure(unittest.TestCase):
 
 
 class TestCategoryPolicy(unittest.TestCase):
-    """B16 3c-4a: config/diagnostic exposure policy."""
+    """Config/diagnostic exposure policy."""
 
     def test_config_entities_served_any_domain(self):
         self.assertTrue(is_category_served("config", "switch.plug_child_lock", None))
@@ -180,7 +180,7 @@ class TestSerializeState(unittest.TestCase):
         self.assertEqual(attrs, {"brightness": 200, "rgb_color": [255, 0, 0]})
 
     def test_light_color_state_attributes_forwarded(self):
-        # B16 stage 3c-2: the app's capability detection reads hs/xy and
+        # The app's capability detection reads hs/xy and
         # the mired scale — they must survive serialization.
         state = FakeState(
             "light.bedroom_left",
@@ -276,7 +276,7 @@ class TestValidateCommand(unittest.TestCase):
 
 
 class TestStage3aWidening(unittest.TestCase):
-    """B16 stage 3a: the dialect the app's sheets actually speak."""
+    """The dialect the app's sheets actually speak."""
 
     def test_light_brightness_pct_and_effect(self):
         # lighting_control_sheet sends percent sliders and effect taps.
@@ -393,14 +393,14 @@ class TestStage3aWidening(unittest.TestCase):
             )
 
     def test_installer_ops_not_exposed(self):
-        # 3c-3: automation is exposed for state + toggle/trigger, but the
+        # Automation is exposed for state + toggle/trigger, but the
         # installer verbs (reload) are still never app commands.
         self.assertTrue(is_exposed("automation.athan"))
         with self.assertRaises(CommandError):
             validate_command("automation.athan", "reload", {})
 
     def test_automation_toggle_and_trigger(self):
-        # 3c-3: the routines tab's three verbs, no data ever.
+        # The routines tab's three verbs, no data ever.
         self.assertEqual(
             validate_command("automation.casa_automation_x", "turn_on", {}),
             ("automation", "turn_on", {}),

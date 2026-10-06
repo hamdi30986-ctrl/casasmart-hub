@@ -1,4 +1,4 @@
-"""Migration Phase 1: nested gangs + presentation + control_entity_ids + room_id.
+"""Registry gangs: nested gangs + presentation + control_entity_ids + room_id.
 
 Run from the repo root:
     python3 -m unittest tests.test_registry_gangs -v
@@ -139,9 +139,9 @@ class GangsPhase1Tests(unittest.TestCase):
         self.assertEqual(reloaded["room_id"], "hall")
 
     def test_serves_defaults_for_legacy_record(self):
-        # A record written BEFORE P1 has no gangs/room_id/control_entity_ids
-        # keys (mirrors the 25 live records). The serve helper must still emit
-        # them so the P0 client never sees a missing field.
+        # A record written before gangs existed has no gangs/room_id/
+        # control_entity_ids keys. The serve helper must still emit them so
+        # an older client never sees a missing field.
         self.engine._user_devices["legacy-dev"] = {
             "entity_ids": ["switch.x", "switch.y"],
             "gang_types": {"x": "light"},
@@ -165,7 +165,7 @@ class GangsPhase1Tests(unittest.TestCase):
 
 
 class GangCommandsPhase3Tests(unittest.TestCase):
-    """Phase 3: per-gang presentation/type/name-icon commands + enforcement."""
+    """Per-gang presentation/type/name-icon commands + enforcement."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -255,8 +255,8 @@ class GangCommandsPhase3Tests(unittest.TestCase):
                 fn()
 
     def test_legacy_empty_gangs_record_has_no_flippable_gang(self):
-        # The 25 live records serve gangs:{} — every gang command must 404 until
-        # the Phase-6 migration populates gangs.
+        # A legacy record serves gangs:{} — every gang command must 404 until
+        # its gangs are populated.
         self.engine.upsert_user_device("legacy", entity_ids=["switch.z"])
         with self.assertRaises(UnknownItemError):
             self.engine.set_gang_presentation("legacy", "switch.z", "solo")
@@ -282,8 +282,8 @@ class GangCommandsPhase3Tests(unittest.TestCase):
         )
 
     def test_upsert_rejects_unknown_gang_type(self):
-        # Phase 3 enforcement reaches the bulk write path too. Use a relay NOT in
-        # the setUp "grp" record so the H2 double-grab guard doesn't fire here.
+        # The gang-type enforcement reaches the bulk write path too. Use a relay
+        # NOT in the setUp "grp" record so the double-grab guard doesn't fire here.
         with self.assertRaises(RegistryError):
             self.engine.upsert_user_device(
                 "x",

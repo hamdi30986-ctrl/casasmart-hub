@@ -1,8 +1,8 @@
 """View-layer tests for ``settings_api`` — the per-person settings contract.
 
-Pins the wire seam of ``GET/PUT /api/casasmart/me/settings`` (mini-block
-MB-2): member-keyed read/write (Phase 5 — a person's devices share one doc,
-different people are isolated), unknown-field + validation rejection (400),
+Pins the wire seam of ``GET/PUT /api/casasmart/me/settings``: member-keyed
+read/write (a person's devices share one doc, different people are
+isolated), unknown-field + validation rejection (400),
 and the settings re-pull nudge on a successful PUT.
 
 The harness ``_Runtime`` does not expose ``user_settings`` (the view reads
@@ -90,7 +90,7 @@ class SettingsPut(SettingsViewTestCase):
         dev, hdr = H.session(self.rt.auth, role="admin")
         member = self.rt.auth.member_id_for(dev)
         # A tank pseudo-tile round-trips without needing a served HA entity
-        # (entity-tiles now ride the Phase-8 served+scope write-guard).
+        # (entity-tiles ride the served+scope write-guard).
         tiles = [{"type": "tank", "entityId": "tank_1", "name": "Tank"}]
         status, body = await self._put(
             hdr, {"display_name": "Sara", "widget_tiles": tiles}
@@ -187,7 +187,7 @@ class SettingsPut(SettingsViewTestCase):
 
 
 class WidgetTileFilter(SettingsViewTestCase):
-    """Phase 8 — widget_tiles get the favorites posture: phantom entity-tiles
+    """widget_tiles get the favorites posture: phantom entity-tiles
     are filtered without mutation on GET, served+scope write-guard on PUT;
     non-HA pseudo-tiles (tank/scene/security) pass through untouched."""
 

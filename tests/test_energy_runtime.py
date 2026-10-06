@@ -1,4 +1,4 @@
-"""P3 tests for Energy Saving permissions, automation gating, and runtime order."""
+"""Tests for Energy Saving permissions, automation gating, and runtime order."""
 
 from __future__ import annotations
 
