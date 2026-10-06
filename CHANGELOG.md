@@ -9,6 +9,14 @@ A hardening release. The REST API, WebSocket frames, handshake capabilities and
 storage schema (version 4) are unchanged, so existing apps keep working.
 
 ### Fixed
+- Pairing a new phone, owner recovery and keyless speaker provisioning work on
+  Docker Desktop hosts again. Docker Desktop rewrites every source address
+  reaching the container, and after a restart it can pick a public one, so
+  these LAN-only requests were refused. The hub now detects Docker Desktop and
+  trusts its loopback-published TLS listener (behind the LAN-only relay in
+  `deploy/macos`) as the LAN proof. The new `lan_relay_ingress` hub-config key
+  (`auto` / `on` / `off`) can override the detection. Other hubs are unchanged,
+  and Cloudflare-proxied requests are never LAN.
 - `hacs.json` now requires Home Assistant 2025.3. The code depends on
   `config_entries.async_loaded_entries`, which arrived in 2025.3; on 2025.1–2025.2
   the integration failed at setup.
@@ -42,7 +50,7 @@ storage schema (version 4) are unchanged, so existing apps keep working.
 ### Internal
 - Restored the comments and docstrings removed by the 1.7.0 sanitize, wherever
   the code is provably unchanged (AST-checked).
-- Restored the original test suite: 1,140 tests, plus about 150 that need a real
+- Restored the original test suite: 1,170 tests, plus about 150 that need a real
   Home Assistant.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest,
   hassfest, HACS validation, tag/manifest check) and `scripts/release.sh`.

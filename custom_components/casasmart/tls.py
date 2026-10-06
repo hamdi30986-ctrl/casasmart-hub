@@ -250,6 +250,12 @@ def ensure_tls_material(
     )
 
 
+# Set on the TLS listener's aiohttp app: True when this listener is trusted as
+# LAN ingress (see lan_ingress.py). auth_api.is_lan_request reads it from
+# request.app; requests served by HA's own HTTP server never carry it.
+TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
+
+
 class CasaSmartTlsServer:
     """The CasaSmart API on its own HTTPS port.
 
@@ -259,10 +265,18 @@ class CasaSmartTlsServer:
     runner) is how a rotated leaf goes live.
     """
 
-    def __init__(self, hass, port: int, material: TlsMaterial) -> None:
+    def __init__(
+        self,
+        hass,
+        port: int,
+        material: TlsMaterial,
+        *,
+        trusted_lan_ingress: bool = False,
+    ) -> None:
         self._hass = hass
         self._port = port
         self._material = material
+        self._trusted_lan_ingress = trusted_lan_ingress
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -290,6 +304,7 @@ class CasaSmartTlsServer:
         """Bring the listener up. False (logged) when the port won't bind."""
         if self._runner is None:
             app = web.Application()
+            app[TLS_LISTENER_TRUSTED_LAN] = self._trusted_lan_ingress
             for view in views:
                 view.register(self._hass, app, app.router)
             self._runner = web.AppRunner(app)

@@ -21,6 +21,12 @@ Requires Home Assistant **2025.3** or newer.
 Update through HACS. HACS records the release tag it installed, so copying files
 in by hand or using the hub's own updater leaves HACS showing the wrong version.
 
+Pairing, owner recovery and keyless speaker provisioning are LAN-only. The hub
+decides "LAN" from the client's address, except on Docker Desktop, where it
+trusts its loopback-published TLS port behind the LAN relay instead (see the
+bridge README; `lan_relay_ingress` overrides). Requests through Cloudflare are
+never LAN. Remote pairing of member codes is opt-in (`remote_pairing_enabled`).
+
 ## Development
 
 Tests stub Home Assistant, so they run without it installed:

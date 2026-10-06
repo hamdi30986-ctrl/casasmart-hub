@@ -72,6 +72,7 @@ from .pairing import (
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
 from .throttle import ThrottledError
+from .tls import TLS_LISTENER_TRUSTED_LAN
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 
 if TYPE_CHECKING:
@@ -179,6 +180,15 @@ def arm_recovery(hass: HomeAssistant) -> None:
 _CLOUDFLARE_HEADERS = ("CF-Connecting-IP", "CF-Ray")
 
 
+def _arrived_on_trusted_lan_ingress(request: web.Request) -> bool:
+    """Served by the hub TLS listener while it is trusted as LAN ingress."""
+    app = getattr(request, "app", None)
+    try:
+        return app is not None and app.get(TLS_LISTENER_TRUSTED_LAN) is True
+    except (AttributeError, TypeError):
+        return False
+
+
 def _arrived_through_cloudflare(request: web.Request) -> bool:
     headers = request.headers
     if any(name in headers for name in _CLOUDFLARE_HEADERS):
@@ -207,9 +217,17 @@ def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -
     port resolves the real client IP from ``X-Forwarded-For`` when the proxy
     is trusted, but the hub's TLS listener is a bare aiohttp app — a tunnel
     pointed at it would arrive from a private Docker/add-on address.
+
+    On Docker Desktop the TLS listener's source addresses are synthetic and
+    unstable, so there the listener itself is the LAN proof: it is published
+    to 127.0.0.1 only and fronted by a relay that admits only LAN clients
+    (``lan_ingress.py``, ``deploy/macos``). Cloudflare-proxied requests are
+    still refused first.
     """
     if _arrived_through_cloudflare(request):
         return False
+    if _arrived_on_trusted_lan_ingress(request):
+        return True
     try:
         remote = ipaddress.ip_address(request.remote or "")
     except ValueError:
