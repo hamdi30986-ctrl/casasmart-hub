@@ -56,6 +56,12 @@ _OWNER_ONLY_TYPES = frozenset(
     }
 )
 
+# When device roles can't be resolved (the auth engine isn't loaded), owner-only
+# pushes fail CLOSED — except alarm and lock alerts, which fail OPEN to every
+# registered device: a missed break-in or door alert is worse than one extra
+# notification on a family member's phone (v2.2.0 decision).
+_FAIL_OPEN_WITHOUT_ROLES = frozenset({PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK})
+
 
 PRIORITY_CRITICAL = "critical"
 PRIORITY_NORMAL = "normal"
@@ -313,6 +319,20 @@ class PushDispatcher:
             from .auth_api import get_engine
 
             engine = get_engine(self._hass)
+            if engine is None:
+                if data.get("type") in _FAIL_OPEN_WITHOUT_ROLES:
+                    _LOGGER.warning(
+                        "Push dispatch: device roles unavailable — sending the "
+                        "%s alert to every registered device",
+                        data.get("type"),
+                    )
+                    owner_only = False
+                else:
+                    _LOGGER.warning(
+                        "Push dispatch: device roles unavailable — %s push "
+                        "withheld (owner-only)",
+                        data.get("type"),
+                    )
         device_tokens = [
             rec["fcm_token"]
             for dev_id, rec in tokens.items()

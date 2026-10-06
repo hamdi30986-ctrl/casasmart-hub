@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -60,7 +61,10 @@ def _load_filtering():
     return filtering, entity_registry
 
 
-_FILTERING, _ER = _load_filtering()
+# The stub homeassistant/casasmart modules exist only while loading, so they
+# never shadow the real packages the other suites import.
+with patch.dict(sys.modules):
+    _FILTERING, _ER = _load_filtering()
 
 
 class _EntityRegistry:
