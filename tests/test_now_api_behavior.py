@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import ModuleType
 
@@ -91,7 +92,10 @@ def _load_now_api():
     return api, now_data, HomeAssistantError
 
 
-_API, _NOW, _HOME_ASSISTANT_ERROR = _load_now_api()
+# The stub homeassistant/casasmart modules exist only while loading, so they
+# never shadow the real packages the other suites import.
+with patch.dict(sys.modules):
+    _API, _NOW, _HOME_ASSISTANT_ERROR = _load_now_api()
 
 
 class _State:
