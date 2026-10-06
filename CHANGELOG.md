@@ -54,6 +54,9 @@ published; everything it contained is in 2.3.0.
   UTC+3, so hubs elsewhere checked at the wrong hour.
 - Alarm alerts no longer log "push not yet wired"; the WARNING now reads
   "Alarm alert (<kind>)". Push to phones was never affected.
+- No more Home Assistant 2026.9 deprecation warning about `device_registry.devices`
+  (it stops working in 2027.9): the admin registry view lists devices the way
+  both old and new Home Assistant releases support.
 - The recovery-code notification no longer claims the code survives a factory
   reset (a reset replaces it), and the factory-reset notification no longer
   claims rooms and scenes are kept.
@@ -100,7 +103,7 @@ published; everything it contained is in 2.3.0.
   the code is provably unchanged (AST-checked). Comments no longer carry
   internal plan references, and the ones that described old behaviour were
   corrected.
-- Restored the original test suite: 1,344 tests, about 155 of which need a real
+- Restored the original test suite: 1,346 tests, about 155 of which need a real
   Home Assistant. Test data no longer contains anyone's network, names or
   devices.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest with
