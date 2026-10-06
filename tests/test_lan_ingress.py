@@ -23,6 +23,7 @@ from casasmart.auth_api import is_lan_request  # noqa: E402
 from casasmart.lan_ingress import (  # noqa: E402
     is_docker_desktop_kernel,
     is_recognized_lan_relay_ingress,
+    needs_relay_ingress_hint,
     resolve_lan_relay_ingress,
 )
 from casasmart.tls import CasaSmartTlsServer, ensure_tls_material  # noqa: E402
@@ -44,30 +45,30 @@ class PolicyTests(unittest.TestCase):
         for banner in (WSL2, HAOS, DEBIAN, RASPBERRY_PI, "", None):
             self.assertFalse(is_docker_desktop_kernel(banner), banner)
 
-    def test_auto_trusts_the_listener_only_on_docker_desktop(self) -> None:
-        for setting in (None, "auto"):
-            self.assertTrue(resolve_lan_relay_ingress(setting, DOCKER_DESKTOP)[0])
-            for banner in (HAOS, DEBIAN, RASPBERRY_PI, WSL2, None):
-                self.assertFalse(resolve_lan_relay_ingress(setting, banner)[0])
+    def test_only_an_explicit_on_trusts_the_listener(self) -> None:
+        # Secure by default: nothing is trusted unless an operator opts in,
+        # whatever the host (Docker Desktop included).
+        for setting in ("on", True):
+            self.assertTrue(resolve_lan_relay_ingress(setting), setting)
+        for setting in (None, "off", False, "auto", "yes", "On", 1, ""):
+            self.assertFalse(resolve_lan_relay_ingress(setting), setting)
 
-    def test_explicit_on_and_off_win_over_detection(self) -> None:
-        for on in ("on", True):
-            self.assertTrue(resolve_lan_relay_ingress(on, HAOS)[0])
-        for off in ("off", False):
-            self.assertFalse(resolve_lan_relay_ingress(off, DOCKER_DESKTOP)[0])
-
-    def test_unrecognized_value_falls_back_to_auto_and_says_so(self) -> None:
-        trusted, reason = resolve_lan_relay_ingress("yes please", DOCKER_DESKTOP)
-        self.assertTrue(trusted)
-        self.assertIn("unrecognized", reason)
-        trusted, _ = resolve_lan_relay_ingress(1, HAOS)
-        self.assertFalse(trusted)
+    def test_docker_desktop_hint_only_when_the_setting_is_unset(self) -> None:
+        # The hub can't see phones' addresses on Docker Desktop, so an unset
+        # (or unrecognized) setting gets a warning telling the operator what
+        # to set; an explicit choice, or any other host, gets none.
+        for setting in (None, "yes"):
+            self.assertTrue(needs_relay_ingress_hint(setting, DOCKER_DESKTOP))
+        for setting in ("on", "off", True, False):
+            self.assertFalse(needs_relay_ingress_hint(setting, DOCKER_DESKTOP))
+        for banner in (HAOS, DEBIAN, RASPBERRY_PI, WSL2, None):
+            self.assertFalse(needs_relay_ingress_hint(None, banner), banner)
 
     def test_recognized_values(self) -> None:
-        # Setup warns about anything else, so a typo is not silently "auto".
-        for setting in (None, "auto", "on", "off", True, False):
+        # Setup warns about anything else, so a typo is never silently ignored.
+        for setting in (None, "on", "off", True, False):
             self.assertTrue(is_recognized_lan_relay_ingress(setting), setting)
-        for setting in ("yes", "On", "true", "", 1, 0, [], {}):
+        for setting in ("auto", "yes", "On", "true", "", 1, 0, [], {}):
             self.assertFalse(is_recognized_lan_relay_ingress(setting), setting)
 
 

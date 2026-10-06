@@ -13,12 +13,13 @@ was prepared but never published; everything it contained is in 2.3.0.
 - Pairing a new phone, owner recovery and keyless speaker provisioning work on
   Docker Desktop hosts again. Docker Desktop rewrites every source address
   reaching the container, and after a restart it can pick a public one, so
-  these LAN-only requests were refused. The hub now detects Docker Desktop and
-  trusts its loopback-published TLS listener (behind the LAN-only relay in
-  `deploy/macos`) as the LAN proof. The new `lan_relay_ingress` hub-config key
-  (`auto` / `on` / `off`) can override the detection; any other value logs a
-  warning and counts as `auto`. Other hubs are unchanged, and Cloudflare-proxied
-  requests are never LAN.
+  these LAN-only requests were refused. Setting the new hub-config key
+  `lan_relay_ingress` to `"on"` makes the hub trust its loopback-published TLS
+  listener (behind the LAN-only relay in `deploy/macos`) as the LAN proof. It
+  is off by default, because the hub can't verify that setup itself. On
+  Docker Desktop with the key unset, the hub logs a warning saying what to
+  set. Any other value logs a warning and counts as `"off"`. Other hubs are
+  unchanged, and Cloudflare-proxied requests are never LAN.
 - Several phones pairing (or using the app) at the same moment no longer fail
   at random. Storage reads were finished outside the database lock, so a
   concurrent write could make a just-paired phone look unknown (login 404) or

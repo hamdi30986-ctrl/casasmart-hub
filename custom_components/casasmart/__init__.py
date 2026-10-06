@@ -95,6 +95,7 @@ from .hq_notifications import (
 from .lan_ingress import (
     LAN_RELAY_INGRESS_CONFIG_KEY,
     is_recognized_lan_relay_ingress,
+    needs_relay_ingress_hint,
     resolve_lan_relay_ingress,
 )
 from .now_data import NowDataEngine
@@ -670,28 +671,36 @@ async def _async_start_tls(
     ingress_setting = runtime_data.hub_config.get(LAN_RELAY_INGRESS_CONFIG_KEY)
     if not is_recognized_lan_relay_ingress(ingress_setting):
         _LOGGER.warning(
-            'Ignoring unrecognized %s %r in hub config (expected "auto", "on" or '
-            '"off"); using "auto"',
+            'Ignoring unrecognized %s %r in hub config (expected "on" or "off"); '
+            'using "off"',
             LAN_RELAY_INGRESS_CONFIG_KEY,
             ingress_setting,
         )
-    trusted_lan, reason = resolve_lan_relay_ingress(
-        ingress_setting,
-        await hass.async_add_executor_job(_read_proc_version),
-    )
+    trusted_lan = resolve_lan_relay_ingress(ingress_setting)
     if trusted_lan:
         # WARNING, not INFO: Home Assistant hides INFO by default, and this is a
         # deliberate relaxation of the LAN gate that operators must be able to see.
         _LOGGER.warning(
-            "LAN relay ingress on (%s): connections on the hub TLS port %s count "
-            "as LAN for pairing, recovery and speaker provisioning. Publish that "
+            "LAN relay ingress on: connections on the hub TLS port %s count as "
+            "LAN for pairing, recovery and speaker provisioning. Publish that "
             "port to 127.0.0.1 only and reach it through the CasaSmart LAN relay "
             "(deploy/macos), which admits only LAN clients.",
-            reason,
             port,
         )
+    elif needs_relay_ingress_hint(
+        ingress_setting, await hass.async_add_executor_job(_read_proc_version)
+    ):
+        _LOGGER.warning(
+            "Docker Desktop detected: the hub can't see phones' real addresses, "
+            "so pairing, owner recovery and keyless speaker provisioning will be "
+            "refused. If the TLS port is published to 127.0.0.1 only and reached "
+            'through the CasaSmart LAN relay (deploy/macos), set "%s": "on" in '
+            "%s and restart Home Assistant.",
+            LAN_RELAY_INGRESS_CONFIG_KEY,
+            data_dir / HUB_CONFIG_FILENAME,
+        )
     else:
-        _LOGGER.debug("LAN relay ingress off (%s)", reason)
+        _LOGGER.debug("LAN relay ingress off: the hub checks client addresses")
 
     server = CasaSmartTlsServer(hass, port, material, trusted_lan_ingress=trusted_lan)
     runtime_data.tls = server
