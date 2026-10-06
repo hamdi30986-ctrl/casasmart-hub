@@ -608,8 +608,8 @@ async def _async_setup_dev_enroll(
     When enabled, provisions the ``dev_devices.json`` manifest now (boot /
     service-reset reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the
     BUTTON reset — which wipes the auth tables in place without reloading the
-    entry — also re-provisions. A no-op on any hub without the manifest (every
-    client hub). The seam is idempotent and never fires ``EVENT_AUTH_CHANGED``
+    entry — also re-provisions. A no-op on any hub without the manifest. The
+    seam is idempotent and never fires ``EVENT_AUTH_CHANGED``
     itself, so the listener can't feed itself. The listener is torn down with
     the entry via ``async_on_unload``.
     """
@@ -617,7 +617,7 @@ async def _async_setup_dev_enroll(
         return
     _LOGGER.warning(
         "%s is set: dev device auto-enrollment is ACTIVE on this hub — never "
-        "enable it on a customer hub",
+        "enable it on a hub that people rely on",
         _DEV_ENROLL_ENV,
     )
 

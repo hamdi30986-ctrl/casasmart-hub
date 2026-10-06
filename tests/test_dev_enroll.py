@@ -270,7 +270,7 @@ class DevEnrollManifestTests(_EngineFixture):
         self.assertEqual(len(self.engine.list_devices()), 1)
 
     def test_accepts_design_doc_field_aliases(self):
-        # public_key_pem / name (the plan's names) are accepted too.
+        # public_key_pem / name (the alternative field names) are accepted too.
         self._write_manifest(
             [{"device_id": "dev-x", "public_key_pem": self.public_pem, "name": "alias"}]
         )
