@@ -268,13 +268,14 @@ class AthanScheduler:
                 today,
             )
 
+        # The home's coordinates stay out of INFO: logs get pasted into public
+        # issues. They are in the DEBUG line for troubleshooting.
+        _LOGGER.debug("Athan location for %s: %.4f,%.4f", today, lat, lon)
         _LOGGER.info(
-            "Athan scheduled for %s (%s/%s, %.4f,%.4f %s) on %s: %s",
+            "Athan scheduled for %s (%s/%s, %s) on %s: %s",
             today,
             method,
             school,
-            lat,
-            lon,
             tz_name,
             "all speakers"
             if not has_sel

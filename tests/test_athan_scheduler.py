@@ -253,6 +253,22 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
         for when in armed:
             self.assertGreater((when - now).total_seconds(), -A._GRACE_SEC)
 
+    def test_reschedule_keeps_home_coordinates_out_of_info_logs(self):
+        A.async_track_point_in_time = lambda hass, action, when: lambda: None
+        A.compute_prayer_times_utc = _future_times()
+        s = A.AthanScheduler(
+            _Hass(),
+            _Engine({"enabled": True, "lat": 24.7136, "lon": 46.6753}),
+            _Adapter(),
+        )
+        with self.assertLogs(A._LOGGER, level="DEBUG") as logs:
+            s.reschedule()
+        info = [r.getMessage() for r in logs.records if r.levelname != "DEBUG"]
+        debug = [r.getMessage() for r in logs.records if r.levelname == "DEBUG"]
+        self.assertTrue(any("Athan scheduled" in m for m in info))
+        self.assertFalse(any("24.71" in m or "46.67" in m for m in info))
+        self.assertTrue(any("24.7136,46.6753" in m for m in debug))
+
     def test_reschedule_disabled_arms_nothing(self):
         armed = []
         A.async_track_point_in_time = lambda hass, action, when: (
