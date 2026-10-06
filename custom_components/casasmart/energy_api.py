@@ -1,4 +1,4 @@
-"""CasaSmart runtime component."""
+"""Authenticated REST surface and discovery for Energy Saving (P3)."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def _candidate(entity: Any, *, dimmable: bool | None = None) -> dict[str, Any]:
 
 
 def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None:
-    """CasaSmart runtime component."""
+    """Find a plug's physical-device power sensor, if HA exposes one."""
     registry = er.async_get(hass)
     entry = registry.async_get(entity_id)
     if entry is None or entry.device_id is None:
@@ -95,7 +95,7 @@ def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None
 async def async_energy_discovery(
     hass: HomeAssistant, runtime: CasaSmartRuntimeData
 ) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Build deterministic wizard inventory grouped by registry floor/room."""
     builder = EnergyInventoryBuilder(hass, runtime.registry)
     inventory = await builder.async_build()
 
@@ -322,8 +322,8 @@ class CasaSmartEnergyStateView(_EnergyView):
             return error
         state = await runtime.energy_controller.async_state()
         if claims.get("role") != ROLE_ADMIN:
-
-
+            # Family roles need the active/lockout/occupancy status, not the
+            # admin-only override and skipped-room diagnostic surfaces.
             for field in (
                 "released_entities",
                 "release_details",

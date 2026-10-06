@@ -1,4 +1,22 @@
-"""CasaSmart runtime component."""
+"""Home Assistant adapter for CasaSmart Energy Saving (P2).
+
+``energy.py`` owns durable configuration and state.  This module owns the
+live Home Assistant side of the contract:
+
+* deterministic activation/re-apply rules for gangs, climate, lights, plugs,
+  heaters, and covers;
+* Smart room occupancy with instant welcome, a cancellable 45-second empty
+  grace, and the boost-then-settle climate state machine;
+* Medium temperature guards and Smart boost temperature edges;
+* the shared sun clock used by covers and dark-only welcome lighting; and
+* an own-command ledger so a human state change releases one device instead
+  of making the mode fight them.
+
+P2 deliberately does not register APIs or wire the adapter into integration
+setup.  P3 owns that lifecycle and lockout boundary.  Keeping this adapter
+constructible in isolation makes the full ruleset testable without a live
+Home Assistant installation.
+"""
 
 from __future__ import annotations
 
@@ -100,7 +118,7 @@ def _state_changed(old_state: Any, new_state: Any) -> bool:
 
 @dataclass(frozen=True)
 class EnergyEntity:
-    """CasaSmart runtime component."""
+    """Small immutable state snapshot used by the rules."""
 
     entity_id: str
     state: str
@@ -131,7 +149,7 @@ class EnergyEntity:
 
 @dataclass(frozen=True)
 class GangGroup:
-    """CasaSmart runtime component."""
+    """One physical two/three-gang wall switch."""
 
     group_id: str
     room_id: str | None
@@ -140,7 +158,7 @@ class GangGroup:
 
 @dataclass
 class RoomInventory:
-    """CasaSmart runtime component."""
+    """Entities participating in Energy Saving for one room."""
 
     room_id: str
     climates: list[EnergyEntity] = field(default_factory=list)
@@ -151,7 +169,7 @@ class RoomInventory:
 
     @property
     def automatic(self) -> bool:
-        """CasaSmart runtime component."""
+        """Smart v1 requires both temperature and presence."""
         return bool(self.temperature_sensors and self.presence_sensors)
 
     @property
@@ -180,7 +198,7 @@ class RoomInventory:
 
 @dataclass(frozen=True)
 class EnergyInventory:
-    """CasaSmart runtime component."""
+    """A point-in-time view of the HA entity graph."""
 
     entities: dict[str, EnergyEntity]
     rooms: dict[str, RoomInventory]
@@ -204,7 +222,12 @@ class _Boost:
 
 
 class EnergyInventoryBuilder:
-    """CasaSmart runtime component."""
+    """Build Energy Saving inventory from HA state + CasaSmart registry.
+
+    Registry assignments win.  If a record is absent, the default resolver
+    asks HA's entity/device area registry.  Tests may inject a trivial resolver
+    and avoid importing the HA registries entirely.
+    """
 
     def __init__(
         self,
@@ -228,8 +251,8 @@ class EnergyInventoryBuilder:
         if self._area_resolver is not None:
             return self._area_resolver(self._hass, entity_id)
         try:
-
-
+            # Lazy import: the adapter's unit suite intentionally has no HA
+            # registry modules, while the live integration does.
             from .filtering import ha_area_id_of
 
             return ha_area_id_of(self._hass, entity_id)
@@ -353,7 +376,7 @@ class EnergyInventoryBuilder:
 
     @staticmethod
     def _is_gang_device(device: dict[str, Any]) -> bool:
-        """CasaSmart runtime component."""
+        """Registry records cover every device; gang metadata is the divider."""
         gangs = device.get("gangs")
         if isinstance(gangs, dict) and any(
             isinstance(key, str) and isinstance(value, dict)
@@ -394,7 +417,7 @@ class EnergyInventoryBuilder:
 
 
 class EnergyAdapter:
-    """CasaSmart runtime component."""
+    """Execute the Energy Saving contract against live HA."""
 
     def __init__(
         self,
@@ -437,11 +460,11 @@ class EnergyAdapter:
         self._command_count = 0
         self._failure_count = 0
 
-
+    # -- lifecycle ---------------------------------------------------------
 
     @callback
     def async_start(self) -> None:
-        """CasaSmart runtime component."""
+        """Subscribe once; P3 calls ``async_apply`` after engine activation."""
         if self._unsub_state_changed is not None:
             return
         self._unsub_state_changed = self._hass.bus.async_listen(
@@ -450,7 +473,7 @@ class EnergyAdapter:
 
     @callback
     def async_stop(self) -> None:
-        """CasaSmart runtime component."""
+        """Cancel every listener/timer.  Safe to call repeatedly."""
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
@@ -461,7 +484,7 @@ class EnergyAdapter:
 
     @callback
     def async_mode_stopped(self) -> None:
-        """CasaSmart runtime component."""
+        """Drop dynamic work after P3 deactivates the engine."""
         self._cancel_all_timers()
         self._own_commands.clear()
         self._managed_entities.clear()
@@ -470,7 +493,7 @@ class EnergyAdapter:
         self._config = None
 
     def issues(self) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Return current fail-safe warnings for P3's state endpoint."""
         return sorted(
             (copy.deepcopy(issue) for issue in self._issues.values()),
             key=lambda item: (
@@ -481,17 +504,22 @@ class EnergyAdapter:
         )
 
     def manages(self, entity_id: str) -> bool:
-        """CasaSmart runtime component."""
+        """Whether the active adapter context owns this device."""
         return entity_id in self._managed_entities
 
     def _notify_changed(self) -> None:
         if self._change_callback is not None:
             self._change_callback()
 
-
+    # -- activation/re-apply ---------------------------------------------
 
     async def async_apply(self, *, reason: str = "activation") -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Apply the active level and arm its dynamic rules.
+
+        The engine must already be active.  P3 owns the transaction ordering:
+        ``engine.activate/reapply`` first, then this method.  A failed device
+        command is isolated and reported; it never aborts the remaining home.
+        """
         level = self._engine.active_level
         if level is None:
             return {"level": None, "commands": 0, "failures": 0, "issues": []}
@@ -615,7 +643,7 @@ class EnergyAdapter:
                 self._issues.pop(key, None)
         return troubled
 
-
+    # -- static rules ------------------------------------------------------
 
     async def _apply_gangs(
         self,
@@ -816,7 +844,7 @@ class EnergyAdapter:
             if entity.available and entity.state not in {"closed", "closing"}:
                 await self._close_cover(entity.entity_id)
 
-
+    # -- Smart occupancy ---------------------------------------------------
 
     async def _initialize_smart_room(self, room: RoomInventory) -> None:
         if not room.sensors_available or room.room_temperature is None:
@@ -1009,9 +1037,9 @@ class EnergyAdapter:
                 else:
                     await self._settle_entity(entity, "heat")
             else:
-
-
-
+                # Unknown/auto modes use the cooling-safe posture.  The
+                # command includes hvac_mode=COOL only for an off climate;
+                # active integrations retain their current cool mode.
                 if temperature < COOL_KILL_BELOW:
                     await self._turn_off(entity.entity_id)
                 elif temperature > COOL_BOOST_ABOVE:
@@ -1169,7 +1197,7 @@ class EnergyAdapter:
                 },
             )
 
-
+    # -- sun clock ---------------------------------------------------------
 
     def _sun_context(self) -> SunContext:
         state = (
@@ -1271,7 +1299,7 @@ class EnergyAdapter:
                 elif not day and entity.state not in {"closed", "closing"}:
                     await self._close_cover(entity.entity_id)
 
-
+    # -- state listener / release ledger ----------------------------------
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
@@ -1350,7 +1378,7 @@ class EnergyAdapter:
             if deadline <= now:
                 self._own_commands.pop(entity_id, None)
 
-
+    # -- HA commands ------------------------------------------------------
 
     async def _command(
         self,
@@ -1379,7 +1407,7 @@ class EnergyAdapter:
                 {**(data or {}), "entity_id": entity_id},
                 blocking=True,
             )
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 - one device must not abort home
             self._failure_count += 1
             self._own_commands.pop(entity_id, None)
             self._issue(
@@ -1504,7 +1532,7 @@ class EnergyAdapter:
             mode != "heat" and room_temperature < COOL_KILL_BELOW
         )
 
-
+    # -- helpers -----------------------------------------------------------
 
     async def _refresh_inventory(self) -> EnergyInventory:
         inventory = await self._builder.async_build()
@@ -1550,7 +1578,7 @@ class EnergyAdapter:
                     data=data,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - audit failure must not block rules
             _LOGGER.exception("Could not record Energy Saving event %s", kind)
 
     def _issue(

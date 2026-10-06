@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -40,11 +39,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class CasaSmartWebSocketView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/ws — the real-time push channel."""
 
     url = f"/api/{DOMAIN}/ws"
     name = f"api:{DOMAIN}:ws"
-
+    # Auth happens in-band (first frame), not via HA's bearer middleware.
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
@@ -52,7 +51,7 @@ class CasaSmartWebSocketView(HomeAssistantView):
         self._hub_version = hub_version
 
     async def get(self, request: web.Request) -> web.WebSocketResponse:
-        """CasaSmart runtime component."""
+        """Upgrade to a WebSocket and run the connection to completion."""
         ws = web.WebSocketResponse(heartbeat=55.0)
         await ws.prepare(request)
         connection = WsConnection(self._hass, ws, self._hub_version)
@@ -64,7 +63,6 @@ class CasaSmartWebSocketView(HomeAssistantView):
 
 
 class WsConnection:
-    """CasaSmart runtime component."""
 
     def __init__(
         self, hass: HomeAssistant, ws: web.WebSocketResponse, hub_version: str
@@ -100,7 +98,6 @@ class WsConnection:
 
 
     async def run(self) -> None:
-        """CasaSmart runtime component."""
         if not await self._authenticate_first_frame():
             return
 
@@ -140,7 +137,6 @@ class WsConnection:
             recheck_task.cancel()
 
     def cleanup(self) -> None:
-        """CasaSmart runtime component."""
         if self._unsub_suggestions_changed is not None:
             self._unsub_suggestions_changed()
             self._unsub_suggestions_changed = None
@@ -174,7 +170,7 @@ class WsConnection:
 
 
     async def _authenticate_first_frame(self) -> bool:
-        """CasaSmart runtime component."""
+        """Enforce the first-frame auth contract; True when authenticated."""
         try:
             async with asyncio.timeout(WS_AUTH_TIMEOUT):
                 msg = await self._ws.receive()
@@ -212,8 +208,13 @@ class WsConnection:
         return True
 
     async def _async_validate_token(self, token: str) -> bool:
-        """CasaSmart runtime component."""
-        from .auth_api import get_engine
+        """Validate a CasaSmart JWT and refresh the connection's claims.
+
+        The B1.6 auth engine: signature + expiry + role permission. Pure
+        HMAC math — no executor hop. Returns False (never raises) so the
+        callers' control flow stays identical to the B1.5 stopgap.
+        """
+        from .auth_api import get_engine  # local: auth_api is sibling glue
 
         engine = get_engine(self._hass)
         if engine is None:
@@ -228,14 +229,18 @@ class WsConnection:
         return True
 
     async def _token_recheck_loop(self) -> None:
-        """CasaSmart runtime component."""
+        """Catch mid-connection revocation/expiry (plan: auth_required + 30s).
+
+        Keeps running after a successful re-auth so a renewed token is
+        itself re-checked on the same cadence.
+        """
         while not self._ws.closed:
             await asyncio.sleep(WS_TOKEN_RECHECK)
             if self._token and await self._async_validate_token(self._token):
                 continue
-
-
-
+            # Token died mid-connection: announce once, arm the grace
+            # deadline. A fresh valid `auth` frame in the receive loop
+            # disarms it; don't re-announce while a grace window is open.
             if (
                 self._reauth_deadline_task is None
                 or self._reauth_deadline_task.done()
@@ -249,7 +254,7 @@ class WsConnection:
                 )
 
     async def _reauth_deadline(self) -> None:
-        """CasaSmart runtime component."""
+        """Close the connection unless re-auth lands within the grace window."""
         await asyncio.sleep(WS_REAUTH_GRACE)
         if self._token is None and not self._ws.closed:
             await self._ws.close(
@@ -258,15 +263,17 @@ class WsConnection:
 
     @callback
     def _on_auth_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """Some device's privileges changed (content-free event). Recheck OUR
+        token now: a connection whose device was untouched revalidates cleanly
+        (a no-op), a revoked/re-scoped one gets `auth_required` at once."""
         self._hass.async_create_task(self._recheck_now())
 
     async def _recheck_now(self) -> None:
-        """CasaSmart runtime component."""
+        """Immediate, single-shot version of the recheck loop's body."""
         if self._ws.closed or not self._token:
             return
         if await self._async_validate_token(self._token):
-            return
+            return  # still valid — our device wasn't the one that changed
         if (
             self._reauth_deadline_task is None
             or self._reauth_deadline_task.done()
@@ -282,7 +289,7 @@ class WsConnection:
 
 
     async def _receive_loop(self) -> None:
-        """CasaSmart runtime component."""
+        """Handle client frames until the socket closes."""
         async for msg in self._ws:
             if msg.type != WSMsgType.TEXT:
                 continue
@@ -301,7 +308,7 @@ class WsConnection:
                 await self._handle_reauth(frame)
 
     async def _handle_subscribe(self, frame: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Set the subscription and ack with a snapshot of the current state."""
         try:
             entity_ids = ws_protocol.subscribe_entity_ids(frame)
         except ws_protocol.ProtocolError as err:
@@ -312,7 +319,9 @@ class WsConnection:
         await self._emit_snapshot()
 
     async def _emit_snapshot(self) -> None:
-        """CasaSmart runtime component."""
+        """Send the `subscribed` frame: the current scoped + served snapshot of
+        the subscribed set. Re-emitted after a scope-changing re-auth so the
+        live view reflects the new rooms at once (Phase 8)."""
         rooms = (self._claims or {}).get("rooms")
         devices = [
             serialize_device(self._hass, state)
@@ -325,7 +334,7 @@ class WsConnection:
         await self._enqueue(ws_protocol.frame_subscribed(devices))
 
     async def _handle_reauth(self, frame: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """A mid-connection auth frame — answers `auth_required`."""
         try:
             token = ws_protocol.auth_token(frame)
         except ws_protocol.ProtocolError as err:
@@ -343,13 +352,13 @@ class WsConnection:
         await self._enqueue(
             ws_protocol.frame_auth_ok(self._hub_version, API_VERSION)
         )
-
-
-
-
-
-
-
+        # Re-send the snapshot after EVERY re-auth (m2). The app gates data
+        # frames while it re-authenticates (auth_required -> auth_ok), so any
+        # state_changed the hub pushed during that grace window is dropped
+        # client-side and its tiles freeze until the next reconnect. A fresh
+        # snapshot on re-auth reconciles that missed state — and also drops/gains
+        # rooms at once when an admin re-scoped this user mid-connection (the
+        # scope-change case this used to be limited to; Phase 8).
         if self._subscribed:
             await self._emit_snapshot()
 
@@ -357,21 +366,25 @@ class WsConnection:
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """HA event-loop callback: queue a push if subscribed AND served.
+
+        Runs for every state change in HA, so the cheap checks come first
+        and serialization only happens for entities actually being pushed.
+        """
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         if new_state is None:
-
-
-
-
+            # Entity removed (unpair / integration drop / registry delete). Tell
+            # a subscribed app to drop the tile — otherwise a dead card lingers
+            # for the connection's lifetime (Phase 8). The frame is just the id,
+            # so there is no state to room-scope.
             if entity_id and self._subscription.matches(entity_id):
                 self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
             return
         if (
             not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
-
+            # Room scope (B1.6): scoped tokens only get their rooms' pushes.
             or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
         ):
             return
@@ -380,7 +393,12 @@ class WsConnection:
 
     @callback
     def _on_registry_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """B17: the home's organization changed — nudge the app to re-fetch.
+
+        The frame carries only the change kind, never content, so there
+        is nothing to room-scope here: the app's follow-up registry GET
+        is filtered to its own slice like every other read.
+        """
         kind = event.data.get("kind", "registry")
         self._offer_or_close(ws_protocol.frame_registry_changed(kind))
 
@@ -391,37 +409,54 @@ class WsConnection:
 
     @callback
     def _on_tank_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """Phase 4: a tank reading landed — nudge the app to re-fetch its
+        calibrated level. Content-free beyond the device id, like the registry
+        nudge; the app's tank GET stays the authorization boundary."""
         device_id = event.data.get("device_id", "")
         self._offer_or_close(ws_protocol.frame_tank_changed(device_id))
 
     @callback
     def _on_alarm_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """B13: arm state changed — nudge alarm-authorized apps to re-fetch.
+
+        Gated by role: the socket only authorized on ``devices.read``, but a
+        plain user has NO alarm access (plan roles table). Pushing even a
+        content-free nudge to them would leak the timing of alarm activity,
+        so connections whose claims lack ``alarm.read`` are skipped entirely.
+        The frame carries no state — the app re-reads the gated state GET.
+        """
         if not AuthEngine.authorize(self._claims or {}, "alarm.read"):
             return
         self._offer_or_close(ws_protocol.frame_alarm_changed())
 
     @callback
     def _on_audio_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """B14: the hub's speaker view changed — nudge audio-authorized apps
+        to re-fetch. Gated like ``_on_alarm_changed``: the socket authorized on
+        ``devices.read``, but only connections whose claims carry ``audio.read``
+        get the (content-free) nudge. The app re-reads the gated speakers GET.
+        """
         if not AuthEngine.authorize(self._claims or {}, "audio.read"):
             return
         self._offer_or_close(ws_protocol.frame_audio_changed())
 
     @callback
     def _on_energy_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
+        """Energy Saving changed — only status-authorized sockets get nudged."""
         if not AuthEngine.authorize(self._claims or {}, "energy.read"):
             return
         self._offer_or_close(ws_protocol.frame_energy_changed())
 
     async def _enqueue(self, frame: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Route protocol replies through the same queue as pushes, preserving
+        send order on the single writer. Protocol frames are loss-intolerant, so
+        they are always admitted (never coalesced/dropped like pushes)."""
         self._send_queue.put_protocol(frame)
 
     def _offer_or_close(self, frame: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Queue a push frame, coalescing/dropping under backpressure. Only a
+        queue full of undrained protocol frames — a genuinely dead consumer —
+        closes the socket (Phase 11: a burst no longer kills a healthy app)."""
         if self._send_queue.offer(frame):
             return
         _LOGGER.warning("WS client not draining (protocol backlog), disconnecting")
@@ -430,12 +465,12 @@ class WsConnection:
         )
 
     async def _sender_loop(self) -> None:
-        """CasaSmart runtime component."""
+        """The single socket writer — drains the queue in order."""
         try:
             while not self._ws.closed:
                 frame = await self._send_queue.get()
-
-
+                # HA state attributes can contain datetime values (notably
+                # automation.last_triggered), so use the same encoder as REST.
                 await self._ws.send_json(frame, dumps=json_dumps)
         except (asyncio.CancelledError, ConnectionResetError):
             pass

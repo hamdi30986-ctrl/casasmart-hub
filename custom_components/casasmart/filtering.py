@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
 
 
 def get_registry_engine(hass: HomeAssistant) -> "RegistryEngine | None":
-    """CasaSmart runtime component."""
+    """The loaded entry's registry engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -28,7 +27,7 @@ def get_registry_engine(hass: HomeAssistant) -> "RegistryEngine | None":
 
 
 def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """CasaSmart runtime component."""
+    """HA's own area resolution (entity override first, then device)."""
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return None
@@ -40,7 +39,14 @@ def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """CasaSmart runtime component."""
+    """Resolve an entity's room (B17: registry first, HA area fallback).
+
+    A registry assignment is the installer's word and wins outright —
+    including an explicit ``None`` ("Unassigned"), which must NOT snap
+    back to the HA area. Only entities with no registry record at all
+    fall through to HA's own area registry. Pure in-memory on both
+    paths — this runs on the event loop for every pushed state change.
+    """
     registry = get_registry_engine(hass)
     if registry is not None:
         room = registry.room_of(entity_id)
@@ -50,7 +56,7 @@ def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
-    """CasaSmart runtime component."""
+    """Resolve an entity's room name (registry room first, HA area fallback)."""
     area_id = area_id_of(hass, entity_id)
     if area_id is None:
         return None
@@ -66,7 +72,13 @@ def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
 def in_scope(
     hass: HomeAssistant, entity_id: str, rooms: list[str] | None
 ) -> bool:
-    """CasaSmart runtime component."""
+    """Room-scope check (B1.6): is this entity inside the token's scope?
+
+    ``rooms`` is the JWT's ``rooms`` claim — a list of area ids, or None
+    for an unrestricted token (admin/sub-admin and unscoped users).
+    Entities with NO area are invisible to room-scoped tokens: scoping is
+    a restriction, and "unassigned" is not a room anyone was granted.
+    """
     if rooms is None:
         return True
     area_id = area_id_of(hass, entity_id)
@@ -74,7 +86,6 @@ def in_scope(
 
 
 def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
-    """CasaSmart runtime component."""
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return True
@@ -98,7 +109,11 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
-    """CasaSmart runtime component."""
+    """True when a sensor/binary_sensor belongs to a weather SERVICE rather
+    than a physical device — its device also hosts a ``weather.*`` entity
+    (OpenWeatherMap, met.no, AccuWeather…). Forecast sensors are not home
+    devices and must never become device cards. Gated to sensor domains so the
+    per-entity device lookup stays off the hot path for everything else."""
     if not (
         entity_id.startswith("sensor.")
         or entity_id.startswith("binary_sensor.")
@@ -149,7 +164,6 @@ def is_openweathermap_measurement(
 
 
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
-    """CasaSmart runtime component."""
     weather_measurement = is_openweathermap_measurement(hass, entity_id)
     return (
         is_exposed(entity_id)
@@ -159,7 +173,18 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
-    """CasaSmart runtime component."""
+    """True when an entity may be a registry ORGANIZE target — assigned to a
+    room, renamed, reordered, or cleared. Deliberately WEAKER than
+    ``is_served``: the read/feed surface hides ``hidden_by`` entities and
+    uncurated diagnostics, but organizing is a different surface. A device
+    the integration has HIDDEN (e.g. a secondary gang switch with
+    ``hidden_by='integration'``), or a diagnostic row, can still legitimately
+    hold a room assignment and have it edited or cleared. Gating writes on
+    ``is_served`` 404'd those legitimate edits — the device was assignable
+    when first imported, then the integration hid it, and the hub then
+    refused to let the app move or clear it. Requires only that the entity is
+    REAL (a registry entry or a live state) and that its domain is exposed.
+    Reads/feeds keep using ``is_served``."""
     if not is_exposed(entity_id):
         return False
     if er.async_get(hass).async_get(entity_id) is not None:
@@ -168,13 +193,21 @@ def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def device_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """CasaSmart runtime component."""
+    """HA device-registry id for an entity, or None when it has no
+    registry entry / no parent device (template/MQTT-yaml entities).
+
+    The app groups multi-entity hardware into one tile by this id —
+    it is an opaque grouping key on the wire, never an HA handle the
+    app can act on (commands stay entity_id + whitelisted action)."""
     entry = er.async_get(hass).async_get(entity_id)
     return entry.device_id if entry is not None else None
 
 
 def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Serialize a state into the wire device dict — area resolved,
+    the installer's registry display name (B17) overriding the HA
+    friendly name when one is set, and the HA device-registry id as
+    the app's tile-grouping key (B16)."""
     entry = er.async_get(hass).async_get(state.entity_id)
     device = serialize_state(
         state,

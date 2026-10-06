@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -44,11 +43,10 @@ _BACKDATE = timedelta(hours=1)
 
 
 class IdentityError(Exception):
-    """CasaSmart runtime component."""
+    """The permanent identity key is unusable — never auto-recovered."""
 
 
 class TlsIdentitySigner:
-    """CasaSmart runtime component."""
 
     _SCALAR_BYTES = 32
 
@@ -61,11 +59,9 @@ class TlsIdentitySigner:
 
     @property
     def public_spki_der(self) -> bytes:
-        """CasaSmart runtime component."""
         return self._public_spki_der
 
     def sign(self, message: bytes) -> bytes:
-        """CasaSmart runtime component."""
         der_signature = self._private_key.sign(message, ec.ECDSA(hashes.SHA256()))
         r, s = decode_dss_signature(der_signature)
         return r.to_bytes(self._SCALAR_BYTES, "big") + s.to_bytes(
@@ -75,7 +71,6 @@ class TlsIdentitySigner:
 
 @dataclass(frozen=True)
 class TlsMaterial:
-    """CasaSmart runtime component."""
 
     identity_public_pem: str
     identity_fingerprint: str
@@ -97,7 +92,7 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
                 key_path.read_bytes(), password=None
             )
         except (ValueError, TypeError) as err:
-
+            # NEVER silently re-key: every paired phone pins this key.
             raise IdentityError(
                 f"Identity key at {key_path} is unreadable ({err}). "
                 "Restore it from backup, or delete the file to re-key — "
@@ -118,7 +113,7 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-
+    # 0600 from the first byte — never world-readable, even briefly.
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(pem)
@@ -151,7 +146,12 @@ def _leaf_is_valid(
     key_path: Path,
     identity: ec.EllipticCurvePrivateKey,
 ) -> datetime | None:
-    """CasaSmart runtime component."""
+    """The stored leaf's expiry when it's still good to serve, else None.
+
+    "Good" = parseable, key matches cert, signed by OUR identity key, and
+    not inside the renewal margin. Anything off -> None (caller re-mints;
+    leaves are disposable).
+    """
     if not cert_path.exists() or not key_path.exists():
         return None
     try:
@@ -183,8 +183,8 @@ def _leaf_is_valid(
             ec.ECDSA(hashes.SHA256()),
         )
     except InvalidSignature:
-
-
+        # Signed by some other identity (restored from the wrong backup?)
+        # — a phone pinning OUR identity would reject it. Re-mint.
         return None
 
     not_after = cert.not_valid_after_utc
@@ -200,11 +200,11 @@ def _mint_leaf(
     identity: ec.EllipticCurvePrivateKey,
     validity_days: int,
 ) -> datetime:
-    """CasaSmart runtime component."""
+    """Mint a fresh leaf keypair + cert signed by the identity key."""
     leaf_key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.now(timezone.utc)
-
-
+    # X.509 time has whole-second resolution — truncate up front so the
+    # value we report always equals what the cert actually says.
     not_after = (now + timedelta(days=validity_days)).replace(microsecond=0)
     cert = (
         x509.CertificateBuilder()
@@ -249,7 +249,6 @@ def _mint_leaf(
 def ensure_tls_material(
     data_dir: Path, validity_days: int = TLS_CERT_VALIDITY_DAYS
 ) -> TlsMaterial:
-    """CasaSmart runtime component."""
     identity = _load_or_create_identity(data_dir)
     cert_path = data_dir / TLS_CERT_FILENAME
     key_path = data_dir / TLS_KEY_FILENAME
@@ -274,7 +273,13 @@ def ensure_tls_material(
 
 
 class CasaSmartTlsServer:
-    """CasaSmart runtime component."""
+    """The CasaSmart API on its own HTTPS port.
+
+    Serves the exact same view instances/registration path as the plain
+    HA-port API (one code path — same auth gates, same filtering), just
+    behind TLS with the hub-issued leaf. Restarting the site (not the
+    runner) is how a rotated leaf goes live.
+    """
 
     def __init__(self, hass, port: int, material: TlsMaterial) -> None:
         self._hass = hass
@@ -304,7 +309,7 @@ class CasaSmartTlsServer:
         return context
 
     async def async_start(self, views) -> bool:
-        """CasaSmart runtime component."""
+        """Bring the listener up. False (logged) when the port won't bind."""
         if self._runner is None:
             app = web.Application()
             for view in views:
@@ -328,7 +333,12 @@ class CasaSmartTlsServer:
         return True
 
     async def async_refresh(self, material: TlsMaterial, views) -> None:
-        """CasaSmart runtime component."""
+        """Adopt re-checked material; restart the site only when needed.
+
+        Called from the daily tick. A rotated leaf (or a listener that
+        never bound) restarts the TCP site with a fresh SSL context —
+        phones reconnect transparently because the pin didn't change.
+        """
         rotated = material.leaf_rotated
         self._material = material
         if self._site is not None and not rotated:

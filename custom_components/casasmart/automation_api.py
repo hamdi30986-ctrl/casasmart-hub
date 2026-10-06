@@ -1,4 +1,34 @@
-"""CasaSmart runtime component."""
+"""Automation config endpoints (Track B — B16 stage 3c-3).
+
+The REST surface that replaces the app's raw-token calls to HA's own
+``/api/config/automation/config/{id}`` (create / edit / delete) and the
+entity-registry ghost cleanup that followed a delete:
+
+- ``GET    /api/casasmart/automations/{config_key}/config`` — one
+  automation's config, for the editor's lazy load.
+- ``POST   /api/casasmart/automations/{config_key}/config`` — create or
+  update; the config is validated with HA's OWN automation validator
+  before a byte is written, then automations.yaml is rewritten
+  atomically and the automation component reloads just that id.
+- ``DELETE /api/casasmart/automations/{config_key}/config`` — remove
+  from automations.yaml, reload, and clean the ghost entity out of HA's
+  entity registry (the hub does the cleanup the app used to do with a
+  second raw-token call).
+
+All three sit behind ``automations.manage`` (admin + sub-admin — family
+members toggle and trigger through the command endpoint, they never
+rewrite configs), and all three refuse room-scoped tokens outright:
+automations have no room, so a scoped grant cannot contain them.
+
+The surface is scoped to the app's own automations — config keys MUST
+carry the ``casa_automation_`` prefix. Hub-internal and installer
+automations are not reachable here, in either direction.
+
+Automation STATE (on/off, last_triggered) deliberately does not live
+here: automation is an exposed domain in ``entity_bridge``, so state
+rides the same devices/WS feed as everything else, and enable/disable/
+trigger ride the whitelisted command endpoint.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +42,7 @@ import voluptuous as vol
 from aiohttp import web
 
 from homeassistant.components.automation import DOMAIN as AUTOMATION_DOMAIN
-from homeassistant.components.automation.config import (
+from homeassistant.components.automation.config import (  # noqa: PLC2701 — the same validator HA's own config API uses
     async_validate_config_item,
 )
 from homeassistant.components.http import HomeAssistantView
@@ -41,20 +71,25 @@ _UNSET = object()
 _LOGGER = logging.getLogger(__name__)
 
 
-
+# -- File I/O (executor-side) ----------------------------------------------------
 
 
 class AutomationFileError(Exception):
-    """CasaSmart runtime component."""
+    """automations.yaml exists but isn't the list HA mandates."""
 
 
 def _read_yaml(path: str) -> list[dict[str, Any]]:
-    """CasaSmart runtime component."""
+    """Load automations.yaml; a missing or empty file is an empty list.
+
+    A present-but-non-list file (hand-edited into a dict/scalar) raises
+    instead of coercing to ``[]`` — silently treating corrupt content as
+    empty would DISCARD it on the next write (audit finding, 3c-3).
+    """
     if not os.path.isfile(path):
         return []
     content = load_yaml(path)
     if content is None:
-
+        # All-comments / empty file — legitimately no automations.
         return []
     if not isinstance(content, list):
         raise AutomationFileError(
@@ -64,40 +99,40 @@ def _read_yaml(path: str) -> list[dict[str, Any]]:
 
 
 def _write_yaml(path: str, data: list[dict[str, Any]]) -> None:
-    """CasaSmart runtime component."""
+    """Serialize BEFORE opening the file — a dump error must not truncate."""
     contents = dump(data)
     write_utf8_file_atomic(path, contents)
 
 
-
+# -- The view -------------------------------------------------------------------
 
 
 class CasaSmartAutomationConfigView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET/POST/DELETE /api/casasmart/automations/{config_key}/config."""
 
     url = f"/api/{DOMAIN}/automations/{{config_key}}/config"
     name = f"api:{DOMAIN}:automation:config"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-
-
-
+        # One writer at a time — concurrent saves must not interleave the
+        # read-modify-write on automations.yaml (same lock discipline as
+        # HA's own config view).
         self._mutation_lock = asyncio.Lock()
 
     def _gate(
         self, request: web.Request
     ) -> tuple[dict[str, Any] | None, web.Response | None]:
-        """CasaSmart runtime component."""
+        """Auth + scope + ownership, shared by all three verbs."""
         claims, error = authenticate_request(
             self._hass, request, "automations.manage"
         )
         if error is not None:
             return None, error
         if claims.get("rooms") is not None:
-
-
+            # Room-scoped tokens have no business in config-land, whatever
+            # their role claims — automations don't live in a room.
             return None, self.json_message(
                 "Automation management requires an unscoped token",
                 HTTPStatus.FORBIDDEN,
@@ -111,9 +146,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 HTTPStatus.BAD_REQUEST,
             )
         if not is_valid_casa_automation_key(config_key):
-
-
-
+            # Owns the prefix but carries an illegal character — a key the
+            # app would never generate. Refuse before it can reach
+            # automations.yaml.
             return self.json_message(
                 f"Invalid automation id {config_key!r}: only letters, digits "
                 "and underscores are allowed after the "
@@ -135,7 +170,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
     async def _load(
         self,
     ) -> tuple[list[dict[str, Any]] | None, web.Response | None]:
-        """CasaSmart runtime component."""
+        """Read automations.yaml off-loop; a corrupt file is a 500, never
+        an empty list a later write would clobber."""
         try:
             data = await self._hass.async_add_executor_job(
                 _read_yaml, self._config_path
@@ -149,7 +185,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return data, None
 
     async def get(self, request: web.Request, config_key: str) -> web.Response:
-        """CasaSmart runtime component."""
+        """One automation's stored config (the editor's lazy load)."""
         _, error = self._gate(request)
         if error is not None:
             return error
@@ -175,7 +211,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         )
 
     async def post(self, request: web.Request, config_key: str) -> web.Response:
-        """CasaSmart runtime component."""
+        """Create or update — validate with HA's validator, write, reload."""
         claims, error = self._gate(request)
         if error is not None:
             return error
@@ -203,9 +239,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 HTTPStatus.FORBIDDEN,
             )
 
-
-
-
+        # HA's own validator — the exact gate its native config API runs.
+        # Invalid configs die here, BEFORE automations.yaml is touched: a
+        # bad write would take every automation down on the next reload.
         try:
             await async_validate_config_item(self._hass, config_key, dict(payload))
         except (vol.Invalid, HomeAssistantError) as err:
@@ -250,7 +286,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         )
 
     async def delete(self, request: web.Request, config_key: str) -> web.Response:
-        """CasaSmart runtime component."""
+        """Remove from automations.yaml, reload, evict the ghost entity."""
         _, error = self._gate(request)
         if error is not None:
             return error
@@ -275,9 +311,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                     "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
                 )
 
-
-
-
+        # The cleanup HA's own config API does on delete: the registry
+        # entry (unique_id == config key) lingers after the config is
+        # gone and would haunt the entities feed as "unavailable".
         ent_reg = er.async_get(self._hass)
         entity_id = ent_reg.async_get_entity_id(
             AUTOMATION_DOMAIN, AUTOMATION_DOMAIN, config_key
@@ -294,13 +330,13 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return self.json({"result": "ok", "id": config_key})
 
     async def _reload(self, config_key: str) -> None:
-        """CasaSmart runtime component."""
+        """Reload just this automation id (HA 2024.6+ scoped reload)."""
         try:
             await self._hass.services.async_call(
                 AUTOMATION_DOMAIN, SERVICE_RELOAD, {CONF_ID: config_key}
             )
         except HomeAssistantError as err:
-
-
-
+            # The yaml is already written and valid — a reload hiccup
+            # self-heals on the next reload/restart. Log, don't fail the
+            # request that did its job.
             _LOGGER.warning("automation reload failed: %s", err)

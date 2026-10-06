@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -212,16 +211,16 @@ READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor", "camer
 
 
 class CommandError(Exception):
-    """CasaSmart runtime component."""
+    """An app command failed validation (maps to HTTP 400)."""
 
 
 def entity_domain(entity_id: str) -> str:
-    """CasaSmart runtime component."""
+    """Return the domain part of an entity_id ('light.living1' -> 'light')."""
     return entity_id.partition(".")[0]
 
 
 def is_exposed(entity_id: str) -> bool:
-    """CasaSmart runtime component."""
+    """True when the entity's domain is part of the CasaSmart surface."""
     return entity_domain(entity_id) in EXPOSED_DOMAINS
 
 
@@ -259,7 +258,12 @@ DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
 
 
 def is_filter_life_entity(entity_id: str) -> bool:
-    """CasaSmart runtime component."""
+    """True for an air purifier's remaining-filter-life sensor.
+
+    Matched by entity_id because HA publishes no device_class for it — brands
+    name it ``filter_lifetime``, ``filter_life_remaining``, ``filter_remaining``.
+    The app matches with the same rule.
+    """
     name = entity_id.lower()
     return "filter" in name and ("life" in name or "remain" in name)
 
@@ -267,15 +271,19 @@ def is_filter_life_entity(entity_id: str) -> bool:
 def is_category_served(
     category: str, entity_id: str, device_class: str | None
 ) -> bool:
-    """CasaSmart runtime component."""
+    """Category-entity exposure policy (B16 3c-4a). Pure — unit-testable.
+
+    ``category`` is the registry entity_category value (``"config"`` /
+    ``"diagnostic"``); callers handle the no-category case themselves.
+    """
     if category == "config":
         return True
     if category == "diagnostic":
         domain = entity_domain(entity_id)
         if domain == "sensor":
-
-
-
+            # An air purifier's filter life is the one thing about the device
+            # its owner has to act on, and HA files it under diagnostics with
+            # no device_class — so the class whitelist alone would hide it.
             if is_filter_life_entity(entity_id):
                 return True
             return device_class in DIAGNOSTIC_SENSOR_CLASSES
@@ -288,7 +296,11 @@ def is_category_served(
 def serialize_state(
     state: Any, area: str | None = None, entity_category: str | None = None
 ) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Serialize one HA state object into the CasaSmart device dict.
+
+    ``state`` is duck-typed: needs ``entity_id``, ``state``, ``attributes``
+    (mapping) and ``last_updated`` (datetime or None).
+    """
     domain = entity_domain(state.entity_id)
     allowed = _ATTRIBUTE_ALLOWLIST.get(domain, frozenset())
     attributes = {
@@ -303,8 +315,8 @@ def serialize_state(
         "area": area,
         "attributes": attributes,
         "last_updated": last_updated.isoformat() if last_updated else None,
-
-
+        # 3c-4a: the app classifies config entities (settings sheets) and
+        # diagnostic sensors (energy panel) by this — None for primaries.
         "entity_category": entity_category,
     }
 
@@ -312,7 +324,12 @@ def serialize_state(
 def validate_command(
     entity_id: str, action: Any, data: Any
 ) -> tuple[str, str, dict[str, Any]]:
-    """CasaSmart runtime component."""
+    """Validate an app command against the whitelist.
+
+    Returns ``(ha_domain, ha_service, service_data)`` ready for
+    ``hass.services.async_call``. Raises ``CommandError`` (HTTP 400
+    territory) on anything outside the whitelist.
+    """
     domain = entity_domain(entity_id)
     if domain not in EXPOSED_DOMAINS:
         raise CommandError(f"Domain {domain!r} is not exposed")

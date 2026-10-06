@@ -1,9 +1,24 @@
-"""CasaSmart runtime component."""
+"""Hub-native athan (prayer-call) scheduler.
+
+Computes the five daily prayer times locally via ``prayer-times-calculator-offline``
+(the same offline, no-network library Home Assistant's *Islamic Prayer Times*
+integration uses) from the athan config the app stores through ``PUT /audio/athan``
+(``lat``/``lon``/``timezone``/``method``/``school``), falling back to the hub's own
+configured location (``hass.config.latitude/longitude/time_zone``). It arms one HA
+timer per prayer and, at prayer time, publishes a broadcast ``play`` command
+(priority ``athan``) through the audio adapter — the same play path PA uses.
+
+This replaces the standalone ``casaos-athan-scheduler`` daemon. The hub owns
+audio (B14), so it owns athan scheduling too. The library returns UTC timestamps,
+so DST/offset handling is inherent (no fixed table), and it adds Hanafi/Shafi Asr,
+high-latitude rules and ~24 regional calculation methods — correct in any region,
+with no Supabase, no hardcoded home id and no separate broker credentials.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timezone, tzinfo  # noqa: F401  (tzinfo used in hints)
 from typing import Any, Optional
 
 from homeassistant.core import HomeAssistant, callback
@@ -17,16 +32,16 @@ from .audio import normalize_mac6, AudioError
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# Prayer-call MP3s are baked onto each Pi speaker image at this path.
 ATHAN_DIR = "/var/lib/speaker/athans"
 PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 
-
-
+# If the hub was down/asleep across a prayer time, don't blast a stale athan on
+# wake — skip anything already more than this many seconds past.
 _GRACE_SEC = 120
 
-
-
+# The library's accepted calculation methods (lower-case). The app historically
+# sends "egyptian"; the library calls it "egypt", so alias it.
 _LIB_METHODS = frozenset({
     "mwl", "isna", "egypt", "makkah", "karachi", "tehran", "jafari", "gulf",
     "kuwait", "qatar", "singapore", "france", "turkey", "russia", "moonsighting",
@@ -41,10 +56,15 @@ _ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
 def compute_prayer_times_utc(
     lat: float, lon: float, method: str, school: str, date_str: str
 ) -> Optional[dict[str, datetime]]:
-    """CasaSmart runtime component."""
+    """The five prayer times as timezone-aware UTC datetimes for ``date_str``.
+
+    Uses ``prayer-times-calculator-offline`` (pure local math, no network).
+    Returns None if the library is missing or the calculation fails, so the
+    caller schedules nothing rather than crashing the loop.
+    """
     try:
         from prayer_times_calculator_offline import PrayerTimesCalculator
-    except Exception:
+    except Exception:  # noqa: BLE001 — declared in manifest; guard anyway
         _LOGGER.warning("Athan: prayer-times-calculator-offline not installed")
         return None
 
@@ -64,7 +84,7 @@ def compute_prayer_times_utc(
             school=sch,
         )
         raw = calc.fetch_prayer_times()
-    except Exception:
+    except Exception:  # noqa: BLE001 — a bad config must not kill the loop
         _LOGGER.exception("Athan: prayer-time calculation failed")
         return None
 
@@ -77,14 +97,14 @@ def compute_prayer_times_utc(
             dt = datetime.fromisoformat(value)
         except (TypeError, ValueError):
             continue
-        if dt.tzinfo is None:
+        if dt.tzinfo is None:  # library emits +00:00, but be defensive
             dt = dt.replace(tzinfo=timezone.utc)
         out[prayer] = dt
     return out or None
 
 
 class AthanScheduler:
-    """CasaSmart runtime component."""
+    """Computes prayer times off the athan config and fires them on HA's clock."""
 
     def __init__(self, hass: HomeAssistant, engine: Any, adapter: Any) -> None:
         self._hass = hass
@@ -92,19 +112,26 @@ class AthanScheduler:
         self._adapter = adapter
         self._unsub_prayers: list[Any] = []
         self._unsub_recompute: Optional[Any] = None
-
-
+        # Last computed schedule, for the GET /audio/athan `schedule` block so
+        # the app can show "next athan" and a silent failure can't hide.
         self._schedule: dict[str, Any] = {"enabled": False}
 
     async def async_start(self) -> None:
-        """CasaSmart runtime component."""
+        """Arm today's prayers and a self-healing hourly recompute.
+
+        The hourly tick (at :01) both rolls the day over at 00:01 AND re-arms
+        every hour — so a missed trigger (a slept host, a dropped timer, a
+        toggle that raced setup) self-corrects within the hour instead of
+        silently missing a whole day. reschedule() is idempotent, so re-running
+        it costs one offline prayer-time calc and cancel/re-arm.
+        """
         self._unsub_recompute = async_track_time_change(
             self._hass, self._handle_recompute, minute=1, second=0
         )
         self.reschedule()
 
     async def async_stop(self) -> None:
-        """CasaSmart runtime component."""
+        """Cancel every armed timer (idempotent)."""
         self._cancel_prayers()
         if self._unsub_recompute is not None:
             self._unsub_recompute()
@@ -115,7 +142,8 @@ class AthanScheduler:
         self.reschedule()
 
     def schedule_snapshot(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """The last computed schedule (today's times + which are still ahead +
+        target speakers), for the athan API's observability block."""
         return dict(self._schedule)
 
     def _cancel_prayers(self) -> None:
@@ -125,7 +153,12 @@ class AthanScheduler:
 
     @callback
     def reschedule(self, *_: Any) -> None:
-        """CasaSmart runtime component."""
+        """(Re)compute today's times and arm timers for the prayers still ahead.
+
+        Safe to call any time — from setup, the midnight tick, or a config PUT.
+        A no-op (all timers cleared) when athan is disabled or no location is
+        resolvable.
+        """
         self._cancel_prayers()
         resolved = self._resolve_config()
         if resolved is None:
@@ -164,7 +197,7 @@ class AthanScheduler:
                 {"name": prayer, "at": fire_at.isoformat(), "local": local, "upcoming": upcoming}
             )
             if not upcoming:
-                continue
+                continue  # already well past — skip (grace guards a late wake)
             unsub = async_track_point_in_time(
                 self._hass, self._make_fire(prayer), fire_at
             )
@@ -186,9 +219,9 @@ class AthanScheduler:
             "next": next_prayer,
         }
 
-
-
-
+        # A configured selection that resolves to zero enrolled speakers means
+        # athan is ENABLED but would fire NOWHERE — surface it loudly (visible
+        # even at the hub's default:warning level); it's a real misconfiguration.
         if has_sel and not targets:
             _LOGGER.warning(
                 "Athan enabled for %s but its selected speakers are all un-enrolled — "
@@ -205,13 +238,19 @@ class AthanScheduler:
         )
 
     def _resolve_targets(self, athan: dict[str, Any]) -> tuple[bool, list[str]]:
-        """CasaSmart runtime component."""
+        """``(has_selection, target_mac6s)``.
+
+        No selection (absent/empty ``speakers``) => broadcast to ALL speakers.
+        A selection is normalised and intersected with the currently-enrolled
+        speakers, so a removed/renamed speaker silently drops out — an explicit
+        selection NEVER falls back to blasting everyone (unlike PA).
+        """
         raw = athan.get("speakers")
         if not raw or not isinstance(raw, list):
             return False, []
         try:
             enrolled = {s.get("mac6") for s in self._engine.speakers()}
-        except Exception:
+        except Exception:  # noqa: BLE001 — a registry hiccup must not kill firing
             enrolled = set()
         targets: list[str] = []
         for item in raw:
@@ -230,7 +269,7 @@ class AthanScheduler:
         return _fire
 
     def _fire_athan(self, prayer: str) -> None:
-
+        # Re-check at fire time: the config may have been disabled since arming.
         if self._resolve_config() is None:
             _LOGGER.info("Athan: %s reached but athan is now disabled — skipping", prayer)
             return
@@ -244,8 +283,8 @@ class AthanScheduler:
             )
             return
 
-
-
+        # No selection => a single broadcast (mac=None). A selection => one
+        # targeted play per chosen speaker (the same path PA uses).
         macs: list[Optional[str]] = targets if has_sel else [None]
         delivered = 0
         for mac in macs:
@@ -253,13 +292,13 @@ class AthanScheduler:
                 topic, payload = self._engine.build_play(
                     mac=mac, file=file_path, priority="athan"
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — a build error must not kill the loop
                 _LOGGER.exception("Athan: failed to build %s play command", prayer)
                 continue
             try:
                 self._adapter.publish(topic, payload, qos=1)
                 delivered += 1
-            except Exception:
+            except Exception:  # noqa: BLE001 — a dead bus is non-fatal, just logged
                 _LOGGER.warning(
                     "Athan: %s not delivered to %s — MQTT bus unavailable", prayer, topic
                 )
@@ -272,10 +311,14 @@ class AthanScheduler:
     def _resolve_config(
         self,
     ) -> Optional[tuple[float, float, str, str, str]]:
-        """CasaSmart runtime component."""
+        """Return ``(lat, lon, tz_name, method, school)`` or None if athan is off.
+
+        Location and timezone fall back to the hub's own HA config so a client
+        hub configured with the customer's location works with no app-side setup.
+        """
         try:
             athan = self._engine.get_athan()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if not athan or not athan.get("enabled"):
             return None

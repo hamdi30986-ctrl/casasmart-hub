@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 

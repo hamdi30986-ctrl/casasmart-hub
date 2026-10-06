@@ -1,4 +1,13 @@
-"""CasaSmart runtime component."""
+"""JsonConfigStore — JSON file for rarely-changed hub config.
+
+Holds the small, near-static stuff: hub identity, network settings, version
+pin. Multi-user / frequently-written data belongs in HubStorage (SQLite),
+not here.
+
+Writes are atomic: serialize to a temp file in the same directory, fsync,
+then ``os.replace`` over the target — a crash mid-write can never leave a
+half-written config behind.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +27,7 @@ _MISSING = object()
 
 
 class JsonConfigStore:
-    """CasaSmart runtime component."""
+    """Dict-like access to a single JSON config file with atomic writes."""
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -41,14 +50,14 @@ class JsonConfigStore:
             )
         return data
 
-
+    # -- access ----------------------------------------------------------------
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """CasaSmart runtime component."""
+        """Set a key and persist immediately (config writes are rare)."""
         with self._lock:
             self._data[key] = value
             self._save()
@@ -59,17 +68,17 @@ class JsonConfigStore:
                 self._save()
 
     def update(self, values: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Set several keys with a single write to disk."""
         with self._lock:
             self._data.update(values)
             self._save()
 
     def as_dict(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Snapshot copy — mutating it does not touch the store."""
         with self._lock:
             return dict(self._data)
 
-
+    # -- persistence -------------------------------------------------------------
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,9 +96,9 @@ class JsonConfigStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_name, self._path)
-
-
-
+            # fsync the directory so the rename itself is durable: without it a
+            # power cut just after replace() can lose the rename — and with it
+            # the permanent pairing/recovery code hashes this file holds.
             dir_fd = os.open(self._path.parent, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)

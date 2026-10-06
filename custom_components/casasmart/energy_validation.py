@@ -1,4 +1,4 @@
-"""CasaSmart runtime component."""
+"""HA-free cross-validation of Energy Saving wizard picks and discovery."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 
 try:
     from .energy import LEVEL_LOW, LEVEL_MEDIUM, LEVEL_SMART, EnergyConfigError
-except ImportError:
-    from energy import (
+except ImportError:  # direct module import in the HA-free unit environment
+    from energy import (  # type: ignore[no-redef]
         LEVEL_LOW,
         LEVEL_MEDIUM,
         LEVEL_SMART,
@@ -19,7 +19,7 @@ except ImportError:
 def validate_config_against_discovery(
     level: str, config: dict[str, Any], discovery: dict[str, Any]
 ) -> None:
-    """CasaSmart runtime component."""
+    """Reject incomplete, stale, or foreign picks before durable storage."""
     rooms = {room["room_id"]: room for room in discovery["rooms"]}
     excluded = set(config["excluded_rooms"])
     unknown_excluded = excluded - set(rooms)

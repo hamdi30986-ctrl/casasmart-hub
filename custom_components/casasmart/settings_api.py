@@ -1,4 +1,17 @@
-"""CasaSmart runtime component."""
+"""Per-user settings endpoints (mini-block MB-2).
+
+``GET/PUT /api/casasmart/me/settings`` — the caller's own settings doc
+(display name + widget layout today), keyed by the JWT's ``sub`` exactly
+like ``/me/favorites``: a token can never read or write another user's
+settings, which is the whole B17 permission story for personal data.
+
+GET rides ``devices.read`` and PUT ``devices.control`` — the favorites
+posture: every current role may keep its own settings, but a future
+read-only role must not slip through a read permission into a mutation.
+PUT is a partial update (only the named fields move; explicit null
+clears) so the profile screen and the widget editor write independently
+without clobbering each other.
+"""
 
 from __future__ import annotations
 
@@ -21,14 +34,14 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
-
+# Widget tile types whose entityId IS a live HA entity (so the served + scope
+# gate applies); tank/scene/security are pseudo-tiles the hub can't key, so they
+# pass through filtering untouched — the same split favorites makes for tanks.
 _ENTITY_TILE_TYPES = frozenset({"toggle", "power", "climate"})
 
 
 def get_user_settings(hass: HomeAssistant) -> UserSettingsEngine | None:
-    """CasaSmart runtime component."""
+    """The loaded entry's settings engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -37,11 +50,11 @@ def get_user_settings(hass: HomeAssistant) -> UserSettingsEngine | None:
 
 
 class CasaSmartUserSettingsView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET/PUT /api/casasmart/me/settings — the caller's own settings."""
 
     url = f"/api/{DOMAIN}/me/settings"
     name = f"api:{DOMAIN}:me:settings"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate in-handler
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -53,8 +66,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         settings = get_user_settings(self._hass)
         if settings is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-
-
+        # Settings roam per PERSON: resolve sub -> member_id (Phase 5) in the
+        # executor; a legacy device is its own member (falls back to sub).
         engine = get_engine(self._hass)
         sub = claims["sub"]
 
@@ -63,11 +76,11 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return mid, settings.get(mid)
 
         member_id, doc = await self._hass.async_add_executor_job(_load)
-
-
-
-
-
+        # Widget-tile parity with favorites: filter an absent/unserved ENTITY
+        # tile from this response, but do not mutate storage from GET. During
+        # HA startup entity states are populated incrementally; persisting the
+        # transient filtered view would permanently erase the user's layout.
+        # Non-HA pseudo-tiles (tank/scene/security) pass through.
         tiles = doc.get("widget_tiles")
         if tiles:
             served = [t for t in tiles if self._tile_alive(t)]
@@ -79,7 +92,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         return self.json(doc)
 
     def _tile_alive(self, tile: object) -> bool:
-        """CasaSmart runtime component."""
+        """An ENTITY tile survives only if its HA entity exists + is served; a
+        pseudo-tile (no HA entity to gate) always survives."""
         if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
             return True
         eid = tile.get("entityId")
@@ -90,7 +104,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         )
 
     def _tile_in_scope(self, tile: object, scope: object) -> bool:
-        """CasaSmart runtime component."""
+        """Scope an ENTITY tile to the caller; pseudo-tiles are unscoped."""
         if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
             return True
         return in_scope(self._hass, tile.get("entityId"), scope)
@@ -109,10 +123,10 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-
-
-
-
+        # Write-guard (favorites parity, Phase 8): an ENTITY tile must point at a
+        # served entity in the caller's scope, so a scoped member can't pin
+        # another room's device into their widget. Pseudo-tiles pass; shape
+        # validation stays the engine's job (_clean_widget_tiles).
         tiles = payload.get("widget_tiles")
         if isinstance(tiles, list):
             scope = claims.get("rooms")
@@ -142,7 +156,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             )
         except SettingsError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-
-
+        # Nudge the member's other devices (Phase 5) — the app re-pulls its
+        # settings on any registry_changed.
         self._hass.bus.async_fire(EVENT_REGISTRY_CHANGED, {"kind": "settings"})
         return self.json(doc)

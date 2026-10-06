@@ -1,4 +1,8 @@
-"""CasaSmart runtime component."""
+"""Runtime coordination for CasaSmart Energy Saving (P3).
+
+The durable engine stays HA-free in :mod:`energy`; this module owns the
+transaction ordering around HA automations and the P2 device adapter.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,11 @@ EVENT_AUTOMATION_RESTORE_FAILED = "automation_restore_failed"
 
 
 class EnergyFlags:
-    """CasaSmart runtime component."""
+    """Dedicated KV namespace for automation flags and restore bookkeeping.
+
+    Methods are synchronous because the underlying storage table is SQLite;
+    callers on HA's event loop use ``async_add_executor_job``.
+    """
 
     def __init__(self, table: Any) -> None:
         self._table = table
@@ -95,7 +103,7 @@ class EnergyFlags:
 
 
 def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool:
-    """CasaSmart runtime component."""
+    """True when the caller is non-admin and the active level locks control."""
     state = engine.snapshot()
     return bool(
         state["active"]
@@ -105,7 +113,7 @@ def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool
 
 
 class EnergyAutomationManager:
-    """CasaSmart runtime component."""
+    """Disable unflagged HA automations and restore exactly what we changed."""
 
     def __init__(
         self,
@@ -126,7 +134,11 @@ class EnergyAutomationManager:
         return str(state.entity_id).partition(".")[2]
 
     async def async_enforce_active(self) -> None:
-        """CasaSmart runtime component."""
+        """Turn off every currently-enabled unflagged automation.
+
+        The remembered set is updated after every successful call so a process
+        crash cannot lose which automations CasaSmart owes the user a restore.
+        """
         remembered = set(
             await self._hass.async_add_executor_job(
                 self._flags.disabled_automations
@@ -155,7 +167,7 @@ class EnergyAutomationManager:
                     {"entity_id": state.entity_id},
                     blocking=True,
                 )
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - isolate one automation
                 _LOGGER.warning(
                     "Could not disable automation %s for Energy Saving: %s",
                     state.entity_id,
@@ -180,7 +192,7 @@ class EnergyAutomationManager:
             )
 
     async def async_restore(self, *, level: str | None = None) -> None:
-        """CasaSmart runtime component."""
+        """Restore only automations disabled by CasaSmart; retain failures."""
         pending = set(
             await self._hass.async_add_executor_job(
                 self._flags.disabled_automations
@@ -194,7 +206,7 @@ class EnergyAutomationManager:
                     {"entity_id": entity_id},
                     blocking=True,
                 )
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - preserve pending retry
                 _LOGGER.warning(
                     "Could not restore automation %s after Energy Saving: %s",
                     entity_id,
@@ -232,12 +244,12 @@ class EnergyAutomationManager:
                     data=data,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - audit cannot block HA recovery
             _LOGGER.exception("Could not record Energy Saving event %s", kind)
 
 
 class EnergyController:
-    """CasaSmart runtime component."""
+    """One orchestration seam shared by REST, startup, and factory reset."""
 
     def __init__(
         self,
@@ -257,8 +269,8 @@ class EnergyController:
     async def async_start(self) -> None:
         self.adapter.async_start()
         if self.engine.active_level is None:
-
-
+            # Crash recovery: a completed deactivation may have left only a
+            # failed automation restore pending. Retry without touching devices.
             await self.automations.async_restore()
             return
         await self.automations.async_enforce_active()
@@ -266,7 +278,7 @@ class EnergyController:
         self.notify_changed()
 
     def async_stop(self) -> None:
-        """CasaSmart runtime component."""
+        """Stop listeners/timers without changing durable active state."""
         self.adapter.async_stop()
 
     async def async_state(self) -> dict[str, Any]:

@@ -1,4 +1,20 @@
-"""CasaSmart runtime component."""
+"""CasaSmart Energy Saving engine — persistent, HA-free core (P1).
+
+This module owns the durable configuration and state contract for the three
+Energy Saving levels. It deliberately contains no Home Assistant imports,
+service calls, timers, device inventory, or role checks:
+
+* P1 (here) validates/stores configuration, active state, releases, room
+  occupancy, factual event history, and stats-lite.
+* P2's adapter will execute rules and drive occupancy/temperature/sun edges.
+* P3 will expose the engine through authenticated REST/WS surfaces and enforce
+  lockout in command paths.
+
+Storage methods are synchronous and must be called through Home Assistant's
+executor once wired. An ``RLock`` protects the in-memory mirrors and their
+corresponding SQLite writes. Read-heavy adapter paths use snapshots and
+``is_released`` without touching disk.
+"""
 
 from __future__ import annotations
 
@@ -51,19 +67,19 @@ _SMART_CONFIG_FIELDS = _COMMON_CONFIG_FIELDS | {"lockout_enabled"}
 
 
 class EnergyError(Exception):
-    """CasaSmart runtime component."""
+    """Base class for rejected Energy Saving operations."""
 
 
 class EnergyConfigError(EnergyError):
-    """CasaSmart runtime component."""
+    """A level configuration or pick has an invalid shape/value."""
 
 
 class UnknownEnergyLevelError(EnergyError):
-    """CasaSmart runtime component."""
+    """The requested level is not Low, Medium, or Smart."""
 
 
 class EnergySetupRequiredError(EnergyError):
-    """CasaSmart runtime component."""
+    """Activation was attempted before that level's wizard was completed."""
 
     def __init__(self, level: str) -> None:
         super().__init__(f"{level} setup is not complete")
@@ -71,11 +87,11 @@ class EnergySetupRequiredError(EnergyError):
 
 
 class EnergyAlreadyActiveError(EnergyError):
-    """CasaSmart runtime component."""
+    """A level is already active; it must be deactivated explicitly."""
 
 
 class EnergyInactiveError(EnergyError):
-    """CasaSmart runtime component."""
+    """An active-level-only operation was requested while inactive."""
 
 
 def _validate_level(level: Any) -> str:
@@ -202,7 +218,7 @@ def _clean_heaters(value: Any) -> list[dict[str, Any]]:
 
 
 def default_level_config(level: str) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Return a fresh canonical configuration document for ``level``."""
     level = _validate_level(level)
     config: dict[str, Any] = {
         "schema_version": CONFIG_SCHEMA_VERSION,
@@ -220,7 +236,14 @@ def default_level_config(level: str) -> dict[str, Any]:
 
 
 def validate_level_config(level: str, value: Any) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Validate and normalize a complete per-level configuration document.
+
+    Keeper counts that are knowable from the blob are enforced here:
+    Low gang groups keep exactly two, Medium/Smart groups keep exactly one,
+    and Medium multi-AC groups keep exactly one. The discovery/API layer in P3
+    will additionally cross-check picks against the live candidate inventory
+    (including ``ceil(n/2)`` light counts).
+    """
     level = _validate_level(level)
     if not isinstance(value, dict):
         raise EnergyConfigError("configuration must be an object")
@@ -278,7 +301,7 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
         raw_ac_keepers,
         "ac_keepers",
         exact_count=1 if level == LEVEL_MEDIUM else None,
-
+        # Smart sensorless rooms may intentionally choose every AC off.
         allow_empty_picks=level == LEVEL_SMART,
     )
 
@@ -311,7 +334,11 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
 
 
 class EnergyEngine:
-    """CasaSmart runtime component."""
+    """Persistent Energy Saving configuration/state model.
+
+    ``config_table`` stores one JSON document per level. ``state_table`` stores
+    one ``current`` document. ``events`` is ``storage.energy_events()``.
+    """
 
     def __init__(
         self,
@@ -331,10 +358,10 @@ class EnergyEngine:
         }
         self._state = self._default_state()
 
-
+    # -- lifecycle ---------------------------------------------------------
 
     def warm_up(self) -> None:
-        """CasaSmart runtime component."""
+        """Load and validate persisted mirrors; fail safe on malformed blobs."""
         with self._lock:
             for level in ENERGY_LEVELS:
                 stored = self._config_table.get(level)
@@ -351,14 +378,14 @@ class EnergyEngine:
                     )
                     self._configs[level] = default_level_config(level)
             self._state = self._coerce_state(self._state_table.get(_STATE_KEY))
-
-
+            # Event history is factual/audit-only, not a source of truth. Bound
+            # it at boot without touching the live state/config documents.
             now = self._now()
             self._events.prune(
                 before_t=max(0, now - _EVENT_RETENTION_SECONDS)
             )
 
-
+    # -- configuration -----------------------------------------------------
 
     def get_config(self, level: str) -> dict[str, Any]:
         level = _validate_level(level)
@@ -376,7 +403,7 @@ class EnergyEngine:
         *,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Validate and replace one complete level document."""
         level = _validate_level(level)
         normalized = validate_level_config(level, config)
         clean_actor = self._optional_actor(actor)
@@ -403,7 +430,7 @@ class EnergyEngine:
         *,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Merge a wizard step into a level document and persist immediately."""
         level = _validate_level(level)
         if not isinstance(patch, dict):
             raise EnergyConfigError("configuration patch must be an object")
@@ -440,7 +467,7 @@ class EnergyEngine:
     def reset_config(
         self, level: str, *, actor: str | None = None
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Reset one wizard to canonical defaults."""
         level = _validate_level(level)
         clean_actor = self._optional_actor(actor)
         now = self._now()
@@ -456,10 +483,10 @@ class EnergyEngine:
             )
             return copy.deepcopy(config)
 
-
+    # -- active state ------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Return the API-ready live state without touching storage."""
         with self._lock:
             state = copy.deepcopy(self._state)
             state["active"] = state["active_level"] is not None
@@ -478,7 +505,7 @@ class EnergyEngine:
         smart_lockout_enabled: bool | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Persist a newly active level; P2 owns device-application ordering."""
         level = _validate_level(level)
         clean_actor = self._optional_actor(actor)
         with self._lock:
@@ -536,7 +563,7 @@ class EnergyEngine:
             return self.snapshot()
 
     def deactivate(self, *, actor: str | None = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Deactivate without restoring devices; only state/lockout are reset."""
         clean_actor = self._optional_actor(actor)
         with self._lock:
             level = self._state["active_level"]
@@ -568,7 +595,7 @@ class EnergyEngine:
             return self.snapshot()
 
     def reapply(self, *, actor: str | None = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Commit a successful P2 re-apply: clear releases, keep device state."""
         clean_actor = self._optional_actor(actor)
         with self._lock:
             level = self._require_active()
@@ -589,7 +616,7 @@ class EnergyEngine:
             )
             return self.snapshot()
 
-
+    # -- release ledger ----------------------------------------------------
 
     def is_released(self, entity_id: str) -> bool:
         entity_id = _clean_entity_id(entity_id, "entity_id")
@@ -604,7 +631,7 @@ class EnergyEngine:
         source: str = "external",
         actor: str | None = None,
     ) -> bool:
-        """CasaSmart runtime component."""
+        """Add one device to the release set; duplicate edges are idempotent."""
         entity_id = _clean_entity_id(entity_id, "entity_id")
         clean_room = (
             _clean_id(room_id, "room_id") if room_id is not None else None
@@ -646,7 +673,7 @@ class EnergyEngine:
     def clear_room_releases(
         self, room_id: str, *, reason: str = "room_empty"
     ) -> list[str]:
-        """CasaSmart runtime component."""
+        """Clear Smart releases for one room after P2's empty grace completes."""
         room_id = _clean_id(room_id, "room_id")
         reason = _clean_id(reason, "reason")
         with self._lock:
@@ -674,7 +701,7 @@ class EnergyEngine:
             )
             return cleared
 
-
+    # -- room occupancy ----------------------------------------------------
 
     def set_room_occupancy(
         self,
@@ -683,7 +710,12 @@ class EnergyEngine:
         *,
         sensors_available: bool = True,
     ) -> bool:
-        """CasaSmart runtime component."""
+        """Persist one Smart room's occupancy chip state.
+
+        ``occupied=None`` is the unavailable/unknown state and requires
+        ``sensors_available=False``. P2 owns the 45-second empty debounce and
+        calls this only after the edge is accepted.
+        """
         room_id = _clean_id(room_id, "room_id")
         if not isinstance(sensors_available, bool):
             raise EnergyConfigError("sensors_available must be a boolean")
@@ -727,7 +759,7 @@ class EnergyEngine:
             )
             return True
 
-
+    # -- events + factual stats -------------------------------------------
 
     def record_event(
         self,
@@ -738,7 +770,7 @@ class EnergyEngine:
         room_id: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """P2/P3 audit seam for rule, automation, and command-gate events."""
         if level is not None:
             level = _validate_level(level)
         with self._lock:
@@ -760,7 +792,7 @@ class EnergyEngine:
         return self._events.recent(limit=limit, since_t=since_t, kinds=kinds)
 
     def stats(self, *, since_t: int | None = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Factual operational counts only—no fabricated kWh, money, or CO₂."""
         with self._lock:
             occupancy = self._state["room_occupancy"].values()
             stats = self._events.summary(since_t=since_t)
@@ -790,7 +822,7 @@ class EnergyEngine:
             )
             return stats
 
-
+    # -- internals ---------------------------------------------------------
 
     @staticmethod
     def _default_state() -> dict[str, Any]:

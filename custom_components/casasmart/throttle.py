@@ -1,4 +1,20 @@
-"""CasaSmart runtime component."""
+"""Server-side failure throttle (Track B — B2): exponential backoff.
+
+The plan's brute-force posture, one reusable piece: "Every secret-guessing
+surface is throttled server-side... N failed attempts (e.g. 5) from a
+source -> lock that surface for a growing window (1 min -> 5 -> 30 ->
+1 hr). Counter is per-source + per-account, resets on success."
+
+B1.6 shipped a flat 30-minute wall inside the auth engine; B2 extracts
+the throttle so the pairing surface (keyed per source IP) and the login
+surface (keyed per device id) share one audited implementation, and
+upgrades the flat wall to the plan's escalating windows.
+
+Pure stdlib, no HA imports — unit-testable like the rest of the auth
+stack. All state is in-memory: a hub reboot clears it, which costs an
+attacker their progress, not us. Thread-safe (callers hit this from
+executor threads).
+"""
 
 from __future__ import annotations
 
@@ -8,18 +24,18 @@ import time
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# Failures inside a window before the wall goes up.
 MAX_FAILURES = 5
-
-
+# Escalating lockout windows (plan: 1 min -> 5 -> 30 -> 1 hr). Repeat
+# offenders stay at the last step.
 LOCKOUT_STEPS = (60.0, 5 * 60.0, 30 * 60.0, 60 * 60.0)
-
-
+# Keys are attacker-influenced (device ids, source IPs) — cap the table so
+# spam can't grow hub memory unbounded (locked entries are kept).
 MAX_ENTRIES = 1000
 
 
 class ThrottledError(Exception):
-    """CasaSmart runtime component."""
+    """Too many failures — locked out."""
 
     def __init__(self, retry_after: float) -> None:
         super().__init__(f"Too many failed attempts, retry in {int(retry_after)}s")
@@ -27,16 +43,16 @@ class ThrottledError(Exception):
 
 
 class FailureThrottle:
-    """CasaSmart runtime component."""
+    """Failure counting + escalating lockouts, keyed by caller-chosen string."""
 
     def __init__(self, name: str) -> None:
         self._name = name
         self._lock = threading.Lock()
-
+        # key -> {failures, locked_until, level}
         self._entries: dict[str, dict[str, float]] = {}
 
     def check(self, key: str) -> None:
-        """CasaSmart runtime component."""
+        """Raise ThrottledError when the key is inside a lockout window."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -46,7 +62,7 @@ class FailureThrottle:
                 raise ThrottledError(remaining)
 
     def record_failure(self, key: str) -> None:
-        """CasaSmart runtime component."""
+        """Count one failure; raise the wall (and escalate it) at the limit."""
         with self._lock:
             self._prune(making_room_for=key)
             entry = self._entries.setdefault(
@@ -59,7 +75,7 @@ class FailureThrottle:
                 entry["locked_until"] = time.monotonic() + lockout
                 entry["failures"] = 0.0
                 entry["level"] = min(step + 1, len(LOCKOUT_STEPS) - 1)
-
+                # Plan: failed bursts must be visible, not silent.
                 _LOGGER.warning(
                     "[%s] lockout for %r after %d failures (%.0f min, level %d)",
                     self._name,
@@ -70,12 +86,12 @@ class FailureThrottle:
                 )
 
     def clear(self, key: str) -> None:
-        """CasaSmart runtime component."""
+        """Success — failures AND escalation level reset (plan: resets on success)."""
         with self._lock:
             self._entries.pop(key, None)
 
     def _prune(self, making_room_for: str) -> None:
-        """CasaSmart runtime component."""
+        """Keep the table bounded; drop unlocked counters first (lock held)."""
         if len(self._entries) < MAX_ENTRIES or making_room_for in self._entries:
             return
         now = time.monotonic()

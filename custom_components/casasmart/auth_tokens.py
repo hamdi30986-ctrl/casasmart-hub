@@ -1,4 +1,41 @@
-"""CasaSmart runtime component."""
+"""Hub-issued JWT layer (Track B — B1.6): mint + validate, nothing else.
+
+Pure stdlib (hmac/hashlib/base64/json) so the token rules are
+unit-testable without an HA install, exactly like ``ws_protocol`` and
+``entity_bridge``.
+
+Why hand-rolled and not PyJWT: the hub is BOTH the issuer and the only
+validator — there is no third party, no interop, and therefore no reason
+to accept anything but our own narrow format. This module hard-rejects
+everything that isn't ``HS256`` + our issuer + our claim shape, which is
+a smaller attack surface than a general-purpose JWT library with
+algorithm negotiation (the classic ``alg: none`` family of bugs can't
+exist here by construction).
+
+Token shape (claims):
+
+- ``iss`` — always ``casasmart-hub``; anything else is rejected.
+- ``sub`` — the device id the token was issued to.
+- ``role`` — ``admin`` / ``sub-admin`` / ``user`` (plan: 3-tier model).
+- ``rooms`` — list of area ids the subject is scoped to, or ``None`` for
+  unrestricted (plan: per-user ``allowedRoomIds`` toggle).
+- ``iat`` / ``exp`` — issued-at / expiry, epoch seconds. Validation
+  allows ``CLOCK_SKEW`` seconds of slack both ways (plan: JWT expiry math
+  must survive small clock drift; the real NTP gate is a separate block).
+- ``ver`` — the device record's auth version at issue time (B2). The
+  engine bumps a device's version on any role/room change and checks
+  ``ver`` on validation, so privilege edits invalidate outstanding
+  tokens immediately instead of riding out the TTL.
+- ``jti`` — unique token id (random), for future revocation lists.
+- ``scope`` — OPTIONAL. Absent on normal session tokens. ``widget`` marks
+  the B16 3c-3 home-screen-widget token: long-lived, but the engine's
+  ``authorize`` only honors it for the narrow widget permission set
+  (device read + control), so a leaked widget token can never touch
+  cameras, history, automations CRUD, pairing, or user management.
+  Revocation rides the existing ``ver`` check — unpairing or editing the
+  issuing device kills its widget tokens the same instant as its session
+  tokens.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +49,7 @@ from typing import Any
 
 ISSUER = "casasmart-hub"
 ALGORITHM = "HS256"
-
+# Seconds of clock slack tolerated on iat/exp checks (NTP gate is B-clock).
 CLOCK_SKEW = 30
 
 ROLE_ADMIN = "admin"
@@ -20,13 +57,26 @@ ROLE_SUB_ADMIN = "sub-admin"
 ROLE_USER = "user"
 VALID_ROLES = (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER)
 
-
+# The only non-default scope a hub token can carry (B16 3c-3 widgets).
 SCOPE_WIDGET = "widget"
 VALID_SCOPES = (SCOPE_WIDGET,)
 
 
 class TokenError(Exception):
-    """CasaSmart runtime component."""
+    """The token is malformed, forged, expired, or not ours.
+
+    ``code`` is the machine-readable reason clients receive in the 401
+    body, so they can react proportionately instead of guessing from an
+    opaque message:
+
+    - ``token_invalid`` — forged/malformed/wrong secret; a fresh login is
+      the only recovery.
+    - ``token_expired`` — a genuine token past ``exp``; refresh via login.
+    - ``token_stale`` — the device was edited (auth ``ver`` bumped); the
+      device is STILL enrolled — re-auth/re-mint, never re-pair.
+    - ``unenrolled`` — the device record is gone; the one code that
+      legitimately means "pair again".
+    """
 
     def __init__(self, message: str, code: str = "token_invalid") -> None:
         super().__init__(message)
@@ -59,7 +109,7 @@ def issue_token(
     now: float | None = None,
     scope: str | None = None,
 ) -> str:
-    """CasaSmart runtime component."""
+    """Mint a signed token for an authenticated device."""
     if not secret:
         raise ValueError("Empty signing secret")
     if role not in VALID_ROLES:
@@ -92,7 +142,11 @@ def issue_token(
 def validate_token(
     secret: bytes, token: str, now: float | None = None
 ) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Verify signature + claims; return the claims dict or raise TokenError.
+
+    Signature is checked FIRST (constant-time) so claim parsing never runs
+    on unauthenticated input.
+    """
     if not secret:
         raise TokenError("Empty signing secret")
     if not isinstance(token, str):
@@ -132,8 +186,8 @@ def validate_token(
     if not isinstance(claims.get("ver"), int):
         raise TokenError("Missing version claim")
     if "scope" in claims and claims["scope"] not in VALID_SCOPES:
-
-
+        # A forged/garbled scope must never validate into "no scope" —
+        # an unknown scope claim is rejected outright, not ignored.
         raise TokenError("Unknown scope claim")
 
     current = now if now is not None else time.time()
@@ -150,7 +204,17 @@ def validate_token(
 
 
 def unverified_subject(secret: bytes, token: str) -> str | None:
-    """CasaSmart runtime component."""
+    """Signature-verified device id (``sub``), IGNORING expiry/version.
+
+    Returns the subject of a token the hub genuinely issued (HMAC verified,
+    our issuer, well-formed claims), or ``None`` for anything forged or
+    garbled. Unlike :func:`validate_token` it does NOT enforce ``exp`` — the
+    sole caller is the ``/auth/whoami`` enrollment probe, which answers "is
+    this device still paired?" and must treat a merely-stale token the same
+    as a fresh one (a stale token still proves the device's identity; whether
+    to refresh it is a separate question the app handles via re-auth). It is
+    NOT an authorization gate — never grant access off this.
+    """
     if not secret or not isinstance(token, str):
         return None
     parts = token.split(".")
@@ -178,5 +242,5 @@ def unverified_subject(secret: bytes, token: str) -> str | None:
 
 
 def generate_secret() -> str:
-    """CasaSmart runtime component."""
+    """A fresh 256-bit signing secret, hex-encoded for the config store."""
     return secrets.token_hex(32)

@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -49,7 +48,7 @@ TANK_LOW_PERCENT_MAX = 30
 
 
 def _coerce_positive(value: Any, field: str) -> float:
-    """CasaSmart runtime component."""
+    """A finite, strictly-positive float, or a TankError naming the field."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TankError(f"{field} must be a number")
     number = float(value)
@@ -63,7 +62,14 @@ def _coerce_positive(value: Any, field: str) -> float:
 def _compute_percent(
     voltage: float, cal_v: float, cal_d: float, height: float
 ) -> float | None:
-    """CasaSmart runtime component."""
+    """The voltage→percent equation, isolated so the live path and the
+    per-reading history path share one implementation (no drift).
+
+        slope = cal_v / cal_d ; max_voltage = height * slope ;
+        percent = clamp((voltage / max_voltage) * 100, 0, 100)
+
+    Returns ``None`` when the calibration can't define a positive full-tank
+    voltage (uncalibrated / nonsensical inputs)."""
     if cal_v <= 0 or cal_d <= 0 or height <= 0:
         return None
     max_voltage = height * (cal_v / cal_d)
@@ -73,7 +79,11 @@ def _compute_percent(
 
 
 def _coerce_low_percent(value: Any) -> int:
-    """CasaSmart runtime component."""
+    """An int in [TANK_LOW_PERCENT_MIN, TANK_LOW_PERCENT_MAX], else TankError.
+
+    A float that is exactly integral (e.g. the slider sends ``20.0``) is
+    accepted; a genuine fraction is not — a threshold of 20.5% is meaningless.
+    """
     if isinstance(value, bool):
         raise TankError("low_percent must be an integer")
     if isinstance(value, float):
@@ -91,11 +101,11 @@ def _coerce_low_percent(value: Any) -> int:
 
 
 class TankError(Exception):
-    """CasaSmart runtime component."""
+    """Tank input rejected (maps to HTTP 400)."""
 
 
 class UnknownTankError(TankError):
-    """CasaSmart runtime component."""
+    """No tank device under that id (maps to HTTP 404)."""
 
 
 class DuplicateTankError(TankError):
@@ -103,7 +113,7 @@ class DuplicateTankError(TankError):
 
 
 class UnknownTokenError(Exception):
-    """CasaSmart runtime component."""
+    """Ingest token didn't match any device (maps to HTTP 401, generic)."""
 
 
 def _hash_token(token: str) -> str:
@@ -125,7 +135,14 @@ def build_tank_script(
     voltmeter_id: int = TANK_VOLTMETER_ID,
     interval_seconds: int = TANK_PUSH_INTERVAL_SECONDS,
 ) -> str:
-    """CasaSmart runtime component."""
+    """The mJS monitoring script pushed to the Shelly.
+
+    Same behavior as the Supabase-era reference script (read the
+    Voltmeter, POST ``{device_token, voltage}``, repeat every 5 min,
+    once immediately on start) with the hub as the destination. URL and
+    token are emitted through ``json.dumps`` so arbitrary config values
+    can never escape the mJS string literal.
+    """
     if not isinstance(ingest_url, str) or not ingest_url.startswith(
         ("http://", "https://")
     ):
@@ -154,7 +171,12 @@ def build_tank_script(
 
 
 def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[str]:
-    """CasaSmart runtime component."""
+    """Split script code into ``Script.PutCode``-sized pieces (>=1 chunk).
+
+    Splits on UTF-8 BYTE length (the device-side cap), never inside a
+    multi-byte sequence — the generated script is ASCII today, but a
+    future name/comment must not be able to corrupt the upload.
+    """
     if chunk_size <= 0:
         raise TankError("chunk_size must be positive")
     encoded = code.encode("utf-8")
@@ -164,7 +186,7 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
     start = 0
     while start < len(encoded):
         end = min(start + chunk_size, len(encoded))
-
+        # Back off a UTF-8 continuation byte boundary.
         while end > start and end < len(encoded) and (encoded[end] & 0xC0) == 0x80:
             end -= 1
         chunks.append(encoded[start:end].decode("utf-8"))
@@ -173,15 +195,14 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
 
 
 class TankEngine:
-    """CasaSmart runtime component."""
 
     def __init__(self, devices_table: Any, readings: Any) -> None:
         self._devices = devices_table
-
-
+        # readings: a storage TankReadingsTable (append/recent/last/prune) —
+        # one row per reading, NOT a rewritten-whole JSON blob.
         self._readings = readings
-
-
+        # Serializes device-record mutations (held across SQLite I/O), same
+        # posture as RegistryEngine.
         self._lock = threading.RLock()
 
 
@@ -189,7 +210,6 @@ class TankEngine:
     def mint_device(
         self, device_id: Any, name: Any, ip: Any, model: Any = None
     ) -> tuple[dict[str, Any], str]:
-        """CasaSmart runtime component."""
         if not isinstance(device_id, str) or not device_id.strip():
             raise TankError("device_id is required")
         device_id = device_id.strip().lower()
@@ -224,7 +244,7 @@ class TankEngine:
         return self._public(device_id, record), token
 
     def list_devices(self) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Every tank device with its last reading — never the token hash."""
         with self._lock:
             return [
                 self._public(device_id, record)
@@ -238,7 +258,7 @@ class TankEngine:
         return self._public(device_id, record)
 
     def delete_device(self, device_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Drop the device and its readings (token dies with the record)."""
         with self._lock:
             try:
                 del self._devices[device_id]
@@ -258,7 +278,17 @@ class TankEngine:
         max_height: Any = None,
         low_percent: Any = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Merge calibration / low-water settings onto a tank record.
+
+        Every field is optional (a ``None`` leaves the stored value alone) so
+        the app's calibration dialog (voltage+depth+height together) and its
+        notification slider (``low_percent`` alone) both ride this one path.
+        Each supplied value is validated here — the hub is authoritative, the
+        app sends raw user numbers. The full calibration is only "complete"
+        once both calibration_voltage and calibration_depth are positive
+        (see ``voltage_to_percent``). Raises ``UnknownTankError`` for an
+        unknown device, ``TankError`` for a bad value.
+        """
         updates: dict[str, Any] = {}
         if calibration_voltage is not None:
             updates["calibration_voltage"] = _coerce_positive(
@@ -280,8 +310,8 @@ class TankEngine:
             if record is None:
                 raise UnknownTankError("Unknown tank device")
             merged = {**record, **updates}
-
-
+            # The water column can't be deeper than the tank is tall — catch a
+            # transposed depth/height pair before it skews every percentage.
             depth = merged.get("calibration_depth", 0.0) or 0.0
             height = merged.get("max_height", 0.0) or 0.0
             if depth > 0 and height > 0 and depth > height:
@@ -293,7 +323,20 @@ class TankEngine:
     def voltage_to_percent(
         self, device_id: str, voltage: Any
     ) -> float | None:
-        """CasaSmart runtime component."""
+        """A raw voltage → 0-100 water-level percent via stored calibration.
+
+        The equation that used to live in the app's ``tank.dart``::
+
+            slope       = calibration_voltage / calibration_depth
+            max_voltage = max_height * slope
+            percent     = clamp((voltage / max_voltage) * 100, 0, 100)
+
+        Returns ``None`` when the device isn't calibrated yet, or the stored
+        calibration can't define a positive full-tank voltage — the app then
+        shows "—", never a fabricated 0%. Raises ``UnknownTankError`` for an
+        unknown device and ``TankError`` for a non-numeric voltage. Edge cases
+        fall out of the clamp: 0 V → 0%, a voltage above full → 100%.
+        """
         if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
             raise TankError("voltage must be a number")
         with self._lock:
@@ -306,7 +349,13 @@ class TankEngine:
         return _compute_percent(float(voltage), cal_v, cal_d, height)
 
     def status(self, device_id: str) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Live status for the app's GET status endpoint + the push monitor.
+
+        ``{voltage, percent, low_percent, is_low, last_reading}`` — ``voltage``
+        / ``percent`` are ``None`` with no reading (or uncalibrated), ``is_low``
+        is true only when a real computed percent sits below the threshold.
+        Raises ``UnknownTankError`` for an unknown device.
+        """
         with self._lock:
             record = self._devices.get(device_id)
             if record is None:
@@ -333,15 +382,20 @@ class TankEngine:
 
 
     def ingest(self, token: Any, voltage: Any) -> str:
-        """CasaSmart runtime component."""
+        """Record one reading for the device matching ``token``.
+
+        Returns the device id. Raises ``UnknownTokenError`` on a token
+        that matches nothing (the view answers a generic 401) and
+        ``TankError`` on a malformed voltage.
+        """
         if not isinstance(token, str) or not token:
             raise UnknownTokenError
         if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
             raise TankError("voltage must be a number")
         voltage = float(voltage)
         if voltage != voltage or voltage in (float("inf"), float("-inf")):
-
-
+            # Reject non-finite at the trust boundary — a NaN/Inf would
+            # serialize to invalid JSON and poison every later read.
             raise TankError("voltage must be a finite number")
         token_hash = _hash_token(token)
         with self._lock:
@@ -354,9 +408,9 @@ class TankEngine:
                     break
             if device_id is None:
                 raise UnknownTokenError
-
-
-
+            # Keep t strictly increasing even across a clock step-back (an NTP
+            # correction right after a power-loss reboot), so history stays
+            # ordered and the (device_id, t) key never collides.
             now = int(time.time())
             last_t = self._readings.latest_t(device_id)
             t = now if last_t is None or now > last_t else last_t + 1
@@ -365,7 +419,14 @@ class TankEngine:
         return device_id
 
     def recent_readings(self, device_id: str, days: Any = 7) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Readings from the last ``days`` days, NEWEST first (the app's
+        ``fetchRecentReadings`` contract). Raises on an unknown device —
+        "no tank" and "no data yet" must stay distinguishable.
+
+        Each entry is ``{"t": unix_seconds, "v": voltage, "p": percent}`` — the
+        hub computes the percent for every reading from the same calibration so
+        the app's history charts read it instead of doing the math (B8 Piece
+        4b). ``p`` is ``None`` for an uncalibrated tank."""
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             raise TankError("days must be a positive integer")
         with self._lock:
@@ -377,7 +438,7 @@ class TankEngine:
             height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
             cutoff = int(time.time()) - days * 24 * 3600
             entries = self._readings.recent(device_id, cutoff)
-
+        # recent() returns newest-first, already windowed at the cutoff.
         return [
             {
                 "t": entry["t"],
@@ -388,7 +449,8 @@ class TankEngine:
         ]
 
     def last_reading(self, device_id: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """The newest reading, or None (also None for unknown devices —
+        the provision wait loop polls this before the record is hot)."""
         return self._readings.last(device_id)
 
 
@@ -404,9 +466,9 @@ class TankEngine:
             "model": record.get("model"),
             "created_at": record.get("created_at", 0),
             "provisioned_at": record.get("provisioned_at", 0),
-
-
-
+            # Calibration is read back by the app so its inputs survive a
+            # reinstall (the hub is the memory). is_calibrated mirrors the
+            # voltage_to_percent precondition so the app needn't re-derive it.
             "calibration_voltage": cal_v,
             "calibration_depth": cal_d,
             "max_height": record.get("max_height", TANK_MAX_HEIGHT_DEFAULT),

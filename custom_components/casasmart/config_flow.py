@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -60,7 +59,6 @@ OPTIONS_SCHEMA = vol.Schema(
 
 
 class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
-    """CasaSmart runtime component."""
 
     VERSION = CONFIG_ENTRY_VERSION
 
@@ -69,13 +67,12 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: ConfigEntry,
     ) -> CasaSmartOptionsFlow:
-        """CasaSmart runtime component."""
+        """Gear icon: edit the Cloudflare domain / toggle the tunnel."""
         return CasaSmartOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """CasaSmart runtime component."""
         errors: dict[str, str] = {}
         if user_input is not None:
             relay_base = normalize_relay_base_url(
@@ -133,12 +130,10 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class CasaSmartOptionsFlow(OptionsFlow):
-    """CasaSmart runtime component."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """CasaSmart runtime component."""
         errors: dict[str, str] = {}
         current_relay = self._current_relay_base()
         if user_input is not None:
@@ -239,7 +234,6 @@ class CasaSmartOptionsFlow(OptionsFlow):
         )
 
     def _current_relay_base(self) -> str | None:
-        """CasaSmart runtime component."""
         normalized = normalize_relay_base_url(
             self.config_entry.options.get(CONF_PUSH_RELAY_URL)
         )
@@ -264,7 +258,11 @@ class CasaSmartOptionsFlow(OptionsFlow):
         return None
 
     async def _async_tunnel_status(self) -> str:
-        """CasaSmart runtime component."""
+        """Live add-on state line for the form description (best effort).
+
+        Never raises — a wedged Supervisor must degrade to a message, not
+        error the options form.
+        """
         controller = CloudflaredController(self.hass)
         if not controller.available():
             return (
