@@ -704,10 +704,11 @@ async def _async_start_tls(
     ):
         _LOGGER.warning(
             "Docker Desktop detected: the hub can't see phones' real addresses, "
-            "so pairing, owner recovery and keyless speaker provisioning will be "
-            "refused. If the TLS port is published to 127.0.0.1 only and reached "
-            'through the CasaSmart LAN relay (deploy/macos), set "%s": "on" in '
-            "%s and restart Home Assistant.",
+            "only one Docker Desktop makes up and changes between restarts, so "
+            "pairing, owner recovery and keyless speaker provisioning will work "
+            "or be refused unpredictably. If the TLS port is published to "
+            "127.0.0.1 only and reached through the CasaSmart LAN relay "
+            '(deploy/macos), set "%s": "on" in %s and restart Home Assistant.',
             LAN_RELAY_INGRESS_CONFIG_KEY,
             data_dir / HUB_CONFIG_FILENAME,
         )

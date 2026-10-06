@@ -21,7 +21,11 @@ listener is an explicit operator choice. ``lan_relay_ingress`` in hub config:
 
 When the hub runs under Docker Desktop (its VM kernel identifies as
 ``linuxkit``) with the setting unset, setup logs a warning that says what to
-set, because LAN pairing can't work there by address.
+set: there the address check judges an address Docker Desktop makes up (its
+private gateway after some restarts, an arbitrary public address after
+others), so LAN pairing works or fails unpredictably. On Docker Desktop it is
+the loopback-only publish plus the relay that keeps the port off the internet,
+whatever this setting says.
 
 Requests that crossed Cloudflare are never LAN whatever this says (checked
 first in ``is_lan_request``), and HA's own HTTP port is never trusted this way:

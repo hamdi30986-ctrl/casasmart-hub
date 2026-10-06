@@ -14,8 +14,9 @@ published; everything it contained is in 2.3.0.
 - **Docker Desktop hubs:** add `"lan_relay_ingress": "on"` to
   `/config/casasmart/hub_config.json` (with Home Assistant stopped), as step 4
   of [deploy/macos](deploy/macos/README.md) describes. Until then, pairing,
-  owner recovery and keyless speaker provisioning are refused, and the hub
-  logs a warning at every start. Other hubs need nothing.
+  owner recovery and keyless speaker provisioning work or fail depending on
+  the address Docker Desktop shows after each restart, and the hub logs a
+  warning at every start. Other hubs need nothing.
 - Entity friendly names now read "CasaSmart Hub Factory reset", "CasaSmart Hub
   Energy savings" and so on, instead of repeating "CasaSmart". Entity IDs are
   unchanged.

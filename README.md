@@ -156,6 +156,10 @@ none of them.
 
 The hub logs a WARNING at startup whenever the TLS port is trusted. On Docker
 Desktop with the setting unset, it logs a WARNING saying what to set instead.
+There the address check is unreliable in both directions (Docker Desktop shows
+a made-up address that changes between restarts), so what keeps the hub's
+port off the internet is the loopback-only publish plus the relay, whatever
+this setting says.
 
 Don't edit the other keys in the file. They hold the hub's secrets, code hashes
 and relay state.
