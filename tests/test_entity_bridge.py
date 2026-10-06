@@ -1,0 +1,483 @@
+"""Unit tests for the B1.4 entity bridge (stdlib unittest, no dependencies).
+
+Run from the repo root:
+    python3 -m unittest discover -s tests -v
+"""
+
+import sys
+import unittest
+from datetime import UTC, datetime
+from pathlib import Path
+
+# Import the module directly — the casasmart package __init__ imports
+# homeassistant, which isn't installed in the test environment.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
+)
+
+from entity_bridge import (
+    DIAGNOSTIC_BINARY_SENSOR_CLASSES,
+    DIAGNOSTIC_SENSOR_CLASSES,
+    EXPOSED_DOMAINS,
+    READ_ONLY_DOMAINS,
+    CommandError,
+    entity_domain,
+    is_category_served,
+    is_exposed,
+    serialize_state,
+    validate_command,
+)
+
+
+class FakeState:
+    """Duck-typed stand-in for homeassistant.core.State."""
+
+    def __init__(self, entity_id, state, attributes=None, last_updated=None):
+        self.entity_id = entity_id
+        self.state = state
+        self.attributes = attributes or {}
+        self.last_updated = last_updated
+
+
+class TestExposure(unittest.TestCase):
+    def test_entity_domain(self):
+        self.assertEqual(entity_domain("light.living1"), "light")
+        self.assertEqual(entity_domain("binary_sensor.smoke_kitchen"), "binary_sensor")
+
+    def test_exposed_domains(self):
+        self.assertTrue(is_exposed("light.living1"))
+        self.assertTrue(is_exposed("climate.bedroom"))
+        # 3c-3: automation joined the surface (routines tab state feed).
+        self.assertTrue(is_exposed("automation.athan"))
+        self.assertFalse(is_exposed("persistent_notification.x"))
+        self.assertFalse(is_exposed("update.core"))
+
+    def test_read_only_domains_are_exposed(self):
+        # Read-only still means visible — just not commandable.
+        self.assertTrue(READ_ONLY_DOMAINS <= EXPOSED_DOMAINS)
+
+
+class TestCategoryPolicy(unittest.TestCase):
+    """B16 3c-4a: config/diagnostic exposure policy."""
+
+    def test_config_entities_served_any_domain(self):
+        self.assertTrue(is_category_served("config", "switch.plug_child_lock", None))
+        self.assertTrue(is_category_served("config", "select.sw_operation_mode", None))
+        self.assertTrue(is_category_served("config", "number.sw_led_level", None))
+
+    def test_diagnostic_sensor_with_measurement_class_served(self):
+        for device_class in sorted(DIAGNOSTIC_SENSOR_CLASSES):
+            self.assertTrue(
+                is_category_served(
+                    "diagnostic", f"sensor.plug_{device_class}", device_class
+                ),
+                device_class,
+            )
+
+    def test_diagnostic_binary_sensor_alert_class_served(self):
+        # The app's satellite chips: tamper/problem/connectivity/running.
+        for device_class in sorted(DIAGNOSTIC_BINARY_SENSOR_CLASSES):
+            self.assertTrue(
+                is_category_served(
+                    "diagnostic", f"binary_sensor.door_{device_class}", device_class
+                ),
+                device_class,
+            )
+
+    def test_diagnostic_filter_life_served(self):
+        # An air purifier's filter life is diagnostic AND classless, so the
+        # device_class whitelist alone hid the one reading its owner must act
+        # on. Matched by name, like the app does.
+        for entity_id in (
+            "sensor.core_300s_filter_lifetime",
+            "sensor.purifier_filter_life_remaining",
+            "sensor.purifier_filter_remaining",
+        ):
+            self.assertTrue(
+                is_category_served("diagnostic", entity_id, None), entity_id
+            )
+
+    def test_filter_match_does_not_widen_the_diagnostic_gate(self):
+        # Needs BOTH halves of the name — a stray "filter" or "life" must not
+        # reopen the classless-diagnostic firehose.
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_filter_status", None)
+        )
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_lifetime_energy", None)
+        )
+        # And still only for sensors.
+        self.assertFalse(
+            is_category_served("diagnostic", "switch.purifier_filter_life", None)
+        )
+
+    def test_diagnostic_noise_stays_hidden(self):
+        # linkquality has no device_class — the classic Z2M chatter source.
+        self.assertFalse(is_category_served("diagnostic", "sensor.plug_lqi", None))
+        self.assertFalse(
+            is_category_served("diagnostic", "sensor.plug_lqi", "signal_strength")
+        )
+        # Diagnostic NON-sensor domains never cross, whatever the class claims.
+        self.assertFalse(
+            is_category_served("diagnostic", "switch.plug_indicator", "power")
+        )
+        # binary_sensor crosses only on the alert classes — measurement
+        # classes belong to sensor, classless never passes.
+        self.assertFalse(
+            is_category_served("diagnostic", "binary_sensor.plug_overload", "power")
+        )
+        self.assertFalse(
+            is_category_served("diagnostic", "binary_sensor.plug_mystery", None)
+        )
+
+    def test_unknown_category_rejected(self):
+        self.assertFalse(is_category_served("system", "sensor.x", "power"))
+        self.assertFalse(is_category_served("", "sensor.x", "power"))
+
+
+class TestSerializeState(unittest.TestCase):
+    def test_entity_category_forwarded(self):
+        state = FakeState("switch.plug_child_lock", "off")
+        self.assertEqual(
+            serialize_state(state, entity_category="config")["entity_category"],
+            "config",
+        )
+
+    def test_entity_category_none_for_primaries(self):
+        self.assertIsNone(
+            serialize_state(FakeState("light.living1", "on"))["entity_category"]
+        )
+
+    def test_basic_shape(self):
+        ts = datetime(2026, 6, 10, 3, 0, 0, tzinfo=UTC)
+        state = FakeState(
+            "light.living1",
+            "on",
+            {"friendly_name": "Living 1", "brightness": 200, "icon": "mdi:bulb"},
+            last_updated=ts,
+        )
+        device = serialize_state(state, area="Living Room")
+        self.assertEqual(device["entity_id"], "light.living1")
+        self.assertEqual(device["name"], "Living 1")
+        self.assertEqual(device["domain"], "light")
+        self.assertEqual(device["state"], "on")
+        self.assertEqual(device["area"], "Living Room")
+        self.assertEqual(device["last_updated"], ts.isoformat())
+
+    def test_attribute_allowlist_filters(self):
+        state = FakeState(
+            "light.living1",
+            "on",
+            {
+                "brightness": 200,
+                "rgb_color": [255, 0, 0],
+                "icon": "mdi:bulb",  # not allowlisted
+                "restored": True,  # not allowlisted
+                "supported_features": 63,  # not allowlisted
+            },
+        )
+        attrs = serialize_state(state)["attributes"]
+        self.assertEqual(attrs, {"brightness": 200, "rgb_color": [255, 0, 0]})
+
+    def test_light_color_state_attributes_forwarded(self):
+        # B16 stage 3c-2: the app's capability detection reads hs/xy and
+        # the mired scale — they must survive serialization.
+        state = FakeState(
+            "light.bedroom_left",
+            "on",
+            {
+                "hs_color": [210.0, 85.0],
+                "xy_color": [0.32, 0.41],
+                "color_temp": 350,
+                "min_mireds": 153,
+                "max_mireds": 500,
+                "supported_features": 63,  # still filtered
+            },
+        )
+        attrs = serialize_state(state)["attributes"]
+        self.assertEqual(
+            attrs,
+            {
+                "hs_color": [210.0, 85.0],
+                "xy_color": [0.32, 0.41],
+                "color_temp": 350,
+                "min_mireds": 153,
+                "max_mireds": 500,
+            },
+        )
+
+    def test_name_falls_back_to_entity_id(self):
+        device = serialize_state(FakeState("switch.plug", "off"))
+        self.assertEqual(device["name"], "switch.plug")
+        self.assertIsNone(device["area"])
+        self.assertIsNone(device["last_updated"])
+
+    def test_sensor_attributes(self):
+        state = FakeState(
+            "sensor.kitchen_temp",
+            "28.1",
+            {"unit_of_measurement": "°C", "device_class": "temperature", "battery": 90},
+        )
+        attrs = serialize_state(state)["attributes"]
+        self.assertEqual(
+            attrs, {"unit_of_measurement": "°C", "device_class": "temperature"}
+        )
+
+
+class TestValidateCommand(unittest.TestCase):
+    def test_light_turn_on_with_data(self):
+        domain, service, data = validate_command(
+            "light.living1", "turn_on", {"brightness": 128}
+        )
+        self.assertEqual((domain, service), ("light", "turn_on"))
+        self.assertEqual(data, {"brightness": 128})
+
+    def test_action_without_data(self):
+        domain, service, data = validate_command("lock.front_door", "unlock", None)
+        self.assertEqual((domain, service), ("lock", "unlock"))
+        self.assertEqual(data, {})
+
+    def test_cover_maps_to_ha_service_names(self):
+        _, service, _ = validate_command("cover.2nd_floor_curtains", "open", {})
+        self.assertEqual(service, "open_cover")
+
+    def test_rejects_unexposed_domain(self):
+        with self.assertRaises(CommandError):
+            validate_command("camera.front_door", "turn_off", {})
+
+    def test_rejects_read_only_domain(self):
+        with self.assertRaises(CommandError):
+            validate_command("sensor.kitchen_temp", "turn_off", {})
+
+    def test_rejects_unknown_action(self):
+        with self.assertRaises(CommandError):
+            validate_command("light.living1", "self_destruct", {})
+
+    def test_rejects_unlisted_data_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command("light.living1", "turn_off", {"brightness": 0})
+
+    def test_rejects_bad_action_type(self):
+        with self.assertRaises(CommandError):
+            validate_command("light.living1", None, {})
+        with self.assertRaises(CommandError):
+            validate_command("light.living1", "", {})
+
+    def test_rejects_bad_data_type(self):
+        with self.assertRaises(CommandError):
+            validate_command("light.living1", "turn_on", "brightness=200")
+
+    def test_climate_set_temperature(self):
+        domain, service, data = validate_command(
+            "climate.bedroom", "set_temperature", {"temperature": 22}
+        )
+        self.assertEqual((domain, service), ("climate", "set_temperature"))
+        self.assertEqual(data, {"temperature": 22})
+
+
+class TestStage3aWidening(unittest.TestCase):
+    """B16 stage 3a: the dialect the app's sheets actually speak."""
+
+    def test_light_brightness_pct_and_effect(self):
+        # lighting_control_sheet sends percent sliders and effect taps.
+        _, service, data = validate_command(
+            "light.living1", "turn_on", {"brightness_pct": 60}
+        )
+        self.assertEqual((service, data), ("turn_on", {"brightness_pct": 60}))
+        _, _, data = validate_command(
+            "light.living1", "turn_on", {"effect": "colorloop", "transition": 1}
+        )
+        self.assertEqual(data, {"effect": "colorloop", "transition": 1})
+
+    def test_cover_tilt(self):
+        _, service, data = validate_command(
+            "cover.blinds", "set_tilt_position", {"tilt_position": 45}
+        )
+        self.assertEqual(service, "set_cover_tilt_position")
+        self.assertEqual(data, {"tilt_position": 45})
+
+    def test_select_option(self):
+        _, service, data = validate_command(
+            "select.sensitivity", "select_option", {"option": "high"}
+        )
+        self.assertEqual((service, data), ("select_option", {"option": "high"}))
+
+    def test_number_set_value(self):
+        _, service, data = validate_command(
+            "number.timeout", "set_value", {"value": 12.5}
+        )
+        self.assertEqual((service, data), ("set_value", {"value": 12.5}))
+
+    def test_siren_on_off_no_data(self):
+        _, service, data = validate_command("siren.alarm", "turn_on", {})
+        self.assertEqual((service, data), ("turn_on", {}))
+        _, service, _ = validate_command("siren.alarm", "turn_off", None)
+        self.assertEqual(service, "turn_off")
+
+    def test_light_color_mode_dialect(self):
+        # Every color key the sheet's per-bulb command modes emit.
+        for key, value in (
+            ("hs_color", [210.0, 85.0]),
+            ("xy_color", [0.31, 0.32]),
+            ("rgbw_color", [255, 200, 120, 0]),
+            ("rgbww_color", [255, 200, 120, 0, 0]),
+            ("color_temp", 300),
+        ):
+            with self.subTest(key=key):
+                _, service, data = validate_command(
+                    "light.living1", "turn_on", {key: value}
+                )
+                self.assertEqual((service, data), ("turn_on", {key: value}))
+
+    def test_climate_set_temperature_carries_hvac_mode(self):
+        # The goodnight quick action preserves the current mode.
+        _, service, data = validate_command(
+            "climate.bedroom",
+            "set_temperature",
+            {"temperature": 22, "hvac_mode": "cool"},
+        )
+        self.assertEqual(service, "set_temperature")
+        self.assertEqual(data, {"temperature": 22, "hvac_mode": "cool"})
+
+    def test_media_player_turn_off(self):
+        # The app's "away" quick action powers media players down.
+        _, service, data = validate_command("media_player.tv", "turn_off", {})
+        self.assertEqual((service, data), ("turn_off", {}))
+
+    def test_media_player_turn_off_rejects_data(self):
+        with self.assertRaises(CommandError):
+            validate_command("media_player.tv", "turn_off", {"transition": 1})
+
+    def test_siren_rejects_data(self):
+        # No tone/duration keys until a sheet actually sends them.
+        with self.assertRaises(CommandError):
+            validate_command("siren.alarm", "turn_on", {"duration": 600})
+
+    def test_select_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "select_option", {"entity_id": "x"})
+
+    def test_tilt_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command("cover.blinds", "set_tilt_position", {"position": 5})
+
+    def test_actions_dont_cross_domains(self):
+        # number can't borrow select's action and vice versa.
+        with self.assertRaises(CommandError):
+            validate_command("number.timeout", "select_option", {"option": "x"})
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "set_value", {"value": 1})
+
+    def test_new_domains_stay_locked_down(self):
+        # Widened ≠ open: anything outside the per-action table still dies.
+        with self.assertRaises(CommandError):
+            validate_command("number.timeout", "set_min", {"min": 0})
+        with self.assertRaises(CommandError):
+            validate_command("select.sensitivity", "toggle", {})
+
+    def test_fan_set_preset_mode(self):
+        # An air purifier changes Auto/Sleep without being "turned on" again.
+        self.assertEqual(
+            validate_command(
+                "fan.purifier", "set_preset_mode", {"preset_mode": "auto"}
+            ),
+            ("fan", "set_preset_mode", {"preset_mode": "auto"}),
+        )
+
+    def test_fan_preset_rejects_foreign_keys(self):
+        with self.assertRaises(CommandError):
+            validate_command(
+                "fan.purifier",
+                "set_preset_mode",
+                {"preset_mode": "auto", "percentage": 50},
+            )
+
+    def test_installer_ops_not_exposed(self):
+        # 3c-3: automation is exposed for state + toggle/trigger, but the
+        # installer verbs (reload) are still never app commands.
+        self.assertTrue(is_exposed("automation.athan"))
+        with self.assertRaises(CommandError):
+            validate_command("automation.athan", "reload", {})
+
+    def test_automation_toggle_and_trigger(self):
+        # 3c-3: the routines tab's three verbs, no data ever.
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "turn_on", {}),
+            ("automation", "turn_on", {}),
+        )
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "turn_off", None),
+            ("automation", "turn_off", {}),
+        )
+        self.assertEqual(
+            validate_command("automation.casa_automation_x", "trigger", {}),
+            ("automation", "trigger", {}),
+        )
+        # skip_condition must not be smuggled in from the wire.
+        with self.assertRaises(CommandError):
+            validate_command(
+                "automation.casa_automation_x", "trigger", {"skip_condition": False}
+            )
+
+    def test_automation_attribute_allowlist(self):
+        attrs = serialize_state(
+            FakeState(
+                "automation.casa_automation_x",
+                "on",
+                {
+                    "id": "casa_automation_20260303_143022",
+                    "last_triggered": "2026-06-11T07:00:00+00:00",
+                    "mode": "single",
+                    "current": 0,
+                    "icon": "mdi:robot",  # HA internal — must drop
+                },
+            )
+        )["attributes"]
+        self.assertEqual(
+            attrs,
+            {
+                "id": "casa_automation_20260303_143022",
+                "last_triggered": "2026-06-11T07:00:00+00:00",
+                "mode": "single",
+                "current": 0,
+            },
+        )
+
+    def test_new_attribute_allowlists(self):
+        select_attrs = serialize_state(
+            FakeState("select.mode", "high", {"options": ["low", "high"], "icon": "x"})
+        )["attributes"]
+        self.assertEqual(select_attrs, {"options": ["low", "high"]})
+        number_attrs = serialize_state(
+            FakeState(
+                "number.timeout",
+                "12",
+                {"min": 0, "max": 60, "step": 1, "mode": "slider"},
+            )
+        )["attributes"]
+        self.assertEqual(number_attrs, {"min": 0, "max": 60, "step": 1})
+
+    def test_cover_tilt_attribute_forwarded(self):
+        attrs = serialize_state(
+            FakeState(
+                "cover.blinds",
+                "open",
+                {"current_position": 80, "current_tilt_position": 45},
+            )
+        )["attributes"]
+        self.assertEqual(attrs["current_tilt_position"], 45)
+
+    def test_light_effect_attributes_forwarded(self):
+        attrs = serialize_state(
+            FakeState(
+                "light.strip",
+                "on",
+                {"effect": "colorloop", "effect_list": ["colorloop", "fire"]},
+            )
+        )["attributes"]
+        self.assertEqual(attrs["effect"], "colorloop")
+        self.assertEqual(attrs["effect_list"], ["colorloop", "fire"])
+
+
+if __name__ == "__main__":
+    unittest.main()

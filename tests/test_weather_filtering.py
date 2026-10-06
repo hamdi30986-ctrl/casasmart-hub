@@ -5,9 +5,9 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 

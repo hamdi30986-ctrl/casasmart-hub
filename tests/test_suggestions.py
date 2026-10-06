@@ -19,7 +19,6 @@ sys.modules[package.__name__] = package
 policy = importlib.import_module("phase4_fixture.suggestions")
 storage = importlib.import_module("phase4_fixture.storage")
 stores = importlib.import_module("phase4_fixture.suggestion_store")
-UTC = UTC
 
 
 def rule(**changes):

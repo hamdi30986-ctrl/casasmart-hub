@@ -49,11 +49,6 @@ install_homeassistant_stubs()
 install_casasmart_package()
 
 import aiohttp  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
-
 import casasmart.push_dispatcher as pd_mod  # noqa: E402
 from casasmart.push_crypto import PushSigner  # noqa: E402
 from casasmart.push_dispatcher import (  # noqa: E402
@@ -66,6 +61,10 @@ from casasmart.push_dispatcher import (  # noqa: E402
     PushDispatcher,
 )
 from const import EVENT_ALARM_TRIGGERED, PUSH_TYPE_TANK_LOW  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from push import PushTokenStore  # noqa: E402
 from storage import HubStorage  # noqa: E402
 
@@ -190,7 +189,7 @@ class FakeSession:
         self.error = error
         self.calls: list[dict] = []
 
-    def post(self, url, json=None, timeout=None):  # noqa: A002 — mirror aiohttp
+    def post(self, url, json=None, timeout=None):
         self.calls.append({"url": url, "json": json, "timeout": timeout})
         return _FakeReqCtx(FakeResponse(self.status, self.payload), self.error)
 

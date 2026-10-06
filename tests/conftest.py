@@ -22,10 +22,10 @@ from __future__ import annotations
 
 def _prefer_real_homeassistant() -> None:
     try:
-        import homeassistant  # noqa: F401
-        import homeassistant.exceptions  # noqa: F401
-        import homeassistant.helpers.area_registry  # noqa: F401
-        import homeassistant.helpers.device_registry  # noqa: F401
+        import homeassistant
+        import homeassistant.exceptions
+        import homeassistant.helpers.area_registry
+        import homeassistant.helpers.device_registry
         import homeassistant.helpers.entity_registry  # noqa: F401
     except ImportError:
         # No real HA here — the stubs take over on first install_*() call.
