@@ -1,4 +1,23 @@
+CasaSmart Hub
 Copyright (c) 2026 CasaSmart. All rights reserved.
 
-Proprietary software. No license is granted to use, copy, modify or
-distribute it without written permission from CasaSmart.
+This software is proprietary. It is not open source.
+
+Permission is granted, free of charge, to install and use this software,
+unmodified, to run a CasaSmart hub on a Home Assistant installation that you
+own or administer, for use with CasaSmart apps and services.
+
+Without prior written permission from CasaSmart, you may not:
+
+- modify, adapt or create derivative works of the software;
+- copy or distribute the software or any part of it, except as needed to
+  install and back up your own Home Assistant installation (for example,
+  through HACS or a Home Assistant backup);
+- sell, rent or sublicense the software, or offer it as a hosted service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+CASASMART BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
