@@ -4,8 +4,8 @@ factory_reset:
     Unpair every app and wipe the CasaSmart app layer: pairing and recovery
     codes (the printed codes rotate), favorites, scenes, settings, Now and
     suggestion data, push tokens, HQ notifications and the trusted HQ key, the
-    alarm log and armed state, audio and Energy Saving data, and the floors,
-    rooms, room tags and device grouping, which re-seed from Home Assistant on
+    alarm log and armed state, audio and Energy Saving data, room tags, and
+    the floors, rooms and device grouping, which re-seed from Home Assistant on
     reload. Keeps tanks, alarm zones and settings, the hub's identity, relay
     registration and tunnel settings, and every Home Assistant device and
     automation.

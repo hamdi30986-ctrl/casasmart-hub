@@ -50,7 +50,9 @@ services:
 > **Never publish 8443 on all interfaces, and never forward it from your router.**
 > Step 4 tells the hub to treat every connection on its TLS port as coming from
 > the LAN. The loopback-only mapping plus the LAN-only relay is what makes that
-> safe.
+> safe. For the same reason, don't point anything on the Mac that carries outside
+> traffic at `127.0.0.1:18443` or `8443`: Tailscale Serve or Funnel, ngrok,
+> `ssh -R`, or a reverse-proxy container.
 
 ## 3. Install the launch agents
 
@@ -95,8 +97,13 @@ refused until you tell it to trust its TLS port instead. Do this only after
 steps 2 and 3, because the hub can't check them itself:
 
 1. Stop Home Assistant.
-2. In `/config/casasmart/hub_config.json`, add `"lan_relay_ingress": "on"`.
-3. Start Home Assistant.
+2. Open `casasmart/hub_config.json` inside the Mac folder you mount as
+   `/config`, and add `"lan_relay_ingress": "on"`.
+3. If you use CasaSmart water tanks, also add
+   `"tank_ingest_url": "http://MAC_LAN_IP:8123/api/casasmart/tank/reading"`.
+   Inside Docker Desktop the hub only knows its container address, which tank
+   sensors on the LAN can't reach.
+4. Start Home Assistant.
 
 The hub then logs a WARNING that starts with "LAN relay ingress on". Until you
 set it, the hub logs a WARNING that starts with "Docker Desktop detected" at
