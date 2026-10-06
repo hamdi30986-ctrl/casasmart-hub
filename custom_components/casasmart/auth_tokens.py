@@ -179,8 +179,7 @@ def validate_token(
         raise TokenError("Missing subject")
     rooms = claims.get("rooms")
     if rooms is not None and (
-        not isinstance(rooms, list)
-        or any(not isinstance(room, str) for room in rooms)
+        not isinstance(rooms, list) or any(not isinstance(room, str) for room in rooms)
     ):
         raise TokenError("Malformed rooms claim")
     if not isinstance(claims.get("ver"), int):

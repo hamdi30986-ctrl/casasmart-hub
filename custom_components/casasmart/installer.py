@@ -10,7 +10,8 @@ No HA imports — unit-testable without an HA install, exactly like
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 # zigbee2mqtt's permit-join request topic. The app used to publish here
 # itself through ``mqtt.publish`` with the raw HA token — the hub now
@@ -109,13 +110,11 @@ def _valid_base_topic(value: Any) -> str | None:
     return topic
 
 
-def _SEGMENT_OK(segment: str) -> bool:  # noqa: N802 — module-private predicate
+def _SEGMENT_OK(segment: str) -> bool:
     return all(ch.isalnum() or ch in "_-" for ch in segment)
 
 
-def resolve_zigbee_base_topics(
-    configured: Any, requested: Any = None
-) -> list[str]:
+def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[str]:
     """Which zigbee2mqtt instances a permit-join should open.
 
     A villa commonly runs two or three zigbee2mqtt instances (one coordinator
@@ -168,9 +167,7 @@ def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
     """
     unknown = set(payload) - {"name"}
     if unknown:
-        raise InstallerError(
-            f"Unknown field(s): {', '.join(sorted(unknown))}"
-        )
+        raise InstallerError(f"Unknown field(s): {', '.join(sorted(unknown))}")
     changes: dict[str, Any] = {}
     if "name" in payload:
         name = payload["name"]
@@ -202,9 +199,7 @@ def parse_remote_command(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
     ):
         commands = list(command)
     else:
-        raise InstallerError(
-            "command must be a non-empty string or list of strings"
-        )
+        raise InstallerError("command must be a non-empty string or list of strings")
     return entity_id, commands
 
 

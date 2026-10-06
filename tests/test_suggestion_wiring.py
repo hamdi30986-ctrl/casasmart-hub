@@ -42,7 +42,7 @@ class WiringTest(unittest.TestCase):
         )
         function.decorator_list = []
         namespace = {"Event": object}
-        exec(  # noqa: S102 -- executes only the repository method under test.
+        exec(
             compile(ast.Module(body=[function], type_ignores=[]), "ws.py", "exec"),
             namespace,
         )

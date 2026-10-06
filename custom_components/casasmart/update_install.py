@@ -30,7 +30,6 @@ from http import HTTPStatus
 from pathlib import Path
 
 import aiohttp
-
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
@@ -132,7 +131,7 @@ async def _download_archive(hass: HomeAssistant, url: str, dest: Path) -> None:
             with dest.open("wb") as handle:
                 async for chunk in response.content.iter_chunked(65536):
                     handle.write(chunk)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+    except (TimeoutError, aiohttp.ClientError) as err:
         raise InstallError(f"download failed: {err}") from err
 
 

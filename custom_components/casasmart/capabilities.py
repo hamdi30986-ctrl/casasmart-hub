@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Final
 
-
 CAPABILITY_CONTRACT_VERSION: Final = 1
 
 # All foundation features are defined against the existing v1 transport.  The
@@ -36,7 +35,9 @@ ORBIT_CAPABILITIES: Final = (
 # their own server-side enforcement exists.
 _IMPLEMENTED_CAPABILITIES: Final = frozenset(
     {
-        "room_activity_bulk_v1", "now_data_v1", "atomic_room_move_v1",
+        "room_activity_bulk_v1",
+        "now_data_v1",
+        "atomic_room_move_v1",
         "contextual_suggestions_v1",
         "generated_room_suggestions_v1",
     }

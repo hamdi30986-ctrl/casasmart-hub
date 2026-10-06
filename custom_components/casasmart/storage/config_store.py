@@ -83,7 +83,9 @@ class JsonConfigStore:
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            payload = json.dumps(self._data, indent=2, ensure_ascii=False, sort_keys=True)
+            payload = json.dumps(
+                self._data, indent=2, ensure_ascii=False, sort_keys=True
+            )
         except (TypeError, ValueError) as err:
             raise ConfigError(f"Config contains non-JSON value: {err}") from err
 

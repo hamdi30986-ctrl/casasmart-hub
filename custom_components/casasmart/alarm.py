@@ -43,7 +43,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ class AlarmEngine:
         history_table: Any,
         settings_table: Any,
         *,
-        alert_sink: Optional[Callable[[dict[str, Any]], None]] = None,
+        alert_sink: Callable[[dict[str, Any]], None] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._state_table = state_table
@@ -198,7 +199,9 @@ class AlarmEngine:
         with self._lock:
             stored = self._state_table.get(_STATE_KEY)
             self._state = self._coerce_state(stored)
-            self._settings = self._coerce_settings(self._settings_table.get(_SETTINGS_KEY))
+            self._settings = self._coerce_settings(
+                self._settings_table.get(_SETTINGS_KEY)
+            )
             self._zones = {
                 entity_id: dict(record)
                 for entity_id, record in self._zones_table.items()
@@ -334,7 +337,7 @@ class AlarmEngine:
         with self._lock:
             return {eid: dict(rec) for eid, rec in self._zones.items()}
 
-    def zone_of(self, entity_id: str) -> Optional[str]:
+    def zone_of(self, entity_id: str) -> str | None:
         rec = self._zones.get(entity_id)
         return rec["zone"] if rec else None
 
@@ -383,9 +386,7 @@ class AlarmEngine:
                 entry_delay=entry_seconds,
             )
             self._persist_state()
-            self._record_event(
-                EVENT_ARMED, now=now, mode=mode, actor=_actor_str(actor)
-            )
+            self._record_event(EVENT_ARMED, now=now, mode=mode, actor=_actor_str(actor))
         return self.snapshot()
 
     def disarm(self, *, actor: Any = None) -> dict[str, Any]:
@@ -416,8 +417,8 @@ class AlarmEngine:
     #    common no-op edge) ----------------------------------------------------
 
     def process_sensor(
-        self, entity_id: str, active: bool, *, now: Optional[float] = None
-    ) -> Optional[dict[str, Any]]:
+        self, entity_id: str, active: bool, *, now: float | None = None
+    ) -> dict[str, Any] | None:
         """Evaluate one sensor edge. Returns the event it caused, or ``None``.
 
         Rules (plan B13):
@@ -466,8 +467,8 @@ class AlarmEngine:
             return self._enter_triggered(entity_id, zone, now=now, persist=True)
 
     def process_sensor_offline(
-        self, entity_id: str, *, now: Optional[float] = None
-    ) -> Optional[dict[str, Any]]:
+        self, entity_id: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
         """A mapped sensor dropped offline. While armed, that is tamper.
 
         Per plan: log + push, but do NOT trigger the full alarm — a dead
@@ -486,7 +487,7 @@ class AlarmEngine:
         self._emit_alert(event)
         return event
 
-    def tick(self, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
+    def tick(self, *, now: float | None = None) -> dict[str, Any] | None:
         """Promote a lapsed entry-delay countdown to triggered.
 
         The HA adapter calls this when the pending deadline fires (or on a
@@ -505,7 +506,7 @@ class AlarmEngine:
                 persist=True,
             )
 
-    def pending_deadline(self) -> Optional[float]:
+    def pending_deadline(self) -> float | None:
         """Absolute time the current entry-delay fires, or ``None``.
 
         Lets the adapter schedule one exact timer instead of polling.
@@ -541,8 +542,8 @@ class AlarmEngine:
 
     def _enter_triggered(
         self,
-        entity_id: Optional[str],
-        zone: Optional[str],
+        entity_id: str | None,
+        zone: str | None,
         *,
         now: float,
         life_safety: bool = False,
@@ -571,7 +572,7 @@ class AlarmEngine:
         the state machine."""
         try:
             self._alert_sink(dict(event))
-        except Exception:  # noqa: BLE001 — a bad sink must not crash the alarm
+        except Exception:
             _LOGGER.exception("Alarm alert sink raised; alarm state is unaffected")
 
     @staticmethod
@@ -620,9 +621,7 @@ class AlarmEngine:
                 # countdown as ``max(0, arming_until - now)`` — no extra endpoint,
                 # no hub-side ticking; a value already in the past simply means
                 # the grace is spent. Null in any non-armed mode.
-                "arming_until": s["active_at"]
-                if s["mode"] in ARMABLE_MODES
-                else None,
+                "arming_until": s["active_at"] if s["mode"] in ARMABLE_MODES else None,
                 "pending_until": s["trigger_deadline"] or None
                 if s["mode"] == MODE_PENDING
                 else None,
@@ -645,7 +644,7 @@ class AlarmEngine:
         }
 
 
-def _actor_str(actor: Any) -> Optional[str]:
+def _actor_str(actor: Any) -> str | None:
     if actor is None:
         return None
     return str(actor)[:_NAME_MAX]

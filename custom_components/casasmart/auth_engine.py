@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -16,8 +15,6 @@ try:
         VALID_ROLES,
         TokenError,
     )
-
-
     from .throttle import FailureThrottle, ThrottledError
 except ImportError:
     import auth_keys
@@ -40,87 +37,39 @@ _LOGGER = logging.getLogger(__name__)
 TOKEN_TTL = 45 * 60
 
 
-
-
-
 WIDGET_TOKEN_TTL = 30 * 24 * 3600
 
 CHALLENGE_TTL = 60.0
 MAX_CHALLENGES_PER_DEVICE = 8
 
 
-
-
-
 MAX_DEVICE_NAME_LENGTH = 64
-
-
 
 
 PERMISSIONS: dict[str, tuple[str, ...]] = {
     "devices.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "devices.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
-
-
     "history.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
-
-
     "energy.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "energy.control": (ROLE_ADMIN,),
     "energy.manage": (ROLE_ADMIN,),
     "users.manage": (ROLE_ADMIN,),
     "pairing.generate": (ROLE_ADMIN,),
-
-
     "registry.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     "suggestions.manage": (ROLE_ADMIN,),
-
-
-
     "automations.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
-
-
-
-
     "alarm.read": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     "alarm.arm": (ROLE_ADMIN, ROLE_SUB_ADMIN),
     "alarm.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
-
-
-
     "cameras.view": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
-
-
-
-
-
-
     "audio.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "audio.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "audio.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
-
-
-
-
-
-
-
     "installer.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN),
-
-
-
-
     "update.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "update.install": (ROLE_ADMIN,),
-
-
-
-
     "widget.token": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
-
-
-
 
 
 WIDGET_SCOPE_PERMISSIONS: frozenset[str] = frozenset(
@@ -419,8 +368,7 @@ class AuthEngine:
         """True once the hub's single admin is enrolled (cache read — cheap)."""
         with self._lock:
             return any(
-                entry.get("role") == ROLE_ADMIN
-                for entry in self._device_cache.values()
+                entry.get("role") == ROLE_ADMIN for entry in self._device_cache.values()
             )
 
     # -- user management (storage — call via executor) ---------------------------
@@ -714,9 +662,7 @@ class AuthEngine:
                 self.throttle.clear(device_id)
             self._device_cache.clear()
         if wiped:
-            _LOGGER.info(
-                "Wiped all %d device(s) — hub reset to unclaimed", len(wiped)
-            )
+            _LOGGER.info("Wiped all %d device(s) — hub reset to unclaimed", len(wiped))
         return wiped
 
     # -- challenge-response login ---------------------------------------------

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +9,6 @@ from typing import Any
 
 import aiohttp
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -25,7 +23,6 @@ from .const import (
 from .update import ReleaseInfo, is_newer, parse_release
 
 _LOGGER = logging.getLogger(__name__)
-
 
 
 _GITHUB_LATEST_URL = "https://api.github.com/repos/{repo}/releases/latest"
@@ -55,7 +52,6 @@ def _resolve_repo(hass: HomeAssistant) -> str | None:
 
 
 class UpdateChecker:
-
     def __init__(self, hass: HomeAssistant, current_version: str) -> None:
         self._hass = hass
         self._current_version = current_version
@@ -83,7 +79,6 @@ class UpdateChecker:
 
     async def _async_refresh(self) -> None:
         async with self._lock:
-
             if self._is_fresh():
                 return
             repo = _resolve_repo(self._hass)
@@ -98,8 +93,6 @@ class UpdateChecker:
                     url, headers=_GITHUB_HEADERS, timeout=_FETCH_TIMEOUT
                 ) as response:
                     if response.status == HTTPStatus.NOT_FOUND:
-
-
                         self._latest = None
                         self._mark_checked()
                         return
@@ -111,7 +104,7 @@ class UpdateChecker:
                         )
                         return
                     payload = await response.json()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            except (TimeoutError, aiohttp.ClientError) as err:
                 _LOGGER.warning("Update check: GitHub unreachable (%s): %s", repo, err)
                 return
 
@@ -205,7 +198,7 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
         except InstallError as err:
             _LOGGER.warning("Self-update refused/failed: %s", err)
             return self.json({"error": str(err)}, status_code=HTTPStatus.CONFLICT)
-        except Exception:  # noqa: BLE001 — surface any unexpected failure as 500
+        except Exception:
             _LOGGER.exception("Self-update crashed")
             return self.json(
                 {"error": "internal error during install"},

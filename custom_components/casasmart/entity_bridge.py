@@ -1,12 +1,6 @@
-
 from __future__ import annotations
 
 from typing import Any
-
-
-
-
-
 
 EXPOSED_DOMAINS: frozenset[str] = frozenset(
     {
@@ -19,24 +13,13 @@ EXPOSED_DOMAINS: frozenset[str] = frozenset(
         "media_player",
         "sensor",
         "binary_sensor",
-
-
         "select",
         "number",
         "siren",
-
-
-
-
-
         "automation",
-
-
-
         "camera",
     }
 )
-
 
 
 _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
@@ -46,10 +29,6 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "color_mode",
             "supported_color_modes",
             "rgb_color",
-
-
-
-
             "hs_color",
             "xy_color",
             "color_temp",
@@ -78,7 +57,12 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
         }
     ),
     "cover": frozenset(
-        {"current_position", "current_tilt_position", "device_class", "supported_features"}
+        {
+            "current_position",
+            "current_tilt_position",
+            "device_class",
+            "supported_features",
+        }
     ),
     "fan": frozenset({"percentage", "percentage_step", "preset_mode", "preset_modes"}),
     "lock": frozenset({}),
@@ -97,27 +81,15 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
     "select": frozenset({"options"}),
     "number": frozenset({"min", "max", "step", "unit_of_measurement"}),
     "siren": frozenset({"device_class"}),
-
-
     "automation": frozenset({"id", "last_triggered", "mode", "current"}),
-
-
-
     "camera": frozenset({"brand", "model_name", "frontend_stream_type"}),
 }
-
-
-
-
 
 
 _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "light": {
         "turn_on": (
             "turn_on",
-
-
-
             frozenset(
                 {
                     "brightness",
@@ -146,9 +118,6 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "turn_on": ("turn_on", frozenset({"percentage", "preset_mode"})),
         "turn_off": ("turn_off", frozenset()),
         "set_percentage": ("set_percentage", frozenset({"percentage"})),
-
-
-
         "set_preset_mode": ("set_preset_mode", frozenset({"preset_mode"})),
     },
     "cover": {
@@ -161,9 +130,6 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "climate": {
         "set_temperature": (
             "set_temperature",
-
-
-
             frozenset(
                 {"temperature", "target_temp_low", "target_temp_high", "hvac_mode"}
             ),
@@ -181,8 +147,6 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "pause": ("media_pause", frozenset()),
         "set_volume": ("volume_set", frozenset({"volume_level"})),
         "mute": ("volume_mute", frozenset({"is_volume_muted"})),
-
-
         "turn_off": ("turn_off", frozenset()),
     },
     "select": {
@@ -195,10 +159,6 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
         "turn_on": ("turn_on", frozenset()),
         "turn_off": ("turn_off", frozenset()),
     },
-
-
-
-
     "automation": {
         "turn_on": ("turn_on", frozenset()),
         "turn_off": ("turn_off", frozenset()),
@@ -224,13 +184,6 @@ def is_exposed(entity_id: str) -> bool:
     return entity_domain(entity_id) in EXPOSED_DOMAINS
 
 
-
-
-
-
-
-
-
 DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
     {
         "power",
@@ -243,8 +196,6 @@ DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
         "battery",
     }
 )
-
-
 
 
 DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
@@ -268,9 +219,7 @@ def is_filter_life_entity(entity_id: str) -> bool:
     return "filter" in name and ("life" in name or "remain" in name)
 
 
-def is_category_served(
-    category: str, entity_id: str, device_class: str | None
-) -> bool:
+def is_category_served(category: str, entity_id: str, device_class: str | None) -> bool:
     """Category-entity exposure policy (B16 3c-4a). Pure — unit-testable.
 
     ``category`` is the registry entity_category value (``"config"`` /

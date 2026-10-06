@@ -127,7 +127,9 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
     admin entry; the dev seam is sub-admin / user only by construction.
     """
     if not isinstance(entry, dict):
-        _LOGGER.error("Dev enroll: manifest entry is not an object — skipped: %r", entry)
+        _LOGGER.error(
+            "Dev enroll: manifest entry is not an object — skipped: %r", entry
+        )
         return None
 
     public_key = entry.get("public_key") or entry.get("public_key_pem")

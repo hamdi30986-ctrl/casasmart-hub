@@ -45,13 +45,18 @@ import logging
 import secrets
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 try:
     from .auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER
     from .throttle import FailureThrottle
 except ImportError:  # top-level import in the test env (no HA package init)
-    from auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER  # type: ignore[no-redef]
+    from auth_tokens import (  # type: ignore[no-redef]
+        ROLE_ADMIN,
+        ROLE_SUB_ADMIN,
+        ROLE_USER,
+    )
     from throttle import FailureThrottle  # type: ignore[no-redef]
 
 _LOGGER = logging.getLogger(__name__)
@@ -191,9 +196,7 @@ class PairingManager:
         instead of becoming a new one-device member. The caller passes the
         member's own role/rooms so the new device matches.
         """
-        if member_id is not None and (
-            not isinstance(member_id, str) or not member_id
-        ):
+        if member_id is not None and (not isinstance(member_id, str) or not member_id):
             raise PairingError("member_id must be a non-empty string")
         if role not in ISSUABLE_ROLES:
             raise PairingError(
@@ -209,9 +212,7 @@ class PairingManager:
             raise PairingError("Room scope only applies to the user role")
         ttl = EXPIRY_CHOICES.get(expires_in)
         if ttl is None:
-            raise PairingError(
-                f"expires_in must be one of {', '.join(EXPIRY_CHOICES)}"
-            )
+            raise PairingError(f"expires_in must be one of {', '.join(EXPIRY_CHOICES)}")
 
         with self._lock:
             self._purge_expired()
@@ -287,9 +288,7 @@ class PairingManager:
             for code_id in list(self._codes):
                 del self._codes[code_id]
         if count:
-            _LOGGER.info(
-                "Wiped all %d pairing code(s) — pairing factory reset", count
-            )
+            _LOGGER.info("Wiped all %d pairing code(s) — pairing factory reset", count)
         return count
 
     # -- enrollment gate ---------------------------------------------------------
@@ -337,8 +336,7 @@ class PairingManager:
         with self._lock:
             self._purge_expired()
             known = any(
-                record["code_hash"] == code_hash
-                for record in self._codes.values()
+                record["code_hash"] == code_hash for record in self._codes.values()
             )
         if not known:
             known = any(

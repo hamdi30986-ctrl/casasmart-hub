@@ -203,7 +203,7 @@ class MdnsAdvertiser:
             from homeassistant.components import zeroconf as ha_zeroconf
 
             self._aiozc = await ha_zeroconf.async_get_async_instance(self._hass)
-        except Exception as err:  # noqa: BLE001 — never fail setup over mDNS
+        except Exception as err:
             _LOGGER.warning(
                 "mDNS advertiser unavailable (zeroconf not ready): %s — the "
                 "app will still reach the hub via stored IP / tunnel",
@@ -218,7 +218,7 @@ class MdnsAdvertiser:
             return
         try:
             await self._aiozc.async_register_service(info)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.warning("mDNS register failed: %s", err)
             return
         self._info = info
@@ -254,7 +254,7 @@ class MdnsAdvertiser:
                 await self._aiozc.async_register_service(info)
             else:
                 await self._aiozc.async_update_service(info)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.warning("mDNS refresh failed: %s", err)
             return
         self._info = info
@@ -267,7 +267,7 @@ class MdnsAdvertiser:
             return
         try:
             await self._aiozc.async_unregister_service(self._info)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.debug("mDNS unregister failed (harmless on shutdown): %s", err)
         finally:
             self._info = None
@@ -280,11 +280,9 @@ class MdnsAdvertiser:
         try:
             from homeassistant.components import network
 
-            ip = await network.async_get_source_ip(
-                self._hass, network.MDNS_TARGET_IP
-            )
+            ip = await network.async_get_source_ip(self._hass, network.MDNS_TARGET_IP)
             return ip
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.debug("source IP lookup failed, hostname-only mDNS: %s", err)
             return None
 
@@ -309,6 +307,6 @@ class MdnsAdvertiser:
                 properties=dict(self._descriptor.properties),
                 server=_server_hostname(self._hub_id),
             )
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.warning("mDNS ServiceInfo build failed: %s", err)
             return None

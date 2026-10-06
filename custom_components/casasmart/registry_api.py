@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +8,6 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -17,19 +15,18 @@ from homeassistant.exceptions import HomeAssistantError
 from .auth_api import authenticate_request, get_engine, json_body
 from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
-from .entity_bridge import CommandError, validate_command
 from .energy_runtime import energy_lockout_applies
+from .entity_bridge import CommandError, validate_command
 from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
 from .registry import (
     UNSET,
     InUseError,
     RegistryEngine,
     RegistryError,
-    UnknownItemError,
     RoomMoveDenied,
+    UnknownItemError,
 )
 from .storage import StorageError
-
 
 _SCENE_CALL_TIMEOUT = 10.0
 
@@ -86,16 +83,13 @@ class _RegistryView(HomeAssistantView):
         """SQLite trouble is a hub problem, not a client one — log the
         cause, hand the app a clean 500 instead of an aiohttp stack."""
         _LOGGER.error("Registry storage failure: %s", err)
-        return self.json_message(
-            "Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR
-        )
+        return self.json_message("Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _energy_flag_reject(
         self, claims: dict[str, Any], payload: dict[str, Any]
     ) -> web.Response | None:
-        if (
-            "works_during_energy_saving" in payload
-            and not AuthEngine.authorize(claims, "energy.manage")
+        if "works_during_energy_saving" in payload and not AuthEngine.authorize(
+            claims, "energy.manage"
         ):
             return self.json_message(
                 "Energy Saving flags require admin access",
@@ -139,9 +133,8 @@ class _RegistryView(HomeAssistantView):
             if not isinstance(entity_ids, list):
                 continue
             for entity_id in entity_ids:
-                if (
-                    not isinstance(entity_id, str)
-                    or not in_scope(self._hass, entity_id, scope)
+                if not isinstance(entity_id, str) or not in_scope(
+                    self._hass, entity_id, scope
                 ):
                     return self.json_message(
                         f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
@@ -150,7 +143,6 @@ class _RegistryView(HomeAssistantView):
 
 
 class CasaSmartRegistryView(_RegistryView):
-
     url = f"/api/{DOMAIN}/registry"
     name = f"api:{DOMAIN}:registry"
 
@@ -173,16 +165,15 @@ class CasaSmartRegistryView(_RegistryView):
             )
 
         try:
-            floors, rooms, room_tags, assignments, scenes = (
-                await self._hass.async_add_executor_job(_read)
-            )
+            (
+                floors,
+                rooms,
+                room_tags,
+                assignments,
+                scenes,
+            ) = await self._hass.async_add_executor_job(_read)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-
-
-
-
-
 
         known_rooms = {room["room_id"] for room in rooms}
 
@@ -203,13 +194,7 @@ class CasaSmartRegistryView(_RegistryView):
         ]
         visible_floors = {room["floor_id"] for room in rooms} - {None}
         if scope is not None:
-            floors = [
-                floor for floor in floors if floor["floor_id"] in visible_floors
-            ]
-
-
-
-
+            floors = [floor for floor in floors if floor["floor_id"] in visible_floors]
 
         devices = []
         for state in self._hass.states.async_all():
@@ -231,7 +216,6 @@ class CasaSmartRegistryView(_RegistryView):
         devices.sort(key=lambda device: device["entity_id"])
 
         if scope is not None:
-
             scenes = [
                 scene
                 for scene in scenes
@@ -248,9 +232,6 @@ class CasaSmartRegistryView(_RegistryView):
 
         user_devices = registry.list_user_devices()
 
-
-
-
         user_devices = [
             device
             for device in user_devices
@@ -260,12 +241,6 @@ class CasaSmartRegistryView(_RegistryView):
             )
         ]
         if scope is not None:
-
-
-
-
-
-
             user_devices = [
                 device
                 for device in user_devices
@@ -362,9 +337,7 @@ class CasaSmartFloorView(_RegistryView):
         if not_ready is not None:
             return not_ready
         try:
-            await self._hass.async_add_executor_job(
-                registry.delete_floor, floor_id
-            )
+            await self._hass.async_add_executor_job(registry.delete_floor, floor_id)
         except RegistryError as err:
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
@@ -579,9 +552,15 @@ class CasaSmartRoomMoveView(_RegistryView):
             return not_ready
         payload = await json_body(request)
         if not isinstance(payload, dict):
-            return self.json_message("Body must be a JSON object", HTTPStatus.BAD_REQUEST)
+            return self.json_message(
+                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+            )
         key = payload.get("idempotency_key")
-        request_id = key[:12] if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key) else "invalid"
+        request_id = (
+            key[:12]
+            if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)
+            else "invalid"
+        )
         runtime = _runtime_data(self._hass)
         if runtime is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
@@ -601,8 +580,12 @@ class CasaSmartRoomMoveView(_RegistryView):
             )
             result = await self._hass.async_add_executor_job(
                 lambda: registry.move_device_room(
-                    runtime.storage, actor, payload, assignable_ids=assignable,
-                    fallback_rooms=fallback, scope=claims.get("rooms"),
+                    runtime.storage,
+                    actor,
+                    payload,
+                    assignable_ids=assignable,
+                    fallback_rooms=fallback,
+                    scope=claims.get("rooms"),
                 )
             )
         except RoomMoveDenied as err:
@@ -614,7 +597,9 @@ class CasaSmartRoomMoveView(_RegistryView):
         except (StorageError, sqlite3.Error) as err:
             _LOGGER.warning("Room move %s failed: storage", request_id)
             return self._storage_failure(err)
-        _LOGGER.debug("Room move %s acknowledged (replayed=%s)", request_id, result["replayed"])
+        _LOGGER.debug(
+            "Room move %s acknowledged (replayed=%s)", request_id, result["replayed"]
+        )
         if not result["replayed"]:
             self._notify_change("devices")
         return self.json(result)
@@ -711,12 +696,8 @@ class CasaSmartUserDeviceView(_RegistryView):
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}"
     name = f"api:{DOMAIN}:registry:user-device"
 
-    async def put(
-        self, request: web.Request, ha_device_id: str
-    ) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+    async def put(self, request: web.Request, ha_device_id: str) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -757,12 +738,8 @@ class CasaSmartUserDeviceView(_RegistryView):
         self._notify_change("user-devices")
         return self.json(device)
 
-    async def patch(
-        self, request: web.Request, ha_device_id: str
-    ) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+    async def patch(self, request: web.Request, ha_device_id: str) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -803,12 +780,8 @@ class CasaSmartUserDeviceView(_RegistryView):
         self._notify_change("user-devices")
         return self.json(device)
 
-    async def delete(
-        self, request: web.Request, ha_device_id: str
-    ) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+    async def delete(self, request: web.Request, ha_device_id: str) -> web.Response:
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -854,9 +827,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
     gang path segment IS the gang's control entity_id.
     """
 
-    url = (
-        f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}/gangs/{{gang}}"
-    )
+    url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}/gangs/{{gang}}"
     name = f"api:{DOMAIN}:registry:user-device:gang"
 
     @staticmethod
@@ -884,9 +855,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
                 icon=payload.get("icon", ...),
             )
         if "room_id" in payload:
-            device = registry.set_gang_room(
-                ha_device_id, gang, payload["room_id"]
-            )
+            device = registry.set_gang_room(ha_device_id, gang, payload["room_id"])
         if device is None:
             raise RegistryError(
                 "Body must set presentation, type, name, icon or room_id"
@@ -896,9 +865,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
     async def patch(
         self, request: web.Request, ha_device_id: str, gang: str
     ) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -945,9 +912,7 @@ class CasaSmartScenesView(_RegistryView):
     name = f"api:{DOMAIN}:registry:scenes"
 
     async def post(self, request: web.Request) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -966,9 +931,7 @@ class CasaSmartScenesView(_RegistryView):
         # Scope re-check — the same defense-in-depth the favorites/user-device
         # writes do. Unreachable today (every registry.manage caller is unscoped),
         # but consistent if a scoped non-user role is ever introduced.
-        reject = self._scope_reject(
-            claims, _scene_entity_ids(payload.get("entities"))
-        )
+        reject = self._scope_reject(claims, _scene_entity_ids(payload.get("entities")))
         if reject is not None:
             return reject
         try:
@@ -995,9 +958,7 @@ class CasaSmartSceneView(_RegistryView):
     name = f"api:{DOMAIN}:registry:scene"
 
     async def patch(self, request: web.Request, scene_id: str) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -1014,9 +975,7 @@ class CasaSmartSceneView(_RegistryView):
             unserved = self._unserved_scene_entity(payload["entities"])
             if unserved is not None:
                 return unserved
-            reject = self._scope_reject(
-                claims, _scene_entity_ids(payload["entities"])
-            )
+            reject = self._scope_reject(claims, _scene_entity_ids(payload["entities"]))
             if reject is not None:
                 return reject
         try:
@@ -1047,9 +1006,7 @@ class CasaSmartSceneView(_RegistryView):
         if not_ready is not None:
             return not_ready
         try:
-            await self._hass.async_add_executor_job(
-                registry.delete_scene, scene_id
-            )
+            await self._hass.async_add_executor_job(registry.delete_scene, scene_id)
         except RegistryError as err:
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
@@ -1071,9 +1028,7 @@ class CasaSmartSceneActivateView(_RegistryView):
     name = f"api:{DOMAIN}:registry:scene:activate"
 
     async def post(self, request: web.Request, scene_id: str) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "devices.control"
-        )
+        claims, error = authenticate_request(self._hass, request, "devices.control")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
@@ -1090,8 +1045,7 @@ class CasaSmartSceneActivateView(_RegistryView):
 
         scope = claims.get("rooms")
         if scope is not None and not all(
-            in_scope(self._hass, item["entity_id"], scope)
-            for item in scene["entities"]
+            in_scope(self._hass, item["entity_id"], scope) for item in scene["entities"]
         ):
             # Same 404 as nonexistent — out-of-scope scenes are invisible.
             return self.json_message("Unknown scene", HTTPStatus.NOT_FOUND)
@@ -1103,8 +1057,7 @@ class CasaSmartSceneActivateView(_RegistryView):
                 {
                     "error": "energy_lockout",
                     "message": (
-                        "Energy saving is active — controls are locked "
-                        "by the admin"
+                        "Energy saving is active — controls are locked by the admin"
                     ),
                 },
                 HTTPStatus.FORBIDDEN,
@@ -1126,15 +1079,6 @@ async def async_execute_registry_scene(
     hass: HomeAssistant, scene: dict[str, Any]
 ) -> dict[str, Any]:
     scene_id = scene["scene_id"]
-
-
-
-
-
-
-
-
-
 
     _climate_with_state = {
         item["entity_id"]
@@ -1164,31 +1108,38 @@ async def async_execute_registry_scene(
             from .generated_suggestions import room_actions
 
             state = hass.states.get(entity_id)
-            valid = state is not None and area_id_of(hass, entity_id) == scene["room_id"]
+            valid = (
+                state is not None and area_id_of(hass, entity_id) == scene["room_id"]
+            )
             if valid and entity_id.startswith("light."):
                 valid = (
                     state.state == "on"
-                    and state.attributes.get("casasmart_room_activity_exclude") is not True
+                    and state.attributes.get("casasmart_room_activity_exclude")
+                    is not True
                 )
                 if valid and item["action"] == "turn_on":
                     valid = any(
-                        a["action"] == item["action"] and a["data"] == item.get("data", {})
+                        a["action"] == item["action"]
+                        and a["data"] == item.get("data", {})
                         for a in room_actions([state], "room_eco")
                     )
             elif valid:
-                unit = getattr(getattr(hass.config, "units", None), "temperature_unit", "°C")
+                unit = getattr(
+                    getattr(hass.config, "units", None), "temperature_unit", "°C"
+                )
                 valid = any(
                     a["action"] == item["action"] and a["data"] == item.get("data", {})
                     for a in room_actions([state], scene["kind"], temperature_unit=unit)
                 )
             if not valid:
-                results.append({
-                    "entity_id": entity_id,
-                    "ok": False,
-                    "error": "Device changed since preview",
-                })
+                results.append(
+                    {
+                        "entity_id": entity_id,
+                        "ok": False,
+                        "error": "Device changed since preview",
+                    }
+                )
                 continue
-
 
         if hass.states.get(entity_id) is None or not is_served(hass, entity_id):
             results.append(
@@ -1217,9 +1168,7 @@ async def async_execute_registry_scene(
             _LOGGER.warning(
                 "Scene %s: %s on %s timed out", scene_id, item["action"], entity_id
             )
-            results.append(
-                {"entity_id": entity_id, "ok": False, "error": "Timed out"}
-            )
+            results.append({"entity_id": entity_id, "ok": False, "error": "Timed out"})
         except (CommandError, HomeAssistantError) as err:
             _LOGGER.warning(
                 "Scene %s: %s on %s failed: %s",
@@ -1228,9 +1177,7 @@ async def async_execute_registry_scene(
                 entity_id,
                 err,
             )
-            results.append(
-                {"entity_id": entity_id, "ok": False, "error": str(err)}
-            )
+            results.append({"entity_id": entity_id, "ok": False, "error": str(err)})
 
     return {
         "scene_id": scene_id,
@@ -1285,8 +1232,7 @@ class CasaSmartFavoritesView(_RegistryView):
         served = [
             eid
             for eid in stored
-            if self._hass.states.get(eid) is not None
-            and is_served(self._hass, eid)
+            if self._hass.states.get(eid) is not None and is_served(self._hass, eid)
         ]
         # Scope to the caller — a room-scoped user only sees its own rooms.
         favorites = [eid for eid in served if in_scope(self._hass, eid, scope)]
@@ -1341,9 +1287,7 @@ class CasaSmartFavoritesView(_RegistryView):
         # filters out-of-scope). A plain replace would silently delete the
         # member's favorites in rooms it can't see (Phase 7) — preserve those,
         # appended after the caller's now-authoritative in-scope list.
-        out_of_scope = [
-            eid for eid in stored if not in_scope(self._hass, eid, scope)
-        ]
+        out_of_scope = [eid for eid in stored if not in_scope(self._hass, eid, scope)]
         try:
             saved = await self._hass.async_add_executor_job(
                 registry.set_favorites, member_id, entity_ids + out_of_scope
@@ -1358,9 +1302,5 @@ class CasaSmartFavoritesView(_RegistryView):
         self._notify_change("favorites")
         # Echo only the caller's in-scope view — never leak out-of-scope ids.
         return self.json(
-            {
-                "entity_ids": [
-                    eid for eid in saved if in_scope(self._hass, eid, scope)
-                ]
-            }
+            {"entity_ids": [eid for eid in saved if in_scope(self._hass, eid, scope)]}
         )

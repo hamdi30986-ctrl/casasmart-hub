@@ -100,9 +100,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
     return private_key
 
 
-def ensure_push_identity(
-    data_dir: Path, hub_config: JsonConfigStore
-) -> PushSigner:
+def ensure_push_identity(data_dir: Path, hub_config: JsonConfigStore) -> PushSigner:
     """Load-or-create the push-identity key (blocking — executor only).
 
     Mirrors the public key (hex) into ``hub_config`` whenever it is missing

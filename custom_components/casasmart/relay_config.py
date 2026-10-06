@@ -1,10 +1,10 @@
-
 from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 from .const import (
@@ -22,7 +22,6 @@ _NON_PRODUCTION_SUFFIXES = (".internal", ".local", ".localhost")
 def normalize_relay_base_url(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-
 
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         return None
@@ -75,7 +74,6 @@ def normalize_relay_base_url(value: object) -> str | None:
 
 @dataclass(frozen=True)
 class RelayEndpoints:
-
     base_url: str | None
     push_url: str
     registration_url: str
@@ -94,7 +92,6 @@ def relay_endpoints(base_url: object) -> RelayEndpoints:
 
 @dataclass(frozen=True)
 class RelayConfigSnapshot:
-
     base_url: str | None
     activation_request_id: str | None
     has_activation_code: bool
@@ -158,7 +155,6 @@ def without_relay_activation(data: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RelayMigration:
-
     options: dict[str, Any]
     base_url: str | None
     legacy_present: bool

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +7,6 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.history import get_significant_states
@@ -16,29 +14,6 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    API_VERSION,
-    API_VERSION_HEADER,
-    DOMAIN,
-    MIN_APP_VERSION,
-    SUPPORTED_API_VERSIONS,
-)
-from .capabilities import handshake_capabilities
-from .auth_api import (
-    CasaSmartChallengeView,
-    CasaSmartEnrollView,
-    CasaSmartPairingCodesView,
-    CasaSmartPairingCodeView,
-    CasaSmartRecoverView,
-    CasaSmartTokenView,
-    CasaSmartUnpairSelfView,
-    CasaSmartUsersView,
-    CasaSmartUserView,
-    CasaSmartWhoamiView,
-    CasaSmartWidgetTokenView,
-    authenticate_request,
-    get_engine,
-)
 from .admin_api import (
     CasaSmartAdminConfigFlowsView,
     CasaSmartAdminConfigFlowView,
@@ -71,7 +46,35 @@ from .audio_api import (
     CasaSmartAudioSpeakersView,
     CasaSmartAudioSpeakerView,
 )
+from .auth_api import (
+    CasaSmartChallengeView,
+    CasaSmartEnrollView,
+    CasaSmartPairingCodesView,
+    CasaSmartPairingCodeView,
+    CasaSmartRecoverView,
+    CasaSmartTokenView,
+    CasaSmartUnpairSelfView,
+    CasaSmartUsersView,
+    CasaSmartUserView,
+    CasaSmartWhoamiView,
+    CasaSmartWidgetTokenView,
+    authenticate_request,
+    get_engine,
+)
 from .automation_api import CasaSmartAutomationConfigView
+from .camera_api import (
+    CasaSmartCameraHlsProxyView,
+    CasaSmartCameraSnapshotView,
+    CasaSmartCameraStreamView,
+)
+from .capabilities import handshake_capabilities
+from .const import (
+    API_VERSION,
+    API_VERSION_HEADER,
+    DOMAIN,
+    MIN_APP_VERSION,
+    SUPPORTED_API_VERSIONS,
+)
 from .energy_api import (
     CasaSmartEnergyActivateView,
     CasaSmartEnergyConfigView,
@@ -80,32 +83,32 @@ from .energy_api import (
     CasaSmartEnergyReapplyView,
     CasaSmartEnergyStateView,
 )
-from .push_api import CasaSmartHqNotificationView, CasaSmartPushTokenView
-from .camera_api import (
-    CasaSmartCameraHlsProxyView,
-    CasaSmartCameraSnapshotView,
-    CasaSmartCameraStreamView,
-)
-from .entity_bridge import CommandError, validate_command
 from .energy_runtime import energy_lockout_applies
+from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
 from .history import (
     HistoryQueryError,
     parse_history_query,
     serialize_history,
 )
-from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
+from .now_api import (
+    CasaSmartNowConfigView,
+    CasaSmartNowView,
+    CasaSmartRoomActivityCommandView,
+    CasaSmartRoomActivityPolicyView,
+)
+from .push_api import CasaSmartHqNotificationView, CasaSmartPushTokenView
 from .registry_api import (
     CasaSmartDeviceAssignmentView,
-    CasaSmartRoomMoveView,
     CasaSmartFavoritesView,
     CasaSmartFloorsView,
     CasaSmartFloorView,
     CasaSmartRegistryView,
+    CasaSmartRoomMoveView,
     CasaSmartRoomsView,
-    CasaSmartRoomView,
     CasaSmartRoomTagsView,
     CasaSmartRoomTagView,
+    CasaSmartRoomView,
     CasaSmartSceneActivateView,
     CasaSmartScenesView,
     CasaSmartSceneView,
@@ -114,23 +117,12 @@ from .registry_api import (
 )
 from .settings_api import CasaSmartUserSettingsView
 from .suggestion_api import (
-    CasaSmartGeneratedSuggestionsView,
     CasaSmartGeneratedSuggestionActionView,
-    CasaSmartSuggestionsView,
-    CasaSmartSuggestionRulesView,
-    CasaSmartSuggestionPreviewView,
+    CasaSmartGeneratedSuggestionsView,
     CasaSmartSuggestionActionView,
-)
-from .now_api import (
-    CasaSmartNowConfigView,
-    CasaSmartNowView,
-    CasaSmartRoomActivityCommandView,
-    CasaSmartRoomActivityPolicyView,
-)
-from .update_api import (
-    CasaSmartUpdateInstallView,
-    CasaSmartUpdateStatusView,
-    get_or_create_checker,
+    CasaSmartSuggestionPreviewView,
+    CasaSmartSuggestionRulesView,
+    CasaSmartSuggestionsView,
 )
 from .tank_api import (
     CasaSmartTankCalibrationView,
@@ -140,6 +132,12 @@ from .tank_api import (
     CasaSmartTankReadingsView,
     CasaSmartTankReadingView,
     CasaSmartTankStatusView,
+)
+from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
+from .update_api import (
+    CasaSmartUpdateInstallView,
+    CasaSmartUpdateStatusView,
+    get_or_create_checker,
 )
 from .ws import CasaSmartWebSocketView
 
@@ -221,9 +219,6 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartTankDevicesView(hass),
         CasaSmartTankDeviceView(hass),
         CasaSmartTankReadingsView(hass),
-
-
-
         CasaSmartTankCalibrationView(hass),
         CasaSmartTankStatusView(hass),
         CasaSmartAudioSpeakersView(hass),
@@ -272,7 +267,6 @@ def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
-
     url = f"/api/{DOMAIN}/handshake"
     name = f"api:{DOMAIN}:handshake"
     requires_auth = False
@@ -306,10 +300,6 @@ class CasaSmartHandshakeView(HomeAssistantView):
                 ),
             }
 
-
-
-
-
         if runtime_data is not None:
             raw_tunnel = runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
             tunnel_url = normalize_tunnel_url(raw_tunnel)
@@ -323,8 +313,6 @@ class CasaSmartHandshakeView(HomeAssistantView):
                     TUNNEL_URL_CONFIG_KEY,
                     raw_tunnel,
                 )
-
-
 
         app_api_version = request.headers.get(API_VERSION_HEADER)
         if app_api_version is not None:
@@ -377,7 +365,7 @@ class CasaSmartHealthView(HomeAssistantView):
             schema_version = await self._hass.async_add_executor_job(
                 lambda: runtime_data.storage.schema_version
             )
-        except Exception:  # noqa: BLE001 — health must never 500 with a traceback
+        except Exception:
             _LOGGER.exception("Health check: storage read failed")
             body["status"] = "error"
             body["storage"] = "error"
@@ -386,9 +374,6 @@ class CasaSmartHealthView(HomeAssistantView):
         body["storage"] = "ok"
         body["schema_version"] = schema_version
         return self.json(body)
-
-
-
 
 
 class CasaSmartDevicesView(HomeAssistantView):
@@ -450,7 +435,6 @@ class CasaSmartDeviceView(HomeAssistantView):
 
 
 class CasaSmartCommandView(HomeAssistantView):
-
     url = f"/api/{DOMAIN}/devices/{{entity_id}}/command"
     name = f"api:{DOMAIN}:device:command"
     requires_auth = False
@@ -459,9 +443,7 @@ class CasaSmartCommandView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request, entity_id: str) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "devices.control"
-        )
+        claims, error = authenticate_request(self._hass, request, "devices.control")
         if error is not None:
             return error
         state = self._hass.states.get(entity_id)
@@ -481,8 +463,7 @@ class CasaSmartCommandView(HomeAssistantView):
                 {
                     "error": "energy_lockout",
                     "message": (
-                        "Energy saving is active — controls are locked "
-                        "by the admin"
+                        "Energy saving is active — controls are locked by the admin"
                     ),
                 },
                 HTTPStatus.FORBIDDEN,
@@ -503,11 +484,6 @@ class CasaSmartCommandView(HomeAssistantView):
             )
         except CommandError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-
-
-
-
-
 
         changed = asyncio.Event()
 
@@ -531,12 +507,9 @@ class CasaSmartCommandView(HomeAssistantView):
                 pass
         except HomeAssistantError as err:
             _LOGGER.warning("Command %s on %s failed: %s", service, entity_id, err)
-            return self.json_message(
-                f"Command failed: {err}", HTTPStatus.BAD_GATEWAY
-            )
+            return self.json_message(f"Command failed: {err}", HTTPStatus.BAD_GATEWAY)
         finally:
             unsub()
-
 
         new_state = self._hass.states.get(entity_id)
         now_data = getattr(_get_runtime_data(self._hass), "now_data", None)
@@ -564,7 +537,6 @@ class CasaSmartCommandView(HomeAssistantView):
 
 
 class CasaSmartHistoryView(HomeAssistantView):
-
     url = f"/api/{DOMAIN}/history"
     name = f"api:{DOMAIN}:history"
     requires_auth = False
@@ -586,9 +558,6 @@ class CasaSmartHistoryView(HomeAssistantView):
 
         rooms = claims.get("rooms")
 
-
-
-
         allowed = [
             entity_id
             for entity_id in entity_ids
@@ -597,21 +566,15 @@ class CasaSmartHistoryView(HomeAssistantView):
             and in_scope(self._hass, entity_id, rooms)
         ]
         if not allowed:
-
             return self.json({"history": {}})
 
         try:
             recorder = get_instance(self._hass)
         except (KeyError, AttributeError):
-
             return self.json_message(
                 "History unavailable: recorder not running",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
-
-
-
-
 
         states = await recorder.async_add_executor_job(
             partial(

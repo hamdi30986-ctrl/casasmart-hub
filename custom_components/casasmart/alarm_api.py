@@ -32,7 +32,6 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -214,9 +213,7 @@ class CasaSmartAlarmZoneView(_AlarmView):
         if not_ready is not None:
             return not_ready
         try:
-            await self._hass.async_add_executor_job(
-                alarm.remove_zone, entity_id
-            )
+            await self._hass.async_add_executor_job(alarm.remove_zone, entity_id)
         except UnknownZoneError:
             return self.json_message(
                 f"No sensor assigned under {entity_id!r}", HTTPStatus.NOT_FOUND
@@ -246,9 +243,7 @@ class CasaSmartAlarmHistoryView(_AlarmView):
                 f"Invalid limit: {raw_limit!r}", HTTPStatus.BAD_REQUEST
             )
         try:
-            history = await self._hass.async_add_executor_job(
-                alarm.history, limit
-            )
+            history = await self._hass.async_add_executor_job(alarm.history, limit)
         except AlarmError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json({"history": history})
@@ -309,9 +304,7 @@ class CasaSmartAlarmSettingsView(_AlarmView):
 
 
 def _arm_job(alarm, mode, actor, exit_delay, entry_delay):
-    return alarm.arm(
-        mode, actor=actor, exit_delay=exit_delay, entry_delay=entry_delay
-    )
+    return alarm.arm(mode, actor=actor, exit_delay=exit_delay, entry_delay=entry_delay)
 
 
 def _disarm_job(alarm, actor):

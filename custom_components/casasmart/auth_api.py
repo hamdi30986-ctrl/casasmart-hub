@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from aiohttp import web
-
 from homeassistant.components import persistent_notification
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -175,9 +174,7 @@ def arm_recovery(hass: HomeAssistant) -> None:
         hass.loop.call_soon_threadsafe(notify_recovery_code, hass, code)
 
 
-def is_lan_request(
-    request: web.Request, extra_cidrs: list[str] | None = None
-) -> bool:
+def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -> bool:
     """True when the request came from the hub's own network.
 
     Plan decision 2026-06-10: initial pairing only completes on the LAN.
@@ -326,9 +323,7 @@ class CasaSmartEnrollView(HomeAssistantView):
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             return None
-        stored = entries[0].runtime_data.hub_config.get(
-            BOOTSTRAP_CODE_HASH_CONFIG_KEY
-        )
+        stored = entries[0].runtime_data.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
         return stored if isinstance(stored, str) and stored else None
 
     async def post(self, request: web.Request) -> web.Response:
@@ -377,9 +372,7 @@ class CasaSmartEnrollView(HomeAssistantView):
             # Never part of the response — it only decides whether the code
             # this device originally redeemed still authorises a re-pair.
             own_code_hash = existing.pop("enrolled_code_hash", None)
-            allowed = tuple(
-                h for h in (self._sticker_hash(), own_code_hash) if h
-            )
+            allowed = tuple(h for h in (self._sticker_hash(), own_code_hash) if h)
             try:
                 await self._hass.async_add_executor_job(
                     lambda: pairing.authorize_known_device(
@@ -425,14 +418,10 @@ class CasaSmartEnrollView(HomeAssistantView):
         except HubAlreadyClaimedError:
             # Correct owner code, but a DIFFERENT phone on a claimed hub — a
             # clear, distinct answer, never the generic "invalid".
-            return self.json_message(
-                "This hub is already paired", HTTPStatus.CONFLICT
-            )
+            return self.json_message("This hub is already paired", HTTPStatus.CONFLICT)
         except CodeInvalidError:
             # One generic bucket: unknown vs expired vs used is not leaked.
-            return self.json_message(
-                "Invalid pairing code", HTTPStatus.UNAUTHORIZED
-            )
+            return self.json_message("Invalid pairing code", HTTPStatus.UNAUTHORIZED)
 
         try:
             device_id = await self._hass.async_add_executor_job(
@@ -528,9 +517,7 @@ class CasaSmartRecoverView(HomeAssistantView):
             return _throttled_response(err)
         except RecoveryCodeInvalidError:
             # One generic bucket: wrong code vs not-armed is not leaked.
-            return self.json_message(
-                "Invalid recovery code", HTTPStatus.UNAUTHORIZED
-            )
+            return self.json_message("Invalid recovery code", HTTPStatus.UNAUTHORIZED)
 
         try:
             device_id = await self._hass.async_add_executor_job(
@@ -669,9 +656,7 @@ class CasaSmartPairingCodesView(HomeAssistantView):
                     "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
                 )
             members = await self._hass.async_add_executor_job(engine.list_members)
-            member = next(
-                (m for m in members if m["member_id"] == member_id), None
-            )
+            member = next((m for m in members if m["member_id"] == member_id), None)
             if member is None:
                 return self.json_message("Unknown member", HTTPStatus.BAD_REQUEST)
             role = member["role"]
@@ -730,9 +715,7 @@ class CasaSmartPairingCodeView(HomeAssistantView):
         pairing = get_pairing(self._hass)
         if pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        revoked = await self._hass.async_add_executor_job(
-            pairing.revoke_code, code_id
-        )
+        revoked = await self._hass.async_add_executor_job(pairing.revoke_code, code_id)
         if not revoked:
             return self.json_message("Unknown pairing code", HTTPStatus.NOT_FOUND)
         return self.json({"revoked": code_id})
@@ -797,7 +780,7 @@ class CasaSmartUserView(HomeAssistantView):
                 lambda: engine.update_device(
                     device_id,
                     role=payload.get("role"),
-                    rooms=payload["rooms"] if "rooms" in payload else ...,
+                    rooms=payload.get("rooms", ...),
                 )
             )
         except UnknownDeviceError:
@@ -830,9 +813,7 @@ class CasaSmartUserView(HomeAssistantView):
         # B8: remove the unpaired device's push token (if any).
         push = _get_push_store(self._hass)
         if push is not None:
-            await self._hass.async_add_executor_job(
-                push.unregister, device_id
-            )
+            await self._hass.async_add_executor_job(push.unregister, device_id)
 
         # Phase 5: prune the person's favorites + settings IFF that was their
         # LAST device — otherwise the member_id-keyed rows orphan (the leak the
@@ -1003,8 +984,10 @@ class CasaSmartTokenView(HomeAssistantView):
         device_id = payload.get("device_id")
         challenge_id = payload.get("challenge_id")
         signature = payload.get("signature")
-        if not all(isinstance(value, str) and value for value in
-                   (device_id, challenge_id, signature)):
+        if not all(
+            isinstance(value, str) and value
+            for value in (device_id, challenge_id, signature)
+        ):
             return self.json_message(
                 "device_id, challenge_id and signature are required",
                 HTTPStatus.BAD_REQUEST,

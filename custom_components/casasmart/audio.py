@@ -49,7 +49,8 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def _clean_name(name: Any, *, field: str = "name") -> str:
     return cleaned
 
 
-def _clean_optional_name(name: Any, *, field: str) -> Optional[str]:
+def _clean_optional_name(name: Any, *, field: str) -> str | None:
     if name is None:
         return None
     return _clean_name(name, field=field)
@@ -196,7 +197,7 @@ def _clean_optional_name(name: Any, *, field: str) -> Optional[str]:
 _ICON_KEY_MAX = 64
 
 
-def _clean_optional_icon(icon: Any) -> Optional[str]:
+def _clean_optional_icon(icon: Any) -> str | None:
     """Normalise a custom-icon key: ``None`` or ``""`` clears it, a non-empty
     string is stripped + length-capped. The icon key is app-defined, so the hub
     only length-bounds it."""
@@ -215,7 +216,7 @@ def _clean_optional_icon(icon: Any) -> Optional[str]:
 _AREA_ID_MAX = 128
 
 
-def _clean_optional_area_id(area_id: Any) -> Optional[str]:
+def _clean_optional_area_id(area_id: Any) -> str | None:
     """Normalise a room/area id: ``None`` or ``""`` clears it, a non-empty
     string is stripped + length-capped. The id is the app's ``room_id`` (== HA
     area id); scoping compares it verbatim against the token's room scope."""
@@ -247,7 +248,7 @@ def _validate_port(value: Any, *, field: str, default: int) -> int:
     return value
 
 
-def _opt_str(value: Any, *, field: str) -> Optional[str]:
+def _opt_str(value: Any, *, field: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
@@ -348,8 +349,7 @@ class AudioEngine:
             stored_athan = self._config_table.get(_ATHAN_KEY)
             self._athan = dict(stored_athan) if isinstance(stored_athan, dict) else {}
             self._speakers = {
-                mac6: dict(record)
-                for mac6, record in self._speakers_table.items()
+                mac6: dict(record) for mac6, record in self._speakers_table.items()
             }
 
     # -- broker config ---------------------------------------------------------
@@ -515,7 +515,9 @@ class AudioEngine:
                 )
             for item in speakers:
                 if not isinstance(item, str) or not item.strip():
-                    raise AudioError("athan 'speakers' entries must be non-empty strings")
+                    raise AudioError(
+                        "athan 'speakers' entries must be non-empty strings"
+                    )
         try:
             import json
 
@@ -568,9 +570,7 @@ class AudioEngine:
                 "area_id": clean_area
                 if area_id is not None
                 else (existing.get("area_id") if existing else None),
-                "enrolled_at": existing["enrolled_at"]
-                if existing
-                else self._clock(),
+                "enrolled_at": existing["enrolled_at"] if existing else self._clock(),
             }
             self._speakers_table[mac6] = record
             self._speakers[mac6] = dict(record)
@@ -695,7 +695,9 @@ class AudioEngine:
             if isinstance(room, str) and room.strip():
                 live["room"] = room.strip()[:_LIVE_STR_MAX]
 
-    def discovered(self, *, ttl: Optional[float] = _DISCOVERY_TTL_SECONDS) -> list[dict[str, Any]]:
+    def discovered(
+        self, *, ttl: float | None = _DISCOVERY_TTL_SECONDS
+    ) -> list[dict[str, Any]]:
         """Speakers the hub has heard from that are NOT yet enrolled.
 
         This is the source for the add-speaker flow: a speaker shows up here
@@ -733,7 +735,7 @@ class AudioEngine:
     # -- command construction (pure — adapter publishes the result) -----------
 
     def build_command(
-        self, mac: Any, cmd: Any, *, value: Any = None, now: Optional[float] = None
+        self, mac: Any, cmd: Any, *, value: Any = None, now: float | None = None
     ) -> tuple[str, dict[str, Any]]:
         """Validate a per-speaker control and return ``(topic, payload)``.
 
@@ -782,7 +784,7 @@ class AudioEngine:
         file: Any = None,
         volume: Any = None,
         priority: Any = None,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Build a ``play`` payload for PA / athan, targeted or broadcast.
 
@@ -802,9 +804,7 @@ class AudioEngine:
             payload["volume"] = _validate_volume(volume)
         if priority is not None:
             if priority not in PRIORITY_VALUES:
-                raise AudioError(
-                    f"priority must be one of {sorted(PRIORITY_VALUES)}"
-                )
+                raise AudioError(f"priority must be one of {sorted(PRIORITY_VALUES)}")
             payload["priority"] = priority
         payload["ts"] = self._clock() if now is None else now
         if mac is None:

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -6,7 +5,6 @@ import time
 from http import HTTPStatus
 
 from aiohttp import ClientError, ClientTimeout, web
-
 from homeassistant.components.camera import async_get_image, async_request_stream
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -27,10 +25,7 @@ from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 _LOGGER = logging.getLogger(__name__)
 
 
-
 SNAPSHOT_TIMEOUT = 10
-
-
 
 
 PROXY_TIMEOUT = ClientTimeout(total=30)
@@ -83,9 +78,7 @@ class CasaSmartCameraSnapshotView(HomeAssistantView):
             )
         except HomeAssistantError as err:
             _LOGGER.debug("Snapshot for %s failed: %s", entity_id, err)
-            return self.json_message(
-                f"Snapshot failed: {err}", HTTPStatus.BAD_GATEWAY
-            )
+            return self.json_message(f"Snapshot failed: {err}", HTTPStatus.BAD_GATEWAY)
         return web.Response(body=image.content, content_type=image.content_type)
 
 
@@ -143,7 +136,6 @@ class CasaSmartCameraStreamView(HomeAssistantView):
 
 
 class CasaSmartCameraHlsProxyView(HomeAssistantView):
-
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/hls/{{ticket}}/{{filename:[A-Za-z0-9_./]+}}"
     name = f"api:{DOMAIN}:camera:hls"
     requires_auth = False
@@ -155,22 +147,16 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
         self, request: web.Request, entity_id: str, ticket: str, filename: str
     ) -> web.Response:
         try:
-            _ticket_store(self._hass).validate(
-                ticket, entity_id, now=time.time()
-            )
+            _ticket_store(self._hass).validate(ticket, entity_id, now=time.time())
         except TicketError as err:
             return self.json_message(str(err), HTTPStatus.UNAUTHORIZED)
-
-
 
         if not _serves_camera(self._hass, entity_id, None):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
         if not is_valid_hls_filename(filename):
-            return self.json_message(
-                "Invalid stream path", HTTPStatus.BAD_REQUEST
-            )
+            return self.json_message("Invalid stream path", HTTPStatus.BAD_REQUEST)
 
         try:
             endpoint = await async_request_stream(self._hass, entity_id, fmt="hls")
@@ -179,21 +165,17 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
                 f"Stream unavailable: {err}", HTTPStatus.BAD_GATEWAY
             )
 
-
         base = endpoint.rsplit("/", 1)[0]
         scheme = "https" if self._hass.http.ssl_certificate else "http"
         upstream = (
-            f"{scheme}://localhost:{self._hass.http.server_port}"
-            f"{base}/{filename}"
+            f"{scheme}://localhost:{self._hass.http.server_port}{base}/{filename}"
         )
         if request.query_string:
             upstream = f"{upstream}?{request.query_string}"
 
         session = async_get_clientsession(self._hass)
         try:
-            async with session.get(
-                upstream, timeout=PROXY_TIMEOUT, ssl=False
-            ) as resp:
+            async with session.get(upstream, timeout=PROXY_TIMEOUT, ssl=False) as resp:
                 body = await resp.read()
                 if resp.status != HTTPStatus.OK:
                     _LOGGER.debug(

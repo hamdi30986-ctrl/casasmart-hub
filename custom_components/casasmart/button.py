@@ -65,9 +65,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
     _attr_name = "CasaSmart Regenerate Pairing Code"
     _attr_icon = "mdi:key-change"
 
-    def __init__(
-        self, hass: HomeAssistant, entry: CasaSmartConfigEntry
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
         self._hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_regenerate_pairing_code"
@@ -179,9 +177,7 @@ class CasaSmartFactoryResetButton(ButtonEntity):
     _attr_name = "CasaSmart Factory Reset"
     _attr_icon = "mdi:alert-octagon"  # danger: wipes the app layer
 
-    def __init__(
-        self, hass: HomeAssistant, entry: CasaSmartConfigEntry
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
         self._hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_factory_reset"

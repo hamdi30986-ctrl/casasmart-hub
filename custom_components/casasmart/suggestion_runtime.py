@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.core import callback
@@ -30,7 +30,7 @@ class SuggestionRuntime:
         self, hass, store, registry, *, clock=None, sunset=None, now_data=None
     ):
         self.hass, self.store, self.registry = hass, store, registry
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.sunset = sunset or self._sunset
         self._unsubs = []
         self._state_unsub = None

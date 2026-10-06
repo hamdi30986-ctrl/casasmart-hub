@@ -64,7 +64,9 @@ def _split(raw: Any) -> tuple[tuple[int, ...], str | None] | None:
     return release, match.group(2)
 
 
-def _pad(a: tuple[int, ...], b: tuple[int, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+def _pad(
+    a: tuple[int, ...], b: tuple[int, ...]
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Right-pad the shorter tuple with zeros so 1.2 and 1.2.0 compare equal."""
     width = max(len(a), len(b))
     return a + (0,) * (width - len(a)), b + (0,) * (width - len(b))

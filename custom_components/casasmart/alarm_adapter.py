@@ -33,13 +33,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 
-from .alarm import AlarmEngine, EVENT_LIFE_SAFETY, EVENT_TRIGGERED
+from .alarm import EVENT_LIFE_SAFETY, EVENT_TRIGGERED, AlarmEngine
 from .const import EVENT_ALARM_CHANGED, EVENT_ALARM_TRIGGERED
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,10 +56,10 @@ class AlarmAdapter:
     def __init__(self, hass: HomeAssistant, engine: AlarmEngine) -> None:
         self._hass = hass
         self._engine = engine
-        self._unsub_state_changed: Optional[Callable[[], None]] = None
-        self._unsub_alarm_changed: Optional[Callable[[], None]] = None
+        self._unsub_state_changed: Callable[[], None] | None = None
+        self._unsub_alarm_changed: Callable[[], None] | None = None
         # The single live entry-delay timer (None when no countdown runs).
-        self._cancel_timer: Optional[Callable[[], None]] = None
+        self._cancel_timer: Callable[[], None] | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -121,7 +122,7 @@ class AlarmAdapter:
                 alarm_event = await self._hass.async_add_executor_job(
                     self._engine.process_sensor, entity_id, active
                 )
-        except Exception:  # noqa: BLE001 — a sensor edge must never crash setup
+        except Exception:
             _LOGGER.exception("Alarm evaluation failed for %s", entity_id)
             return
         self._react(alarm_event)
@@ -161,7 +162,7 @@ class AlarmAdapter:
     async def _run_tick(self) -> None:
         try:
             alarm_event = await self._hass.async_add_executor_job(self._engine.tick)
-        except Exception:  # noqa: BLE001 — a storage hiccup must not kill the loop
+        except Exception:
             _LOGGER.exception("Alarm tick failed")
             return
         self._react(alarm_event)
@@ -169,7 +170,7 @@ class AlarmAdapter:
     # -- reactions -------------------------------------------------------------
 
     @callback
-    def _react(self, alarm_event: Optional[dict[str, Any]]) -> None:
+    def _react(self, alarm_event: dict[str, Any] | None) -> None:
         """Fan a state transition out to the bus (state push + siren hook)."""
         if alarm_event is None:
             return  # the common no-op edge: nothing changed

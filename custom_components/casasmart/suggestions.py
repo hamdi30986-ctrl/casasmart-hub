@@ -6,11 +6,11 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-UTC = timezone.utc
+UTC = UTC
 MAX_RULES = 64
 STATES = {
     "light": {"on", "off"},

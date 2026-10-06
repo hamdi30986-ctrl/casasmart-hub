@@ -50,19 +50,14 @@ class EnergyFlags:
         key = self._clean_key(config_key)
         value = self._table.get(f"{_FLAG_PREFIX}{key}")
         return bool(
-            isinstance(value, dict)
-            and value.get("works_during_energy_saving") is True
+            isinstance(value, dict) and value.get("works_during_energy_saving") is True
         )
 
-    def set_works_during_energy_saving(
-        self, config_key: str, enabled: Any
-    ) -> bool:
+    def set_works_during_energy_saving(self, config_key: str, enabled: Any) -> bool:
         key = self._clean_key(config_key)
         if not isinstance(enabled, bool):
             raise ValueError("works_during_energy_saving must be a boolean")
-        self._table[f"{_FLAG_PREFIX}{key}"] = {
-            "works_during_energy_saving": enabled
-        }
+        self._table[f"{_FLAG_PREFIX}{key}"] = {"works_during_energy_saving": enabled}
         return enabled
 
     def delete_automation(self, config_key: str) -> None:
@@ -71,16 +66,13 @@ class EnergyFlags:
 
     def disabled_automations(self) -> list[str]:
         value = self._table.get(_DISABLED_KEY)
-        if not isinstance(value, dict) or not isinstance(
-            value.get("entity_ids"), list
-        ):
+        if not isinstance(value, dict) or not isinstance(value.get("entity_ids"), list):
             return []
         return sorted(
             {
                 item.strip()
                 for item in value["entity_ids"]
-                if isinstance(item, str)
-                and item.strip().startswith("automation.")
+                if isinstance(item, str) and item.strip().startswith("automation.")
             }
         )
 
@@ -89,8 +81,7 @@ class EnergyFlags:
             {
                 item.strip()
                 for item in entity_ids
-                if isinstance(item, str)
-                and item.strip().startswith("automation.")
+                if isinstance(item, str) and item.strip().startswith("automation.")
             }
         )
         if clean:
@@ -140,9 +131,7 @@ class EnergyAutomationManager:
         crash cannot lose which automations CasaSmart owes the user a restore.
         """
         remembered = set(
-            await self._hass.async_add_executor_job(
-                self._flags.disabled_automations
-            )
+            await self._hass.async_add_executor_job(self._flags.disabled_automations)
         )
         for state in sorted(
             (
@@ -167,7 +156,7 @@ class EnergyAutomationManager:
                     {"entity_id": state.entity_id},
                     blocking=True,
                 )
-            except Exception as err:  # noqa: BLE001 - isolate one automation
+            except Exception as err:
                 _LOGGER.warning(
                     "Could not disable automation %s for Energy Saving: %s",
                     state.entity_id,
@@ -194,9 +183,7 @@ class EnergyAutomationManager:
     async def async_restore(self, *, level: str | None = None) -> None:
         """Restore only automations disabled by CasaSmart; retain failures."""
         pending = set(
-            await self._hass.async_add_executor_job(
-                self._flags.disabled_automations
-            )
+            await self._hass.async_add_executor_job(self._flags.disabled_automations)
         )
         for entity_id in sorted(pending):
             try:
@@ -206,7 +193,7 @@ class EnergyAutomationManager:
                     {"entity_id": entity_id},
                     blocking=True,
                 )
-            except Exception as err:  # noqa: BLE001 - preserve pending retry
+            except Exception as err:
                 _LOGGER.warning(
                     "Could not restore automation %s after Energy Saving: %s",
                     entity_id,
@@ -223,9 +210,7 @@ class EnergyAutomationManager:
             await self._hass.async_add_executor_job(
                 self._flags.set_disabled_automations, sorted(pending)
             )
-            await self._record(
-                EVENT_AUTOMATION_RESTORED, entity_id, {}, level=level
-            )
+            await self._record(EVENT_AUTOMATION_RESTORED, entity_id, {}, level=level)
 
     async def _record(
         self,
@@ -244,7 +229,7 @@ class EnergyAutomationManager:
                     data=data,
                 )
             )
-        except Exception:  # noqa: BLE001 - audit cannot block HA recovery
+        except Exception:
             _LOGGER.exception("Could not record Energy Saving event %s", kind)
 
 

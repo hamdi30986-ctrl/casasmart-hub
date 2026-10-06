@@ -18,17 +18,22 @@ with no Supabase, no hardcoded home id and no separate broker credentials.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, tzinfo  # noqa: F401  (tzinfo used in hints)
-from typing import Any, Optional
+from datetime import (  # noqa: F401  (tzinfo used in hints)
+    UTC,
+    datetime,
+    timezone,
+    tzinfo,
+)
+from typing import Any
 
+import homeassistant.util.dt as dt_util
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_time_change,
 )
-import homeassistant.util.dt as dt_util
 
-from .audio import normalize_mac6, AudioError
+from .audio import AudioError, normalize_mac6
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,12 +47,34 @@ _GRACE_SEC = 120
 
 # The library's accepted calculation methods (lower-case). The app historically
 # sends "egyptian"; the library calls it "egypt", so alias it.
-_LIB_METHODS = frozenset({
-    "mwl", "isna", "egypt", "makkah", "karachi", "tehran", "jafari", "gulf",
-    "kuwait", "qatar", "singapore", "france", "turkey", "russia", "moonsighting",
-    "dubai", "jakim", "tunisia", "algeria", "kemenag", "morocco", "portugal",
-    "jordan", "custom",
-})
+_LIB_METHODS = frozenset(
+    {
+        "mwl",
+        "isna",
+        "egypt",
+        "makkah",
+        "karachi",
+        "tehran",
+        "jafari",
+        "gulf",
+        "kuwait",
+        "qatar",
+        "singapore",
+        "france",
+        "turkey",
+        "russia",
+        "moonsighting",
+        "dubai",
+        "jakim",
+        "tunisia",
+        "algeria",
+        "kemenag",
+        "morocco",
+        "portugal",
+        "jordan",
+        "custom",
+    }
+)
 _METHOD_ALIASES = {"egyptian": "egypt", "umalqura": "makkah", "umm_al_qura": "makkah"}
 _DEFAULT_METHOD = "makkah"
 _ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
@@ -55,7 +82,7 @@ _ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
 
 def compute_prayer_times_utc(
     lat: float, lon: float, method: str, school: str, date_str: str
-) -> Optional[dict[str, datetime]]:
+) -> dict[str, datetime] | None:
     """The five prayer times as timezone-aware UTC datetimes for ``date_str``.
 
     Uses ``prayer-times-calculator-offline`` (pure local math, no network).
@@ -64,7 +91,7 @@ def compute_prayer_times_utc(
     """
     try:
         from prayer_times_calculator_offline import PrayerTimesCalculator
-    except Exception:  # noqa: BLE001 — declared in manifest; guard anyway
+    except Exception:
         _LOGGER.warning("Athan: prayer-times-calculator-offline not installed")
         return None
 
@@ -84,7 +111,7 @@ def compute_prayer_times_utc(
             school=sch,
         )
         raw = calc.fetch_prayer_times()
-    except Exception:  # noqa: BLE001 — a bad config must not kill the loop
+    except Exception:
         _LOGGER.exception("Athan: prayer-time calculation failed")
         return None
 
@@ -98,7 +125,7 @@ def compute_prayer_times_utc(
         except (TypeError, ValueError):
             continue
         if dt.tzinfo is None:  # library emits +00:00, but be defensive
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         out[prayer] = dt
     return out or None
 
@@ -111,7 +138,7 @@ class AthanScheduler:
         self._engine = engine
         self._adapter = adapter
         self._unsub_prayers: list[Any] = []
-        self._unsub_recompute: Optional[Any] = None
+        self._unsub_recompute: Any | None = None
         # Last computed schedule, for the GET /audio/athan `schedule` block so
         # the app can show "next athan" and a silent failure can't hide.
         self._schedule: dict[str, Any] = {"enabled": False}
@@ -177,7 +204,10 @@ class AthanScheduler:
         times = compute_prayer_times_utc(lat, lon, method, school, today.isoformat())
         if not times:
             _LOGGER.warning("Athan: could not compute prayer times for %s", today)
-            self._schedule = {"enabled": True, "error": "prayer-time computation failed"}
+            self._schedule = {
+                "enabled": True,
+                "error": "prayer-time computation failed",
+            }
             return
 
         athan = self._engine.get_athan() or {}
@@ -186,7 +216,7 @@ class AthanScheduler:
         now_utc = dt_util.utcnow()
         armed: list[str] = []
         prayers_out: list[dict[str, Any]] = []
-        next_prayer: Optional[dict[str, Any]] = None
+        next_prayer: dict[str, Any] | None = None
         for prayer in PRAYER_NAMES:
             fire_at = times.get(prayer)
             if fire_at is None:
@@ -194,7 +224,12 @@ class AthanScheduler:
             local = fire_at.astimezone(tz).strftime("%H:%M")
             upcoming = (fire_at - now_utc).total_seconds() >= -_GRACE_SEC
             prayers_out.append(
-                {"name": prayer, "at": fire_at.isoformat(), "local": local, "upcoming": upcoming}
+                {
+                    "name": prayer,
+                    "at": fire_at.isoformat(),
+                    "local": local,
+                    "upcoming": upcoming,
+                }
             )
             if not upcoming:
                 continue  # already well past — skip (grace guards a late wake)
@@ -204,7 +239,11 @@ class AthanScheduler:
             self._unsub_prayers.append(unsub)
             armed.append(f"{prayer} {local}")
             if next_prayer is None:
-                next_prayer = {"name": prayer, "at": fire_at.isoformat(), "local": local}
+                next_prayer = {
+                    "name": prayer,
+                    "at": fire_at.isoformat(),
+                    "local": local,
+                }
 
         mode = "all" if not has_sel else ("subset" if targets else "none")
         self._schedule = {
@@ -225,15 +264,25 @@ class AthanScheduler:
         if has_sel and not targets:
             _LOGGER.warning(
                 "Athan enabled for %s but its selected speakers are all un-enrolled — "
-                "athan will fire on NO speakers until the selection is fixed.", today,
+                "athan will fire on NO speakers until the selection is fixed.",
+                today,
             )
 
         _LOGGER.info(
             "Athan scheduled for %s (%s/%s, %.4f,%.4f %s) on %s: %s",
-            today, method, school, lat, lon, tz_name,
-            "all speakers" if not has_sel
-            else (f"{len(targets)} speaker(s): {','.join(targets)}" if targets
-                  else "NO speakers (empty selection)"),
+            today,
+            method,
+            school,
+            lat,
+            lon,
+            tz_name,
+            "all speakers"
+            if not has_sel
+            else (
+                f"{len(targets)} speaker(s): {','.join(targets)}"
+                if targets
+                else "NO speakers (empty selection)"
+            ),
             ", ".join(armed) if armed else "none remaining today",
         )
 
@@ -250,7 +299,7 @@ class AthanScheduler:
             return False, []
         try:
             enrolled = {s.get("mac6") for s in self._engine.speakers()}
-        except Exception:  # noqa: BLE001 — a registry hiccup must not kill firing
+        except Exception:
             enrolled = set()
         targets: list[str] = []
         for item in raw:
@@ -266,12 +315,15 @@ class AthanScheduler:
         @callback
         def _fire(_now: datetime) -> None:
             self._fire_athan(prayer)
+
         return _fire
 
     def _fire_athan(self, prayer: str) -> None:
         # Re-check at fire time: the config may have been disabled since arming.
         if self._resolve_config() is None:
-            _LOGGER.info("Athan: %s reached but athan is now disabled — skipping", prayer)
+            _LOGGER.info(
+                "Athan: %s reached but athan is now disabled — skipping", prayer
+            )
             return
         athan = self._engine.get_athan() or {}
         has_sel, targets = self._resolve_targets(athan)
@@ -279,38 +331,44 @@ class AthanScheduler:
 
         if has_sel and not targets:
             _LOGGER.warning(
-                "Athan: %s — selected speakers are all un-enrolled; firing nowhere", prayer
+                "Athan: %s — selected speakers are all un-enrolled; firing nowhere",
+                prayer,
             )
             return
 
         # No selection => a single broadcast (mac=None). A selection => one
         # targeted play per chosen speaker (the same path PA uses).
-        macs: list[Optional[str]] = targets if has_sel else [None]
+        macs: list[str | None] = targets if has_sel else [None]
         delivered = 0
         for mac in macs:
             try:
                 topic, payload = self._engine.build_play(
                     mac=mac, file=file_path, priority="athan"
                 )
-            except Exception:  # noqa: BLE001 — a build error must not kill the loop
+            except Exception:
                 _LOGGER.exception("Athan: failed to build %s play command", prayer)
                 continue
             try:
                 self._adapter.publish(topic, payload, qos=1)
                 delivered += 1
-            except Exception:  # noqa: BLE001 — a dead bus is non-fatal, just logged
+            except Exception:
                 _LOGGER.warning(
-                    "Athan: %s not delivered to %s — MQTT bus unavailable", prayer, topic
+                    "Athan: %s not delivered to %s — MQTT bus unavailable",
+                    prayer,
+                    topic,
                 )
         if delivered:
             _LOGGER.info(
-                "Athan fired: %s -> %s", prayer,
-                "all speakers" if not has_sel else f"{delivered} speaker(s): {','.join(targets)}",
+                "Athan fired: %s -> %s",
+                prayer,
+                "all speakers"
+                if not has_sel
+                else f"{delivered} speaker(s): {','.join(targets)}",
             )
 
     def _resolve_config(
         self,
-    ) -> Optional[tuple[float, float, str, str, str]]:
+    ) -> tuple[float, float, str, str, str] | None:
         """Return ``(lat, lon, tz_name, method, school)`` or None if athan is off.
 
         Location and timezone fall back to the hub's own HA config so a client
@@ -318,7 +376,7 @@ class AthanScheduler:
         """
         try:
             athan = self._engine.get_athan()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         if not athan or not athan.get("enabled"):
             return None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def digest(value):
@@ -14,7 +14,7 @@ def digest(value):
 
 def window(now):
     start = int(now.timestamp()) // 7200 * 7200
-    return start, datetime.fromtimestamp(start + 7200, timezone.utc)
+    return start, datetime.fromtimestamp(start + 7200, UTC)
 
 
 def number(value):

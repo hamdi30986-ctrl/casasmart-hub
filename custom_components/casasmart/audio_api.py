@@ -55,17 +55,16 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 
 from .audio import (
+    CMD_RESET,
+    TOPIC_ATHAN_CONFIG,
     AudioEngine,
     AudioError,
     UnknownSpeakerError,
-    CMD_RESET,
-    TOPIC_ATHAN_CONFIG,
     normalize_mac6,
 )
 from .audio_adapter import AudioAdapter, AudioAdapterNotReady
@@ -282,7 +281,9 @@ class CasaSmartAudioSpeakersView(_AudioView):
             # scoped speaker matching nothing is hidden, never leaked.
             allowed_ids = set(scope)
             allowed_names = _scoped_area_names(self._hass, scope)
-            speakers = [s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)]
+            speakers = [
+                s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)
+            ]
         return self.json({"speakers": speakers})
 
     async def post(self, request: web.Request) -> web.Response:
@@ -372,9 +373,7 @@ class CasaSmartAudioSpeakerView(_AudioView):
         self._notify_change()
         return self.json({"deleted": norm_mac6})
 
-    def _deprovision_speaker(
-        self, mac6: str, reset_topic: str, reset_msg: Any
-    ) -> None:
+    def _deprovision_speaker(self, mac6: str, reset_topic: str, reset_msg: Any) -> None:
         """Reset the Pi + clear retained ghosts (best-effort, bus-down safe)."""
         adapter = get_audio_adapter(self._hass)
         if adapter is None:
@@ -636,9 +635,15 @@ class CasaSmartAudioPaView(_AudioView):
         try:
             reader = await request.multipart()
         except (AssertionError, ValueError):
-            return "", "", b"", [], self.json_message(
-                "Body must be multipart/form-data with an 'audio' file",
-                HTTPStatus.BAD_REQUEST,
+            return (
+                "",
+                "",
+                b"",
+                [],
+                self.json_message(
+                    "Body must be multipart/form-data with an 'audio' file",
+                    HTTPStatus.BAD_REQUEST,
+                ),
             )
         filename = content_type = ""
         data: bytes | None = None
@@ -659,15 +664,25 @@ class CasaSmartAudioPaView(_AudioView):
                     break
                 size += len(chunk)
                 if size > _PA_MAX_BYTES:
-                    return "", "", b"", [], self.json_message(
-                        f"Audio too large (max {_PA_MAX_BYTES} bytes)",
-                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    return (
+                        "",
+                        "",
+                        b"",
+                        [],
+                        self.json_message(
+                            f"Audio too large (max {_PA_MAX_BYTES} bytes)",
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        ),
                     )
                 chunks.append(chunk)
             data = b"".join(chunks)
         if data is None:
-            return "", "", b"", [], self.json_message(
-                "Missing 'audio' file part", HTTPStatus.BAD_REQUEST
+            return (
+                "",
+                "",
+                b"",
+                [],
+                self.json_message("Missing 'audio' file part", HTTPStatus.BAD_REQUEST),
             )
         return filename, content_type, data, targets, None
 
@@ -961,9 +976,7 @@ def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):
 
 
 def _update_job(audio: AudioEngine, mac6, name, room, icon, area_id):
-    return audio.update_speaker(
-        mac6, name=name, room=room, icon=icon, area_id=area_id
-    )
+    return audio.update_speaker(mac6, name=name, room=room, icon=icon, area_id=area_id)
 
 
 def _set_broker_job(audio: AudioEngine, payload: dict[str, Any]):

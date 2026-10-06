@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -10,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
@@ -18,15 +18,30 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
 )
+from homeassistant.helpers import (
+    area_registry as ar,
+)
+from homeassistant.helpers import (
+    device_registry as dr,
+)
+from homeassistant.helpers import (
+    entity_registry as er,
+)
+from homeassistant.helpers import (
+    floor_registry as fr,
+)
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.loader import async_get_integration
 
-from homeassistant.components import persistent_notification
-
+from .alarm import AlarmEngine
+from .alarm_adapter import AlarmAdapter
 from .api import async_register_views, build_views
+from .athan_scheduler import AthanScheduler
+from .audio import AudioEngine
+from .audio_adapter import AudioAdapter
 from .auth_api import notify_recovery_code
 from .auth_engine import AuthEngine
-from .discovery import MdnsAdvertiser
 from .const import (
     API_VERSION,
     BACKUP_DIR_NAME,
@@ -45,32 +60,38 @@ from .const import (
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
-    PUSH_RELAY_URL_CONFIG_KEY,
     PROVISION_SECRET_CONFIG_KEY,
+    PUSH_RELAY_URL_CONFIG_KEY,
     RECOVERY_CODE_HASH_CONFIG_KEY,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
     TUNNEL_WATCHDOG_INTERVAL_MINUTES,
 )
-from homeassistant.helpers import (
-    area_registry as ar,
-    device_registry as dr,
-    entity_registry as er,
-    floor_registry as fr,
-)
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-
 from .dev_enroll import ensure_dev_devices
+from .discovery import MdnsAdvertiser
+from .energy import EnergyEngine
+from .energy_adapter import EnergyAdapter
+from .energy_runtime import (
+    EnergyAutomationManager,
+    EnergyController,
+    EnergyFlags,
+)
 from .entity_bridge import is_exposed
 from .hq_notifications import (
     HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY,
     HqNotificationError,
     normalize_public_key,
 )
-from .pairing import PairingManager, hash_code as pairing_hash_code
+from .now_data import NowDataEngine
+from .pairing import PairingManager
+from .pairing import hash_code as pairing_hash_code
 from .push import PushTokenStore
 from .push_crypto import PushIdentityError, ensure_push_identity
 from .push_dispatcher import PushDispatcher, TankPushMonitor
+from .recovery import RecoveryManager
+from .recovery import hash_code as recovery_hash_code
+from .registry import RegistryEngine, RegistryError
+from .registry_api import async_execute_registry_scene
 from .relay_config import (
     RelayConfigSnapshot,
     async_reload_relay_runtime,
@@ -82,22 +103,9 @@ from .relay_config import (
     without_relay_activation,
 )
 from .relay_registration import RelayRegistrar, is_activation_code_format
-from .alarm import AlarmEngine
-from .alarm_adapter import AlarmAdapter
-from .audio import AudioEngine
-from .audio_adapter import AudioAdapter
-from .athan_scheduler import AthanScheduler
-from .recovery import RecoveryManager, hash_code as recovery_hash_code
-from .registry import RegistryEngine, RegistryError
-from .registry_api import async_execute_registry_scene
-from .energy import EnergyEngine
-from .energy_adapter import EnergyAdapter
-from .energy_runtime import (
-    EnergyAutomationManager,
-    EnergyController,
-    EnergyFlags,
-)
 from .storage import ConfigError, HubStorage, JsonConfigStore, StorageError
+from .suggestion_runtime import SuggestionRuntime
+from .suggestion_store import SuggestionStore
 from .tank import TankEngine
 from .tls import CasaSmartTlsServer, IdentityError, ensure_tls_material
 from .tunnel import (
@@ -108,12 +116,8 @@ from .tunnel import (
 )
 from .tunnel_control import CloudflaredController, TunnelControlError
 from .user_settings import UserSettingsEngine
-from .now_data import NowDataEngine
-from .suggestion_store import SuggestionStore
-from .suggestion_runtime import SuggestionRuntime
 
 _LOGGER = logging.getLogger(__name__)
-
 
 
 _NOTIFY_TUNNEL_UNAVAILABLE = f"{DOMAIN}_tunnel_control_unavailable"
@@ -122,11 +126,6 @@ _NOTIFY_TUNNEL_ERROR = f"{DOMAIN}_tunnel_control_error"
 _NOTIFY_TUNNEL_EDGE_DOWN = f"{DOMAIN}_tunnel_edge_down"
 _NOTIFY_RELAY_ACTIVATION = f"{DOMAIN}_relay_activation"
 _NOTIFY_RELAY_CONFIGURATION = f"{DOMAIN}_relay_configuration"
-
-
-
-
-
 
 
 PLATFORMS: list[Platform] = [
@@ -140,7 +139,6 @@ type CasaSmartConfigEntry = ConfigEntry[CasaSmartRuntimeData]
 
 @dataclass
 class CasaSmartRuntimeData:
-
     storage: HubStorage
     hub_config: JsonConfigStore
     auth: AuthEngine
@@ -155,47 +153,34 @@ class CasaSmartRuntimeData:
 
     alarm: AlarmEngine
 
-
     audio: AudioEngine
 
     energy: EnergyEngine
     energy_flags: EnergyFlags
 
-
     alarm_adapter: AlarmAdapter | None = None
     suggestions: SuggestionRuntime | None = None
-
-
 
     audio_adapter: AudioAdapter | None = None
 
     energy_adapter: EnergyAdapter | None = None
     energy_controller: EnergyController | None = None
 
-
     athan_scheduler: AthanScheduler | None = None
-
 
     push_dispatcher: PushDispatcher | None = None
 
-
     relay_registrar: RelayRegistrar | None = None
 
-
     relay_config_applied: RelayConfigSnapshot | None = None
-
 
     tank_push_monitor: TankPushMonitor | None = None
 
     tls: CasaSmartTlsServer | None = None
 
-
     mdns: MdnsAdvertiser | None = None
 
-
     tunnel_control: CloudflaredController | None = None
-
-
 
     tunnel_options_applied: dict[str, Any] | None = None
 
@@ -232,11 +217,6 @@ def _open_storage(
     pairing = PairingManager(storage.table("pairing_codes"), auth.has_admin)
     recovery = RecoveryManager(storage.table("recovery_codes"), auth.has_admin)
 
-
-
-
-
-
     bootstrap_hash = hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
     if bootstrap_hash:
         pairing.install_bootstrap_hash(bootstrap_hash)
@@ -252,16 +232,8 @@ def _open_storage(
         recovery.install_recovery_hash(recovery_hash)
         recovery_code = None
     else:
-
-
-
         recovery_code = recovery.mint_permanent()
-        hub_config.set(
-            RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code)
-        )
-
-
-
+        hub_config.set(RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code))
 
     if not hub_config.get(PROVISION_SECRET_CONFIG_KEY):
         hub_config.set(PROVISION_SECRET_CONFIG_KEY, secrets.token_urlsafe(24))
@@ -289,8 +261,6 @@ def _open_storage(
     )
     push = PushTokenStore(storage.table("push_tokens"))
 
-
-
     alarm = AlarmEngine(
         storage.table("alarm_state"),
         storage.table("alarm_zones"),
@@ -298,8 +268,6 @@ def _open_storage(
         storage.table("alarm_settings"),
     )
     alarm.warm_up()
-
-
 
     audio = AudioEngine(
         storage.table("audio_config"),
@@ -333,9 +301,7 @@ def _open_storage(
     )
 
 
-async def async_migrate_entry(
-    hass: HomeAssistant, entry: CasaSmartConfigEntry
-) -> bool:
+async def async_migrate_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
     if entry.version > CONFIG_ENTRY_VERSION:
         _LOGGER.error(
             "Cannot migrate CasaSmart config entry version %s to %s",
@@ -369,8 +335,6 @@ async def async_migrate_entry(
                 hub_config.delete, PUSH_RELAY_URL_CONFIG_KEY
             )
         except ConfigError:
-
-
             _LOGGER.warning(
                 "CasaSmart relay option migrated but the legacy config key "
                 "could not be removed"
@@ -386,15 +350,11 @@ async def async_migrate_entry(
             title="CasaSmart Hub — relay configuration required",
             notification_id=_NOTIFY_RELAY_CONFIGURATION,
         )
-    _LOGGER.info(
-        "CasaSmart config entry migrated to version %s", CONFIG_ENTRY_VERSION
-    )
+    _LOGGER.info("CasaSmart config entry migrated to version %s", CONFIG_ENTRY_VERSION)
     return True
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: CasaSmartConfigEntry
-) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
 
     try:
@@ -437,13 +397,11 @@ async def async_setup_entry(
         relay_config_applied=relay_config_snapshot(entry.options, entry.data),
     )
 
-
-
-
-
     suggestion_store = SuggestionStore(storage)
     await hass.async_add_executor_job(suggestion_store.recover)
-    entry.runtime_data.suggestions = SuggestionRuntime(hass, suggestion_store, registry, now_data=now_data)
+    entry.runtime_data.suggestions = SuggestionRuntime(
+        hass, suggestion_store, registry, now_data=now_data
+    )
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
 
@@ -459,25 +417,13 @@ async def async_setup_entry(
         )
     )
 
-
-
-
     await _async_sync_tunnel_url(hass, entry)
 
     await _async_import_registry(hass, hub_config, registry)
 
-
-
-
-
-
-
-
     await _async_setup_dev_enroll(hass, entry, data_dir)
 
     if bootstrap_code is not None:
-
-
         persistent_notification.async_create(
             hass,
             f"Initial admin pairing code: **{bootstrap_code}**\n\n"
@@ -488,12 +434,9 @@ async def async_setup_entry(
         )
 
     if recovery_code is not None:
-
-
         notify_recovery_code(hass, recovery_code)
 
     _async_register_services(hass)
-
 
     integration = await async_get_integration(hass, DOMAIN)
     hub_version = str(integration.version) if integration.version else "0.0.0"
@@ -503,13 +446,9 @@ async def async_setup_entry(
     await _async_start_mdns(hass, entry)
     await _async_start_push(hass, entry, data_dir)
 
-
-
     alarm_adapter = AlarmAdapter(hass, alarm)
     alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
-
-
 
     energy_adapter = EnergyAdapter(
         hass,
@@ -525,27 +464,15 @@ async def async_setup_entry(
     entry.runtime_data.energy_controller = energy_controller
     await energy_controller.async_start()
 
-
-
-
     audio_adapter = AudioAdapter(hass, audio)
     await audio_adapter.async_start()
     entry.runtime_data.audio_adapter = audio_adapter
-
-
-
 
     athan_scheduler = AthanScheduler(hass, audio, audio_adapter)
     await athan_scheduler.async_start()
     entry.runtime_data.athan_scheduler = athan_scheduler
 
-
-
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-
-
-
 
     entry.runtime_data.tunnel_control = CloudflaredController(hass)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
@@ -554,9 +481,6 @@ async def async_setup_entry(
         _async_reconcile_tunnel(hass, entry),
         name="casasmart-tunnel-reconcile",
     )
-
-
-
 
     async def _async_run_tunnel_watchdog(_now) -> None:
         await _async_tunnel_watchdog(hass, entry)
@@ -630,7 +554,7 @@ async def _async_import_registry(
 
     try:
         counts = await hass.async_add_executor_job(_seed)
-    except Exception:  # noqa: BLE001 — a failed seed must never kill setup
+    except Exception:
         # Flag stays unset -> retried next boot; import_initial never
         # overwrites, so a partial seed just gets completed then.
         _LOGGER.exception("Registry seed failed — will retry on next start")
@@ -641,14 +565,6 @@ async def _async_import_registry(
         counts["rooms"],
         counts["assignments"],
     )
-
-
-
-
-
-
-
-
 
 
 _DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
@@ -695,9 +611,7 @@ async def _async_setup_dev_enroll(
     def _on_auth_changed(_event) -> None:
         entry.async_create_task(hass, _provision())
 
-    entry.async_on_unload(
-        hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed)
-    )
+    entry.async_on_unload(hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed))
 
 
 async def _async_start_tls(
@@ -746,9 +660,7 @@ async def _async_start_tls(
     )
 
 
-async def _async_start_mdns(
-    hass: HomeAssistant, entry: CasaSmartConfigEntry
-) -> None:
+async def _async_start_mdns(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
     """B6: advertise ``_casasmart._tcp`` so the app auto-discovers the hub.
 
     The hub-id broadcast in the TXT record is the **permanent identity
@@ -857,9 +769,6 @@ async def _async_start_push(
             notification_id=_NOTIFY_RELAY_ACTIVATION,
         )
 
-
-
-
     registrar = RelayRegistrar(
         session=async_get_clientsession(hass),
         registration_url=endpoints.registration_url,
@@ -873,12 +782,7 @@ async def _async_start_push(
     registrar.start(hass, entry)
     runtime_data.relay_registrar = registrar
 
-
-
-
-    tank_monitor = TankPushMonitor(
-        hass, tanks=runtime_data.tanks, notifier=dispatcher
-    )
+    tank_monitor = TankPushMonitor(hass, tanks=runtime_data.tanks, notifier=dispatcher)
     tank_monitor.async_start()
     runtime_data.tank_push_monitor = tank_monitor
 
@@ -933,13 +837,9 @@ async def _async_options_updated(
 ) -> None:
     runtime_data = entry.runtime_data
     applied_relay = runtime_data.relay_config_applied
-    configured_relay = normalize_relay_base_url(
-        entry.options.get(CONF_PUSH_RELAY_URL)
-    )
+    configured_relay = normalize_relay_base_url(entry.options.get(CONF_PUSH_RELAY_URL))
     activation_raw = entry.data.get(CONF_RELAY_ACTIVATION_CODE)
-    activation_code = (
-        activation_raw.strip() if isinstance(activation_raw, str) else ""
-    )
+    activation_code = activation_raw.strip() if isinstance(activation_raw, str) else ""
     activation_present = bool(activation_code)
     activation_valid = is_activation_code_format(activation_code)
 
@@ -980,8 +880,6 @@ async def _async_options_updated(
         relay_changed = requested_relay.base_url != applied_relay.base_url
 
         if not activation_valid:
-
-
             new_options = dict(entry.options)
             if relay_changed:
                 if applied_relay.base_url is None:
@@ -1009,8 +907,6 @@ async def _async_options_updated(
             )
             return
 
-
-
         reloaded = await async_reload_relay_runtime(hass, entry)
         if not reloaded:
             _LOGGER.error(
@@ -1027,9 +923,7 @@ async def _async_options_updated(
                 notification_id=_NOTIFY_RELAY_CONFIGURATION,
             )
         else:
-            persistent_notification.async_dismiss(
-                hass, _NOTIFY_RELAY_CONFIGURATION
-            )
+            persistent_notification.async_dismiss(hass, _NOTIFY_RELAY_CONFIGURATION)
         return
 
     previous = runtime_data.tunnel_options_applied or {}
@@ -1040,15 +934,9 @@ async def _async_options_updated(
         await _async_sync_tunnel_url(hass, entry)
     else:
         if previous_domain:
-
-
-
             derived = domain_to_tunnel_url(previous_domain)
             hub_config = runtime_data.hub_config
-            if (
-                derived is not None
-                and hub_config.get(TUNNEL_URL_CONFIG_KEY) == derived
-            ):
+            if derived is not None and hub_config.get(TUNNEL_URL_CONFIG_KEY) == derived:
                 await hass.async_add_executor_job(
                     hub_config.delete, TUNNEL_URL_CONFIG_KEY
                 )
@@ -1252,16 +1140,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
             and energy.active_level is not None
             and not scene.get("works_during_energy_saving", False)
         ):
-            raise HomeAssistantError(
-                "Scene is disabled while Energy Saving is active"
-            )
+            raise HomeAssistantError("Scene is disabled while Energy Saving is active")
         result = await async_execute_registry_scene(hass, scene)
         if not result["ok"]:
-            failed = [
-                item["entity_id"]
-                for item in result["results"]
-                if not item["ok"]
-            ]
+            failed = [item["entity_id"] for item in result["results"] if not item["ok"]]
             raise HomeAssistantError(
                 f"Scene {scene_id} failed for: {', '.join(failed)}"
             )
@@ -1288,9 +1170,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
             url,
         )
 
-
-
-
         runtime_data.tunnel_options_applied = _tunnel_options_snapshot(entry)
 
         domain = normalize_cloudflare_domain(url)
@@ -1301,8 +1180,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
             hass.config_entries.async_update_entry(entry, options=new_options)
         elif domain is None:
-
-
             _LOGGER.debug(
                 "Tunnel URL %s is not a bare origin — not mirrored to options",
                 url,
@@ -1343,13 +1220,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("CasaSmart hub is not loaded")
         runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
 
-
-
-
         if runtime_data.energy_controller is not None:
-            await runtime_data.energy_controller.async_deactivate(
-                actor="factory_reset"
-            )
+            await runtime_data.energy_controller.async_deactivate(actor="factory_reset")
         pending_automations = await hass.async_add_executor_job(
             runtime_data.energy_flags.disabled_automations
         )
@@ -1364,17 +1236,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("pairing_codes").clear()
             runtime_data.storage.table("recovery_codes").clear()
 
-
-
             runtime_data.storage.table("registry_favorites").clear()
 
-
-
-
-
             runtime_data.storage.table("registry_scenes").clear()
-
-
 
             runtime_data.storage.table("user_settings").clear()
             runtime_data.storage.table("now_recents").clear()
@@ -1387,39 +1251,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.storage.table("push_tokens").clear()
             runtime_data.storage.table("hq_notifications").clear()
 
-
-
             runtime_data.storage.table("alarm_history").clear()
             runtime_data.storage.table("alarm_state").clear()
 
-
-
-
             runtime_data.storage.table("audio_config").clear()
             runtime_data.storage.table("audio_speakers").clear()
-
-
 
             runtime_data.storage.table("energy_configs").clear()
             runtime_data.storage.table("energy_state").clear()
             runtime_data.storage.table("energy_flags").clear()
             runtime_data.storage.energy_events().clear()
 
-
-
-
-
-
-
-
             runtime_data.storage.table("registry_floors").clear()
             runtime_data.storage.table("registry_rooms").clear()
             runtime_data.storage.table("registry_devices").clear()
             runtime_data.storage.table("registry_user_devices").clear()
             runtime_data.hub_config.delete("registry_imported")
-
-
-
 
             runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
@@ -1434,7 +1281,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "assignments/grouping) — re-seeding from HA on reload; printed "
             "codes rotated"
         )
-
 
         await hass.config_entries.async_reload(entries[0].entry_id)
 
@@ -1452,9 +1298,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
 
-async def async_unload_entry(
-    hass: HomeAssistant, entry: CasaSmartConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
@@ -1481,9 +1325,7 @@ async def async_unload_entry(
     return True
 
 
-async def async_remove_entry(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Entry deleted: best-effort restore of cloudflared to boot=auto.
 
     The reconciler may have parked the add-on at boot=manual (tunnel
@@ -1504,11 +1346,8 @@ async def async_remove_entry(
         if slug is not None:
             await controller.async_restore_boot_auto(slug)
             _LOGGER.info(
-                "CasaSmart removed — cloudflared add-on %s restored to "
-                "boot=auto",
+                "CasaSmart removed — cloudflared add-on %s restored to boot=auto",
                 slug,
             )
     except TunnelControlError as err:
-        _LOGGER.warning(
-            "Could not restore cloudflared boot mode on removal: %s", err
-        )
+        _LOGGER.warning("Could not restore cloudflared boot mode on removal: %s", err)

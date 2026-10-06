@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -6,7 +5,11 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import (
     area_registry as ar,
+)
+from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
 )
 
@@ -18,7 +21,7 @@ if TYPE_CHECKING:
     from .registry import RegistryEngine
 
 
-def get_registry_engine(hass: HomeAssistant) -> "RegistryEngine | None":
+def get_registry_engine(hass: HomeAssistant) -> RegistryEngine | None:
     """The loaded entry's registry engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
@@ -69,9 +72,7 @@ def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
     return area.name if area else None
 
 
-def in_scope(
-    hass: HomeAssistant, entity_id: str, rooms: list[str] | None
-) -> bool:
+def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bool:
     """Room-scope check (B1.6): is this entity inside the token's scope?
 
     ``rooms`` is the JWT's ``rooms`` claim — a list of area ids, or None
@@ -103,9 +104,7 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
     device_class = (
         state.attributes.get("device_class") if state is not None else None
     ) or entry.original_device_class
-    return is_category_served(
-        str(entry.entity_category.value), entity_id, device_class
-    )
+    return is_category_served(str(entry.entity_category.value), entity_id, device_class)
 
 
 def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
@@ -114,10 +113,7 @@ def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
     (OpenWeatherMap, met.no, AccuWeather…). Forecast sensors are not home
     devices and must never become device cards. Gated to sensor domains so the
     per-entity device lookup stays off the hot path for everything else."""
-    if not (
-        entity_id.startswith("sensor.")
-        or entity_id.startswith("binary_sensor.")
-    ):
+    if not (entity_id.startswith("sensor.") or entity_id.startswith("binary_sensor.")):
         return False
     registry = er.async_get(hass)
     entry = registry.async_get(entity_id)
@@ -131,9 +127,7 @@ def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
     )
 
 
-def is_openweathermap_measurement(
-    hass: HomeAssistant, entity_id: str
-) -> bool:
+def is_openweathermap_measurement(hass: HomeAssistant, entity_id: str) -> bool:
     """Return true for live OWM temperature/humidity child sensors only.
 
     This deliberately uses registry semantics rather than installation-specific

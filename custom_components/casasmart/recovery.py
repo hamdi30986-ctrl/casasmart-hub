@@ -38,7 +38,8 @@ import logging
 import secrets
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 try:
     from .throttle import FailureThrottle
@@ -70,9 +71,7 @@ def _hash_code(code: str) -> str:
 
 def _new_code() -> str:
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
-    return "-".join(
-        raw[i : i + CODE_GROUP] for i in range(0, CODE_LENGTH, CODE_GROUP)
-    )
+    return "-".join(raw[i : i + CODE_GROUP] for i in range(0, CODE_LENGTH, CODE_GROUP))
 
 
 def normalize_code(code: str) -> str:

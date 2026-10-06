@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 _MODULE_PATH = (
     Path(__file__).parents[1] / "custom_components" / "casasmart" / "capabilities.py"

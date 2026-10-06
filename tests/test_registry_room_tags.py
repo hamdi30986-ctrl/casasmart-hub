@@ -89,7 +89,9 @@ class RegistryRoomTagTest(unittest.TestCase):
                 updated = self.engine.update_room_tag(tag["tag_id"], color=color)
                 self.assertEqual(updated["color"], color)
                 reloaded = make_engine(rooms=self.rooms, tags=self.tags)
-                saved = next(t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"])
+                saved = next(
+                    t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"]
+                )
                 self.assertEqual(saved["color"], color)
                 self.engine.delete_room_tag(tag["tag_id"])
 
@@ -98,11 +100,15 @@ class RegistryRoomTagTest(unittest.TestCase):
             with self.subTest(color=color):
                 tag = self.engine.create_room_tag(color, color, ["living"])
                 reloaded = make_engine(rooms=self.rooms, tags=self.tags)
-                saved = next(t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"])
+                saved = next(
+                    t for t in reloaded.list_room_tags() if t["tag_id"] == tag["tag_id"]
+                )
                 self.assertEqual(saved["color"], color)
                 self.engine.delete_room_tag(tag["tag_id"])
 
-    def test_corrupt_legacy_tag_rows_are_sanitized_without_breaking_snapshot(self) -> None:
+    def test_corrupt_legacy_tag_rows_are_sanitized_without_breaking_snapshot(
+        self,
+    ) -> None:
         self.tags["all"] = {
             "missing-name": {"color": "not-a-color", "room_ids": "living"},
             "safe": {

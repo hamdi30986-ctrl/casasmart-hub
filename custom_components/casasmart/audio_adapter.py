@@ -42,13 +42,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 
 from .audio import (
-    AudioEngine,
     TOPIC_ATHAN_CONFIG,
+    AudioEngine,
     speaker_state_topic,
     speaker_status_topic,
 )
@@ -113,7 +114,7 @@ class AudioAdapter:
         self._hass = hass
         self._engine = engine
         self._client_factory = client_factory
-        self._client: Optional[Any] = None
+        self._client: Any | None = None
         # True between a successful connect-attempt setup and stop; lets
         # publish/ discover fail fast (and loudly) when audio isn't wired.
         self._started = False
@@ -156,7 +157,7 @@ class AudioAdapter:
         try:
             client.connect_async(host, port)
             client.loop_start()
-        except Exception:  # noqa: BLE001 — a bad broker must not abort hub setup
+        except Exception:
             _LOGGER.exception(
                 "CasaSmart audio: failed to start MQTT to %s:%s", host, port
             )
@@ -180,7 +181,7 @@ class AudioAdapter:
         try:
             client.loop_stop()
             client.disconnect()
-        except Exception:  # noqa: BLE001 — teardown must never raise on unload
+        except Exception:
             _LOGGER.exception("CasaSmart audio: error stopping MQTT client")
 
     async def async_reconfigure(self) -> None:
@@ -201,9 +202,7 @@ class AudioAdapter:
         if rc != 0:
             _LOGGER.warning("CasaSmart audio: MQTT connect failed (rc=%s)", rc)
             return
-        client.subscribe(
-            [(_TOPIC_ANNOUNCE, 0), (_SUB_STATUS, 1), (_SUB_STATE, 0)]
-        )
+        client.subscribe([(_TOPIC_ANNOUNCE, 0), (_SUB_STATUS, 1), (_SUB_STATE, 0)])
         client.publish(_TOPIC_PING, "", qos=0)
         # Re-push the stored athan config retained on every (re)connect (M4).
         # The PUT relays it once when the bus is up, but a config saved while
@@ -221,7 +220,7 @@ class AudioAdapter:
                 client.publish(
                     TOPIC_ATHAN_CONFIG, json.dumps(athan), qos=1, retain=True
                 )
-        except Exception:  # noqa: BLE001 — a relay failure must not break connect
+        except Exception:
             _LOGGER.exception("CasaSmart audio: failed to re-publish athan config")
 
     def _on_disconnect(self, _client: Any, _userdata: Any, rc: Any) -> None:
@@ -234,7 +233,7 @@ class AudioAdapter:
         """Route one broker message into the engine, then nudge the WS server."""
         try:
             changed = self._ingest(message.topic, message.payload)
-        except Exception:  # noqa: BLE001 — a bad message must not kill the thread
+        except Exception:
             _LOGGER.exception(
                 "CasaSmart audio: failed to ingest %s", getattr(message, "topic", "?")
             )
@@ -244,7 +243,11 @@ class AudioAdapter:
 
     def _ingest(self, topic: str, payload: Any) -> bool:
         """Apply a message to the engine. Returns True if it moved live state."""
-        text = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else payload
+        text = (
+            payload.decode("utf-8", "replace")
+            if isinstance(payload, bytes)
+            else payload
+        )
 
         if topic == _TOPIC_ANNOUNCE:
             data = self._loads(text)

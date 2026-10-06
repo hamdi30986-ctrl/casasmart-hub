@@ -4,7 +4,7 @@ import importlib
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from test_suggestions import rule, storage, stores
@@ -25,7 +25,7 @@ class StorageCompatibilityTest(unittest.TestCase):
             before.close()
             suggestions = stores.SuggestionStore(db)
             suggestions.replace_rules(0, [rule()])
-            now = datetime(2026, 10, 5, 23, 30, tzinfo=timezone.utc)
+            now = datetime(2026, 10, 5, 23, 30, tzinfo=UTC)
             occurrence = {
                 "occurrence_id": "fixture",
                 "expires_at": (now + timedelta(hours=1)).isoformat(),

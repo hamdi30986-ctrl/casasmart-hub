@@ -1,12 +1,13 @@
 """Execute the real HTTP view and SQLite engine with fake HA boundaries."""
+
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sqlite3
 import sys
-from types import ModuleType, SimpleNamespace
 import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import test_atomic_room_moves as fixtures
@@ -37,14 +38,28 @@ def load_api():
     module("homeassistant.core", HomeAssistant=object)
     module("homeassistant.exceptions", HomeAssistantError=Exception)
     module("room_api_fixture", __path__=[])
-    module("room_api_fixture.auth_api", authenticate_request=None, get_engine=None, json_body=None)
+    module(
+        "room_api_fixture.auth_api",
+        authenticate_request=None,
+        get_engine=None,
+        json_body=None,
+    )
     module("room_api_fixture.auth_engine", AuthEngine=object)
-    module("room_api_fixture.const", DOMAIN="casasmart", EVENT_REGISTRY_CHANGED="registry_changed")
-    module("room_api_fixture.entity_bridge", CommandError=Exception, validate_command=None)
+    module(
+        "room_api_fixture.const",
+        DOMAIN="casasmart",
+        EVENT_REGISTRY_CHANGED="registry_changed",
+    )
+    module(
+        "room_api_fixture.entity_bridge", CommandError=Exception, validate_command=None
+    )
     module("room_api_fixture.energy_runtime", energy_lockout_applies=None)
-    module("room_api_fixture.filtering", **dict.fromkeys(
-        ["area_id_of", "ha_area_id_of", "in_scope", "is_assignable", "is_served"]
-    ))
+    module(
+        "room_api_fixture.filtering",
+        **dict.fromkeys(
+            ["area_id_of", "ha_area_id_of", "in_scope", "is_assignable", "is_served"]
+        ),
+    )
     modules["room_api_fixture.registry"] = _REGISTRY
     modules["room_api_fixture.storage"] = storage_module
     path = Path(__file__).parents[1] / "custom_components/casasmart/registry_api.py"
@@ -75,11 +90,15 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.hass = SimpleNamespace(
             async_add_executor_job=executor,
-            bus=SimpleNamespace(async_fire=lambda event, data: self.events.append((event, data))),
+            bus=SimpleNamespace(
+                async_fire=lambda event, data: self.events.append((event, data))
+            ),
         )
         self.api.get_registry = lambda hass: self.engine
         self.api._runtime_data = lambda hass: SimpleNamespace(storage=self.store)
-        self.api.get_engine = lambda hass: SimpleNamespace(member_id_for=lambda sub: "member")
+        self.api.get_engine = lambda hass: SimpleNamespace(
+            member_id_for=lambda sub: "member"
+        )
         self.api.authenticate_request = authenticate
         self.api.json_body = body
         self.api.is_assignable = lambda hass, eid: eid in {"light.one", "cover.two"}
@@ -97,7 +116,10 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events), 1)
 
     async def test_unauthorized_request_never_writes_or_notifies(self):
-        self.api.authenticate_request = lambda *args: (None, self.view.json_message("denied", 403))
+        self.api.authenticate_request = lambda *args: (
+            None,
+            self.view.json_message("denied", 403),
+        )
         response = await self.view.post(self.payload)
         self.assertEqual(response.status, 403)
         self.assertEqual(self.engine.room_of("light.one"), "a")
@@ -107,7 +129,9 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
         self.claims["rooms"] = ["b"]
         self.assertEqual((await self.view.post(self.payload)).status, 403)
         self.claims["rooms"] = None
-        self.assertEqual((await self.view.post({**self.payload, "room_id": "gone"})).status, 404)
+        self.assertEqual(
+            (await self.view.post({**self.payload, "room_id": "gone"})).status, 404
+        )
         self.engine.assign_device("light.one", room_id=None)
         response = await self.view.post(self.payload)
         self.assertEqual(response.status, 409)
@@ -116,10 +140,12 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_storage_failure_rolls_back_and_does_not_notify(self):
         original = self.store._execute_write
+
         def fail(sql, params=()):
             if params[:2] == ("devices", "cover.two"):
                 raise sqlite3.OperationalError("injected")
             return original(sql, params)
+
         with patch.object(self.store, "_execute_write", side_effect=fail):
             response = await self.view.post(self.payload)
         self.assertEqual(response.status, 500)
