@@ -1,21 +1,43 @@
-# Docker Desktop LAN pairing
+# Running the hub on Docker Desktop (macOS)
 
-Docker Desktop on macOS cannot publish CasaSmart's TLS port directly while
-preserving the LAN client's source address. The address the hub sees is
-synthetic and not stable: after a container restart it can even be an
-arbitrary public address. Docker Desktop also cannot publish the container's
-multicast DNS announcement onto the physical LAN reliably.
+Home Assistant OS, a Raspberry Pi, a Proxmox VM or Docker on Linux need none of
+this. Use this guide only when Home Assistant runs in Docker Desktop on a Mac.
 
-So on Docker Desktop the hub (2.2.0+) does not judge "is this phone on the
-LAN?" by address on its TLS port. It detects Docker Desktop (the VM kernel
-reports `linuxkit`) and treats its TLS listener as LAN ingress. That is only
-safe because of the setup below: the TLS port is published to `127.0.0.1` only,
-and the relay admits only clients from local address ranges. Requests that
-crossed Cloudflare are never treated as LAN. To override detection, set
-`lan_relay_ingress` in the hub config to `"on"` or `"off"` (default `"auto"`).
-The hub logs its choice at startup ("LAN relay ingress on ...").
+Docker Desktop causes two problems for the CasaSmart app:
 
-Use a loopback-only Docker mapping:
+- **Phones can't discover the hub.** A container can't announce itself on the
+  LAN over multicast DNS (`_casasmart._tcp`).
+- **The hub can't tell which phones are on the LAN.** Docker Desktop rewrites
+  the source address of every connection that reaches the container, and after
+  a container restart it can even show a public address. Pairing, owner
+  recovery and keyless speaker provisioning are LAN-only, so without help they
+  are refused.
+
+Two small helpers run on the Mac and fix both. They need only `python3` and
+its standard library.
+
+- `tls_relay.py` listens on the Mac's port 8443, admits only clients from
+  local address ranges (private, link-local, loopback), and forwards the
+  encrypted bytes to the hub's TLS port. It doesn't terminate TLS, see pairing
+  codes, or hold any hub identity.
+- `mdns_publish.py` reads the hub's public handshake and advertises
+  `_casasmart._tcp` through macOS Bonjour with the hub's real fingerprint. It
+  does this on the Mac's LAN address, port 8443.
+
+## 1. Get the helpers
+
+HACS installs only the integration, not this folder. Clone the repository on
+the Mac and keep that checkout in place, because launchd runs the helpers from
+it:
+
+```sh
+git clone https://github.com/hamdi30986-ctrl/casasmart-hub.git ~/casasmart-hub
+```
+
+## 2. Publish the hub's TLS port to loopback only
+
+In your Docker Compose file, map the container's port 8443 to `127.0.0.1:18443`
+only, so the relay is the only way in from the network:
 
 ```yaml
 services:
@@ -25,16 +47,76 @@ services:
       - "127.0.0.1:18443:8443"
 ```
 
-Then install the two launch-agent templates after replacing `__PYTHON__` and
-`__REPO_ROOT__` with absolute paths. The TLS relay forwards encrypted bytes; it
-does not terminate TLS, inspect pairing codes, or contain a hub identity, and it
-refuses clients outside local address ranges. The mDNS publisher reads the active
-hub's public handshake and advertises that hub's real fingerprint, so the same
-files work with a different hub.
+> **Never publish 8443 on all interfaces, and never forward it from your router.**
+> On Docker Desktop the hub treats every connection on its TLS port as coming
+> from the LAN (see step 4). The loopback-only mapping plus the LAN-only relay
+> is what makes that safe.
 
-Validate from another LAN device:
+## 3. Install the launch agents
+
+Replace the two placeholders and load the agents:
 
 ```sh
-curl -k https://HUB_LAN_IP:8443/api/casasmart/handshake
+REPO=~/casasmart-hub          # absolute path of the checkout from step 1
+PY=/usr/bin/python3           # any python3 (Command Line Tools or Homebrew)
+for name in hub-tls-relay hub-mdns; do
+  sed -e "s#__PYTHON__#$PY#g" -e "s#__REPO_ROOT__#$REPO#g" \
+    "$REPO/deploy/macos/com.casasmart.$name.plist.template" \
+    > ~/Library/LaunchAgents/com.casasmart.$name.plist
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.casasmart.$name.plist
+done
+```
+
+Both agents start at login and restart if they exit. They log to
+`/tmp/casasmart-hub-tls-relay.log` and `/tmp/casasmart-hub-mdns.log`.
+
+- The relay's default ports (8443 in, `127.0.0.1:18443` out) match step 2.
+- The publisher finds the Mac's LAN address itself. It reads the handshake
+  from `https://127.0.0.1:18443` and advertises the name "CasaSmart Hub". To
+  change any of these, add `--address`, `--handshake` or `--name` to its plist.
+
+To update the helpers later, pull the checkout and restart them:
+
+```sh
+git -C ~/casasmart-hub pull
+launchctl kickstart -k gui/$(id -u)/com.casasmart.hub-tls-relay
+launchctl kickstart -k gui/$(id -u)/com.casasmart.hub-mdns
+```
+
+To remove them, run `launchctl bootout gui/$(id -u)/com.casasmart.hub-tls-relay`
+(and the same for `hub-mdns`), then delete the two plists from
+`~/Library/LaunchAgents`.
+
+## 4. How the hub decides "LAN" here
+
+On Docker Desktop the hub can't use a client's address, so the hub setting
+`lan_relay_ingress` decides instead:
+
+- `"auto"` (the default) trusts the hub's TLS listener as the LAN when the hub
+  runs under Docker Desktop (its VM kernel reports `linuxkit`). Elsewhere the
+  hub checks addresses.
+- `"on"` always trusts the TLS listener. Use it for another setup where the TLS
+  port is reachable only through a LAN-only relay.
+- `"off"` always checks addresses.
+
+Requests that crossed Cloudflare are never LAN, whatever this says. Home
+Assistant's own port (8123, where a tunnel enters) is never trusted this way.
+
+At startup the hub logs a WARNING that starts with "LAN relay ingress on" when
+it trusts the listener. To change the setting, see "Hub settings" in the
+[main README](../../README.md#hub-settings).
+
+Behind the relay every phone looks the same to the hub, so they share one
+pairing throttle. After five wrong codes from anyone, everyone waits a minute.
+
+## 5. Check it
+
+From another device on the LAN (`MAC_LAN_IP` is the Mac's address on the LAN):
+
+```sh
+curl -k https://MAC_LAN_IP:8443/api/casasmart/handshake
 dns-sd -B _casasmart._tcp local.
 ```
+
+The first command returns the hub's handshake JSON. The second lists the hub
+within a few seconds (macOS; on Linux use `avahi-browse -r _casasmart._tcp`).
