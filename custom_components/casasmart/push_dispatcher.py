@@ -7,8 +7,9 @@ import secrets
 import time
 from base64 import b64encode
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from homeassistant.const import (
@@ -446,15 +447,13 @@ class PushDispatcher:
         return removed
 
 
-TANK_LOW_CHECK_UTC_HOUR = 15
+# Local wall-clock hour (HA's configured time zone) of the daily low-water sweep.
+TANK_LOW_CHECK_LOCAL_HOUR = 18
 
 TANK_OFFLINE_TIMEOUT_SECONDS = 20 * 60
 
 
 TANK_OFFLINE_POLL = timedelta(minutes=5)
-
-_SECONDS_PER_DAY = 86400
-_AST_OFFSET_SECONDS = 3 * 3600
 
 
 class TankPushMonitor:
@@ -464,13 +463,14 @@ class TankPushMonitor:
     tank readings arrive on a 5-minute REST cadence, and "low at 6pm" / "silent
     for 20 minutes" are time questions, not state edges. Two timers:
 
-    - a daily 18:00-AST sweep: for every calibrated tank, compute the current
-      percent and push once if it's below the tank's ``low_percent``;
+    - a daily 18:00 sweep in Home Assistant's time zone: for every calibrated
+      tank, compute the current percent and push once if it's below the tank's
+      ``low_percent``;
     - a 5-minute watchdog: push once when a tank that *was* reporting has gone
       silent for 20+ minutes.
 
-    Both are deduped to at most one push per device per **AST calendar day** (so
-    the offline watchdog can't fire every 5 minutes). Each alert also fires its
+    Both are deduped to at most one push per device per **local calendar day**
+    (so the offline watchdog can't fire every 5 minutes). Each alert also fires its
     HA bus event (EVENT_TANK_LOW / EVENT_TANK_OFFLINE) as the installer
     automation hook, then dispatches the phone push through the shared signed
     relay path (``PushDispatcher.async_send``).
@@ -494,7 +494,7 @@ class TankPushMonitor:
         self._clock = clock
         self._unsub_daily: Callable[[], None] | None = None
         self._unsub_offline: Callable[[], None] | None = None
-        # device_id -> AST day index of the last push, one map per channel so a
+        # device_id -> local day ordinal of the last push, one map per channel so a
         # low-water push and an offline push don't suppress each other.
         self._low_pushed_day: dict[str, int] = {}
         self._offline_pushed_day: dict[str, int] = {}
@@ -507,14 +507,15 @@ class TankPushMonitor:
         (the dispatcher unit tests stub only ``homeassistant.const``/``core``).
         """
         from homeassistant.helpers.event import (
+            async_track_time_change,
             async_track_time_interval,
-            async_track_utc_time_change,
         )
 
-        self._unsub_daily = async_track_utc_time_change(
+        # async_track_time_change follows HA's configured time zone.
+        self._unsub_daily = async_track_time_change(
             self._hass,
             self._handle_daily_check,
-            hour=TANK_LOW_CHECK_UTC_HOUR,
+            hour=TANK_LOW_CHECK_LOCAL_HOUR,
             minute=0,
             second=0,
         )
@@ -522,8 +523,10 @@ class TankPushMonitor:
             self._hass, self._handle_offline_check, TANK_OFFLINE_POLL
         )
         _LOGGER.info(
-            "Tank push monitor started (low-water sweep 18:00 AST, "
+            "Tank push monitor started (low-water sweep %02d:00 %s, "
             "offline watchdog every %s)",
+            TANK_LOW_CHECK_LOCAL_HOUR,
+            self._time_zone(),
             TANK_OFFLINE_POLL,
         )
 
@@ -550,7 +553,7 @@ class TankPushMonitor:
     async def async_check_low_water(self) -> None:
         """Push once for each calibrated tank currently below its threshold."""
         now = self._clock()
-        day = self._ast_day(now)
+        day = self._local_day(now)
         devices = await self._list_devices()
         for device in devices:
             device_id = device.get("device_id")
@@ -579,7 +582,7 @@ class TankPushMonitor:
     async def async_check_offline(self) -> None:
         """Push once for each previously-reporting tank now silent 20+ min."""
         now = self._clock()
-        day = self._ast_day(now)
+        day = self._local_day(now)
         devices = await self._list_devices()
         for device in devices:
             device_id = device.get("device_id")
@@ -653,7 +656,16 @@ class TankPushMonitor:
             _LOGGER.exception("Tank monitor: listing devices failed")
             return []
 
-    @staticmethod
-    def _ast_day(now: float) -> int:
-        """The AST (UTC+3) calendar-day index for the once-per-day dedup."""
-        return int((now + _AST_OFFSET_SECONDS) // _SECONDS_PER_DAY)
+    def _time_zone(self) -> tzinfo:
+        """HA's configured time zone (UTC if it is unset or unknown)."""
+        name = getattr(getattr(self._hass, "config", None), "time_zone", None)
+        if isinstance(name, str) and name:
+            try:
+                return ZoneInfo(name)
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        return UTC
+
+    def _local_day(self, now: float) -> int:
+        """The local calendar-day ordinal for the once-per-day dedup."""
+        return datetime.fromtimestamp(now, self._time_zone()).date().toordinal()
