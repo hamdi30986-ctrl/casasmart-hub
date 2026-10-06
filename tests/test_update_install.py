@@ -58,6 +58,20 @@ class _Hass:
         return func(*args)
 
 
+class _RecordingHass(_Hass):
+    """Knows whether the code it is running is inside an executor job."""
+
+    def __init__(self) -> None:
+        self.in_executor = False
+
+    async def async_add_executor_job(self, func, *args):
+        self.in_executor = True
+        try:
+            return func(*args)
+        finally:
+            self.in_executor = False
+
+
 class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.key = Ed25519PrivateKey.generate()
@@ -113,6 +127,25 @@ class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
             await update_install.perform_install(_Hass(), _Checker())
         self.assertEqual(extracted, [])
         self.assertEqual(self.swaps, [])
+
+    async def test_file_work_runs_in_the_executor_not_the_event_loop(self) -> None:
+        hass = _RecordingHass()
+        seen: list[tuple[str, bool]] = []
+        real_extract = update_install._extract_zip
+        fake_swap = update_install.swap_integration_dir
+
+        def extract(archive, dest):
+            seen.append(("extract", hass.in_executor))
+            real_extract(archive, dest)
+
+        def swap(current, new_dir):
+            seen.append(("swap", hass.in_executor))
+            return fake_swap(current, new_dir)
+
+        self._patch("_extract_zip", extract)
+        self._patch("swap_integration_dir", swap)
+        await update_install.perform_install(hass, _Checker())
+        self.assertEqual(seen, [("extract", True), ("swap", True)])
 
     async def test_manifest_version_must_match_the_tag(self) -> None:
         with self.assertRaises(InstallError) as ctx:
