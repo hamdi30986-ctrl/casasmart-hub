@@ -153,7 +153,7 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/update/status"
     name = f"api:{DOMAIN}:update:status"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant, checker: UpdateChecker) -> None:
         self._hass = hass
@@ -169,7 +169,7 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
 
 
 class CasaSmartUpdateInstallView(HomeAssistantView):
-    """POST /api/casasmart/update/install — owner-only self-update (Piece 3).
+    """POST /api/casasmart/update/install — owner-only self-update.
 
     Gated ``update.install`` (admin only). On success the integration tree
     is already swapped and an HA restart is scheduled; the app gets a 202
@@ -179,7 +179,7 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/update/install"
     name = f"api:{DOMAIN}:update:install"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant, checker: UpdateChecker) -> None:
         self._hass = hass

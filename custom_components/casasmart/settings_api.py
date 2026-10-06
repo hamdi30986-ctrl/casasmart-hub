@@ -1,9 +1,9 @@
-"""Per-user settings endpoints (mini-block MB-2).
+"""Per-user settings endpoints.
 
 ``GET/PUT /api/casasmart/me/settings`` — the caller's own settings doc
 (display name + widget layout today), keyed by the JWT's ``sub`` exactly
 like ``/me/favorites``: a token can never read or write another user's
-settings, which is the whole B17 permission story for personal data.
+settings, which is the whole permission story for personal data.
 
 GET rides ``devices.read`` and PUT ``devices.control`` — the favorites
 posture: every current role may keep its own settings, but a future
@@ -65,7 +65,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         settings = get_user_settings(self._hass)
         if settings is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        # Settings roam per PERSON: resolve sub -> member_id (Phase 5) in the
+        # Settings roam per PERSON: resolve sub -> member_id in the
         # executor; a legacy device is its own member (falls back to sub).
         engine = get_engine(self._hass)
         sub = claims["sub"]
@@ -120,7 +120,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        # Write-guard (favorites parity, Phase 8): an ENTITY tile must point at a
+        # Write-guard (favorites parity): an ENTITY tile must point at a
         # served entity in the caller's scope, so a scoped member can't pin
         # another room's device into their widget. Pseudo-tiles pass; shape
         # validation stays the engine's job (_clean_widget_tiles).
@@ -153,7 +153,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             )
         except SettingsError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-        # Nudge the member's other devices (Phase 5) — the app re-pulls its
+        # Nudge the member's other devices — the app re-pulls its
         # settings on any registry_changed.
         self._hass.bus.async_fire(EVENT_REGISTRY_CHANGED, {"kind": "settings"})
         return self.json(doc)

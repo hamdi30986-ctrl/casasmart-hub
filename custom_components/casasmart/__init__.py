@@ -508,7 +508,7 @@ async def _async_import_registry(
     hub_config: JsonConfigStore,
     registry: RegistryEngine,
 ) -> None:
-    """B17 first-run import: seed the registry from HA's own registries.
+    """First-run import: seed the registry from HA's own registries.
 
     Floors/areas/entity-area assignments become registry floors/rooms/
     assignments KEEPING their HA ids — existing room-scoped JWTs use HA
@@ -639,7 +639,7 @@ async def _async_start_tls(
     data_dir: Path,
     hub_version: str,
 ) -> None:
-    """B10: bring up the dedicated HTTPS listener + the daily cert check.
+    """Bring up the dedicated HTTPS listener + the daily cert check.
 
     A corrupt identity key aborts setup loudly (re-keying silently would
     break every paired phone's pin — tls.py documents the recovery). A
@@ -706,10 +706,10 @@ async def _async_start_tls(
 
 
 async def _async_start_mdns(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> None:
-    """B6: advertise ``_casasmart._tcp`` so the app auto-discovers the hub.
+    """Advertise ``_casasmart._tcp`` so the app auto-discovers the hub.
 
     The hub-id broadcast in the TXT record is the **permanent identity
-    fingerprint** (B10) — the same value the app pins — so discovery and
+    fingerprint** — the same value the app pins — so discovery and
     the TLS trust decision share one identity, and a spoofed TXT id can't
     survive the pin. Needs that fingerprint, so it runs after TLS; if the
     identity layer failed (``runtime_data.tls is None``) there's nothing
@@ -853,7 +853,7 @@ async def _async_sync_tunnel_url(
     fallback chain tolerates a dead URL), and pairing is LAN-only anyway.
 
     Without an options domain this is a no-op — a service-set URL from the
-    B7 installer path is never touched.
+    installer path is never touched.
     """
     domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
     runtime_data = entry.runtime_data
@@ -1099,7 +1099,7 @@ async def _async_reconcile_tunnel(
 async def _async_tunnel_watchdog(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """Periodic edge-liveness check (Phase 9): heal a running-but-offline tunnel.
+    """Periodic edge-liveness check: heal a running-but-offline tunnel.
 
     The reconciler only knows whether the add-on is *running*; cloudflared can
     be running yet disconnected from Cloudflare's edge (network flap, edge drop)

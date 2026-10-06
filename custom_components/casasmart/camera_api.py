@@ -59,7 +59,7 @@ class CasaSmartCameraSnapshotView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/snapshot"
     name = f"api:{DOMAIN}:camera:snapshot"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -87,7 +87,7 @@ class CasaSmartCameraStreamView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/stream"
     name = f"api:{DOMAIN}:camera:stream"
-    requires_auth = False  # CasaSmart JWT gate (B1.6)
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass

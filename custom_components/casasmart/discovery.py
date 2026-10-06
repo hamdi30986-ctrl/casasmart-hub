@@ -1,8 +1,8 @@
-"""mDNS advertiser (B6 — Multi-Home / Layer-0 network discovery).
+"""mDNS advertiser (multi-home network discovery).
 
 The hub broadcasts ``_casasmart._tcp`` on the LAN so the app finds it
 regardless of DHCP — no static IP, no GPS, like AirPlay finding an Apple
-TV (plan B6 / Layer 0 "Network Discovery").
+TV.
 
 Two layers, same split the rest of the integration uses:
 
@@ -17,7 +17,7 @@ Two layers, same split the rest of the integration uses:
 
 * :class:`MdnsAdvertiser` (bottom half) is the thin lifecycle wrapper:
   it reuses **HA's own zeroconf instance** (no second mDNS responder
-  fighting the first, no new dependency — 15-yr-stability filter),
+  fighting the first, no new dependency),
   registers the service at setup, re-publishes the address when the
   hub's LAN IP shifts, and unregisters on unload. Its HA/zeroconf
   imports are lazy (inside methods) so the pure half stays importable
@@ -29,8 +29,8 @@ TXT contract (kept tiny — one UDP packet, forward-compatible):
 key         value
 ==========  ====================================================
 ``id``      the hub's permanent identity fingerprint (SHA-256 hex
-            over the B10 identity SPKI). The multi-home matching
-            key AND the B10 pin — an attacker can spoof the TXT id
+            over the TLS identity SPKI). The multi-home matching
+            key AND the TLS pin — an attacker can spoof the TXT id
             but not the TLS identity behind it, so the pin catches
             a liar. REQUIRED; a record without it is unusable.
 ``name``    friendly hub name (display hint only; the app's paired
@@ -42,7 +42,7 @@ key         value
 ==========  ====================================================
 
 The TXT carries no secret — the identity *public* key and the real
-trust decision happen at the handshake/TLS layer (B10/B11), never here.
+trust decision happen at the handshake/TLS layer, never here.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # ── Pure builder (stdlib only — keep it HA/zeroconf-free) ──
 
-#: The service type the app browses for (plan: ``_casasmart._tcp``).
+#: The service type the app browses for.
 SERVICE_TYPE = "_casasmart._tcp.local."
 
 #: TXT schema version — bumped only if the *meaning* of a key changes.
@@ -134,8 +134,8 @@ def build_service_descriptor(
 ) -> MdnsServiceDescriptor:
     """Assemble the full descriptor from hub identity + the LAN port.
 
-    ``port`` is the secure CasaSmart API port (the TLS listener, B10/B11
-    — LAN traffic is pinned-TLS), i.e. what the app should actually dial.
+    ``port`` is the secure CasaSmart API port (the TLS listener — LAN
+    traffic is pinned-TLS), i.e. what the app should actually dial.
     """
     if port <= 0 or port > 65535:
         raise ValueError(f"invalid mDNS port {port}")
@@ -167,9 +167,9 @@ class MdnsAdvertiser:
     """Registers/refreshes/unregisters the hub's ``_casasmart._tcp``
     record on HA's shared zeroconf instance.
 
-    Graceful degradation (quality filter 3): mDNS is a *discovery
+    Graceful degradation: mDNS is a *discovery
     convenience*, never load-bearing — the app still reaches the hub via
-    the stored IP and the tunnel (B16 chain). So every failure here is
+    the stored IP and the tunnel. So every failure here is
     logged and swallowed; it must never take the integration down.
     """
 
@@ -234,10 +234,9 @@ class MdnsAdvertiser:
     async def async_refresh(self, _now=None) -> None:
         """Re-publish the address when the hub's LAN IP has shifted.
 
-        DHCP can hand the hub a new IP at any lease renewal; the plan
-        requires the mDNS record to follow it ("Integration stores its
-        own current IP and updates mDNS records on change"). A no-op when
-        the IP is unchanged so the periodic tick is nearly free.
+        DHCP can hand the hub a new IP at any lease renewal, and the mDNS
+        record must follow it. A no-op when the IP is unchanged so the
+        periodic tick is nearly free.
         """
         if self._aiozc is None:
             # Setup-time zeroconf failure — try a full (re)start instead.

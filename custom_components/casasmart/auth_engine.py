@@ -85,7 +85,7 @@ class EnrollError(AuthError):
 
 
 class AdminExistsError(EnrollError):
-    """A second admin enrollment was attempted (plan: exactly one admin)."""
+    """A second admin enrollment was attempted (exactly one admin per hub)."""
 
 
 class UnknownDeviceError(AuthError):
@@ -185,8 +185,8 @@ class AuthEngine:
             raise EnrollError(str(err)) from err
 
         with self._lock:
-            # Plan decision 2026-06-09: exactly one admin per hub, the hub
-            # rejects any attempt to create a second one.
+            # Exactly one admin per hub: the hub rejects any attempt to create
+            # a second one.
             if role == ROLE_ADMIN and self.has_admin():
                 raise AdminExistsError("This hub already has an admin")
 
@@ -303,7 +303,7 @@ class AuthEngine:
         return True
 
     def replace_admin(self, name: str, public_key_pem: str) -> str:
-        """Swap the hub's admin for a new device (B3 owner recovery).
+        """Swap the hub's admin for a new device (owner recovery).
 
         The ONE sanctioned path around "the admin record is immutable":
         the caller has already proven ownership by redeeming the
@@ -535,7 +535,7 @@ class AuthEngine:
         """Edit a device's role and/or room scope; outstanding JWTs die.
 
         The admin record is immutable here — there is no demotion path
-        (plan: factory reset is how an admin changes hands). Promotion
+        (factory reset is how an admin changes hands). Promotion
         ceiling is sub-admin: ``role`` may only be sub-admin or user.
         ``rooms=...`` (the sentinel) means "leave unchanged"; an explicit
         None clears the scope. Room scope only applies to the user role.
@@ -555,7 +555,7 @@ class AuthEngine:
                 or any(not isinstance(room, str) or not room for room in new_rooms)
             ):
                 raise UserManagementError("rooms must be a list of area ids")
-            # Plan: room-scoping is a per-USER toggle; sub-admins see all rooms.
+            # Room-scoping is a per-USER toggle; sub-admins see all rooms.
             if new_rooms is not None and new_role != ROLE_USER:
                 raise UserManagementError("Room scope only applies to the user role")
 
@@ -583,7 +583,7 @@ class AuthEngine:
         }
 
     def delete_device(self, device_id: str) -> str:
-        """Unpair a device — instant kill for all its tokens (plan B2).
+        """Unpair a device — instant kill for all its tokens.
 
         Returns the unpaired device's ``member_id`` so the caller can prune the
         person's favorites/user_settings IFF this was their last device (see
@@ -747,7 +747,7 @@ class AuthEngine:
         Beyond the cryptographic check, the token must point at a device
         that is STILL enrolled with the SAME auth version — unpairing or
         editing a device kills its outstanding JWTs here, on the next
-        request (plan B2: "Delete public key from hub = instant kill").
+        request.
         Pure in-memory work — safe on the event loop.
         """
         claims = auth_tokens.validate_token(self._signing_secret(), token)

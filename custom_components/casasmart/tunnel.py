@@ -1,12 +1,12 @@
-"""Remote-access tunnel formalization (Track B — B7).
+"""Remote-access tunnel formalization.
 
 The hub itself never dials Cloudflare — ``cloudflared`` runs as its own
-service on the box, configured at client onboarding (plan B7: one-time
+service on the box, configured at client onboarding (one-time
 install, per-client subdomain, ingress routed at the CasaSmart TLS port
 only — never bare HA). What the integration formalizes is the *contract*:
 the installer records the hub's public tunnel URL in ``hub_config.json``
 (key ``tunnel_url``), and the handshake advertises it so the app captures
-the remote path AT PAIRING — exactly like the B10 TLS pin. No Supabase
+the remote path AT PAIRING — exactly like the TLS pin. No Supabase
 ``hubs`` table, no manual URL entry on the phone.
 
 This module is the pure validation half (stdlib only, flat-importable by
@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
-# hub_config.json key the installer sets at onboarding (plan B7).
+# hub_config.json key the installer sets at onboarding.
 TUNNEL_URL_CONFIG_KEY = "tunnel_url"
 
 # One DNS label: 1-63 chars of [a-z0-9-], no leading/trailing hyphen.
@@ -76,7 +76,7 @@ def normalize_tunnel_url(value: object) -> str | None:
         return None
     # Presence, not emptiness — `https://host?` has an EMPTY query, which
     # urlsplit reports as falsy; checking the delimiters themselves keeps
-    # a degenerate `?`/`#` from ever being advertised (audit finding).
+    # a degenerate `?`/`#` from ever being advertised.
     if "?" in candidate or "#" in candidate:
         return None
 
@@ -191,7 +191,7 @@ def pick_cloudflared_slug(addons: object) -> str | None:
     return min(slug for slug, _state in matches)
 
 
-# --- Edge-liveness watchdog (Phase 9) ---------------------------------------
+# --- Edge-liveness watchdog -------------------------------------------------
 # Cloudflare returns these statuses from its EDGE when the edge is reachable but
 # it cannot reach the origin tunnel — i.e. cloudflared is running yet its edge
 # connection is dead. That is the exact "running but offline" case the add-on's

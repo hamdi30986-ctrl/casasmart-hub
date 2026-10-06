@@ -9,7 +9,7 @@ timer per prayer and, at prayer time, publishes a broadcast ``play`` command
 (priority ``athan``) through the audio adapter — the same play path PA uses.
 
 This replaces the standalone ``casaos-athan-scheduler`` daemon. The hub owns
-audio (B14), so it owns athan scheduling too. The library returns UTC timestamps,
+audio, so it owns athan scheduling too. The library returns UTC timestamps,
 so DST/offset handling is inherent (no fixed table), and it adds Hanafi/Shafi Asr,
 high-latitude rules and ~24 regional calculation methods — correct in any region,
 with no Supabase, no hardcoded home id and no separate broker credentials.

@@ -1,4 +1,4 @@
-"""WebSocket wire protocol (Track B — B1.5): frame parsing + building.
+"""WebSocket wire protocol: frame parsing + building.
 
 Pure protocol layer for the CasaSmart WebSocket server. Like
 ``entity_bridge``, this module imports nothing from Home Assistant so the
@@ -7,12 +7,12 @@ protocol rules are unit-testable without an HA install.
 Client -> server frames (JSON objects, ``type`` discriminator):
 
 - ``{"type": "auth", "token": "<jwt>"}`` — MUST be the first frame after
-  connect (plan: token never in the URL — URLs leak into logs). Also the
+  connect (token never in the URL — URLs leak into logs). Also the
   answer to a mid-connection ``auth_required``.
 - ``{"type": "subscribe", "entity_ids": [...]}`` — start receiving state
   pushes. ``entity_ids`` omitted or null = everything the connection is
   allowed to see. Replaces any previous subscription.
-- ``{"type": "ping"}`` — app-level keep-alive (plan B16: tunnel mode pings
+- ``{"type": "ping"}`` — app-level keep-alive (in tunnel mode the app pings
   every 30s to stop Cloudflare dropping idle connections).
 
 Server -> client frames:
@@ -83,7 +83,7 @@ class Subscription:
     """What one connection has asked to receive.
 
     Starts empty: nothing is pushed until the client sends ``subscribe``
-    (plan: pushes go to subscribed entities only).
+    (pushes go to subscribed entities only).
     """
 
     def __init__(self) -> None:
@@ -122,7 +122,7 @@ def frame_auth_failed(reason: str) -> dict[str, Any]:
 
 def frame_auth_required(grace_seconds: int) -> dict[str, Any]:
     """Token no longer valid mid-connection; fresh auth frame expected
-    within the grace window or the server closes (plan: 30s grace)."""
+    within the grace window or the server closes."""
     return {"type": "auth_required", "grace_seconds": grace_seconds}
 
 
@@ -145,14 +145,14 @@ def frame_entity_removed(entity_id: str) -> dict[str, Any]:
 
 
 def frame_registry_changed(kind: str) -> dict[str, Any]:
-    """The home's organization changed (B17: floors/rooms/devices/scenes).
+    """The home's organization changed (floors/rooms/devices/scenes).
     Deliberately content-free — the app re-fetches through its own scoped
     registry GET, so the push can never leak what REST would hide."""
     return {"type": "registry_changed", "kind": kind}
 
 
 def frame_alarm_changed() -> dict[str, Any]:
-    """The arm state changed (B13: arm/disarm/pending/triggered/tamper).
+    """The arm state changed (arm/disarm/pending/triggered/tamper).
     Content-free like ``registry_changed`` — the app re-fetches through the
     permission-gated alarm state GET, so the push leaks nothing even though
     the socket authorized only on ``devices.read``. The server additionally
@@ -161,7 +161,7 @@ def frame_alarm_changed() -> dict[str, Any]:
 
 
 def frame_audio_changed() -> dict[str, Any]:
-    """The hub's speaker view changed (B14: enroll/rename/drop or a live
+    """The hub's speaker view changed (enroll/rename/drop or a live
     status/state ingest off the bus). Content-free like ``alarm_changed`` —
     the app re-fetches through the ``audio.read`` gated speakers GET, so the
     push leaks nothing. The server only sends this to connections whose role
@@ -175,7 +175,7 @@ def frame_energy_changed() -> dict[str, Any]:
 
 
 def frame_tank_changed(device_id: str) -> dict[str, Any]:
-    """A tank reading landed (Phase 4 ingest). Carries only the device id —
+    """A tank reading landed. Carries only the device id —
     content-free like ``registry_changed``; the app re-fetches the calibrated
     level through its tank GET, so the push leaks nothing REST would hide."""
     return {"type": "tank_changed", "device_id": device_id}
@@ -191,7 +191,7 @@ def frame_error(message: str) -> dict[str, Any]:
     return {"type": "error", "message": message}
 
 
-# -- Outbound backpressure (Phase 11) -----------------------------------------
+# -- Outbound backpressure -----------------------------------------------------
 # On a congested tunnel (LTE, weak WiFi) a burst of state changes — a scene
 # flipping 20 lights, a re-sync fan-out — can arrive faster than the socket
 # drains. The old queue force-closed (4003 "too slow") the moment it hit its

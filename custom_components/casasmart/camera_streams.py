@@ -1,4 +1,4 @@
-"""Camera stream tickets + HLS path validation (B16 stage 3c-3): pure half.
+"""Camera stream tickets + HLS path validation: pure half.
 
 The camera fallback player loads the HLS playlist inside a WebView — it
 cannot attach an ``Authorization`` header to the playlist or segment

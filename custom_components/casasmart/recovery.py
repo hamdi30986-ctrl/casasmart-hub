@@ -1,6 +1,6 @@
-"""Owner recovery codes (Track B — B3): the metal-card tier.
+"""Owner recovery codes: the metal-card tier.
 
-Plan ("B3. Owner Recovery" + "Recovery Layers", Layer 1):
+Recovery tiers:
 
 - Cloud keychain restore is tier 1 and lives entirely app-side — the
   restored key just logs in. THIS module is tier 2: the laser-engraved
@@ -14,7 +14,7 @@ Plan ("B3. Owner Recovery" + "Recovery Layers", Layer 1):
 - Redemption **requires LAN presence** (enforced at the API layer, same
   check as pairing) — a photo taken remotely is useless.
 - Redemption replaces the hub's single admin: the old admin device is
-  unenrolled (its outstanding JWTs die instantly via the B2 ``ver``
+  unenrolled (its outstanding JWTs die instantly via the ``ver``
   revocation) and the new phone's keypair becomes the admin. Tier 3
   (operator factory reset over Tailscale/on-site) is the
   ``casasmart.factory_reset`` HA service — see ``__init__.py``.
@@ -183,7 +183,7 @@ class RecoveryManager:
             if record is None or record["code_hash"] != code_hash:
                 self.throttle.record_failure(source_key)
                 raise CodeInvalidError("Invalid recovery code")
-            # PERMANENT (decision): NOT deleted — the engraved card stays valid.
+            # PERMANENT: NOT deleted — the engraved card stays valid.
             # The guard is LAN-only presence + the escalating throttle + the
             # card's physical secrecy; replace_admin (the caller) additionally
             # requires an existing admin, so the code is inert on an unclaimed hub.

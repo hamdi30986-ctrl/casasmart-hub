@@ -131,7 +131,7 @@ class _UserSensorManager:
     def _next_entity_id(self, record: dict[str, Any]) -> str:
         """A unique ``sensor.casasmart_user_<name>`` id for a new device.
 
-        Pinned (not device-name-prefixed) to match the plan; deduped across
+        Pinned (not device-name-prefixed); deduped across
         the live state machine AND the ids already handed out this batch, so
         same-named devices get ``…_2`` / ``…_3`` rather than colliding.
         """
@@ -215,7 +215,7 @@ class CasaSmartUserSensor(SensorEntity):
         self._attr_unique_id = f"{entry_id}_user_{self._device_id}"
         name = record.get("name") or self._device_id
         self._attr_name = f"CasaSmart User {name}"
-        # Pin the plan's exact ``sensor.casasmart_user_<name>`` id (a
+        # Pin the exact ``sensor.casasmart_user_<name>`` id (a
         # device-named entity would become ``sensor.casasmart_hub_…``). Set on
         # first registration only; still groups under the hub device below.
         self.entity_id = entity_id

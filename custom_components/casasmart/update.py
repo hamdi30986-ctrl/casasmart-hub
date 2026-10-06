@@ -1,4 +1,4 @@
-"""Pure self-update logic (Track B — B5) — no HA imports.
+"""Pure self-update logic — no HA imports.
 
 The version math and GitHub-release parsing behind ``update_api.py``,
 kept import-free so the unit tests run without a Home Assistant install
@@ -168,7 +168,7 @@ def _pick_download_url(payload: dict) -> str | None:
     return _asset_urls(payload).get(RELEASE_ASSET_NAME)
 
 
-# --- Piece 3: install-side filesystem logic (pure, no HA / no network) -------
+# --- Install-side filesystem logic (pure, no HA / no network) ----------------
 #
 # The installer in update_install.py owns the aiohttp download + the HA
 # restart; everything that touches only the filesystem lives here so it can

@@ -193,9 +193,8 @@ class WsConnection:
     async def _async_validate_token(self, token: str) -> bool:
         """Validate a CasaSmart JWT and refresh the connection's claims.
 
-        The B1.6 auth engine: signature + expiry + role permission. Pure
-        HMAC math — no executor hop. Returns False (never raises) so the
-        callers' control flow stays identical to the B1.5 stopgap.
+        The auth engine: signature + expiry + role permission. Pure
+        HMAC math — no executor hop. Returns False (never raises).
         """
         from .auth_api import get_engine  # local: auth_api is sibling glue
 
@@ -212,7 +211,7 @@ class WsConnection:
         return True
 
     async def _token_recheck_loop(self) -> None:
-        """Catch mid-connection revocation/expiry (plan: auth_required + 30s).
+        """Catch mid-connection revocation/expiry (auth_required + grace window).
 
         Keeps running after a successful re-auth so a renewed token is
         itself re-checked on the same cadence.
@@ -290,7 +289,7 @@ class WsConnection:
     async def _emit_snapshot(self) -> None:
         """Send the `subscribed` frame: the current scoped + served snapshot of
         the subscribed set. Re-emitted after a scope-changing re-auth so the
-        live view reflects the new rooms at once (Phase 8)."""
+        live view reflects the new rooms at once."""
         rooms = (self._claims or {}).get("rooms")
         devices = [
             serialize_device(self._hass, state)
@@ -325,7 +324,7 @@ class WsConnection:
         # client-side and its tiles freeze until the next reconnect. A fresh
         # snapshot on re-auth reconciles that missed state — and also drops/gains
         # rooms at once when an admin re-scoped this user mid-connection (the
-        # scope-change case this used to be limited to; Phase 8).
+        # scope-change case this used to be limited to).
         if self._subscribed:
             await self._emit_snapshot()
 
@@ -341,7 +340,7 @@ class WsConnection:
         if new_state is None:
             # Entity removed (unpair / integration drop / registry delete). Tell
             # a subscribed app to drop the tile — otherwise a dead card lingers
-            # for the connection's lifetime (Phase 8). The frame is just the id,
+            # for the connection's lifetime. The frame is just the id,
             # so there is no state to room-scope.
             if entity_id and self._subscription.matches(entity_id):
                 self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
@@ -349,7 +348,7 @@ class WsConnection:
         if (
             not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
-            # Room scope (B1.6): scoped tokens only get their rooms' pushes.
+            # Room scope: scoped tokens only get their rooms' pushes.
             or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
         ):
             return
@@ -358,7 +357,7 @@ class WsConnection:
 
     @callback
     def _on_registry_changed(self, event: Event) -> None:
-        """B17: the home's organization changed — nudge the app to re-fetch.
+        """The home's organization changed — nudge the app to re-fetch.
 
         The frame carries only the change kind, never content, so there
         is nothing to room-scope here: the app's follow-up registry GET
@@ -374,7 +373,7 @@ class WsConnection:
 
     @callback
     def _on_tank_changed(self, event: Event) -> None:
-        """Phase 4: a tank reading landed — nudge the app to re-fetch its
+        """A tank reading landed — nudge the app to re-fetch its
         calibrated level. Content-free beyond the device id, like the registry
         nudge; the app's tank GET stays the authorization boundary."""
         device_id = event.data.get("device_id", "")
@@ -382,10 +381,10 @@ class WsConnection:
 
     @callback
     def _on_alarm_changed(self, event: Event) -> None:
-        """B13: arm state changed — nudge alarm-authorized apps to re-fetch.
+        """Arm state changed — nudge alarm-authorized apps to re-fetch.
 
         Gated by role: the socket only authorized on ``devices.read``, but a
-        plain user has NO alarm access (plan roles table). Pushing even a
+        plain user has NO alarm access. Pushing even a
         content-free nudge to them would leak the timing of alarm activity,
         so connections whose claims lack ``alarm.read`` are skipped entirely.
         The frame carries no state — the app re-reads the gated state GET.
@@ -396,7 +395,7 @@ class WsConnection:
 
     @callback
     def _on_audio_changed(self, event: Event) -> None:
-        """B14: the hub's speaker view changed — nudge audio-authorized apps
+        """The hub's speaker view changed — nudge audio-authorized apps
         to re-fetch. Gated like ``_on_alarm_changed``: the socket authorized on
         ``devices.read``, but only connections whose claims carry ``audio.read``
         get the (content-free) nudge. The app re-reads the gated speakers GET.
@@ -421,7 +420,7 @@ class WsConnection:
     def _offer_or_close(self, frame: dict[str, Any]) -> None:
         """Queue a push frame, coalescing/dropping under backpressure. Only a
         queue full of undrained protocol frames — a genuinely dead consumer —
-        closes the socket (Phase 11: a burst no longer kills a healthy app)."""
+        closes the socket (a burst never kills a healthy app)."""
         if self._send_queue.offer(frame):
             return
         _LOGGER.warning("WS client not draining (protocol backlog), disconnecting")

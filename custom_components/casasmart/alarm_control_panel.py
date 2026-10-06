@@ -1,4 +1,4 @@
-"""CasaSmart alarm_control_panel entity (Phase 6, block B13) — the HA face.
+"""CasaSmart alarm_control_panel entity — the HA face.
 
 The hub-authoritative ``AlarmEngine`` (``alarm.py``) owns every decision; the
 REST API (``alarm_api.py``) is how the *app* drives it. This platform is the
@@ -17,9 +17,9 @@ through the app fires that same event, which this entity listens to — so a
 phone-driven arm reflects on the HA panel and vice-versa, with no second
 source of truth.
 
-Option A (no PIN): ``code_arm_required`` is False and there is no code format.
+No PIN: ``code_arm_required`` is False and there is no code format.
 Authorisation lives at the app/JWT layer and at HA's own auth — the panel does
-not gate on a shared secret (see B13 decision log).
+not gate on a shared secret.
 
 Exit-delay grace is passive in the engine (no event fires when it lapses), so
 when the panel computes ``ARMING`` it schedules one exact refresh at the
@@ -85,7 +85,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Security"
-    # Option A: no PIN. Authorisation is the app's JWT / HA's own auth.
+    # No PIN. Authorisation is the app's JWT / HA's own auth.
     _attr_code_arm_required = False
     _attr_code_format = None
     _attr_supported_features = (

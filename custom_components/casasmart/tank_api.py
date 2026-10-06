@@ -397,7 +397,7 @@ class CasaSmartTankReadingView(_TankView):
 
         _INGEST_THROTTLE.clear(source)
         # Nudge connected apps to re-fetch this tank's calibrated level in real
-        # time (Phase 4) — mirrors the registry/alarm/audio nudge pattern.
+        # time — mirrors the registry/alarm/audio nudge pattern.
         self._hass.bus.async_fire(EVENT_TANK_CHANGED, {"device_id": device_id})
         return self.json({"ok": True, "device_id": device_id})
 
@@ -470,8 +470,8 @@ class CasaSmartTankReadingsView(_TankView):
 
     The 24/7 history the phone-local log can't have — newest first,
     ``{"t": unix_seconds, "v": voltage, "p": percent}``. The hub computes
-    ``p`` from the device's calibration (B8 Piece 4b — the app no longer does
-    the math; ``p`` is null for an uncalibrated tank).
+    ``p`` from the device's calibration (the app does not do the math;
+    ``p`` is null for an uncalibrated tank).
     """
 
     url = f"/api/{DOMAIN}/tank/devices/{{device_id}}/readings"
@@ -514,7 +514,7 @@ class CasaSmartTankCalibrationView(_TankView):
     """PATCH /api/casasmart/tank/{device_id}/calibration.
 
     The hub owns the voltage→percent calibration and the low-water threshold
-    (B8 Piece 4b — the app is pure UI). Body carries any subset of
+    (the app is pure UI). Body carries any subset of
     ``{"calibration_voltage", "calibration_depth", "max_height",
     "low_percent"}``; omitted fields are left unchanged, so the calibration
     dialog (the three calibration inputs) and the notification slider
@@ -558,7 +558,7 @@ class CasaSmartTankStatusView(_TankView):
     """GET /api/casasmart/tank/{device_id}/status.
 
     The computed live status the app displays instead of doing the math
-    itself (B8 Piece 4b): ``{voltage, percent, low_percent, is_low,
+    itself: ``{voltage, percent, low_percent, is_low,
     last_reading}``. ``voltage``/``percent`` are null with no reading yet or an
     uncalibrated tank. ``devices.read`` gated, like the device/readings GETs.
     """

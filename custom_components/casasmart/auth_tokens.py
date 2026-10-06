@@ -1,4 +1,4 @@
-"""Hub-issued JWT layer (Track B — B1.6): mint + validate, nothing else.
+"""Hub-issued JWT layer: mint + validate, nothing else.
 
 Pure stdlib (hmac/hashlib/base64/json) so the token rules are
 unit-testable without an HA install, exactly like ``ws_protocol`` and
@@ -16,19 +16,19 @@ Token shape (claims):
 
 - ``iss`` — always ``casasmart-hub``; anything else is rejected.
 - ``sub`` — the device id the token was issued to.
-- ``role`` — ``admin`` / ``sub-admin`` / ``user`` (plan: 3-tier model).
+- ``role`` — ``admin`` / ``sub-admin`` / ``user`` (3-tier model).
 - ``rooms`` — list of area ids the subject is scoped to, or ``None`` for
-  unrestricted (plan: per-user ``allowedRoomIds`` toggle).
+  unrestricted (a per-user toggle).
 - ``iat`` / ``exp`` — issued-at / expiry, epoch seconds. Validation
-  allows ``CLOCK_SKEW`` seconds of slack both ways (plan: JWT expiry math
-  must survive small clock drift; the real NTP gate is a separate block).
-- ``ver`` — the device record's auth version at issue time (B2). The
+  allows ``CLOCK_SKEW`` seconds of slack both ways (JWT expiry math
+  must survive small clock drift).
+- ``ver`` — the device record's auth version at issue time. The
   engine bumps a device's version on any role/room change and checks
   ``ver`` on validation, so privilege edits invalidate outstanding
   tokens immediately instead of riding out the TTL.
 - ``jti`` — unique token id (random), for future revocation lists.
 - ``scope`` — OPTIONAL. Absent on normal session tokens. ``widget`` marks
-  the B16 3c-3 home-screen-widget token: long-lived, but the engine's
+  the home-screen-widget token: long-lived, but the engine's
   ``authorize`` only honors it for the narrow widget permission set
   (device read + control), so a leaked widget token can never touch
   cameras, history, automations CRUD, pairing, or user management.
@@ -49,7 +49,7 @@ from typing import Any
 
 ISSUER = "casasmart-hub"
 ALGORITHM = "HS256"
-# Seconds of clock slack tolerated on iat/exp checks (NTP gate is B-clock).
+# Seconds of clock slack tolerated on iat/exp checks.
 CLOCK_SKEW = 30
 
 ROLE_ADMIN = "admin"
@@ -57,7 +57,7 @@ ROLE_SUB_ADMIN = "sub-admin"
 ROLE_USER = "user"
 VALID_ROLES = (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER)
 
-# The only non-default scope a hub token can carry (B16 3c-3 widgets).
+# The only non-default scope a hub token can carry (home-screen widgets).
 SCOPE_WIDGET = "widget"
 VALID_SCOPES = (SCOPE_WIDGET,)
 

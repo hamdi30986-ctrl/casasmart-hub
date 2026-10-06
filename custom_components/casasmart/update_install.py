@@ -1,7 +1,7 @@
-"""Self-update execution (Track B — B5, Piece 3) — the install action.
+"""Self-update execution — the install action.
 
 ``POST /api/casasmart/update/install`` (owner/admin-only, ``update.install``)
-turns the "update available" state Piece 1 reports into an actual upgrade:
+turns the "update available" state update_api reports into an actual upgrade:
 
     1. Re-check the latest release; refuse (409) if nothing is newer.
     2. Download the release's ``casasmart.zip`` asset (the file HACS

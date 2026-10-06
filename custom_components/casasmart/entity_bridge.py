@@ -220,7 +220,7 @@ def is_filter_life_entity(entity_id: str) -> bool:
 
 
 def is_category_served(category: str, entity_id: str, device_class: str | None) -> bool:
-    """Category-entity exposure policy (B16 3c-4a). Pure — unit-testable.
+    """Category-entity exposure policy. Pure — unit-testable.
 
     ``category`` is the registry entity_category value (``"config"`` /
     ``"diagnostic"``); callers handle the no-category case themselves.
@@ -264,7 +264,7 @@ def serialize_state(
         "area": area,
         "attributes": attributes,
         "last_updated": last_updated.isoformat() if last_updated else None,
-        # 3c-4a: the app classifies config entities (settings sheets) and
+        # The app classifies config entities (settings sheets) and
         # diagnostic sensors (energy panel) by this — None for primaries.
         "entity_category": entity_category,
     }
