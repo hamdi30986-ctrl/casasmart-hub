@@ -4,3 +4,22 @@
 .ruff_cache/
 __pycache__/
 *.py[cod]
+
+# Release build output (scripts/release.sh)
+dist/
+
+# Keys, credentials and local environments — never commit these
+*.pem
+*.key
+*.p8
+*.p12
+.env
+.env.*
+service-account*.json
+.venv/
+venv/
+
+# Test and tooling caches
+.coverage
+htmlcov/
+.mypy_cache/
