@@ -195,7 +195,7 @@ def _arrived_through_cloudflare(request: web.Request) -> bool:
     return "cloudflare" in str(headers.get("CDN-Loop", "")).lower()
 
 
-def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -> bool:
+def is_lan_request(request: web.Request) -> bool:
     """True when the request came from the hub's own network.
 
     Initial pairing only completes on the LAN.
@@ -204,13 +204,6 @@ def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -
     pairing QR is useless remotely. Link-local/private = LAN; everything
     else (public, loopback, unparseable) is refused.
 
-    ``extra_cidrs`` (hub config ``pairing_extra_lan_cidrs``, default
-    unset) is a deployment knob for environments whose port proxy
-    rewrites the client source address — e.g. Docker Desktop presents
-    every inbound connection as its VM interface IP, which can land in
-    public space. Production (HAOS/LXC) sees real peer IPs and never
-    needs this.
-
     A request carrying Cloudflare's proxy headers is never LAN, whatever
     source address the last hop shows: it crossed the internet. HA's own
     port resolves the real client IP from ``X-Forwarded-For`` when the proxy
@@ -218,10 +211,10 @@ def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -
     pointed at it would arrive from a private Docker/add-on address.
 
     On Docker Desktop the TLS listener's source addresses are synthetic and
-    unstable, so there the listener itself is the LAN proof: it is published
-    to 127.0.0.1 only and fronted by a relay that admits only LAN clients
-    (``lan_ingress.py``, ``deploy/macos``). Cloudflare-proxied requests are
-    still refused first.
+    unstable. With ``lan_relay_ingress`` on, the listener itself is the LAN
+    proof: it is published to 127.0.0.1 only and fronted by a relay that admits
+    only LAN clients (``lan_ingress.py``, ``deploy/macos``). Cloudflare-proxied
+    requests are still refused first.
     """
     if _arrived_through_cloudflare(request):
         return False
@@ -231,39 +224,7 @@ def is_lan_request(request: web.Request, extra_cidrs: list[str] | None = None) -
         remote = ipaddress.ip_address(request.remote or "")
     except ValueError:
         return False
-    if (remote.is_private or remote.is_link_local) and not remote.is_loopback:
-        return True
-    for cidr in extra_cidrs or []:
-        try:
-            network = ipaddress.ip_network(cidr, strict=False)
-        except ValueError:
-            _LOGGER.error("Ignoring invalid pairing_extra_lan_cidrs entry %r", cidr)
-            continue
-        if not network.is_private:
-            # The LAN-widening knob may only cover a PRIVATE proxy range (e.g.
-            # Docker Desktop's VM interface) — never public space, which would
-            # expose pairing/recovery to the internet. Refuse it loudly.
-            _LOGGER.error(
-                "Refusing PUBLIC pairing_extra_lan_cidrs entry %r — "
-                "LAN-widening is private-only",
-                cidr,
-            )
-            continue
-        if remote in network:
-            return True
-    return False
-
-
-def get_extra_lan_cidrs(hass: HomeAssistant) -> list[str]:
-    """The hub's configured extra pairing CIDRs ([] when unset/malformed)."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return []
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    cidrs = runtime_data.hub_config.get("pairing_extra_lan_cidrs")
-    if not isinstance(cidrs, list):
-        return []
-    return [cidr for cidr in cidrs if isinstance(cidr, str)]
+    return (remote.is_private or remote.is_link_local) and not remote.is_loopback
 
 
 def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
@@ -368,7 +329,7 @@ class CasaSmartEnrollView(HomeAssistantView):
         pairing = get_pairing(self._hass)
         if engine is None or pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        lan_source = is_lan_request(request, get_extra_lan_cidrs(self._hass))
+        lan_source = is_lan_request(request)
         if not lan_source and not is_remote_pairing_enabled(self._hass):
             # A leaked/photographed pairing QR is useless remotely.
             # Flag OFF (the default) keeps this refusal byte-for-byte the
@@ -530,7 +491,7 @@ class CasaSmartRecoverView(HomeAssistantView):
         recovery = get_recovery(self._hass)
         if engine is None or recovery is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        if not is_lan_request(request, get_extra_lan_cidrs(self._hass)):
+        if not is_lan_request(request):
             # A photographed card is useless remotely.
             _LOGGER.warning(
                 "Recovery attempt refused (non-LAN source: %s)", request.remote

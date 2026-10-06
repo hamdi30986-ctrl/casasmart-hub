@@ -22,6 +22,12 @@ published; everything it contained is in 2.3.0.
 - HQ reminder pushes are titled "CasaSmart HQ" unless a sender name is set
   (`casasmart.configure_hq_notifications`, new `sender_name` field).
 
+### Removed
+- The `pairing_extra_lan_cidrs` hub setting. Private and link-local addresses
+  already counted as LAN and public ranges were refused, so its only effect was
+  to let loopback count as LAN, which is how a local tunnel arrives. It is now
+  ignored, and setup logs a warning while it is still in `hub_config.json`.
+
 ### Added
 - Brand icons (`brand/icon.png`, `brand/icon@2x.png`), which Home Assistant
   2026 shows for the integration.
