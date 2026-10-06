@@ -759,7 +759,6 @@ class ProvisionView(AudioViewTestCase):
     async def test_non_lan_source_is_403(self) -> None:
         # A leaked/photographed provision URL is useless off-LAN.
         with (
-            mock.patch("casasmart.audio_api.get_extra_lan_cidrs", return_value=[]),
             mock.patch("casasmart.audio_api.is_lan_request", return_value=False),
         ):
             resp = await self.view.get(H.FakeRequest(headers={}, remote="8.8.8.8"))
@@ -770,7 +769,6 @@ class ProvisionView(AudioViewTestCase):
         # LAN-only with NO JWT: the response IS the secret (it never leaves the
         # LAN), so — unlike GET /audio/broker — the password is NOT redacted.
         with (
-            mock.patch("casasmart.audio_api.get_extra_lan_cidrs", return_value=[]),
             mock.patch("casasmart.audio_api.is_lan_request", return_value=True),
         ):
             resp = await self.view.get(

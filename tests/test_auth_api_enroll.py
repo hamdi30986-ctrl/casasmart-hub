@@ -206,12 +206,10 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_remote_lockout_does_not_block_lan_owner_claim(self) -> None:
         # ONE source string ("127.0.0.1"), classified remote first and LAN
         # after: a tunnel guessing burst locks the remote bucket (429 +
-        # Retry-After); the operator then widens pairing_extra_lan_cidrs
-        # (the existing private-only knob for proxies that rewrite every
-        # source — loopback space is private, so 127.0.0.0/8 is accepted),
-        # the SAME source becomes LAN-classified, and the owner's bootstrap
-        # claim goes straight through — the remote lockout never touched
-        # the LAN bucket.
+        # Retry-After); the same source then arrives on a TLS listener trusted
+        # as LAN ingress (the Docker Desktop relay setup, where every phone
+        # shows a synthetic address), and the owner's bootstrap claim goes
+        # straight through — the remote lockout never touched the LAN bucket.
         self.hub_config.set(REMOTE_PAIRING_ENABLED_CONFIG_KEY, True)
         code = self.pairing.ensure_bootstrap_code()
         for _ in range(MAX_FAILURES):
@@ -231,10 +229,31 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 429)
         self.assertIn("Retry-After", resp.headers)
         self.assertIn("retry_after", body)
-        self.hub_config.set("pairing_extra_lan_cidrs", ["127.0.0.0/8"])
-        status, body = await self._enroll(code, TUNNEL_IP, name="Owner phone")
+        from casasmart.tls import TLS_LISTENER_TRUSTED_LAN
+
+        request = H.FakeRequest(
+            body={
+                "pairing_code": code,
+                "public_key": make_public_pem(),
+                "name": "Owner phone",
+            },
+            remote=TUNNEL_IP,
+        )
+        request.app = {TLS_LISTENER_TRUSTED_LAN: True}
+        status, body = H.read_response(await self.view.post(request))
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "admin")
+
+    async def test_retired_extra_lan_cidrs_setting_is_ignored(self) -> None:
+        # pairing_extra_lan_cidrs could only ever widen the gate to loopback
+        # (private ranges already count, public ones were refused): the very
+        # traffic a local tunnel produces. Since 2.3.0 it has no effect.
+        self._claim_hub()
+        self.hub_config.set("pairing_extra_lan_cidrs", ["127.0.0.0/8"])
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll(issued["code"], TUNNEL_IP)
+        self.assertEqual(status, 403)
+        self.assertEqual(body["message"], LAN_ONLY_MSG)
 
     # -- Admin notification fires on enroll -------------------------------------
 

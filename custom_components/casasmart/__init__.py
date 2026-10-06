@@ -635,6 +635,9 @@ async def _async_setup_dev_enroll(
     entry.async_on_unload(hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed))
 
 
+_RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"
+
+
 def _read_proc_version() -> str | None:
     """The kernel banner (identifies Docker Desktop's VM), or None off Linux."""
     try:
@@ -668,6 +671,15 @@ async def _async_start_tls(
     if not isinstance(port, int):
         port = TLS_PORT_DEFAULT
 
+    if runtime_data.hub_config.get(_RETIRED_EXTRA_LAN_CIDRS_KEY) is not None:
+        # It could only ever widen the LAN gate to loopback (private ranges
+        # already count, public ones were refused): what a local tunnel sends.
+        _LOGGER.warning(
+            "%s in hub config is ignored since 2.3.0: private and link-local "
+            "addresses already count as LAN. Remove it from %s.",
+            _RETIRED_EXTRA_LAN_CIDRS_KEY,
+            data_dir / HUB_CONFIG_FILENAME,
+        )
     ingress_setting = runtime_data.hub_config.get(LAN_RELAY_INGRESS_CONFIG_KEY)
     if not is_recognized_lan_relay_ingress(ingress_setting):
         _LOGGER.warning(

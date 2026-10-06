@@ -69,7 +69,6 @@ from .audio import (
 from .audio_adapter import AudioAdapter, AudioAdapterNotReady
 from .auth_api import (
     authenticate_request,
-    get_extra_lan_cidrs,
     get_provision_secret,
     is_lan_request,
     json_body,
@@ -896,9 +895,7 @@ class CasaSmartAudioProvisionView(_AudioView):
         secret = get_provision_secret(self._hass)
         presented = request.headers.get("X-CasaSmart-Provision-Key", "")
         secret_ok = bool(secret) and hmac.compare_digest(presented, secret)
-        if not secret_ok and not is_lan_request(
-            request, get_extra_lan_cidrs(self._hass)
-        ):
+        if not secret_ok and not is_lan_request(request):
             _LOGGER.warning(
                 "Audio provision refused (bad/absent key, non-LAN source: %s)",
                 request.remote,
