@@ -1,12 +1,11 @@
-"""Per-user settings store (post-funeral mini-block MB-2) — the pure half.
+"""Per-user settings store — the pure half.
 
-Replaces Phase 5's phone-local interim for the two pieces of personal
-state that roam across a user's phones: the display name (the
-greeting/profile name) and the home-screen widget layout. Keyed by
-``member_id`` (the PERSON, resolved from the request's device ``sub``)
-so a member's devices share one row — exactly like B17 favorites; one
-table, partial updates, schema deliberately open for whatever rides
-along later (the plan names favorites-style extensions).
+Holds, hub-side, the two pieces of personal state that roam across a
+user's phones: the display name (the greeting/profile name) and the
+home-screen widget layout. Keyed by ``member_id`` (the PERSON, resolved
+from the request's device ``sub``) so a member's devices share one row —
+exactly like registry favorites; one table, partial updates, schema
+deliberately open for whatever rides along later.
 
 Flat-importable engine like ``registry.py``: no HA imports, dict-like
 storage table in, unit-tests on a temp SQLite file. Storage-touching

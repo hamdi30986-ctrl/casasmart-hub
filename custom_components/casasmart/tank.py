@@ -127,9 +127,9 @@ def build_tank_script(
 ) -> str:
     """The mJS monitoring script pushed to the Shelly.
 
-    Same behavior as the Supabase-era reference script (read the
-    Voltmeter, POST ``{device_token, voltage}``, repeat every 5 min,
-    once immediately on start) with the hub as the destination. URL and
+    Reads the Voltmeter and POSTs ``{device_token, voltage}`` to the hub,
+    once immediately on start and then every ``interval_seconds`` (5 min by
+    default). URL and
     token are emitted through ``json.dumps`` so arbitrary config values
     can never escape the mJS string literal.
     """
@@ -303,7 +303,7 @@ class TankEngine:
     def voltage_to_percent(self, device_id: str, voltage: Any) -> float | None:
         """A raw voltage → 0-100 water-level percent via stored calibration.
 
-        The equation that used to live in the app's ``tank.dart``::
+        The equation::
 
             slope       = calibration_voltage / calibration_depth
             max_voltage = max_height * slope

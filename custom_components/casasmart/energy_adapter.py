@@ -1,4 +1,4 @@
-"""Home Assistant adapter for CasaSmart Energy Saving (P2).
+"""Home Assistant adapter for CasaSmart Energy Saving.
 
 ``energy.py`` owns durable configuration and state.  This module owns the
 live Home Assistant side of the contract:
@@ -12,10 +12,11 @@ live Home Assistant side of the contract:
 * an own-command ledger so a human state change releases one device instead
   of making the mode fight them.
 
-P2 deliberately does not register APIs or wire the adapter into integration
-setup.  P3 owns that lifecycle and lockout boundary.  Keeping this adapter
-constructible in isolation makes the full ruleset testable without a live
-Home Assistant installation.
+This module deliberately does not register APIs or manage its own lifecycle:
+``energy_runtime.EnergyController`` (created in ``__init__.py``) starts and
+stops it and owns the lockout boundary.  Keeping this adapter constructible in
+isolation makes the full ruleset testable without a live Home Assistant
+installation.
 """
 
 from __future__ import annotations
@@ -451,7 +452,7 @@ class EnergyAdapter:
 
     @callback
     def async_start(self) -> None:
-        """Subscribe once; P3 calls ``async_apply`` after engine activation."""
+        """Subscribe once; the controller calls ``async_apply`` after activation."""
         if self._unsub_state_changed is not None:
             return
         self._unsub_state_changed = self._hass.bus.async_listen(
@@ -471,7 +472,7 @@ class EnergyAdapter:
 
     @callback
     def async_mode_stopped(self) -> None:
-        """Drop dynamic work after P3 deactivates the engine."""
+        """Drop dynamic work after the controller deactivates the engine."""
         self._cancel_all_timers()
         self._own_commands.clear()
         self._managed_entities.clear()
@@ -480,7 +481,7 @@ class EnergyAdapter:
         self._config = None
 
     def issues(self) -> list[dict[str, Any]]:
-        """Return current fail-safe warnings for P3's state endpoint."""
+        """Return current fail-safe warnings for the energy state endpoint."""
         return sorted(
             (copy.deepcopy(issue) for issue in self._issues.values()),
             key=lambda item: (
@@ -503,9 +504,10 @@ class EnergyAdapter:
     async def async_apply(self, *, reason: str = "activation") -> dict[str, Any]:
         """Apply the active level and arm its dynamic rules.
 
-        The engine must already be active.  P3 owns the transaction ordering:
-        ``engine.activate/reapply`` first, then this method.  A failed device
-        command is isolated and reported; it never aborts the remaining home.
+        The engine must already be active.  The controller owns the transaction
+        ordering: ``engine.activate/reapply`` first, then this method.  A
+        failed device command is isolated and reported; it never aborts the
+        remaining home.
         """
         level = self._engine.active_level
         if level is None:

@@ -1,17 +1,17 @@
-"""CasaSmart Energy Saving engine — persistent, HA-free core (P1).
+"""CasaSmart Energy Saving engine — persistent, HA-free core.
 
 This module owns the durable configuration and state contract for the three
 Energy Saving levels. It deliberately contains no Home Assistant imports,
 service calls, timers, device inventory, or role checks:
 
-* P1 (here) validates/stores configuration, active state, releases, room
-  occupancy, factual event history, and stats-lite.
-* P2's adapter will execute rules and drive occupancy/temperature/sun edges.
-* P3 will expose the engine through authenticated REST/WS surfaces and enforce
-  lockout in command paths.
+* this module validates/stores configuration, active state, releases, room
+  occupancy, factual event history, and stats-lite;
+* ``energy_adapter`` executes rules and drives occupancy/temperature/sun edges;
+* ``energy_runtime`` and ``energy_api`` expose the engine through authenticated
+  REST/WS surfaces and enforce lockout in command paths.
 
 Storage methods are synchronous and must be called through Home Assistant's
-executor once wired. An ``RLock`` protects the in-memory mirrors and their
+executor. An ``RLock`` protects the in-memory mirrors and their
 corresponding SQLite writes. Read-heavy adapter paths use snapshots and
 ``is_released`` without touching disk.
 """
@@ -228,9 +228,9 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
 
     Keeper counts that are knowable from the blob are enforced here:
     Low gang groups keep exactly two, Medium/Smart groups keep exactly one,
-    and Medium multi-AC groups keep exactly one. The discovery/API layer in P3
-    will additionally cross-check picks against the live candidate inventory
-    (including ``ceil(n/2)`` light counts).
+    and Medium multi-AC groups keep exactly one. The discovery/API layer
+    (``energy_validation``) additionally cross-checks picks against the live
+    candidate inventory (including ``ceil(n/2)`` light counts).
     """
     level = _validate_level(level)
     if not isinstance(value, dict):
@@ -475,7 +475,7 @@ class EnergyEngine:
         smart_lockout_enabled: bool | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        """Persist a newly active level; P2 owns device-application ordering."""
+        """Persist a newly active level; applying it to devices is the adapter's job."""
         level = _validate_level(level)
         clean_actor = self._optional_actor(actor)
         with self._lock:
@@ -559,7 +559,7 @@ class EnergyEngine:
             return self.snapshot()
 
     def reapply(self, *, actor: str | None = None) -> dict[str, Any]:
-        """Commit a successful P2 re-apply: clear releases, keep device state."""
+        """Commit a successful re-apply: clear releases, keep device state."""
         clean_actor = self._optional_actor(actor)
         with self._lock:
             level = self._require_active()
@@ -635,7 +635,7 @@ class EnergyEngine:
     def clear_room_releases(
         self, room_id: str, *, reason: str = "room_empty"
     ) -> list[str]:
-        """Clear Smart releases for one room after P2's empty grace completes."""
+        """Clear one room's Smart releases after the adapter's empty grace completes."""
         room_id = _clean_id(room_id, "room_id")
         reason = _clean_id(reason, "reason")
         with self._lock:
@@ -675,8 +675,8 @@ class EnergyEngine:
         """Persist one Smart room's occupancy chip state.
 
         ``occupied=None`` is the unavailable/unknown state and requires
-        ``sensors_available=False``. P2 owns the 45-second empty debounce and
-        calls this only after the edge is accepted.
+        ``sensors_available=False``. The adapter owns the 45-second empty
+        debounce and calls this only after the edge is accepted.
         """
         room_id = _clean_id(room_id, "room_id")
         if not isinstance(sensors_available, bool):
@@ -732,7 +732,7 @@ class EnergyEngine:
         room_id: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """P2/P3 audit seam for rule, automation, and command-gate events."""
+        """Audit seam for adapter/runtime rule, automation, and command-gate events."""
         if level is not None:
             level = _validate_level(level)
         with self._lock:

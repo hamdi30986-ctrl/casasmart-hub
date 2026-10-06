@@ -11,7 +11,7 @@ state recorded in the config entry's options (``__init__.py`` reconciler):
 not resurrect a tunnel the owner turned off for pairing — the Supervisor
 itself keeps it down, not just our reconciler.
 
-Only the Supervisor backend exists, deliberately: the production fleet is
+Only the Supervisor backend exists, deliberately: the supported setup is
 HAOS + the cloudflared add-on, and a Container/Core install cannot reach
 host systemd from inside HA anyway. On those installs ``available()`` is
 False and every caller degrades gracefully — domain storage + handshake

@@ -1,7 +1,8 @@
-"""Runtime coordination for CasaSmart Energy Saving (P3).
+"""Runtime coordination for CasaSmart Energy Saving.
 
 The durable engine stays HA-free in :mod:`energy`; this module owns the
-transaction ordering around HA automations and the P2 device adapter.
+transaction ordering around HA automations and the device adapter
+(:mod:`energy_adapter`).
 """
 
 from __future__ import annotations

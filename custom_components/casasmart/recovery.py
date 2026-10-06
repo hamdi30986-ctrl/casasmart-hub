@@ -8,16 +8,18 @@ Recovery tiers:
   + new Apple ID).
 - The code is **permanent and reusable** — the printed metal card keeps
   working. Redeeming it does NOT consume it, and its hash is persisted in
-  hub_config so the same card survives factory reset (the storage tables
-  wipe, the JSON config does not). Security rests on LAN presence + the
-  escalating throttle + the card's physical secrecy, not on single-use.
+  hub_config so the same card survives restarts and reinstalls. A factory
+  reset rotates it: the reset deletes the hash and a fresh code is minted
+  on reload. Security rests on LAN presence + the escalating throttle +
+  the card's physical secrecy, not on single-use.
 - Redemption **requires LAN presence** (enforced at the API layer, same
   check as pairing) — a photo taken remotely is useless.
 - Redemption replaces the hub's single admin: the old admin device is
   unenrolled (its outstanding JWTs die instantly via the ``ver``
   revocation) and the new phone's keypair becomes the admin. Tier 3
-  (operator factory reset over Tailscale/on-site) is the
-  ``casasmart.factory_reset`` HA service — see ``__init__.py``.
+  (a factory reset through Home Assistant, on-site or over remote Home
+  Assistant access) is the ``casasmart.factory_reset`` HA service — see
+  ``__init__.py``.
 
 Code format: 10 characters from an unambiguous alphabet (no 0/O, 1/I/L),
 grouped ``XXXXX-XXXXX`` for engraving. ~49 bits — unguessable through
@@ -130,10 +132,12 @@ class RecoveryManager:
         """Install the hub's PERMANENT recovery code from a stored hash.
 
         Like the bootstrap admin code, the recovery code is engraved once and
-        must survive factory reset, so its hash is persisted in hub_config and
-        re-installed here on every boot. Idempotent; always armed (even on an
-        unclaimed hub) — redeem is inert until an admin exists (replace_admin
-        needs one), so the printed card is ready the moment the owner claims.
+        must survive restarts and reinstalls, so its hash is persisted in
+        hub_config and re-installed here on every boot (a factory reset
+        deletes the hash, so a fresh code is minted instead). Idempotent;
+        always armed (even on an unclaimed hub) — redeem is inert until an
+        admin exists (replace_admin needs one), so the printed card is ready
+        the moment the owner claims.
         """
         with self._lock:
             self._codes[RECOVERY_CODE_ID] = {
@@ -163,14 +167,13 @@ class RecoveryManager:
             return RECOVERY_CODE_ID in self._codes
 
     def redeem(self, code: str, source_key: str) -> None:
-        """Consume the recovery code, or raise.
+        """Verify the recovery code, or raise.
 
         ``source_key`` is the request's remote IP — every failure counts
         against it through the escalating throttle. Failures are one
         generic bucket: wrong code and not-armed are indistinguishable.
-        The code is consumed here; the caller re-arms AFTER the admin
-        swap succeeds, so a failed enrollment never leaves the hub with
-        both an old admin and a spent card.
+        A match is NOT consumed — the engraved card stays valid — and
+        clears the source's throttle counter.
         """
         self.throttle.check(source_key)
         if not isinstance(code, str) or not code.strip():

@@ -1,4 +1,4 @@
-"""Authenticated REST surface and discovery for Energy Saving (P3)."""
+"""Authenticated REST surface and discovery for Energy Saving."""
 
 from __future__ import annotations
 

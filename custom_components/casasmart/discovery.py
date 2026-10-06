@@ -11,9 +11,7 @@ Two layers, same split the rest of the integration uses:
   — instance name, port, TXT records. Stdlib only, zero HA/zeroconf
   imports, so ``tests/test_discovery.py`` imports it directly (the
   package ``__init__`` pulls in ``homeassistant``, absent in the test
-  env). It is also what the ``.dev`` LAN proof harness reuses to publish
-  the genuine service from the host (Docker Desktop on macOS can't
-  multicast a container onto the LAN — the real HAOS/LXC hub does).
+  env).
 
 * :class:`MdnsAdvertiser` (bottom half) is the thin lifecycle wrapper:
   it reuses **HA's own zeroconf instance** (no second mDNS responder
@@ -68,9 +66,9 @@ DEFAULT_HUB_NAME = "CasaSmart Hub"
 class MdnsServiceDescriptor:
     """Everything needed to register the service, transport-neutral.
 
-    The lifecycle wrapper converts this into a ``zeroconf.ServiceInfo``;
-    the proof harness converts it the same way. Neither the descriptor
-    nor its builder import zeroconf, so both stay unit-testable.
+    The lifecycle wrapper converts this into a ``zeroconf.ServiceInfo``.
+    Neither the descriptor nor its builder import zeroconf, so both stay
+    unit-testable.
     """
 
     service_type: str

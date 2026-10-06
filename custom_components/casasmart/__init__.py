@@ -850,7 +850,7 @@ async def _async_sync_tunnel_url(
     (camera_api.py) read it live per request, so no reload is ever needed.
     The URL keeps being advertised even while the tunnel is toggled OFF:
     phones capture the remote path at pairing for when it returns (their
-    fallback chain tolerates a dead URL), and pairing is LAN-only anyway.
+    fallback chain tolerates a dead URL), and pairing is LAN-only by default.
 
     Without an options domain this is a no-op — a service-set URL from the
     installer path is never touched.
@@ -1344,7 +1344,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     The reconciler may have parked the add-on at boot=manual (tunnel
     disabled). Removing the integration must not permanently strand the
-    client's remote access, so hand auto-boot back to the Supervisor —
+    home's remote access, so hand auto-boot back to the Supervisor —
     without starting the add-on (removal is not consent to open remote
     access right now). Best effort by design: no Supervisor, no add-on, or
     a Supervisor error is logged and dropped. runtime_data is already gone

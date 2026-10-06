@@ -19,9 +19,9 @@ app's family-share screen, which POSTs to ``/api/casasmart/pairing/codes``
 behind the admin-only ``pairing.generate`` gate. No hub button is involved.
 
 Like ``casasmart.factory_reset``, the control is reachable only through Home
-Assistant itself: pressing it requires HA access (the owner over Tailscale or
-on-site), which IS the hub's owner-authorization boundary — a stolen app token
-can never reach it.
+Assistant itself: pressing it requires HA access (on-site or over remote Home
+Assistant access), which IS the hub's owner-authorization boundary — a stolen
+app token can never reach it.
 """
 
 from __future__ import annotations
@@ -101,8 +101,9 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             # bootstrap code and returns its plaintext.
             code = pairing.ensure_bootstrap_code()
             # ROTATE the permanent sticker code: persist the new hash so it
-            # survives factory reset and is the one the boot path re-installs.
-            # The OLD printed sticker is now dead — the hub must be re-stickered.
+            # survives restarts (the boot path re-installs it); a factory
+            # reset rotates it again. The OLD printed sticker is now dead —
+            # the hub must be re-stickered.
             if code is not None:
                 data.hub_config.set(
                     BOOTSTRAP_CODE_HASH_CONFIG_KEY, pairing_hash_code(code)
@@ -170,8 +171,8 @@ class CasaSmartFactoryResetButton(ButtonEntity):
     codes are dead. KEPT: tanks, alarm zones + settings, HA devices/automations/
     Zigbee mesh, the hub's TLS/push identities and relay registration, and the
     tunnel settings.
-    Operator-only: reachable through Home Assistant (admin login / on-site /
-    Tailscale), never the CasaSmart API.
+    Operator-only: reachable through Home Assistant (admin login, on-site or
+    over remote Home Assistant access), never the CasaSmart API.
     """
 
     _attr_has_entity_name = False
@@ -193,8 +194,8 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         """Trigger casasmart.factory_reset (wipe app layer + reload).
 
         Non-blocking: the service reloads this very config entry, so awaiting it
-        would wait on our own platform unloading. The permanent sticker + metal
-        card still re-onboard the owner after the reset.
+        would wait on our own platform unloading. Fresh admin + recovery codes
+        are posted after the reset; the old sticker and metal card stop working.
         """
         _LOGGER.warning("CasaSmart factory reset requested via button")
         persistent_notification.async_create(

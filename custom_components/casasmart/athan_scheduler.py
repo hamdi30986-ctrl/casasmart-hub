@@ -8,11 +8,11 @@ configured location (``hass.config.latitude/longitude/time_zone``). It arms one 
 timer per prayer and, at prayer time, publishes a broadcast ``play`` command
 (priority ``athan``) through the audio adapter — the same play path PA uses.
 
-This replaces the standalone ``casaos-athan-scheduler`` daemon. The hub owns
-audio, so it owns athan scheduling too. The library returns UTC timestamps,
-so DST/offset handling is inherent (no fixed table), and it adds Hanafi/Shafi Asr,
-high-latitude rules and ~24 regional calculation methods — correct in any region,
-with no Supabase, no hardcoded home id and no separate broker credentials.
+The hub owns audio, so it owns athan scheduling too — no separate scheduler
+daemon. The library returns UTC timestamps, so DST/offset handling is inherent
+(no fixed table), and it adds Hanafi/Shafi Asr, high-latitude rules and ~24
+regional calculation methods — correct in any region, with no cloud lookup, no
+hardcoded home id and no separate broker credentials.
 """
 
 from __future__ import annotations
@@ -372,8 +372,8 @@ class AthanScheduler:
     ) -> tuple[float, float, str, str, str] | None:
         """Return ``(lat, lon, tz_name, method, school)`` or None if athan is off.
 
-        Location and timezone fall back to the hub's own HA config so a client
-        hub configured with the customer's location works with no app-side setup.
+        Location and timezone fall back to the hub's own HA config so a hub
+        configured with the home's location works with no app-side setup.
         """
         try:
             athan = self._engine.get_athan()

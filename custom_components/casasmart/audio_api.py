@@ -1,12 +1,11 @@
 """CasaSmart audio REST endpoints.
 
 The app's thin-client surface over the hub-side ``AudioEngine`` +
-``AudioAdapter``. This is what flips the speaker stack: the phone stops
-holding broker creds and opening its own ``MqttServerClient``, and instead
-reads hub state + fires commands here. The hub is
-the only MQTT client (the adapter), the only place the broker/PA creds live
-(the engine), and — through ``GET /audio/provision`` — the cred source the Pi
-pulls on boot instead of the dead Supabase edge function.
+``AudioAdapter``. The phone never holds broker creds or opens its own MQTT
+connection; it reads hub state + fires commands here. The hub is the only
+MQTT client (the adapter), the only place the broker/PA creds live (the
+engine), and — through ``GET /audio/provision`` — the cred source the Pi
+pulls on boot.
 
 Matches the established API pattern (``alarm_api`` / ``tank_api``): plain views
 served on both HA's port and the dedicated TLS port, every handler gates in-band with
@@ -875,7 +874,6 @@ class CasaSmartAudioPaConfigView(_AudioView):
 class CasaSmartAudioProvisionView(_AudioView):
     """GET /audio/provision — broker coordinates for the Pi speaker agent.
 
-    Replaces the dead Supabase edge function the agent used to beg for creds.
     Auth is the shared provisioning secret (header ``X-CasaSmart-Provision-Key``,
     baked into the Pi image) OR LAN membership. The secret path works from any
     source — so a Docker-NAT'd hub, whose LAN check sees a rewritten peer IP,
