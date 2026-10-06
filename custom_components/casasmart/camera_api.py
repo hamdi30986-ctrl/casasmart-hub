@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -38,14 +37,19 @@ PROXY_TIMEOUT = ClientTimeout(total=30)
 
 
 def _ticket_store(hass: HomeAssistant) -> StreamTicketStore:
-    """CasaSmart runtime component."""
+    """The ONE ticket store, shared across listeners and view instances.
+
+    ``build_views`` constructs fresh view objects for the plain and TLS
+    listeners — a ticket minted on either must validate on both, so the
+    store lives in ``hass.data``, never on a view.
+    """
     return hass.data.setdefault(DOMAIN, {}).setdefault(
         "camera_stream_tickets", StreamTicketStore()
     )
 
 
 def _serves_camera(hass: HomeAssistant, entity_id: str, rooms) -> bool:
-    """CasaSmart runtime component."""
+    """The shared existence gate: camera domain, served, in scope."""
     state = hass.states.get(entity_id)
     return (
         state is not None
@@ -56,11 +60,11 @@ def _serves_camera(hass: HomeAssistant, entity_id: str, rooms) -> bool:
 
 
 class CasaSmartCameraSnapshotView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/camera/{entity_id}/snapshot — one JPEG frame."""
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/snapshot"
     name = f"api:{DOMAIN}:camera:snapshot"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -86,11 +90,11 @@ class CasaSmartCameraSnapshotView(HomeAssistantView):
 
 
 class CasaSmartCameraStreamView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/camera/{entity_id}/stream — mint the HLS fallback."""
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/stream"
     name = f"api:{DOMAIN}:camera:stream"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -104,10 +108,10 @@ class CasaSmartCameraStreamView(HomeAssistantView):
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
         try:
-
-
-
-
+            # Starts (or reuses) the camera's HLS stream worker. The
+            # returned HA endpoint is NOT handed to the app — the proxy
+            # view re-derives it per fetch, so a worker restart with a
+            # fresh stream token never strands the player mid-watch.
             await async_request_stream(self._hass, entity_id, fmt="hls")
         except HomeAssistantError as err:
             _LOGGER.warning("Stream mint for %s failed: %s", entity_id, err)
@@ -120,11 +124,11 @@ class CasaSmartCameraStreamView(HomeAssistantView):
             f"/hls/{ticket.ticket_id}/master_playlist.m3u8"
         )
         body: dict = {"url": path, "expires_in": int(TICKET_TTL)}
-
-
-
-
-
+        # The player is a WebView — it trusts public CAs, not the hub's
+        # pinned LAN cert. Advertise the tunnel-absolute URL when one is
+        # configured so the app can hand the WebView a URL whose cert
+        # actually validates; the ticket store is shared, so a mint on
+        # the LAN route plays fine through the tunnel.
         tunnel_url = self._tunnel_url()
         if tunnel_url is not None:
             body["tunnel_url"] = f"{tunnel_url}{path}"
@@ -139,7 +143,6 @@ class CasaSmartCameraStreamView(HomeAssistantView):
 
 
 class CasaSmartCameraHlsProxyView(HomeAssistantView):
-    """CasaSmart runtime component."""
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/hls/{{ticket}}/{{filename:[A-Za-z0-9_./]+}}"
     name = f"api:{DOMAIN}:camera:hls"

@@ -1,4 +1,28 @@
-"""CasaSmart runtime component."""
+"""CasaSmart 'Regenerate pairing code' button — pairing factory reset.
+
+One button entity — ``button.casasmart_regenerate_pairing_code`` — the hub
+owner presses to FACTORY-RESET pairing. A single press, in one executor job:
+
+1. Unpairs EVERY enrolled device — admin, sub-admins and users alike. Their
+   JWTs die instantly (the same ``ver`` kill as an unpair), the login-throttle
+   counters reset, and the hub is handed back to the unclaimed state.
+2. Wipes every outstanding pairing code, the bootstrap admin code included —
+   afterwards no code exists at all.
+3. Mints a FRESH **admin** bootstrap code. With no admin left after step 1,
+   ``ensure_bootstrap_code`` re-arms the unclaimed-hub onboarding path, so the
+   owner re-pairs from scratch — the hub only ever mints admin codes.
+4. Surfaces the new plaintext admin code as an HA persistent notification —
+   the one and only time it exists in the clear.
+
+Sub-admin and user access are NOT minted here: they come exclusively from the
+app's family-share screen, which POSTs to ``/api/casasmart/pairing/codes``
+behind the admin-only ``pairing.generate`` gate. No hub button is involved.
+
+Like ``casasmart.factory_reset``, the control is reachable only through Home
+Assistant itself: pressing it requires HA access (the owner over Tailscale or
+on-site), which IS the hub's owner-authorization boundary — a stolen app token
+can never reach it.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +49,7 @@ async def async_setup_entry(
     entry: CasaSmartConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """CasaSmart runtime component."""
+    """Register the hub's owner-control buttons (regenerate pairing + factory reset)."""
     async_add_entities(
         [
             CasaSmartRegeneratePairingButton(hass, entry),
@@ -35,7 +59,7 @@ async def async_setup_entry(
 
 
 class CasaSmartRegeneratePairingButton(ButtonEntity):
-    """CasaSmart runtime component."""
+    """The owner's one-press 'factory-reset pairing' control."""
 
     _attr_has_entity_name = False
     _attr_name = "CasaSmart Regenerate Pairing Code"
@@ -47,10 +71,10 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         self._hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_regenerate_pairing_code"
-
-
-
-
+        # Pin the exact entity id the plan/app expect, independent of the hub
+        # device name (a device-named entity would become
+        # ``button.casasmart_hub_…``). Set on first registration only; the
+        # entity still groups under the hub device below.
         self.entity_id = ENTITY_ID_FORMAT.format("casasmart_regenerate_pairing_code")
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -59,7 +83,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """CasaSmart runtime component."""
+        """Wipe every device + code, then mint a fresh admin bootstrap code."""
         data = self._entry.runtime_data
         auth = data.auth
         pairing = data.pairing
@@ -67,20 +91,20 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
         def _regenerate() -> dict:
             wiped_devices = auth.wipe_all_devices()
             wiped_codes = pairing.clear_all_codes()
-
-
-
+            # The unpaired phones' push tokens are now dead — drop them so the
+            # dispatcher can't keep pushing alarm/lock events to a departed
+            # owner's phone (Phase 3).
             data.storage.table("push_tokens").clear()
-
-
+            # Every member just left, so their per-person favorites + settings
+            # (member_id-keyed) would orphan — clear them too (Phase 5).
             data.storage.table("registry_favorites").clear()
             data.storage.table("user_settings").clear()
-
-
+            # No admin remains after the wipe, so this mints a fresh ADMIN
+            # bootstrap code and returns its plaintext.
             code = pairing.ensure_bootstrap_code()
-
-
-
+            # ROTATE the permanent sticker code: persist the new hash so it
+            # survives factory reset and is the one the boot path re-installs.
+            # The OLD printed sticker is now dead — the hub must be re-stickered.
             if code is not None:
                 data.hub_config.set(
                     BOOTSTRAP_CODE_HASH_CONFIG_KEY, pairing_hash_code(code)
@@ -108,9 +132,9 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
                 "Add family members later from the app's family-share screen."
             )
         else:
-
-
-
+            # ensure_bootstrap_code only returns None if an admin still exists
+            # or a code is already outstanding — neither is reachable right
+            # after a wipe, but never claim a code we don't actually hold.
             body = (
                 f"Pairing was reset: {device_count} device(s) unpaired, "
                 f"{code_count} code(s) cleared.\n\n"
@@ -123,7 +147,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             title="CasaSmart Hub — pairing reset",
             notification_id=f"{DOMAIN}_regenerated_pairing",
         )
-
+        # The enrolled set was wiped — refresh the per-user sensors.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
         _LOGGER.info(
             "Pairing factory reset: unpaired %d device(s), wiped %d code(s), "
@@ -135,11 +159,25 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
 
 
 class CasaSmartFactoryResetButton(ButtonEntity):
-    """CasaSmart runtime component."""
+    """Nuclear reset (B3 tier 3 / ownership transfer) — wipes the app layer.
+
+    Presses ``casasmart.factory_reset`` (``__init__._handle_factory_reset``).
+    Cleared: every paired device, pairing + recovery codes, favorites, scenes,
+    per-user settings, Now data and suggestion rules, push tokens, HQ
+    notifications + the trusted HQ key, the alarm log + armed state, audio
+    config + speakers, Energy Saving data, and the registry organization layer
+    (floors, rooms, device assignments and grouping), which re-seeds from Home
+    Assistant on reload. The printed admin sticker + metal recovery card are
+    ROTATED — fresh codes are surfaced after the reset and the OLD printed
+    codes are dead. KEPT: tanks, HA devices/automations/Zigbee mesh, the hub's
+    TLS/push identities and relay registration, and the tunnel settings.
+    Operator-only: reachable through Home Assistant (admin login / on-site /
+    Tailscale), never the CasaSmart API.
+    """
 
     _attr_has_entity_name = False
     _attr_name = "CasaSmart Factory Reset"
-    _attr_icon = "mdi:alert-octagon"
+    _attr_icon = "mdi:alert-octagon"  # danger: wipes the app layer
 
     def __init__(
         self, hass: HomeAssistant, entry: CasaSmartConfigEntry
@@ -155,7 +193,12 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """CasaSmart runtime component."""
+        """Trigger casasmart.factory_reset (wipe app layer + reload).
+
+        Non-blocking: the service reloads this very config entry, so awaiting it
+        would wait on our own platform unloading. The permanent sticker + metal
+        card still re-onboard the owner after the reset.
+        """
         _LOGGER.warning("CasaSmart factory reset requested via button")
         persistent_notification.async_create(
             self._hass,

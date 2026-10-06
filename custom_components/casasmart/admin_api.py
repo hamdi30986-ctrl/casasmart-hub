@@ -1,4 +1,32 @@
-"""CasaSmart runtime component."""
+"""Installer admin endpoints (Track B — B16 3c-4b).
+
+The REST surface that retires the app's last raw-HA-token call sites —
+the five installer screens (pairing sheet, switch domain swap, IR
+wizard, tools, discovered devices). Every endpoint here is gated by
+``installer.manage`` (admin and sub-admin — see ``auth_engine.PERMISSIONS``;
+these reshape the home's hardware):
+
+- ``POST /api/casasmart/admin/zigbee/permit_join`` — open/close the
+  Zigbee network (the z2m permit-join publish the pairing sheet sent
+  itself).
+- ``GET /api/casasmart/admin/registry`` — the RAW HA entity + device
+  registries (incl. hidden/disabled): what the import flows group and
+  classify by.
+- ``GET /api/casasmart/admin/states`` — the raw state dump behind the
+  import/pairing diff (unfiltered except the token-bearing attributes —
+  see ``installer.STRIPPED_STATE_ATTRS``).
+- ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — entity
+  rename only (the switch_as_x domain swap was removed in Phase 7), a
+  scoped subset of HA's WS ``config/entity_registry/update``.
+- ``GET/POST /api/casasmart/admin/config_flow`` and
+  ``POST .../config_flow/{flow_id}`` — the config-flow proxy,
+  whitelisted to the Broadlink + EasyIR handlers (``installer
+  .ALLOWED_FLOW_HANDLERS``); driving any other integration's flow is a
+  404 indistinguishable from nonexistence.
+- ``POST /api/casasmart/admin/remote/send_command`` — IR blast through
+  a ``remote.*`` entity (the remote domain is deliberately not on the
+  entity-bridge whitelist).
+"""
 
 from __future__ import annotations
 
@@ -38,17 +66,17 @@ from .installer import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
+# A stuck MQTT broker / IR blaster must not hang the request forever —
+# same ceiling as scene activation.
 _SERVICE_CALL_TIMEOUT = 10.0
 
 _PERMISSION = "installer.manage"
 
 
 class _AdminView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """Shared plumbing for the installer admin views."""
 
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate in-handler
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -56,7 +84,7 @@ class _AdminView(HomeAssistantView):
     async def _call_service(
         self, domain: str, service: str, data: dict[str, Any]
     ) -> web.Response | None:
-        """CasaSmart runtime component."""
+        """Run a service call with a timeout; an error response or None."""
         try:
             await asyncio.wait_for(
                 self._hass.services.async_call(
@@ -78,7 +106,7 @@ class _AdminView(HomeAssistantView):
 
 
 class CasaSmartAdminPermitJoinView(_AdminView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/admin/zigbee/permit_join."""
 
     url = f"/api/{DOMAIN}/admin/zigbee/permit_join"
     name = f"api:{DOMAIN}:admin:zigbee:permit-join"
@@ -101,11 +129,11 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "MQTT is not available on this hub",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
-
-
-
-
-
+        # permit_join is PER zigbee2mqtt instance. A villa runs one
+        # coordinator per floor, so publishing only to the default base topic
+        # opened floor 1 and left the rest shut — devices upstairs simply
+        # could not be paired from the app. Open every configured instance
+        # (or the one the caller asked for).
         topics = resolve_zigbee_base_topics(
             self._zigbee_base_topics(), payload.get("base_topic")
         )
@@ -132,14 +160,14 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "ok": True,
                 "enable": enable,
                 "duration": duration if enable else None,
-
-
+                # Which coordinators actually got the message — an installer
+                # commissioning a multi-floor villa needs to see this.
                 "instances": topics,
             }
         )
 
     def _zigbee_base_topics(self) -> Any:
-        """CasaSmart runtime component."""
+        """The hub's configured zigbee2mqtt base topics (None when unset)."""
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             return None
@@ -147,7 +175,7 @@ class CasaSmartAdminPermitJoinView(_AdminView):
 
 
 class CasaSmartAdminRegistryView(_AdminView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/admin/registry — raw HA registries."""
 
     url = f"/api/{DOMAIN}/admin/registry"
     name = f"api:{DOMAIN}:admin:registry"
@@ -194,7 +222,7 @@ class CasaSmartAdminRegistryView(_AdminView):
 
 
 class CasaSmartAdminStatesView(_AdminView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/admin/states — the raw state dump."""
 
     url = f"/api/{DOMAIN}/admin/states"
     name = f"api:{DOMAIN}:admin:states"
@@ -216,7 +244,7 @@ class CasaSmartAdminStatesView(_AdminView):
 
 
 class CasaSmartAdminEntityView(_AdminView):
-    """CasaSmart runtime component."""
+    """PATCH /api/casasmart/admin/registry/entities/{entity_id}."""
 
     url = f"/api/{DOMAIN}/admin/registry/entities/{{entity_id}}"
     name = f"api:{DOMAIN}:admin:registry:entity"
@@ -239,9 +267,9 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-
-
-
+        # Name rename only — the switch_as_x options swap is gone (Phase 7), so
+        # parse_entity_patch yields exactly {"name": ...}.
+        # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:
             entry = registry.async_update_entity(
                 entity_id, name=changes["name"]
@@ -265,13 +293,14 @@ class CasaSmartAdminEntityView(_AdminView):
 
 
 class CasaSmartAdminConfigFlowsView(_AdminView):
-    """CasaSmart runtime component."""
+    """GET/POST /api/casasmart/admin/config_flow — list + initiate."""
 
     url = f"/api/{DOMAIN}/admin/config_flow"
     name = f"api:{DOMAIN}:admin:config-flow"
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
+        """In-progress flows for the whitelisted handlers only — the
+        discovered-devices screen (DHCP-found Broadlink remotes)."""
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
@@ -283,7 +312,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
         return self.json({"flows": flows})
 
     async def post(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
+        """Initiate a flow — whitelisted handlers only."""
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
@@ -302,7 +331,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
                 handler, context={"source": SOURCE_USER}
             )
         except data_entry_flow.UnknownHandler:
-
+            # Whitelisted but not installed (e.g. EasyIR missing).
             return self.json_message(
                 f"Integration {handler!r} is not installed on this hub",
                 HTTPStatus.NOT_FOUND,
@@ -313,7 +342,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
 
 
 class CasaSmartAdminConfigFlowView(_AdminView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/admin/config_flow/{flow_id} — drive a step."""
 
     url = f"/api/{DOMAIN}/admin/config_flow/{{flow_id}}"
     name = f"api:{DOMAIN}:admin:config-flow:step"
@@ -328,9 +357,9 @@ class CasaSmartAdminConfigFlowView(_AdminView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         flow_mgr = self._hass.config_entries.flow
-
-
-
+        # The handler gate applies to STEPS too — a flow_id minted by some
+        # other integration's discovery must not be drivable through this
+        # proxy. Out-of-whitelist is the same 404 as nonexistent.
         try:
             progress = flow_mgr.async_get(flow_id)
         except data_entry_flow.UnknownFlow:
@@ -351,7 +380,7 @@ class CasaSmartAdminConfigFlowView(_AdminView):
 
 
 class CasaSmartAdminRemoteCommandView(_AdminView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/admin/remote/send_command — IR blast."""
 
     url = f"/api/{DOMAIN}/admin/remote/send_command"
     name = f"api:{DOMAIN}:admin:remote:send-command"

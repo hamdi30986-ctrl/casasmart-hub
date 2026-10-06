@@ -1,4 +1,48 @@
-"""CasaSmart runtime component."""
+"""CasaSmart audio REST endpoints (Phase 6, block B14) — piece 3.
+
+The app's thin-client surface over the hub-side ``AudioEngine`` +
+``AudioAdapter``. This is what flips the speaker stack: the phone stops
+holding broker creds and opening its own ``MqttServerClient`` (B14 piece 4
+deletes that), and instead reads hub state + fires commands here. The hub is
+the only MQTT client (the adapter), the only place the broker/PA creds live
+(the engine), and — through ``GET /audio/provision`` — the cred source the Pi
+pulls on boot instead of the dead Supabase edge function.
+
+Matches the established API pattern (``alarm_api`` / ``tank_api``): plain views
+served on both HA's port and the B10 TLS port, every handler gates in-band with
+``authenticate_request``, storage-touching engine calls hop the executor, and
+pure in-memory reads (the live mirror) do not.
+
+Endpoints (roles in parens — see ``auth_engine.PERMISSIONS``):
+
+App-facing — speaker registry + live status:
+- ``GET    /audio/speakers``               — enrolled speakers + live status (``audio.read``)
+- ``GET    /audio/discover``               — un-enrolled speakers seen on the bus (``audio.manage``)
+- ``POST   /audio/speakers``               — enroll a discovered speaker (``audio.manage``)
+- ``PUT    /audio/speakers/{mac6}``        — rename / re-room (``audio.manage``)
+- ``DELETE /audio/speakers/{mac6}``        — drop the speaker (``audio.manage``)
+
+App-facing — control:
+- ``POST   /audio/speakers/{mac6}/command``— volume/stop/pause/resume/reset (``audio.control``)
+- ``POST   /audio/broadcast``              — play a URL/file to all speakers (``audio.control``)
+- ``POST   /audio/pa``                     — proxy a PA audio upload to the PA service (``audio.control``)
+
+App-facing — athan config:
+- ``GET    /audio/athan``                  — the stored athan config (``audio.read``)
+- ``PUT    /audio/athan``                  — replace it + relay retained (``audio.manage``)
+
+Installer — broker / PA credentials:
+- ``GET/PUT /audio/broker``                — broker host/port/tls/user/pass (``audio.manage``)
+- ``GET/PUT /audio/pa-config``             — PA service host/port/api-key (``audio.manage``)
+
+Device-facing — the Pi pulls its broker creds on boot:
+- ``GET    /audio/provision``              — broker coordinates, provisioning-key or LAN
+
+Mutations that move the hub's view of the speakers (enroll/remove/update) fire
+``EVENT_AUDIO_CHANGED`` so the WS server nudges connected apps to re-fetch —
+same pattern as ``EVENT_ALARM_CHANGED``. MQTT-driven changes already fire it
+from the adapter's ingest path.
+"""
 
 from __future__ import annotations
 
@@ -39,27 +83,35 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
+# Hard cap on a PA upload so a client can't stream an unbounded body into the
+# hub. PA clips are short voice/chime files.
 _PA_MAX_BYTES = 16 * 1024 * 1024
-
-
-
+# How long a hosted PA clip stays fetchable. The speakers fetch within ~1s of
+# the play command, so this is generous; short enough that the unguessable URL
+# is a non-issue. Clips are evicted lazily on access — no background sweeper.
 _PA_CLIP_TTL = 120.0
-
+# Cap on concurrently-hosted clips (defence against an upload flood).
 _PA_CLIP_MAX_COUNT = 16
 _PA_STORE_KEY = f"{DOMAIN}_pa_clips"
 
 
 class PaClipStore:
-    """CasaSmart runtime component."""
+    """Ephemeral in-memory store of PA clips the hub hosts for its speakers.
+
+    The app uploads a recorded clip; the hub keeps the bytes here under a random
+    token and hands the speakers a token URL to fetch (presigned-URL pattern —
+    the token + short TTL are the access control, so the fetch endpoint needs no
+    JWT, which also side-steps the Docker LAN-gate that would otherwise reject
+    the speakers). One event loop → no locking; expired entries are evicted
+    lazily on access, so there is no background task.
+    """
 
     def __init__(
         self, ttl: float = _PA_CLIP_TTL, max_count: int = _PA_CLIP_MAX_COUNT
     ) -> None:
         self._ttl = ttl
         self._max_count = max_count
-
+        # token -> (data, content_type, expires_at_monotonic)
         self._clips: dict[str, tuple[bytes, str, float]] = {}
 
     @property
@@ -72,17 +124,17 @@ class PaClipStore:
             del self._clips[token]
 
     def put(self, data: bytes, content_type: str) -> str:
-        """CasaSmart runtime component."""
+        """Store a clip and return its token; drops the oldest if at capacity."""
         self._evict_expired()
         while len(self._clips) >= self._max_count:
             oldest = min(self._clips, key=lambda t: self._clips[t][2])
             del self._clips[oldest]
-        token = secrets.token_urlsafe(24)
+        token = secrets.token_urlsafe(24)  # ~192 bits of entropy
         self._clips[token] = (data, content_type, time.monotonic() + self._ttl)
         return token
 
     def get(self, token: str) -> tuple[bytes, str] | None:
-        """CasaSmart runtime component."""
+        """Return ``(data, content_type)`` for a live token, else None."""
         self._evict_expired()
         item = self._clips.get(token)
         if item is None:
@@ -91,7 +143,7 @@ class PaClipStore:
 
 
 def _pa_store(hass: HomeAssistant) -> PaClipStore:
-    """CasaSmart runtime component."""
+    """The per-hass PA clip store, created on first use."""
     store = hass.data.get(_PA_STORE_KEY)
     if store is None:
         store = PaClipStore()
@@ -100,7 +152,7 @@ def _pa_store(hass: HomeAssistant) -> PaClipStore:
 
 
 def get_audio(hass: HomeAssistant) -> AudioEngine | None:
-    """CasaSmart runtime component."""
+    """The loaded entry's audio engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -109,7 +161,7 @@ def get_audio(hass: HomeAssistant) -> AudioEngine | None:
 
 
 def get_audio_adapter(hass: HomeAssistant) -> AudioAdapter | None:
-    """CasaSmart runtime component."""
+    """The loaded entry's audio MQTT adapter (None until/unless started)."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -118,7 +170,7 @@ def get_audio_adapter(hass: HomeAssistant) -> AudioAdapter | None:
 
 
 def get_athan_scheduler(hass: HomeAssistant):
-    """CasaSmart runtime component."""
+    """The loaded entry's hub-native athan scheduler (None until started)."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -127,9 +179,9 @@ def get_athan_scheduler(hass: HomeAssistant):
 
 
 class _AudioView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """Shared plumbing for the audio views."""
 
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate in-handler
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -151,13 +203,13 @@ class _AudioView(HomeAssistantView):
         return adapter, None
 
     def _notify_change(self) -> None:
-        """CasaSmart runtime component."""
+        """Tell connected apps the hub's speaker view moved."""
         self._hass.bus.async_fire(EVENT_AUDIO_CHANGED, None)
 
     def _publish_or_503(
         self, adapter: AudioAdapter, topic: str, payload: Any, *, retain: bool = False
     ) -> web.Response | None:
-        """CasaSmart runtime component."""
+        """Publish through the adapter; map a dead bus to a clean 503."""
         try:
             adapter.publish(topic, payload, qos=1, retain=retain)
         except AudioAdapterNotReady as err:
@@ -165,11 +217,11 @@ class _AudioView(HomeAssistantView):
         return None
 
 
-
+# -- speaker registry + live status -------------------------------------------
 
 
 def _scoped_area_names(hass: HomeAssistant, scope: list[str]) -> set[str]:
-    """CasaSmart runtime component."""
+    """Casefolded names of the HA areas in a token's room scope."""
     registry = ar.async_get(hass)
     names: set[str] = set()
     for area_id in scope:
@@ -184,7 +236,12 @@ def _speaker_in_scope(
     allowed_ids: set[str],
     allowed_names: set[str],
 ) -> bool:
-    """CasaSmart runtime component."""
+    """Whether a room-scoped caller may see this speaker.
+
+    Exact ``area_id`` membership first (the modern, robust path); then the
+    legacy free-text ``room`` name-match for enrolments made before speakers
+    carried an area id; then shared (no room at all) → visible to everyone.
+    """
     area_id = speaker.get("area_id")
     if area_id:
         return area_id in allowed_ids
@@ -195,7 +252,11 @@ def _speaker_in_scope(
 
 
 class CasaSmartAudioSpeakersView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET /audio/speakers — enrolled speakers merged with live status.
+
+    POST /audio/speakers — enroll a (discovered) speaker once it is on the LAN
+    and named (the tail of the app's add-speaker flow).
+    """
 
     url = f"/api/{DOMAIN}/audio/speakers"
     name = f"api:{DOMAIN}:audio:speakers"
@@ -207,18 +268,18 @@ class CasaSmartAudioSpeakersView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-
+        # speakers() copies the in-memory mirror — pure CPU, no executor hop.
         speakers = audio.speakers()
         scope = claims.get("rooms")
         if scope is not None:
-
-
-
-
-
-
-
-
+            # A room-scoped user (e.g. a guest/kids phone) sees only its rooms'
+            # speakers (Phase 8). Preferred path: the speaker's ``area_id`` (==
+            # the app's room_id / HA area id) is matched EXACTLY against the
+            # caller's room scope — robust, no name-string fuzziness. Legacy
+            # fallback: a speaker with no area_id but a free-text ``room`` label
+            # is matched by casefolded area NAME (older enrolments). A speaker
+            # with neither is shared house infra, visible to all. Fail-closed: a
+            # scoped speaker matching nothing is hidden, never leaked.
             allowed_ids = set(scope)
             allowed_names = _scoped_area_names(self._hass, scope)
             speakers = [s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)]
@@ -253,7 +314,7 @@ class CasaSmartAudioSpeakersView(_AudioView):
 
 
 class CasaSmartAudioSpeakerView(_AudioView):
-    """CasaSmart runtime component."""
+    """PUT/DELETE /audio/speakers/{mac6} — one enrolled speaker."""
 
     url = f"/api/{DOMAIN}/audio/speakers/{{mac6}}"
     name = f"api:{DOMAIN}:audio:speaker"
@@ -294,11 +355,11 @@ class CasaSmartAudioSpeakerView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-
-
-
-
-
+        # Build the reset command while the speaker is still enrolled — this
+        # also doubles as the existence check (404 for an unknown id). Then drop
+        # it from the registry and, best-effort, tell the Pi to wipe + re-enter
+        # setup and clear its retained topics so it can't resurrect as a
+        # discovery ghost on the next reconnect (M3).
         try:
             reset_topic, reset_msg = audio.build_command(mac6, CMD_RESET)
             norm_mac6 = normalize_mac6(mac6)
@@ -314,7 +375,7 @@ class CasaSmartAudioSpeakerView(_AudioView):
     def _deprovision_speaker(
         self, mac6: str, reset_topic: str, reset_msg: Any
     ) -> None:
-        """CasaSmart runtime component."""
+        """Reset the Pi + clear retained ghosts (best-effort, bus-down safe)."""
         adapter = get_audio_adapter(self._hass)
         if adapter is None:
             return
@@ -331,7 +392,12 @@ class CasaSmartAudioSpeakerView(_AudioView):
 
 
 class CasaSmartAudioDiscoverView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET /audio/discover — speakers heard on the bus but not yet enrolled.
+
+    Provokes a fresh announce round (the adapter pings the bus) and returns the
+    un-enrolled set — the source for the app's add-speaker list. Admin-only
+    (it is the install/onboarding surface, not a household action).
+    """
 
     url = f"/api/{DOMAIN}/audio/discover"
     name = f"api:{DOMAIN}:audio:discover"
@@ -343,18 +409,23 @@ class CasaSmartAudioDiscoverView(_AudioView):
         adapter, not_ready = self._adapter_or_503()
         if not_ready is not None:
             return not_ready
-
-
-
+        # async_discover pings the bus then returns engine.discovered() — the
+        # ping is fire-and-forget, the snapshot is the retained truth already in
+        # the engine, so this returns immediately.
         discovered = await adapter.async_discover()
         return self.json({"discovered": discovered})
 
 
-
+# -- control ------------------------------------------------------------------
 
 
 class CasaSmartAudioCommandView(_AudioView):
-    """CasaSmart runtime component."""
+    """POST /audio/speakers/{mac6}/command — a per-speaker control.
+
+    Body: ``{"cmd": "volume", "value": 40}`` or ``{"cmd": "stop"}`` etc. The
+    engine validates the command vocabulary + value and builds the exact wire
+    payload the Pi agent speaks; the adapter publishes it.
+    """
 
     url = f"/api/{DOMAIN}/audio/speakers/{{mac6}}/command"
     name = f"api:{DOMAIN}:audio:command"
@@ -389,7 +460,15 @@ class CasaSmartAudioCommandView(_AudioView):
 
 
 class CasaSmartAudioAirplayView(_AudioView):
-    """CasaSmart runtime component."""
+    """POST /audio/speakers/{mac6}/airplay — AirPlay transport (DACP remote).
+
+    Body: ``{"action": "playpause"}`` (also play/pause/next/previous/stop). The
+    engine maps the action to shairport-sync's remote verb; we publish it as a
+    **raw, non-retained** string to ``speakers/<mac6>/airplay/remote`` and
+    shairport relays it as a DACP command to the AirPlay *source* — so the
+    phone's own playback actually pauses/skips. A no-op if nothing is currently
+    AirPlaying to that speaker.
+    """
 
     url = f"/api/{DOMAIN}/audio/speakers/{{mac6}}/airplay"
     name = f"api:{DOMAIN}:audio:airplay"
@@ -422,7 +501,12 @@ class CasaSmartAudioAirplayView(_AudioView):
 
 
 class CasaSmartAudioBroadcastView(_AudioView):
-    """CasaSmart runtime component."""
+    """POST /audio/broadcast — play a URL/file on every speaker.
+
+    Body: ``{"url": "..."}`` or ``{"file": "..."}`` (exactly one), optional
+    ``volume`` / ``priority``. For an already-hosted source; uploading raw
+    audio goes through ``POST /audio/pa`` instead.
+    """
 
     url = f"/api/{DOMAIN}/audio/broadcast"
     name = f"api:{DOMAIN}:audio:broadcast"
@@ -458,7 +542,17 @@ class CasaSmartAudioBroadcastView(_AudioView):
 
 
 class CasaSmartAudioPaView(_AudioView):
-    """CasaSmart runtime component."""
+    """POST /audio/pa — host a PA clip on the hub and play it on the speakers.
+
+    Hub-native (no external PA service): the app POSTs ``multipart/form-data``
+    with an ``audio`` file part (+ optional ``targets``). The hub stores the clip
+    under a random token and publishes a ``play`` command carrying the
+    hub-relative clip path; each speaker builds a URL from the hub host it is
+    already connected to (so it tracks the hub's IP with no extra discovery) and
+    fetches the clip over the LAN. The audio never touches the cloud — when the
+    app is remote only the upload rides the tunnel; the speakers still fetch
+    locally. Served by ``CasaSmartAudioPaClipView``.
+    """
 
     url = f"/api/{DOMAIN}/audio/pa"
     name = f"api:{DOMAIN}:audio:pa"
@@ -480,16 +574,16 @@ class CasaSmartAudioPaView(_AudioView):
         if read_error is not None:
             return read_error
 
-
-
-
+        # Host the clip under an unguessable token and hand the speakers a
+        # hub-relative path — each resolves it against the hub host it is live
+        # on, so it survives the hub's IP changing (see PaClipStore).
         token = _pa_store(self._hass).put(
             data, content_type or "application/octet-stream"
         )
         clip_path = f"/api/{DOMAIN}/audio/pa-clip/{token}"
 
-
-
+        # Play(pa) on the selected speakers, or broadcast to all. A target that
+        # isn't enrolled is skipped rather than failing the whole announcement.
         played_on: list[str] = []
         try:
             if targets:
@@ -529,7 +623,16 @@ class CasaSmartAudioPaView(_AudioView):
     async def _read_pa_parts(
         self, request: web.Request
     ) -> tuple[str, str, bytes, list[str], web.Response | None]:
-        """CasaSmart runtime component."""
+        """Pull the ``audio`` (bounded) + optional ``targets`` parts.
+
+        ``targets`` is an optional text field — a JSON array or comma-separated
+        list of speaker ids — naming the speakers the clip should play on. It is
+        normalised to canonical mac6s (invalid entries dropped); an empty list
+        means "broadcast to all".
+
+        Returns ``(filename, content_type, data, targets, None)`` or
+        ``("", "", b"", [], error_response)``.
+        """
         try:
             reader = await request.multipart()
         except (AssertionError, ValueError):
@@ -570,7 +673,13 @@ class CasaSmartAudioPaView(_AudioView):
 
 
 class CasaSmartAudioPaClipView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET /audio/pa-clip/{token} — serve a hosted PA clip to the speakers.
+
+    No JWT: access is gated by the unguessable token + short TTL (presigned-URL
+    pattern). Deliberately NOT LAN-gated — the speakers fetch this and, behind
+    Docker, every inbound source is rewritten to a non-LAN peer, so a LAN gate
+    would reject them. Plain HTTP so the Pi's ``wget`` needs no TLS.
+    """
 
     url = f"/api/{DOMAIN}/audio/pa-clip/{{token}}"
     name = f"api:{DOMAIN}:audio:pa-clip"
@@ -583,11 +692,16 @@ class CasaSmartAudioPaClipView(_AudioView):
         return web.Response(body=data, content_type=content_type)
 
 
-
+# -- athan config -------------------------------------------------------------
 
 
 class CasaSmartAudioAthanView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET/PUT /audio/athan — the hub-owned athan config.
+
+    GET (``audio.read``) renders the app's athan settings screen. PUT
+    (``audio.manage``) replaces it and relays it RETAINED to ``athan/config``
+    so the scheduler picks it up immediately and on every reconnect.
+    """
 
     url = f"/api/{DOMAIN}/audio/athan"
     name = f"api:{DOMAIN}:audio:athan"
@@ -600,10 +714,10 @@ class CasaSmartAudioAthanView(_AudioView):
         if not_ready is not None:
             return not_ready
         athan = audio.get_athan()
-
-
-
-
+        # The effective location the scheduler will use: the app's pinned coords
+        # if any, else the hub's own home location (hass.config). The app renders
+        # this read-only ("Location follows your home · <timezone>") now that it
+        # no longer pins a city itself.
         cfg = self._hass.config
         pinned = athan.get("lat") is not None and athan.get("lon") is not None
         location = {
@@ -612,9 +726,9 @@ class CasaSmartAudioAthanView(_AudioView):
             "timezone": athan.get("timezone") or cfg.time_zone,
             "source": "config" if pinned else "home",
         }
-
-
-
+        # Observability: the scheduler's last computed schedule (today's times,
+        # which are still ahead, the next one, and the resolved target speakers)
+        # so the app can show "Next athan: …" and a silent miss can't hide.
         scheduler = get_athan_scheduler(self._hass)
         schedule = scheduler.schedule_snapshot() if scheduler is not None else None
         return self.json({"athan": athan, "location": location, "schedule": schedule})
@@ -636,9 +750,9 @@ class CasaSmartAudioAthanView(_AudioView):
             stored = await self._hass.async_add_executor_job(audio.set_athan, config)
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-
-
-
+        # Relay retained so the scheduler gets it now and on every reconnect.
+        # A dead bus is non-fatal here: the config is persisted, the next
+        # adapter (re)connect does not re-push stored athan, so surface it.
         adapter = get_audio_adapter(self._hass)
         relayed = False
         if adapter is not None:
@@ -649,20 +763,25 @@ class CasaSmartAudioAthanView(_AudioView):
                 _LOGGER.warning(
                     "Athan config stored but not relayed — MQTT bus is down"
                 )
-
-
-
+        # Re-arm the hub's own scheduler off the new config immediately (the
+        # retained relay above is now vestigial — kept for any external listener
+        # — but the hub itself is the scheduler and reschedules in-process).
         scheduler = get_athan_scheduler(self._hass)
         if scheduler is not None:
             scheduler.reschedule()
         return self.json({"athan": stored, "relayed": relayed})
 
 
-
+# -- installer: broker / PA credentials ---------------------------------------
 
 
 class CasaSmartAudioBrokerView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET/PUT /audio/broker — the MQTT broker credentials (admin only).
+
+    PUT cycles the adapter so the hub reconnects with the new creds. Body
+    fields are all optional (omitted = unchanged): ``host``, ``port``,
+    ``tls``, ``username``, ``password``.
+    """
 
     url = f"/api/{DOMAIN}/audio/broker"
     name = f"api:{DOMAIN}:audio:broker"
@@ -694,7 +813,7 @@ class CasaSmartAudioBrokerView(_AudioView):
             )
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-
+        # Reconnect the single MQTT client with the new creds.
         adapter = get_audio_adapter(self._hass)
         if adapter is not None:
             await adapter.async_reconfigure()
@@ -702,7 +821,7 @@ class CasaSmartAudioBrokerView(_AudioView):
 
 
 class CasaSmartAudioPaConfigView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET/PUT /audio/pa-config — the PA service host/port/api-key (admin)."""
 
     url = f"/api/{DOMAIN}/audio/pa-config"
     name = f"api:{DOMAIN}:audio:pa-config"
@@ -735,11 +854,19 @@ class CasaSmartAudioPaConfigView(_AudioView):
         return self.json({"pa": _redact_secret(pa, "api_key")})
 
 
-
+# -- device-facing: the Pi pulls its broker creds on boot ---------------------
 
 
 class CasaSmartAudioProvisionView(_AudioView):
-    """CasaSmart runtime component."""
+    """GET /audio/provision — broker coordinates for the Pi speaker agent.
+
+    Replaces the dead Supabase edge function the agent used to beg for creds.
+    Auth is the shared provisioning secret (header ``X-CasaSmart-Provision-Key``,
+    baked into the Pi image) OR LAN membership. The secret path works from any
+    source — so a Docker-NAT'd hub, whose LAN check sees a rewritten peer IP,
+    still provisions — while the LAN fallback keeps the original keyless posture
+    for a bare on-LAN hub.
+    """
 
     url = f"/api/{DOMAIN}/audio/provision"
     name = f"api:{DOMAIN}:audio:provision"
@@ -748,11 +875,11 @@ class CasaSmartAudioProvisionView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-
-
-
-
-
+        # Auth = the shared provisioning secret (header) OR the LAN gate. The
+        # secret path is what a Pi uses: it works from any source, so a
+        # Docker-NAT'd hub (whose LAN check sees a rewritten peer IP) still
+        # provisions. The LAN fallback preserves the original keyless posture
+        # for a bare on-LAN hub.
         secret = get_provision_secret(self._hass)
         presented = request.headers.get("X-CasaSmart-Provision-Key", "")
         secret_ok = bool(secret) and hmac.compare_digest(presented, secret)
@@ -776,11 +903,16 @@ class CasaSmartAudioProvisionView(_AudioView):
         return self.json({"broker": broker})
 
 
-
+# -- helpers ------------------------------------------------------------------
 
 
 def _parse_targets(raw: Any) -> list[str]:
-    """CasaSmart runtime component."""
+    """Normalise a PA ``targets`` field to a de-duped list of canonical mac6s.
+
+    Accepts a JSON array (``["aabbcc", ...]``) or a comma/space-separated
+    string. Invalid ids are dropped silently — a bad selection must never block
+    the announcement, it just falls back toward broadcast. Order preserved.
+    """
     if not isinstance(raw, str) or not raw.strip():
         return []
     items: list[Any]
@@ -807,15 +939,21 @@ def _parse_targets(raw: Any) -> list[str]:
 
 
 def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """Copy ``config`` with ``field`` reduced to a bool ``<field>_set``.
+
+    Config GETs are admin-only, but the broker password / PA key still never
+    need to round-trip to the app — the app only needs to know whether one is
+    set. The plaintext stays hub-side (and goes to the Pi only over the
+    LAN-only provision endpoint).
+    """
     redacted = dict(config)
     redacted[f"{field}_set"] = bool(redacted.pop(field, None))
     return redacted
 
 
-
-
-
+# -- executor jobs (storage-touching engine calls) ----------------------------
+# Plain module-level callables so async_add_executor_job gets a function, not a
+# closure capturing request state.
 
 
 def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):

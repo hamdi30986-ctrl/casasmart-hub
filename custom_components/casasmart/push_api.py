@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -31,7 +30,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _get_push_store(hass: HomeAssistant):
-    """CasaSmart runtime component."""
+    """Return the PushTokenStore from runtime data, or None."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -45,7 +44,7 @@ def _get_runtime_data(hass: HomeAssistant):
 
 
 class CasaSmartPushTokenView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """POST + DELETE /api/casasmart/auth/push-token."""
 
     url = "/api/casasmart/auth/push-token"
     name = "api:casasmart:auth:push-token"
@@ -55,8 +54,10 @@ class CasaSmartPushTokenView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
-        claims, err = authenticate_request(self._hass, request, "devices.read")
+        """Register or refresh an FCM push token."""
+        claims, err = authenticate_request(
+            self._hass, request, "devices.read"
+        )
         if err is not None:
             return err
 
@@ -111,8 +112,10 @@ class CasaSmartPushTokenView(HomeAssistantView):
         )
 
     async def delete(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
-        claims, err = authenticate_request(self._hass, request, "devices.read")
+        """Unregister the calling device's push token (logout)."""
+        claims, err = authenticate_request(
+            self._hass, request, "devices.read"
+        )
         if err is not None:
             return err
 
@@ -125,7 +128,9 @@ class CasaSmartPushTokenView(HomeAssistantView):
 
         device_id = claims["sub"]
 
-        existed = await self._hass.async_add_executor_job(store.unregister, device_id)
+        existed = await self._hass.async_add_executor_job(
+            store.unregister, device_id
+        )
 
         return web.json_response(
             {"device_id": device_id, "removed": existed},

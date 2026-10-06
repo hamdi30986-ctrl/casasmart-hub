@@ -1,4 +1,19 @@
-"""CasaSmart runtime component."""
+"""CasaSmart enrolled-user sensors — one per paired device.
+
+Each enrolled device surfaces as ``sensor.casasmart_user_<name>`` whose STATE
+is the device's role (``admin`` / ``sub-admin`` / ``user``) and whose
+attributes carry ``device_id``, ``enrolled_at`` and ``last_seen`` (plus the
+room scope + display name). They are the household roster as first-class HA
+entities — visible on a dashboard, usable in automations ("notify me when a
+new sub-admin pairs").
+
+The set is dynamic: the platform seeds from the auth engine at setup, then
+reconciles on every ``EVENT_AUTH_CHANGED`` (pair / role-or-room edit / unpair
+/ admin recovery / pairing-code regeneration) — adding sensors for new
+devices, removing them for gone ones, repainting the rest. ``last_seen`` is
+the engine's in-memory liveness clock (see ``AuthEngine.list_devices``): None
+until the device makes its first authenticated call this boot.
+"""
 
 from __future__ import annotations
 
@@ -21,14 +36,14 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
-
+# Role/name/enrollment changes repaint instantly off EVENT_AUTH_CHANGED; this
+# slow poll only refreshes the live `last_seen` clock (an in-memory read), so a
+# couple of minutes of granularity is plenty and costs nothing.
 SCAN_INTERVAL = timedelta(minutes=2)
 
 
 def _iso(unix_seconds: float | int | None) -> str | None:
-    """CasaSmart runtime component."""
+    """Unix seconds -> ISO-8601 UTC string, or None for falsy/absent."""
     if not unix_seconds:
         return None
     return datetime.fromtimestamp(float(unix_seconds), tz=timezone.utc).isoformat()
@@ -39,14 +54,14 @@ async def async_setup_entry(
     entry: CasaSmartConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """CasaSmart runtime component."""
+    """Seed the Energy Saving status plus per-user roster sensors."""
     async_add_entities([CasaSmartEnergySavingsSensor(entry)])
     manager = _UserSensorManager(hass, entry, async_add_entities)
     await manager.async_start()
 
 
 class CasaSmartEnergySavingsSensor(SensorEntity):
-    """CasaSmart runtime component."""
+    """Native HA summary of the hub-authoritative Energy Saving state."""
 
     _attr_name = "CasaSmart Energy Savings"
     _attr_icon = "mdi:leaf"
@@ -92,7 +107,7 @@ class CasaSmartEnergySavingsSensor(SensorEntity):
 
 
 class _UserSensorManager:
-    """CasaSmart runtime component."""
+    """Owns the live mapping of device id -> sensor entity for one hub entry."""
 
     def __init__(
         self,
@@ -104,17 +119,22 @@ class _UserSensorManager:
         self._entry = entry
         self._add = async_add_entities
         self._entities: dict[str, CasaSmartUserSensor] = {}
-
-
-
+        # Entity ids handed out so far — seeds the uniqueness check so a batch
+        # of same-named devices doesn't collide before any are in the state
+        # machine.
         self._entity_ids: set[str] = set()
-
-
-
+        # EVENT_AUTH_CHANGED can fire in bursts (a regeneration revokes then
+        # mints); serialize reconciles so two of them can't both create the
+        # same new entity.
         self._lock = asyncio.Lock()
 
     def _next_entity_id(self, record: dict[str, Any]) -> str:
-        """CasaSmart runtime component."""
+        """A unique ``sensor.casasmart_user_<name>`` id for a new device.
+
+        Pinned (not device-name-prefixed) to match the plan; deduped across
+        the live state machine AND the ids already handed out this batch, so
+        same-named devices get ``…_2`` / ``…_3`` rather than colliding.
+        """
         name = record.get("name") or record["device_id"]
         object_id = f"casasmart_user_{slugify(name)}"
         existing = set(self._hass.states.async_entity_ids()) | self._entity_ids
@@ -174,12 +194,12 @@ class _UserSensorManager:
 
 
 class CasaSmartUserSensor(SensorEntity):
-    """CasaSmart runtime component."""
+    """One enrolled device: role as state, enrollment detail as attributes."""
 
     _attr_has_entity_name = False
     _attr_icon = "mdi:account-key"
-
-
+    # Polled (SCAN_INTERVAL) ONLY to refresh the live `last_seen` clock; role /
+    # name / enrollment changes still repaint instantly via update_record.
     _attr_should_poll = True
 
     def __init__(
@@ -195,9 +215,9 @@ class CasaSmartUserSensor(SensorEntity):
         self._attr_unique_id = f"{entry_id}_user_{self._device_id}"
         name = record.get("name") or self._device_id
         self._attr_name = f"CasaSmart User {name}"
-
-
-
+        # Pin the plan's exact ``sensor.casasmart_user_<name>`` id (a
+        # device-named entity would become ``sensor.casasmart_hub_…``). Set on
+        # first registration only; still groups under the hub device below.
         self.entity_id = entity_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry_id)},
@@ -207,7 +227,7 @@ class CasaSmartUserSensor(SensorEntity):
 
     @callback
     def update_record(self, record: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Adopt a fresh roster record and repaint (no-op before added)."""
         self._record = record
         if self.hass is not None:
             self.async_write_ha_state()
@@ -223,7 +243,7 @@ class CasaSmartUserSensor(SensorEntity):
             "name": self._record.get("name"),
             "rooms": self._record.get("rooms"),
             "enrolled_at": _iso(self._record.get("paired_at")),
-
-
+            # Read live from the engine's in-memory clock (cheap), so the slow
+            # poll keeps it current without waiting for a roster change.
             "last_seen": _iso(self._engine.last_seen(self._device_id)),
         }

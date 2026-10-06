@@ -1,4 +1,17 @@
-"""CasaSmart runtime component."""
+"""Per-user settings store (post-funeral mini-block MB-2) — the pure half.
+
+Replaces Phase 5's phone-local interim for the two pieces of personal
+state that roam across a user's phones: the display name (the
+greeting/profile name) and the home-screen widget layout. Keyed by
+``member_id`` (the PERSON, resolved from the request's device ``sub``)
+so a member's devices share one row — exactly like B17 favorites; one
+table, partial updates, schema deliberately open for whatever rides
+along later (the plan names favorites-style extensions).
+
+Flat-importable engine like ``registry.py``: no HA imports, dict-like
+storage table in, unit-tests on a temp SQLite file. Storage-touching
+methods are synchronous (call via executor).
+"""
 
 from __future__ import annotations
 
@@ -9,23 +22,23 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 _NAME_MAX = 64
-
-
+# A widget grid is 4x4-ish today; 64 leaves generous headroom while
+# keeping a runaway client from growing the row unbounded.
 _MAX_TILES = 64
 _TILE_FIELD_MAX = 128
 
-
-
-
+# The complete settable surface today. PUT bodies naming anything else
+# are rejected — additions extend this map (with their own validator),
+# they never get stored unvalidated.
 _KNOWN_FIELDS = ("display_name", "widget_tiles")
 
 
 class SettingsError(Exception):
-    """CasaSmart runtime component."""
+    """Settings input rejected (maps to HTTP 400)."""
 
 
 def _clean_display_name(value: Any) -> str | None:
-    """CasaSmart runtime component."""
+    """None/empty clears; anything else must be a sane short string."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -39,7 +52,11 @@ def _clean_display_name(value: Any) -> str | None:
 
 
 def _clean_widget_tiles(value: Any) -> list[dict[str, str]] | None:
-    """CasaSmart runtime component."""
+    """None clears; otherwise a list of ``{type, entityId, name}`` tiles.
+
+    The hub stores the layout opaquely for the app to mirror back — but
+    shape-validated and size-capped, never raw client JSON.
+    """
     if value is None:
         return None
     if not isinstance(value, list):
@@ -72,19 +89,21 @@ _VALIDATORS = {
 
 
 class UserSettingsEngine:
-    """CasaSmart runtime component."""
+    """Per-user settings rows over one storage table."""
 
     def __init__(self, table: Any) -> None:
         self._table = table
         self._lock = threading.RLock()
 
     def get(self, member_id: str) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """A member's full settings doc — every known field, None when unset."""
         record = self._table.get(member_id) or {}
         return {field: record.get(field) for field in _KNOWN_FIELDS}
 
     def update(self, member_id: str, changes: Any) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Partial update: only the fields present in ``changes`` move;
+        an explicit null clears. Unknown fields are rejected so a typo'd
+        key can't silently store garbage forever. Returns the full doc."""
         if not isinstance(changes, dict):
             raise SettingsError("Body must be a JSON object")
         unknown = [key for key in changes if key not in _VALIDATORS]
@@ -100,7 +119,7 @@ class UserSettingsEngine:
         with self._lock:
             record = self._table.get(member_id) or {}
             record.update(validated)
-
+            # Fully cleared rows are deleted, not kept as tombstones.
             if all(record.get(field) is None for field in record):
                 self._table.pop(member_id, None)
             else:
@@ -108,6 +127,7 @@ class UserSettingsEngine:
         return {field: record.get(field) for field in _KNOWN_FIELDS}
 
     def delete(self, member_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Drop a member's settings row — called when their last device is
+        unpaired so the row can't orphan. No-op when the row is absent."""
         with self._lock:
             self._table.pop(member_id, None)

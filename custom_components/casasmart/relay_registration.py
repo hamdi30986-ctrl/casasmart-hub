@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -30,12 +29,10 @@ _ACTIVATION_CODE_RE = re.compile(
 
 
 def is_activation_code_format(value: object) -> bool:
-    """CasaSmart runtime component."""
     return isinstance(value, str) and _ACTIVATION_CODE_RE.fullmatch(value) is not None
 
 
 class IdentityProofSigner(Protocol):
-    """CasaSmart runtime component."""
 
     @property
     def public_spki_der(self) -> bytes: ...
@@ -49,7 +46,6 @@ class PushPublicKey(Protocol):
 
 
 def canonical_registration_payload(payload: dict[str, Any]) -> bytes:
-    """CasaSmart runtime component."""
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -67,7 +63,6 @@ def build_registration_proof(
     nonce: str,
     activation_code: str | None = None,
 ) -> dict[str, Any]:
-    """CasaSmart runtime component."""
     unsigned: dict[str, Any] = {
         "version": REGISTRATION_VERSION,
         "hub_id": hub_id,
@@ -93,7 +88,6 @@ class _AttemptResult:
 
 
 class RelayRegistrar:
-    """CasaSmart runtime component."""
 
     def __init__(
         self,
@@ -131,11 +125,9 @@ class RelayRegistrar:
 
     @property
     def registration_url(self) -> str:
-        """CasaSmart runtime component."""
         return self._registration_url
 
     def start(self, hass, entry) -> None:
-        """CasaSmart runtime component."""
         task = entry.async_create_background_task(
             hass,
             self.async_run(),
@@ -145,14 +137,12 @@ class RelayRegistrar:
             self._task = task
 
     def stop(self) -> None:
-        """CasaSmart runtime component."""
         self._activation_code = None
         task, self._task = self._task, None
         if task is not None and not task.done():
             task.cancel()
 
     async def async_run(self) -> None:
-        """CasaSmart runtime component."""
         attempt = 0
         while True:
             attempt += 1
@@ -279,7 +269,6 @@ class RelayRegistrar:
 
     @staticmethod
     async def _read_response(response) -> dict[str, Any]:
-        """CasaSmart runtime component."""
         try:
             chunks: list[bytes] = []
             total = 0
@@ -300,7 +289,6 @@ class RelayRegistrar:
 
     @staticmethod
     async def _async_callback(callback: Callable[..., Any] | None, *args: Any) -> None:
-        """CasaSmart runtime component."""
         if callback is None:
             return
         result = callback(*args)

@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -130,48 +129,52 @@ WIDGET_SCOPE_PERMISSIONS: frozenset[str] = frozenset(
 
 
 class AuthError(Exception):
-    """CasaSmart runtime component."""
+    """Base for everything the auth engine can refuse."""
 
 
 class EnrollError(AuthError):
-    """CasaSmart runtime component."""
+    """Enrollment input rejected (bad key, bad role...)."""
 
 
 class AdminExistsError(EnrollError):
-    """CasaSmart runtime component."""
+    """A second admin enrollment was attempted (plan: exactly one admin)."""
 
 
 class UnknownDeviceError(AuthError):
-    """CasaSmart runtime component."""
+    """No enrolled device under that id."""
 
 
 class ChallengeError(AuthError):
-    """CasaSmart runtime component."""
+    """Challenge missing, expired, already used, or signature invalid."""
 
 
 class UserManagementError(AuthError):
-    """CasaSmart runtime component."""
+    """A user-management edit was refused (unknown id, admin protected...)."""
 
 
 class AuthEngine:
-    """CasaSmart runtime component."""
+    """Device enrollment, challenge-response login, JWT mint/validate."""
 
     def __init__(self, devices_table: Any, hub_config: Any) -> None:
         self._devices = devices_table
         self._hub_config = hub_config
         self._lock = threading.RLock()
-
+        # challenge_id -> {device_id, nonce, expires}
         self._challenges: dict[str, dict[str, Any]] = {}
         self.throttle = FailureThrottle("login")
         self._secret: bytes | None = None
-
-
-
-
+        # In-memory mirror of every device's auth-relevant state:
+        # device_id -> {role, rooms, ver}. validate_token reads ONLY this
+        # (no DB hop on the event loop); enroll/update/delete keep it in
+        # sync, which is what makes revocation instant.
         self._device_cache: dict[str, dict[str, Any]] = {}
 
     def warm_up(self) -> None:
-        """CasaSmart runtime component."""
+        """Load the signing secret + device cache from storage.
+
+        Blocking file/DB I/O — called once via executor at setup so the
+        first ``validate_token`` on the event loop is pure CPU.
+        """
         self._signing_secret()
         with self._lock:
             self._device_cache = {
@@ -183,10 +186,10 @@ class AuthEngine:
                 for device_id, record in self._devices.items()
             }
 
-
+    # -- signing secret ------------------------------------------------------
 
     def _signing_secret(self) -> bytes:
-        """CasaSmart runtime component."""
+        """The hub's JWT secret — generated once, persisted in hub config."""
         with self._lock:
             if self._secret is None:
                 stored = self._hub_config.get("jwt_secret")
@@ -197,7 +200,7 @@ class AuthEngine:
                 self._secret = bytes.fromhex(stored)
             return self._secret
 
-
+    # -- enrollment (storage — call via executor) ------------------------------
 
     def enroll_device(
         self,
@@ -209,12 +212,17 @@ class AuthEngine:
         member_id: str | None = None,
         code_hash: str | None = None,
     ) -> str:
-        """CasaSmart runtime component."""
+        """Store a device's identity; returns the new device id.
+
+        ``enrolled_via`` records the pairing code id the device redeemed (None
+        for paths that don't go through one), retained on the device record for
+        potential per-code revocation.
+        """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
-
-
-
+        # Pre-auth input — cap the stored length (truncate, never reject; see
+        # MAX_DEVICE_NAME_LENGTH). strip() again below so the cap can't leave a
+        # trailing space.
         name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
@@ -229,8 +237,8 @@ class AuthEngine:
             raise EnrollError(str(err)) from err
 
         with self._lock:
-
-
+            # Plan decision 2026-06-09: exactly one admin per hub, the hub
+            # rejects any attempt to create a second one.
             if role == ROLE_ADMIN and self.has_admin():
                 raise AdminExistsError("This hub already has an admin")
 
@@ -243,17 +251,17 @@ class AuthEngine:
                 "ver": 1,
                 "paired_at": time.time(),
                 "enrolled_via": enrolled_via,
-
-
-
-
-
+                # Hash of the code this device actually redeemed. The idempotent
+                # re-pair path accepts it forever, so a double-submit — or a
+                # retry after a mid-redeem timeout — still works once that path
+                # checks the code, even though the code itself was consumed on
+                # the first pass. None on records enrolled before this existed.
                 "enrolled_code_hash": code_hash,
-
-
-
-
-
+                # The PERSON this device belongs to. An "add device to member"
+                # pairing code carries an existing member_id (the device joins
+                # that person); a new-member code passes None and we mint one.
+                # favorites + user_settings key by member_id so a person's
+                # devices share them (auth itself still uses the per-device sub).
                 "member_id": member_id or f"mem-{secrets.token_urlsafe(9)}",
             }
             self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
@@ -268,13 +276,32 @@ class AuthEngine:
         public_key_pem: str,
         rooms: list[str] | None = None,
     ) -> bool:
-        """CasaSmart runtime component."""
+        """Idempotently enroll a device under a CALLER-CHOSEN id.
+
+        The stable-id sibling of :meth:`enroll_device` (which mints a random,
+        unguessable id). Here the caller names the id, so declarative
+        provisioning — a manifest of trusted keys re-applied after every
+        factory reset — can pin an id that OUTLIVES the reset, instead of a
+        fresh random id breaking any tooling that hardcoded the old one.
+
+        Sub-admin / user only: the single-admin invariant means an admin
+        identity is never minted from a static manifest (same ceiling as
+        :meth:`update_device`). Returns True when it actually wrote a record,
+        False when the id is already enrolled with the SAME key/role/rooms — so
+        it is safe to call on every boot and every auth-changed event and only
+        ever writes on a real diff. If the id exists with DIFFERENT material the
+        record is rewritten and its ``ver`` bumped, killing any stale tokens
+        (same instant-revocation contract as :meth:`update_device`), so the
+        manifest stays authoritative. The write keeps the in-memory cache in
+        sync under the lock, so a freshly provisioned device can log in on the
+        very next request — no :meth:`warm_up` needed.
+        """
         if not isinstance(device_id, str) or not device_id.strip():
             raise EnrollError("device_id is required")
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
-
-
+        # Never admin: the dev/provisioning path must not be able to mint an
+        # owner identity around the single-admin invariant.
         if role not in (ROLE_SUB_ADMIN, ROLE_USER):
             raise EnrollError("Provisioned role must be sub-admin or user")
         if rooms is not None and (
@@ -296,7 +323,7 @@ class AuthEngine:
                 and existing.get("role") == role
                 and existing.get("rooms") == rooms
             ):
-                return False
+                return False  # already correct — idempotent no-op
 
             if existing is not None:
                 ver = int(existing.get("ver", 1)) + 1
@@ -328,7 +355,16 @@ class AuthEngine:
         return True
 
     def replace_admin(self, name: str, public_key_pem: str) -> str:
-        """CasaSmart runtime component."""
+        """Swap the hub's admin for a new device (B3 owner recovery).
+
+        The ONE sanctioned path around "the admin record is immutable":
+        the caller has already proven ownership by redeeming the
+        single-use recovery code (LAN-only, throttled). Atomic under the
+        lock — the old admin device is unenrolled (its outstanding JWTs
+        die instantly via the ``ver`` cache, same as unpair) and the new
+        keypair becomes the admin. Inputs are validated BEFORE the old
+        admin is touched, so a bad key never leaves the hub adminless.
+        """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
         try:
@@ -346,8 +382,8 @@ class AuthEngine:
                 None,
             )
             if old_admin_id is None:
-
-
+                # Unclaimed hub: recovery has nothing to replace — the
+                # bootstrap pairing code is the right door.
                 raise EnrollError("This hub has no admin to recover")
 
             del self._devices[old_admin_id]
@@ -362,8 +398,8 @@ class AuthEngine:
                 "rooms": None,
                 "ver": 1,
                 "paired_at": time.time(),
-
-
+                # Recovery is replace_admin, not a code redemption — no code id.
+                # Mirror the enroll record shape, which carries enrolled_via.
                 "enrolled_via": None,
             }
             self._device_cache[device_id] = {
@@ -380,17 +416,23 @@ class AuthEngine:
         return device_id
 
     def has_admin(self) -> bool:
-        """CasaSmart runtime component."""
+        """True once the hub's single admin is enrolled (cache read — cheap)."""
         with self._lock:
             return any(
                 entry.get("role") == ROLE_ADMIN
                 for entry in self._device_cache.values()
             )
 
-
+    # -- user management (storage — call via executor) ---------------------------
 
     def list_devices(self) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Every enrolled device, public fields only (no keys).
+
+        ``last_seen`` is the in-memory clock from the last successful token
+        validation (None until the device makes its first authenticated call
+        this boot — like the throttle counters, it is deliberately not
+        persisted; a reboot just resets the liveness clock).
+        """
         with self._lock:
             last_seen = {
                 device_id: entry.get("last_seen")
@@ -411,7 +453,11 @@ class AuthEngine:
         ]
 
     def get_device(self, device_id: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """Public fields for one enrolled device, or None when not enrolled.
+
+        Cheap DB + cache read (call via executor). Used by ``/auth/whoami`` to
+        report the device's CURRENT role/name and by the sensor platform.
+        """
         record = self._devices.get(device_id)
         if record is None:
             return None
@@ -430,7 +476,14 @@ class AuthEngine:
         }
 
     def device_for_public_key(self, public_key_pem: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """The enrolled device whose key matches ``public_key_pem``, or None.
+
+        The same-phone re-pair seam: a phone re-running onboarding (a UI glitch,
+        a redundant claim) sends the SAME public key it enrolled with. Matching
+        it lets enroll be IDEMPOTENT — return the existing identity instead of
+        bricking on an already-claimed hub. Safe: the returned id grants
+        nothing; the token still requires proving the PRIVATE key via login.
+        """
         try:
             canonical_pem = auth_keys.validate_public_key(public_key_pem)
         except auth_keys.KeyError_:
@@ -442,22 +495,27 @@ class AuthEngine:
                         "device_id": device_id,
                         "role": record.get("role"),
                         "rooms": record.get("rooms"),
-
-
-
+                        # Not part of the response body — the enroll view uses
+                        # it to accept the code this device originally redeemed
+                        # (already consumed) on an idempotent re-pair.
                         "enrolled_code_hash": record.get("enrolled_code_hash"),
                     }
         return None
 
     def member_id_for(self, device_id: str) -> str:
-        """CasaSmart runtime component."""
+        """The PERSON id this device belongs to — the key favorites +
+        user_settings roam by. Falls back to the device id for a legacy record
+        enrolled before member_id existed (it is then its own one-device
+        member), so no data migration is needed."""
         record = self._devices.get(device_id)
         if record is None:
             return device_id
         return record.get("member_id") or device_id
 
     def member_device_count(self, member_id: str) -> int:
-        """CasaSmart runtime component."""
+        """How many enrolled devices belong to ``member_id`` — the caller
+        prunes a member's personal data only when this hits zero (the last
+        device unpaired)."""
         return sum(
             1
             for device_id, record in self._devices.items()
@@ -465,7 +523,10 @@ class AuthEngine:
         )
 
     def list_members(self) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Distinct members (people) with a device count — the family-share
+        'add a device to [member]' picker. Name/role/rooms come from the
+        member's most-recently-paired device (set consistently per member at
+        pairing)."""
         members: dict[str, dict[str, Any]] = {}
         for device_id, record in self._devices.items():
             mid = record.get("member_id") or device_id
@@ -494,13 +555,25 @@ class AuthEngine:
         return list(members.values())
 
     def last_seen(self, device_id: str) -> float | None:
-        """CasaSmart runtime component."""
+        """The device's last-validated-token timestamp, or None this boot.
+
+        Pure in-memory read (no DB) — cheap enough for the user sensors to
+        poll on the event loop. None until the device makes its first
+        authenticated call since the last hub restart.
+        """
         with self._lock:
             cached = self._device_cache.get(device_id)
             return cached.get("last_seen") if cached else None
 
     def device_for_token(self, token: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """Public device info for ``token``'s subject if STILL enrolled.
+
+        Signature-verified but freshness-agnostic (see
+        ``auth_tokens.unverified_subject``): an expired or version-bumped
+        token whose device is still paired returns the device — the app's
+        ``/auth/whoami`` resume check wants enrollment status, not token
+        validity. Returns None for a forged token or an unpaired device.
+        """
         device_id = auth_tokens.unverified_subject(self._signing_secret(), token)
         if device_id is None:
             return None
@@ -512,7 +585,14 @@ class AuthEngine:
         role: str | None = None,
         rooms: list[str] | object | None = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Edit a device's role and/or room scope; outstanding JWTs die.
+
+        The admin record is immutable here — there is no demotion path
+        (plan: factory reset is how an admin changes hands). Promotion
+        ceiling is sub-admin: ``role`` may only be sub-admin or user.
+        ``rooms=...`` (the sentinel) means "leave unchanged"; an explicit
+        None clears the scope. Room scope only applies to the user role.
+        """
         with self._lock:
             record = self._devices.get(device_id)
             if record is None:
@@ -528,14 +608,14 @@ class AuthEngine:
                 or any(not isinstance(room, str) or not room for room in new_rooms)
             ):
                 raise UserManagementError("rooms must be a list of area ids")
-
+            # Plan: room-scoping is a per-USER toggle; sub-admins see all rooms.
             if new_rooms is not None and new_role != ROLE_USER:
                 raise UserManagementError("Room scope only applies to the user role")
 
             record["role"] = new_role
             record["rooms"] = new_rooms
             record["ver"] = int(record.get("ver", 1)) + 1
-            self._devices[device_id] = record
+            self._devices[device_id] = record  # persist
             self._device_cache[device_id] = {
                 "role": new_role,
                 "rooms": new_rooms,
@@ -556,7 +636,15 @@ class AuthEngine:
         }
 
     def delete_device(self, device_id: str) -> str:
-        """CasaSmart runtime component."""
+        """Unpair a device — instant kill for all its tokens (plan B2).
+
+        Returns the unpaired device's ``member_id`` so the caller can prune the
+        person's favorites/user_settings IFF this was their last device (see
+        :meth:`member_device_count`) — otherwise those rows orphan.
+
+        The admin cannot be deleted through the API; factory reset is the
+        only way the owner identity leaves the hub.
+        """
         with self._lock:
             record = self._devices.get(device_id)
             if record is None:
@@ -566,14 +654,32 @@ class AuthEngine:
             member_id = record.get("member_id") or device_id
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
-
-
+            # Their login surface resets too — stale lockouts shouldn't
+            # follow a re-pair of the same phone.
             self.throttle.clear(device_id)
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
         return member_id
 
     def leave_hub(self, device_id: str) -> str:
-        """CasaSmart runtime component."""
+        """Unpair a device AT ITS OWN REQUEST — the admin included.
+
+        Deliberately skips :meth:`delete_device`'s admin guard, and is the
+        ONLY path that may: that guard exists so one admin can't be evicted by
+        somebody else, which is not what is happening here — the caller proved
+        possession of this device's private key to get the token that names it.
+
+        Without this, "Remove Hub" on the owner's phone was unrecoverable. The
+        hub kept the phone enrolled as its one admin, and a hub that HAS an
+        admin refuses to enroll another, only ever issues sub-admin/user codes,
+        and kills the bootstrap owner code — so nobody could become admin
+        again short of the engraved recovery card or physically holding the
+        reset button. Letting the owner hand the hub back makes it re-claimable
+        with the sticker code that shipped with it.
+
+        Returns the departing device's ``member_id`` so the caller can prune
+        that person's rows if this was their last device — same contract as
+        :meth:`delete_device`.
+        """
         with self._lock:
             record = self._devices.get(device_id)
             if record is None:
@@ -590,7 +696,17 @@ class AuthEngine:
         return member_id
 
     def wipe_all_devices(self) -> list[str]:
-        """CasaSmart runtime component."""
+        """Unpair EVERY device — admin included. The pairing factory reset.
+
+        Unlike :meth:`delete_device` and :meth:`update_device`, there is NO
+        admin guard here: wiping the owner IS the point. This hands the hub
+        back to the unclaimed state, so the next :meth:`has_admin` is False and
+        a fresh bootstrap admin code can be minted (the "Regenerate pairing
+        code" button does exactly that). Every device's outstanding JWTs die
+        instantly — its ``ver`` cache entry vanishes, same kill as an unpair —
+        and each device's login-throttle counter is cleared so a re-pair of the
+        same phone starts clean. Returns the wiped device ids.
+        """
         with self._lock:
             wiped = list(self._devices.keys())
             for device_id in wiped:
@@ -603,13 +719,13 @@ class AuthEngine:
             )
         return wiped
 
-
+    # -- challenge-response login ---------------------------------------------
 
     def create_challenge(self, device_id: str) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Issue a one-time nonce for the device to sign."""
         self.throttle.check(device_id)
         if device_id not in self._devices:
-
+            # Counts as a guess: unknown ids must not be a free probe.
             self.throttle.record_failure(device_id)
             raise UnknownDeviceError("Unknown device")
 
@@ -620,8 +736,8 @@ class AuthEngine:
                 for cid, challenge in self._challenges.items()
                 if challenge["device_id"] == device_id
             ]
-
-
+            # Cap outstanding nonces; drop the oldest rather than refuse —
+            # an app retrying over a flaky link shouldn't lock itself out.
             while len(outstanding) >= MAX_CHALLENGES_PER_DEVICE:
                 self._challenges.pop(outstanding.pop(0), None)
 
@@ -641,12 +757,12 @@ class AuthEngine:
     def redeem_challenge(
         self, device_id: str, challenge_id: str, signature_b64: str
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Verify the signed nonce; mint a JWT on success."""
         self.throttle.check(device_id)
 
         with self._lock:
             self._prune_challenges()
-            challenge = self._challenges.pop(challenge_id, None)
+            challenge = self._challenges.pop(challenge_id, None)  # single use
 
         record = self._devices.get(device_id)
         if (
@@ -657,8 +773,8 @@ class AuthEngine:
                 record["public_key"], challenge["nonce"], signature_b64
             )
         ):
-
-
+            # One generic failure path — the error must not reveal WHICH
+            # part was wrong (unknown device vs dead nonce vs bad signature).
             self.throttle.record_failure(device_id)
             raise ChallengeError("Challenge verification failed")
 
@@ -678,46 +794,63 @@ class AuthEngine:
             "device_id": device_id,
         }
 
-
+    # -- validation + authorization (pure CPU — safe on the event loop) --------
 
     def validate_token(self, token: str) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Signature + claims + revocation check; claims or TokenError.
+
+        Beyond the cryptographic check, the token must point at a device
+        that is STILL enrolled with the SAME auth version — unpairing or
+        editing a device kills its outstanding JWTs here, on the next
+        request (plan B2: "Delete public key from hub = instant kill").
+        Pure in-memory work — safe on the event loop.
+        """
         claims = auth_tokens.validate_token(self._signing_secret(), token)
         with self._lock:
             cached = self._device_cache.get(claims["sub"])
             if cached is None:
-
-
-
-
+                # warm_up() mirrors every enrolled device at startup and
+                # enroll/delete keep the cache in sync, so a miss means the
+                # device is GONE — the one condition that justifies telling
+                # the client to re-pair.
                 raise TokenError("Token revoked", code="unenrolled")
             if cached["ver"] != claims.get("ver"):
-
-
-
+                # Device still enrolled, just edited since this token was
+                # minted (role/rooms change). A fresh login/mint recovers —
+                # clients must NOT treat this as a re-pair signal.
                 raise TokenError("Token revoked", code="token_stale")
-
-
-
+            # Liveness clock for the per-user sensors — in-memory, updated on
+            # the same lock+read we already do, so no extra cost on the hot
+            # path and no DB write per request.
             cached["last_seen"] = time.time()
-
-
-
-
-
+            # Authorize off the STORED role/rooms, never the client-presented
+            # JWT claim. The ver gate above already guarantees they match, but
+            # stamping makes authorize() depend on the device record — so a token
+            # whose claims were somehow trusted without this check can't ride an
+            # elevated role past authorize().
             claims["role"] = cached["role"]
             claims["rooms"] = cached.get("rooms")
         return claims
 
     def is_owner_device(self, device_id: str) -> bool:
-        """CasaSmart runtime component."""
+        """True when [device_id] is the enrolled ADMIN (owner) — for owner-only
+        push (alarm/lock/tank). Unknown or room-scoped devices return False."""
         with self._lock:
             cached = self._device_cache.get(device_id)
             return bool(cached and cached.get("role") == ROLE_ADMIN)
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
-        """CasaSmart runtime component."""
+        """True when the role grants the named permission.
+
+        ``claims`` MUST come from ``AuthEngine.validate_token``, which stamps the
+        role/rooms from the STORED device record (not the raw JWT) — so the role
+        checked here is the device's, never a client-presented claim.
+
+        A ``scope: widget`` token is additionally capped to
+        ``WIDGET_SCOPE_PERMISSIONS`` — the scope check runs FIRST so a
+        widget token held by an admin still can't reach admin surfaces.
+        """
         if (
             claims.get("scope") == auth_tokens.SCOPE_WIDGET
             and permission not in WIDGET_SCOPE_PERMISSIONS
@@ -725,13 +858,19 @@ class AuthEngine:
             return False
         allowed_roles = PERMISSIONS.get(permission)
         if allowed_roles is None:
-
+            # Unknown permission = programming error; fail closed, loudly.
             _LOGGER.error("authorize() called with unknown permission %r", permission)
             return False
         return claims.get("role") in allowed_roles
 
     def mint_widget_token(self, device_id: str) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Mint the long-lived, widget-scoped token for an enrolled device.
+
+        Role/rooms/ver come from the device's CURRENT record — never from
+        the requesting token — so the widget token always reflects the
+        latest privilege edit and dies with the next one (``ver`` bump).
+        Raises ``UnknownDeviceError`` when the device is gone.
+        """
         with self._lock:
             cached = self._device_cache.get(device_id)
         if cached is None:
@@ -751,10 +890,10 @@ class AuthEngine:
             "scope": auth_tokens.SCOPE_WIDGET,
         }
 
-
+    # -- housekeeping -------------------------------------------------------------
 
     def _prune_challenges(self) -> None:
-        """CasaSmart runtime component."""
+        """Drop expired nonces (caller holds the lock)."""
         now = time.monotonic()
         for challenge_id in [
             cid for cid, c in self._challenges.items() if c["expires"] <= now

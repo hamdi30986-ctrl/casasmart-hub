@@ -1,4 +1,13 @@
-"""CasaSmart runtime component."""
+"""Push-token storage for B8 — encrypted push notifications.
+
+Each paired device can register one FCM token (keyed by device_id).
+The hub stores these so it can fan out encrypted push payloads via
+the relay server when alarm/leak/lock events fire.
+
+Thread-safety: delegates to HubStorage's internal lock (KV writes are
+serialized). The ``PushTokenStore`` itself is stateless — every call
+reads/writes the KV table directly.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +22,7 @@ MAX_TOKEN_LENGTH = 4096
 
 
 class PushTokenStore:
-    """CasaSmart runtime component."""
+    """Thin wrapper around the ``push_tokens`` KV namespace."""
 
     def __init__(self, table: Any) -> None:
         self._table = table
@@ -24,7 +33,11 @@ class PushTokenStore:
         fcm_token: str,
         platform: str,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Store or update a push token for a paired device.
+
+        Upserts by device_id — a token refresh from the same phone
+        just overwrites the old token.
+        """
         if platform not in VALID_PLATFORMS:
             raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}")
         if not fcm_token or not fcm_token.strip() or len(fcm_token) > MAX_TOKEN_LENGTH:
@@ -40,7 +53,7 @@ class PushTokenStore:
         return record
 
     def unregister(self, device_id: str) -> bool:
-        """CasaSmart runtime component."""
+        """Remove the push token for a device. Returns True if it existed."""
         try:
             del self._table[device_id]
             _LOGGER.info("Push token removed for device %s", device_id)
@@ -49,11 +62,11 @@ class PushTokenStore:
             return False
 
     def get_all_tokens(self) -> dict[str, dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Return {device_id: record} for every registered push token."""
         return dict(self._table.items())
 
     def get_token(self, device_id: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """Return the push token record for one device, or None."""
         try:
             return self._table[device_id]
         except KeyError:

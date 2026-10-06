@@ -1,13 +1,17 @@
-"""CasaSmart runtime component."""
+"""Storage-layer exceptions.
+
+Everything the storage package raises derives from StorageError so callers
+can catch one base class at the integration boundary.
+"""
 
 
 class StorageError(Exception):
-    """CasaSmart runtime component."""
+    """Base class for all storage-layer errors."""
 
 
 class MigrationError(StorageError):
-    """CasaSmart runtime component."""
+    """A schema migration failed. The database has been restored from backup."""
 
 
 class ConfigError(StorageError):
-    """CasaSmart runtime component."""
+    """The JSON config file is unreadable or corrupted."""

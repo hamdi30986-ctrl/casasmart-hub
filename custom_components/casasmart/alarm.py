@@ -1,4 +1,42 @@
-"""CasaSmart runtime component."""
+"""Hub-side security / alarm engine (Phase 6, block B13) — the pure half.
+
+Replaces the Flutter client-side alarm (``alarm_engine.dart``, 1,395 lines)
+whose own code admits "kill the app = alarm dies": sensor monitoring only
+ran while the app process was alive + WS-connected. That is a liability for
+a security feature. The arm state machine moves into the hub integration so
+it survives a dead app, a backgrounded app, and (state persisted to disk) a
+hub reboot.
+
+This module is the flat-importable engine (stdlib only, no HA imports —
+unit-tested on a temp SQLite file like ``registry.py``/``tank.py``). It owns
+the *decisions*; it never talks to Home Assistant. The split is deliberate:
+
+- ``AlarmEngine`` — the arm state machine + zone model. Persists arm state,
+  zone→sensor assignments, and a bounded event history across reboots
+  (three storage tables). ``process_sensor`` is the trigger evaluator: given
+  a sensor's active/clear edge it decides nothing / entry-delay countdown /
+  immediate trigger, honouring the current arm mode and the per-zone rules.
+- **Life Safety is always armed.** Smoke/gas/CO/leak fire regardless of arm
+  mode — *including ``disarmed``*. This is new behaviour vs the Flutter
+  engine (whose life-safety was arm-gated), and the shadow-mode comparator
+  (B13 step 2) must whitelist this exact class as an expected delta.
+- **The push leg is a stub.** Alerts are emitted through an injected
+  ``alert_sink`` callback that defaults to a no-op logger. Wiring the real
+  encrypted push dispatch (B8 relay) into that sink is a one-line change with
+  no engine edits — that is the whole point of the seam.
+
+What is intentionally NOT here (it lives in the HA adapter, a later piece):
+subscribing to ``state_changed`` events, real async timers, firing sirens /
+automations via ``haService.callService``, and the ``alarm_control_panel``
+entity mapping. The engine is driven by the adapter calling ``process_sensor``
+/ ``tick`` and reading ``snapshot()``; time is injected so it stays pure and
+deterministic under test.
+
+Storage-touching methods are synchronous (call via executor) and guarded by
+an ``RLock``, same posture as ``RegistryEngine``/``TankEngine``. A small
+in-memory mirror of arm state + zones is warmed at startup so the event-loop
+hot path (``process_sensor`` on every sensor edge) is pure CPU.
+"""
 
 from __future__ import annotations
 
@@ -9,29 +47,29 @@ from typing import Any, Callable, Optional
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# -- Arm modes (the persisted state machine) -----------------------------------
 MODE_DISARMED = "disarmed"
 MODE_AWAY = "armed_away"
 MODE_HOME = "armed_home"
 MODE_NIGHT = "armed_night"
-MODE_PENDING = "pending"
+MODE_PENDING = "pending"  # entry delay running — about to trigger if not disarmed
 MODE_TRIGGERED = "triggered"
 
-
-
+# The modes the app may command directly. pending/triggered are reached by the
+# engine itself, never set from outside.
 ARMABLE_MODES = (MODE_AWAY, MODE_HOME, MODE_NIGHT)
 ALL_MODES = (MODE_DISARMED, *ARMABLE_MODES, MODE_PENDING, MODE_TRIGGERED)
 
-
-ZONE_PERIMETER = "perimeter"
-ZONE_INTERIOR = "interior"
-ZONE_ENTRY = "entry"
-ZONE_LIFE_SAFETY = "life_safety"
+# -- Zones (which sensors fire in which mode) ----------------------------------
+ZONE_PERIMETER = "perimeter"  # doors / windows
+ZONE_INTERIOR = "interior"  # motion
+ZONE_ENTRY = "entry"  # entry doors — get the entry delay
+ZONE_LIFE_SAFETY = "life_safety"  # smoke / gas / CO / leak — ALWAYS armed
 ALL_ZONES = (ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY, ZONE_LIFE_SAFETY)
 
-
-
-
+# Which non-life-safety zones are active per arm mode (plan B13 "Arm Modes").
+# Away = everything; Home = perimeter only (motion ignored); Night = perimeter
+# + entry doors (no motion). Life Safety is added unconditionally below.
 _ACTIVE_ZONES_BY_MODE: dict[str, frozenset[str]] = {
     MODE_AWAY: frozenset({ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY}),
     MODE_HOME: frozenset({ZONE_PERIMETER}),
@@ -41,36 +79,36 @@ _ACTIVE_ZONES_BY_MODE: dict[str, frozenset[str]] = {
     MODE_TRIGGERED: frozenset({ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY}),
 }
 
-
+# -- Event kinds (alarm history + alert payloads) ------------------------------
 EVENT_ARMED = "armed"
 EVENT_DISARMED = "disarmed"
-EVENT_ENTRY_DELAY = "entry_delay"
-EVENT_TRIGGERED = "triggered"
-EVENT_TAMPER = "tamper"
-EVENT_LIFE_SAFETY = "life_safety"
+EVENT_ENTRY_DELAY = "entry_delay"  # entry sensor opened, countdown started
+EVENT_TRIGGERED = "triggered"  # alarm went off (an armed zone or life safety)
+EVENT_TAMPER = "tamper"  # sensor dropped offline while armed
+EVENT_LIFE_SAFETY = "life_safety"  # smoke/gas/CO/leak — fired regardless of mode
 
-
+# -- Defaults / bounds ---------------------------------------------------------
 DEFAULT_ENTRY_DELAY_SECONDS = 30
 DEFAULT_EXIT_DELAY_SECONDS = 60
-_MAX_DELAY_SECONDS = 600
+_MAX_DELAY_SECONDS = 600  # sanity cap; a 10-min delay is already absurd
 _NAME_MAX = 64
-
-
+# History is a single bounded blob (like tank readings). Plenty for an audit
+# trail without growing unbounded on a chatty install.
 _MAX_HISTORY = 1000
 _HISTORY_RETENTION_SECONDS = 90 * 24 * 3600
 
-
-_STATE_KEY = "current"
-_HISTORY_KEY = "events"
-_SETTINGS_KEY = "defaults"
+# Storage keys.
+_STATE_KEY = "current"  # single-row arm-state blob
+_HISTORY_KEY = "events"  # single-row {"entries": [...]} blob
+_SETTINGS_KEY = "defaults"  # single-row {"entry_delay", "exit_delay"} blob
 
 
 class AlarmError(Exception):
-    """CasaSmart runtime component."""
+    """Alarm input rejected (maps to HTTP 400)."""
 
 
 class UnknownZoneError(AlarmError):
-    """CasaSmart runtime component."""
+    """No sensor assigned under that entity id (maps to HTTP 404)."""
 
 
 def _clean_name(name: Any) -> str:
@@ -99,12 +137,28 @@ def _validate_delay(value: Any, *, field: str, default: int) -> int:
 
 
 def active_zones_for_mode(mode: str) -> frozenset[str]:
-    """CasaSmart runtime component."""
+    """Non-life-safety zones that can trigger in ``mode``.
+
+    Life Safety is always armed, so it is intentionally *not* in this set —
+    ``process_sensor`` adds it unconditionally. Pure function, no I/O.
+    """
     return _ACTIVE_ZONES_BY_MODE.get(mode, frozenset())
 
 
 class AlarmEngine:
-    """CasaSmart runtime component."""
+    """Arm state machine + zone model over three storage tables.
+
+    Tables (all dict-like ``KeyValueTable`` handles):
+      * ``state_table``   — one row (``_STATE_KEY``) with the live arm state,
+        so a reboot restores the previous mode instead of silently disarming.
+      * ``zones_table``   — one row per sensor: ``entity_id -> {zone, name}``.
+      * ``history_table`` — one bounded ``{"entries": [...]}`` row.
+
+    ``alert_sink`` is the B8 push seam: called with each alert dict the moment
+    an alarm fires (trigger / life-safety / tamper). Defaults to a no-op
+    logger. ``clock`` is injectable for deterministic tests; production passes
+    the default ``time.time``.
+    """
 
     def __init__(
         self,
@@ -122,20 +176,25 @@ class AlarmEngine:
         self._settings_table = settings_table
         self._alert_sink = alert_sink or self._default_alert_sink
         self._clock = clock
-
+        # Held across SQLite I/O — same posture as RegistryEngine.
         self._lock = threading.RLock()
-
+        # In-memory mirrors so the per-sensor-edge hot path is pure CPU.
         self._state: dict[str, Any] = self._default_state()
         self._zones: dict[str, dict[str, Any]] = {}
-
-
-
+        # Hub-owned default delays the app reads/edits. Holding these on the
+        # hub (not the phone) is what lets a fresh/swapped phone arm with the
+        # home's configured delays instead of falling back to the constants.
         self._settings: dict[str, Any] = self._default_settings()
 
-
+    # -- lifecycle -------------------------------------------------------------
 
     def warm_up(self) -> None:
-        """CasaSmart runtime component."""
+        """Load persisted arm state + zone map into the in-memory mirrors.
+
+        Blocking (storage read) — call via executor at setup, exactly like
+        ``RegistryEngine.warm_up``. After this, ``snapshot``/``process_sensor``
+        are pure CPU.
+        """
         with self._lock:
             stored = self._state_table.get(_STATE_KEY)
             self._state = self._coerce_state(stored)
@@ -144,10 +203,10 @@ class AlarmEngine:
                 entity_id: dict(record)
                 for entity_id, record in self._zones_table.items()
             }
-
-
-
-
+            # A hub that rebooted mid-pending must not sit in a half-state
+            # waiting on a timer that died with the process. Promote to the
+            # safe, loud answer: a pending alarm that lost its countdown is
+            # treated as triggered (fail-secure), a clean armed mode is kept.
             if self._state["mode"] == MODE_PENDING:
                 _LOGGER.warning(
                     "Alarm restored from disk mid entry-delay — failing secure to triggered"
@@ -164,16 +223,16 @@ class AlarmEngine:
         return {
             "mode": MODE_DISARMED,
             "since": 0.0,
-            "active_at": 0.0,
-            "trigger_deadline": 0.0,
-            "armed_mode": None,
+            "active_at": 0.0,  # exit-delay grace: triggers ignored before this
+            "trigger_deadline": 0.0,  # entry-delay: pending -> triggered at this
+            "armed_mode": None,  # the mode pending will return to on disarm
             "trigger_entity": None,
             "trigger_zone": None,
             "entry_delay": DEFAULT_ENTRY_DELAY_SECONDS,
         }
 
     def _coerce_state(self, stored: Any) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Merge a persisted blob onto defaults, dropping anything invalid."""
         state = self._default_state()
         if isinstance(stored, dict):
             if stored.get("mode") in ALL_MODES:
@@ -202,7 +261,7 @@ class AlarmEngine:
         }
 
     def _coerce_settings(self, stored: Any) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Merge a persisted settings blob onto defaults, dropping bad values."""
         settings = self._default_settings()
         if isinstance(stored, dict):
             for key in ("entry_delay", "exit_delay"):
@@ -215,17 +274,22 @@ class AlarmEngine:
                     settings[key] = value
         return settings
 
-
+    # -- default-delay settings (storage — call via executor) ------------------
 
     def get_settings(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """The hub-owned default entry/exit delays the app's settings screen
+        renders (copy of the in-memory mirror — pure CPU)."""
         with self._lock:
             return dict(self._settings)
 
     def set_settings(
         self, *, entry_delay: Any = None, exit_delay: Any = None
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Update one or both default delays (omitted fields keep their value).
+
+        Validated and clamped exactly like the per-arm delays. Returns the new
+        full settings dict.
+        """
         with self._lock:
             updated = dict(self._settings)
             if entry_delay is not None:
@@ -240,10 +304,14 @@ class AlarmEngine:
             self._settings_table[_SETTINGS_KEY] = dict(updated)
             return dict(updated)
 
-
+    # -- zone configuration (storage — call via executor) ----------------------
 
     def set_zone(self, entity_id: Any, zone: Any, name: Any = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Assign ``entity_id`` to ``zone`` (create or replace).
+
+        Returns the stored record. The app's zone-assignment settings screen
+        drives this through the API layer.
+        """
         if not isinstance(entity_id, str) or not entity_id.strip():
             raise AlarmError("entity_id is required")
         entity_id = entity_id.strip()
@@ -262,7 +330,7 @@ class AlarmEngine:
             self._zones.pop(entity_id, None)
 
     def zones(self) -> dict[str, dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """The full ``entity_id -> {zone, name}`` map (copy)."""
         with self._lock:
             return {eid: dict(rec) for eid, rec in self._zones.items()}
 
@@ -270,7 +338,7 @@ class AlarmEngine:
         rec = self._zones.get(entity_id)
         return rec["zone"] if rec else None
 
-
+    # -- arm / disarm (storage — call via executor) ----------------------------
 
     def arm(
         self,
@@ -280,13 +348,19 @@ class AlarmEngine:
         exit_delay: Any = None,
         entry_delay: Any = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Command an armed mode (away/home/night).
+
+        ``exit_delay`` grace lets the user leave: sensor edges before it
+        elapses are ignored (life safety still fires). ``entry_delay`` is the
+        countdown an entry-zone trip starts later. Both default sensibly and
+        are clamped. Returns the new public snapshot.
+        """
         if mode not in ARMABLE_MODES:
             raise AlarmError(
                 f"Cannot arm to {mode!r} (expected one of {ARMABLE_MODES})"
             )
-
-
+        # An omitted delay falls back to the hub's stored default (not the
+        # module constant) so every phone arms with the home's configuration.
         with self._lock:
             default_exit = self._settings["exit_delay"]
             default_entry = self._settings["entry_delay"]
@@ -315,7 +389,11 @@ class AlarmEngine:
         return self.snapshot()
 
     def disarm(self, *, actor: Any = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Drop to disarmed from any state (cancels a pending countdown).
+
+        Disarming during ``pending`` is the normal "I just walked in" path —
+        no alarm fires. Disarming a ``triggered`` alarm silences it.
+        """
         now = self._clock()
         with self._lock:
             was = self._state["mode"]
@@ -334,20 +412,31 @@ class AlarmEngine:
             )
         return self.snapshot()
 
-
-
+    # -- the trigger evaluator (hot path — pure CPU, NO storage write on the
+    #    common no-op edge) ----------------------------------------------------
 
     def process_sensor(
         self, entity_id: str, active: bool, *, now: Optional[float] = None
     ) -> Optional[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Evaluate one sensor edge. Returns the event it caused, or ``None``.
+
+        Rules (plan B13):
+          * Life Safety active -> trigger *immediately, in any mode* incl.
+            disarmed (this is the whitelisted shadow-mode delta).
+          * ``active`` is False (sensor cleared) -> never triggers.
+          * During exit-delay grace (now < active_at) -> ignored.
+          * Entry-zone trip in an active mode -> start the entry-delay
+            countdown (mode -> pending), unless already pending/triggered.
+          * Any other active zone trip in an active mode -> trigger now.
+          * Sensor not in an active zone for the current mode -> ignored.
+        """
         now = self._clock() if now is None else now
         record = self._zones.get(entity_id)
         if record is None:
-            return None
+            return None  # unmapped sensor — not part of the alarm
         zone = record["zone"]
 
-
+        # Life Safety is always armed — evaluated before any mode gate.
         if zone == ZONE_LIFE_SAFETY:
             if not active:
                 return None
@@ -363,7 +452,7 @@ class AlarmEngine:
             mode = self._state["mode"]
             if mode in (MODE_DISARMED, MODE_TRIGGERED):
                 return None
-
+            # Exit-delay grace: the user is still on their way out.
             if now < self._state["active_at"]:
                 return None
             if zone not in active_zones_for_mode(mode):
@@ -371,15 +460,19 @@ class AlarmEngine:
 
             if zone == ZONE_ENTRY:
                 if mode == MODE_PENDING:
-                    return None
+                    return None  # countdown already running
                 return self._enter_pending(entity_id, now=now)
-
+            # Perimeter / interior in an armed mode -> immediate.
             return self._enter_triggered(entity_id, zone, now=now, persist=True)
 
     def process_sensor_offline(
         self, entity_id: str, *, now: Optional[float] = None
     ) -> Optional[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """A mapped sensor dropped offline. While armed, that is tamper.
+
+        Per plan: log + push, but do NOT trigger the full alarm — a dead
+        battery should not wake the house. Ignored while disarmed.
+        """
         now = self._clock() if now is None else now
         record = self._zones.get(entity_id)
         if record is None:
@@ -394,7 +487,11 @@ class AlarmEngine:
         return event
 
     def tick(self, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Promote a lapsed entry-delay countdown to triggered.
+
+        The HA adapter calls this when the pending deadline fires (or on a
+        coarse poll). Idempotent: a no-op unless ``pending`` has expired.
+        """
         now = self._clock() if now is None else now
         with self._lock:
             if self._state["mode"] != MODE_PENDING:
@@ -409,13 +506,16 @@ class AlarmEngine:
             )
 
     def pending_deadline(self) -> Optional[float]:
-        """CasaSmart runtime component."""
+        """Absolute time the current entry-delay fires, or ``None``.
+
+        Lets the adapter schedule one exact timer instead of polling.
+        """
         with self._lock:
             if self._state["mode"] != MODE_PENDING:
                 return None
             return self._state["trigger_deadline"]
 
-
+    # -- internal transitions (caller holds the lock) --------------------------
 
     def _enter_pending(self, entity_id: str, *, now: float) -> dict[str, Any]:
         prior = self._state["mode"]
@@ -436,7 +536,7 @@ class AlarmEngine:
             zone=ZONE_ENTRY,
             deadline=deadline,
         )
-
+        # No alert yet — the user still has the delay window to disarm.
         return event
 
     def _enter_triggered(
@@ -464,22 +564,23 @@ class AlarmEngine:
         self._emit_alert(event)
         return event
 
-
+    # -- alerts (the B8 push seam) ---------------------------------------------
 
     def _emit_alert(self, event: dict[str, Any]) -> None:
-        """CasaSmart runtime component."""
+        """Hand the event to the push sink, never letting a sink fault break
+        the state machine."""
         try:
             self._alert_sink(dict(event))
-        except Exception:
+        except Exception:  # noqa: BLE001 — a bad sink must not crash the alarm
             _LOGGER.exception("Alarm alert sink raised; alarm state is unaffected")
 
     @staticmethod
     def _default_alert_sink(event: dict[str, Any]) -> None:
-
-
+        # B8 stub: until the encrypted push relay is wired, alerts are logged
+        # so a triggered alarm is at least visible in the hub log.
         _LOGGER.warning("ALARM ALERT (push not yet wired — B8): %s", event)
 
-
+    # -- history (storage) -----------------------------------------------------
 
     def _record_event(self, kind: str, *, now: float, **fields: Any) -> dict[str, Any]:
         event = {"kind": kind, "at": now}
@@ -495,7 +596,7 @@ class AlarmEngine:
         return event
 
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Most-recent-first event history (bounded read)."""
         if not isinstance(limit, int) or limit < 1:
             raise AlarmError("limit must be a positive integer")
         blob = self._history_table.get(_HISTORY_KEY) or {}
@@ -504,21 +605,21 @@ class AlarmEngine:
             entries = []
         return list(reversed(entries))[:limit]
 
-
+    # -- snapshot / persistence ------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """The public arm state the app renders (no internal bookkeeping)."""
         with self._lock:
             s = self._state
             return {
                 "mode": s["mode"],
                 "since": s["since"],
                 "active_zones": sorted(active_zones_for_mode(s["mode"])),
-
-
-
-
-
+                # Exit-delay grace deadline (option A countdown): the absolute
+                # time a freshly armed mode goes live. The app renders the arming
+                # countdown as ``max(0, arming_until - now)`` — no extra endpoint,
+                # no hub-side ticking; a value already in the past simply means
+                # the grace is spent. Null in any non-armed mode.
                 "arming_until": s["active_at"]
                 if s["mode"] in ARMABLE_MODES
                 else None,
@@ -531,7 +632,7 @@ class AlarmEngine:
             }
 
     def _persist_state(self) -> None:
-        """CasaSmart runtime component."""
+        """Write the live arm state so a reboot restores it (caller holds lock)."""
         self._state_table[_STATE_KEY] = {
             "mode": self._state["mode"],
             "since": self._state["since"],

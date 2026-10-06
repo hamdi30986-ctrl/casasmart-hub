@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -44,7 +43,6 @@ _GITHUB_REPO_RE = re.compile(
 
 
 def _resolve_repo(hass: HomeAssistant) -> str | None:
-    """CasaSmart runtime component."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if entries:
         runtime_data = entries[0].runtime_data
@@ -57,7 +55,6 @@ def _resolve_repo(hass: HomeAssistant) -> str | None:
 
 
 class UpdateChecker:
-    """CasaSmart runtime component."""
 
     def __init__(self, hass: HomeAssistant, current_version: str) -> None:
         self._hass = hass
@@ -73,19 +70,18 @@ class UpdateChecker:
         return (time.monotonic() - self._checked_monotonic) < UPDATE_CHECK_TTL_SECONDS
 
     async def async_status(self) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Return the status dict, refreshing the cache first if it's stale."""
         if not self._is_fresh():
             await self._async_refresh()
         return self._build_status()
 
     async def async_download_url(self) -> str | None:
-        """CasaSmart runtime component."""
+        """The latest release's install artifact URL (Piece 3), refreshing if stale."""
         if not self._is_fresh():
             await self._async_refresh()
         return self._latest.download_url if self._latest is not None else None
 
     async def _async_refresh(self) -> None:
-        """CasaSmart runtime component."""
         async with self._lock:
 
             if self._is_fresh():
@@ -144,7 +140,11 @@ class UpdateChecker:
 
 
 def get_or_create_checker(hass: HomeAssistant, current_version: str) -> UpdateChecker:
-    """CasaSmart runtime component."""
+    """The hub's single ``UpdateChecker``, created on first use.
+
+    ``build_views`` runs once per listener (plain + TLS), so the checker
+    is stashed in ``hass.data`` to share one cache across both surfaces.
+    """
     domain_data = hass.data.setdefault(DOMAIN, {})
     checker = domain_data.get("update_checker")
     if checker is None:
@@ -154,18 +154,19 @@ def get_or_create_checker(hass: HomeAssistant, current_version: str) -> UpdateCh
 
 
 class CasaSmartUpdateStatusView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/update/status — current vs latest hub version."""
 
     url = f"/api/{DOMAIN}/update/status"
     name = f"api:{DOMAIN}:update:status"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant, checker: UpdateChecker) -> None:
         self._hass = hass
         self._checker = checker
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
+        """Report the update status. Never 500s on a GitHub hiccup — a
+        failed check degrades to ``latest_version: null`` (no update)."""
         _, error = authenticate_request(self._hass, request, "update.read")
         if error is not None:
             return error
@@ -173,11 +174,17 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
 
 
 class CasaSmartUpdateInstallView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/update/install — owner-only self-update (Piece 3).
+
+    Gated ``update.install`` (admin only). On success the integration tree
+    is already swapped and an HA restart is scheduled; the app gets a 202
+    "installing" before the connection drops, then reconnects on the new
+    code. A "nothing newer" or a bad payload is a clean 409, never a 500.
+    """
 
     url = f"/api/{DOMAIN}/update/install"
     name = f"api:{DOMAIN}:update:install"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant, checker: UpdateChecker) -> None:
         self._hass = hass
@@ -188,8 +195,8 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
         if error is not None:
             return error
 
-
-
+        # Imported here to keep update_api importable without the installer
+        # (and to avoid any import-order coupling at module load).
         from .update import InstallError
         from .update_install import perform_install
 
@@ -198,7 +205,7 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
         except InstallError as err:
             _LOGGER.warning("Self-update refused/failed: %s", err)
             return self.json({"error": str(err)}, status_code=HTTPStatus.CONFLICT)
-        except Exception:
+        except Exception:  # noqa: BLE001 — surface any unexpected failure as 500
             _LOGGER.exception("Self-update crashed")
             return self.json(
                 {"error": "internal error during install"},

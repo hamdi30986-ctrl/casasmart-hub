@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -103,7 +102,6 @@ _NONCE_BYTES = 32
 
 
 class PushDispatcher:
-    """CasaSmart runtime component."""
 
     def __init__(
         self,
@@ -132,14 +130,12 @@ class PushDispatcher:
 
     @property
     def relay_url(self) -> str:
-        """CasaSmart runtime component."""
         return self._relay_url
 
 
 
     @callback
     def async_start(self) -> None:
-        """CasaSmart runtime component."""
         self._active = True
         self._unsub_alarm = self._hass.bus.async_listen(
             EVENT_ALARM_TRIGGERED, self._on_alarm_triggered
@@ -155,7 +151,6 @@ class PushDispatcher:
 
     @callback
     def async_stop(self) -> None:
-        """CasaSmart runtime component."""
         self._active = False
         if self._unsub_alarm is not None:
             self._unsub_alarm()
@@ -172,7 +167,6 @@ class PushDispatcher:
 
     @callback
     def _schedule_dispatch(self, coro: Any) -> None:
-        """CasaSmart runtime component."""
         task = self._hass.async_create_task(coro)
         if isinstance(task, asyncio.Task):
             self._tasks.add(task)
@@ -182,13 +176,11 @@ class PushDispatcher:
 
     @callback
     def _on_alarm_triggered(self, event: Event) -> None:
-        """CasaSmart runtime component."""
         data = self._build_security_payload(event.data or {})
         self._schedule_dispatch(self._dispatch(data, PRIORITY_CRITICAL))
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        """CasaSmart runtime component."""
         entity_id = event.data.get("entity_id")
         if not isinstance(entity_id, str):
             return
@@ -211,12 +203,12 @@ class PushDispatcher:
     def _is_widget_relevant_change(
         entity_id: str, old_state: Any, new_state: Any
     ) -> bool:
-        """CasaSmart runtime component."""
+        """True for a settled control-domain state edge a widget would render."""
         domain = entity_id.split(".", 1)[0]
         if domain not in _WIDGET_DOMAINS:
             return False
-
-
+        # Need a real new value and a real prior value that actually differs —
+        # ignore attribute-only churn and flaps in/out of unavailable/unknown.
         if new_state is None or new_state.state in _WIDGET_UNSETTLED:
             return False
         if old_state is None or old_state.state in _WIDGET_UNSETTLED:
@@ -225,23 +217,29 @@ class PushDispatcher:
 
     @callback
     def _mark_widgets_dirty(self) -> None:
-        """CasaSmart runtime component."""
+        """Arm one coalesced widget-refresh flush; absorb changes within it."""
         if self._widget_flush_cancel is not None:
-            return
+            return  # a flush is already scheduled for this window
         self._widget_flush_cancel = async_call_later(
             self._hass, _WIDGET_PUSH_COALESCE_SECONDS, self._flush_widget_refresh
         )
 
     @callback
     def _flush_widget_refresh(self, _now: Any) -> None:
-        """CasaSmart runtime component."""
         self._widget_flush_cancel = None
         data = {"type": PUSH_TYPE_UPDATE_WIDGETS, "silent": "1"}
         self._schedule_dispatch(self._dispatch(data, PRIORITY_NORMAL))
 
     @staticmethod
     def _is_real_lock_transition(old_state: Any, new_state: Any) -> bool:
-        """CasaSmart runtime component."""
+        """True only for a settled ``locked``<->``unlocked`` change.
+
+        The new state must be a settled lock state; the old state must be a real
+        prior state (not ``unavailable``/``unknown`` and not ``None``); and they
+        must differ. This catches the genuine edge even when the lock reported an
+        intermediate ``locking``/``unlocking`` first, while ignoring flaps in and
+        out of ``unavailable``.
+        """
         if new_state is None or new_state.state not in _LOCK_SETTLED:
             return False
         if old_state is None or old_state.state in _LOCK_FLAP_STATES:
@@ -251,7 +249,7 @@ class PushDispatcher:
 
 
     def _build_security_payload(self, alarm_event: dict[str, Any]) -> dict[str, str]:
-        """CasaSmart runtime component."""
+        """Plaintext security notification from an alarm event dict."""
         life_safety = bool(alarm_event.get("life_safety"))
         entity_id = alarm_event.get("entity_id")
         zone = alarm_event.get("zone")
@@ -260,8 +258,8 @@ class PushDispatcher:
         body = f"{name} triggered the alarm" if name else "The alarm was triggered"
         data = {"type": PUSH_TYPE_SECURITY, "title": title, "body": body}
         if life_safety:
-
-
+            # House-wide audience flag: a fire/smoke (life-safety) alarm must
+            # reach EVERYONE, not just the owner (consumed in _dispatch_inner).
             data["life_safety"] = "1"
         if isinstance(entity_id, str) and entity_id:
             data["entity_id"] = entity_id
@@ -270,7 +268,7 @@ class PushDispatcher:
     def _build_lock_payload(
         self, entity_id: str, new_state: Any
     ) -> dict[str, str]:
-        """CasaSmart runtime component."""
+        """Plaintext lock notification for a settled lock transition."""
         locked = new_state.state == STATE_LOCKED
         name = self._friendly_name(entity_id) or entity_id
         action = "locked" if locked else "unlocked"
@@ -282,7 +280,7 @@ class PushDispatcher:
         }
 
     def _friendly_name(self, entity_id: Any) -> Optional[str]:
-        """CasaSmart runtime component."""
+        """The entity's friendly name from the live state, or None."""
         if not isinstance(entity_id, str) or not entity_id:
             return None
         state = self._hass.states.get(entity_id)
@@ -294,13 +292,20 @@ class PushDispatcher:
 
 
     async def async_send(self, data: dict[str, str], priority: str) -> dict[str, str]:
-        """CasaSmart runtime component."""
         return await self._dispatch(data, priority)
 
     async def async_send_device_paired(
         self, name: str, role: str, device_id: str
     ) -> None:
-        """CasaSmart runtime component."""
+        """Owner notification for a successful NEW device enroll (Phase 5, D6).
+
+        "New device paired: <name> (<role>)" — the enroll view calls this
+        after ``enroll_device`` lands, so a member code redeemed anywhere
+        (LAN or, with ``remote_pairing_enabled`` on, remotely) is always
+        visible to the owner. Rides the same signed relay path and the same
+        owner-only audience filter as alarm/lock/tank; notification-only by
+        locked decision #6 — no approval gate. Never raises.
+        """
         await self._dispatch(
             {
                 "type": PUSH_TYPE_DEVICE_PAIRED,
@@ -312,7 +317,6 @@ class PushDispatcher:
         )
 
     async def _dispatch(self, data: dict[str, str], priority: str) -> dict[str, str]:
-        """CasaSmart runtime component."""
         try:
             return await self._dispatch_inner(data, priority)
         except Exception:
@@ -368,7 +372,13 @@ class PushDispatcher:
     def _build_request(
         self, device_tokens: list[str], data: dict[str, str], priority: str
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Build the signed relay request body.
+
+        The canonical JSON signed here MUST match what the relay re-derives:
+        sorted keys, no whitespace, raw UTF-8 (``ensure_ascii=False``), integer
+        timestamp. ``signature`` is excluded from the signed bytes and added
+        afterwards.
+        """
         signed = {
             "hub_id": self._hub_id,
             "timestamp": int(self._clock()),
@@ -387,7 +397,6 @@ class PushDispatcher:
         return {**signed, "signature": signature}
 
     async def _send(self, body: dict[str, Any]) -> dict[str, str]:
-        """CasaSmart runtime component."""
         if not self._active:
             return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         timeout = aiohttp.ClientTimeout(total=PUSH_RELAY_TIMEOUT_SECONDS)
@@ -409,14 +418,14 @@ class PushDispatcher:
 
     @staticmethod
     async def _read_json(resp: aiohttp.ClientResponse) -> Any:
-        """CasaSmart runtime component."""
+        """Best-effort JSON parse of a relay response, or None."""
         try:
             return await resp.json()
         except (aiohttp.ClientError, ValueError):
             return None
 
     async def _cleanup_dead_tokens(self, payload: Any) -> None:
-        """CasaSmart runtime component."""
+        """Drop any token the relay flagged ``remove_token`` (UNREGISTERED)."""
         if not isinstance(payload, dict):
             return
         errors = payload.get("errors")
@@ -433,7 +442,7 @@ class PushDispatcher:
             return
         try:
             removed = await self._hass.async_add_executor_job(self._remove_tokens, dead)
-        except Exception:
+        except Exception:  # noqa: BLE001 — cleanup is best-effort, never fatal
             _LOGGER.exception("Push dispatch: dead-token cleanup failed")
             return
         if removed:
@@ -443,7 +452,7 @@ class PushDispatcher:
             )
 
     def _remove_tokens(self, dead: set[str]) -> int:
-        """CasaSmart runtime component."""
+        """Executor: unregister every device whose token the relay rejected."""
         removed = 0
         for device_id, rec in self._push_store.get_all_tokens().items():
             if rec.get("fcm_token") in dead and self._push_store.unregister(device_id):
@@ -466,7 +475,27 @@ _AST_OFFSET_SECONDS = 3 * 3600
 
 
 class TankPushMonitor:
-    """CasaSmart runtime component."""
+    """Water-tank low-level + offline push notifications (B8 Piece 4b).
+
+    Unlike the alarm/lock dispatcher this is **timer-driven, not event-driven**:
+    tank readings arrive on a 5-minute REST cadence, and "low at 6pm" / "silent
+    for 20 minutes" are time questions, not state edges. Two timers:
+
+    - a daily 18:00-AST sweep: for every calibrated tank, compute the current
+      percent and push once if it's below the tank's ``low_percent``;
+    - a 5-minute watchdog: push once when a tank that *was* reporting has gone
+      silent for 20+ minutes.
+
+    Both are deduped to at most one push per device per **AST calendar day** (so
+    the offline watchdog can't fire every 5 minutes). Each alert also fires its
+    HA bus event (EVENT_TANK_LOW / EVENT_TANK_OFFLINE) as the installer
+    automation hook, then dispatches the phone push through the shared signed
+    relay path (``PushDispatcher.async_send``).
+
+    The decision methods (``async_check_low_water`` / ``async_check_offline``)
+    take their "now" from an injectable ``clock`` and read the engine via the
+    executor, so they're unit-testable without HA timers or a live relay.
+    """
 
     def __init__(
         self,
@@ -482,16 +511,18 @@ class TankPushMonitor:
         self._clock = clock
         self._unsub_daily: Optional[Callable[[], None]] = None
         self._unsub_offline: Optional[Callable[[], None]] = None
-
-
+        # device_id -> AST day index of the last push, one map per channel so a
+        # low-water push and an offline push don't suppress each other.
         self._low_pushed_day: dict[str, int] = {}
         self._offline_pushed_day: dict[str, int] = {}
 
-
+    # -- lifecycle -------------------------------------------------------------
 
     @callback
     def async_start(self) -> None:
-        """CasaSmart runtime component."""
+        """Wire the two timers. Imported lazily so the module stays importable
+        (the dispatcher unit tests stub only ``homeassistant.const``/``core``).
+        """
         from homeassistant.helpers.event import (
             async_track_time_interval,
             async_track_utc_time_change,
@@ -515,7 +546,7 @@ class TankPushMonitor:
 
     @callback
     def async_stop(self) -> None:
-        """CasaSmart runtime component."""
+        """Release both timers (idempotent — safe on any unload)."""
         if self._unsub_daily is not None:
             self._unsub_daily()
             self._unsub_daily = None
@@ -523,7 +554,7 @@ class TankPushMonitor:
             self._unsub_offline()
             self._unsub_offline = None
 
-
+    # -- timer adapters --------------------------------------------------------
 
     async def _handle_daily_check(self, _now: Any = None) -> None:
         await self.async_check_low_water()
@@ -531,10 +562,10 @@ class TankPushMonitor:
     async def _handle_offline_check(self, _now: Any = None) -> None:
         await self.async_check_offline()
 
-
+    # -- checks (testable; clock-driven) ---------------------------------------
 
     async def async_check_low_water(self) -> None:
-        """CasaSmart runtime component."""
+        """Push once for each calibrated tank currently below its threshold."""
         now = self._clock()
         day = self._ast_day(now)
         devices = await self._list_devices()
@@ -545,16 +576,16 @@ class TankPushMonitor:
             if self._low_pushed_day.get(device_id) == day:
                 continue
             last = device.get("last_reading")
-
-
-
+            # A dead sensor must not raise a "low" alert off a stale reading —
+            # that's the offline watchdog's job. Skip when the latest reading is
+            # already past the offline threshold.
             if not last or now - last.get("t", 0) >= TANK_OFFLINE_TIMEOUT_SECONDS:
                 continue
             try:
                 status = await self._hass.async_add_executor_job(
                     self._tanks.status, device_id
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — one bad tank must not stop the sweep
                 _LOGGER.exception("Tank %s: status read failed", device_id)
                 continue
             if status.get("percent") is None or not status.get("is_low"):
@@ -563,7 +594,7 @@ class TankPushMonitor:
             await self._emit_low(device, status)
 
     async def async_check_offline(self) -> None:
-        """CasaSmart runtime component."""
+        """Push once for each previously-reporting tank now silent 20+ min."""
         now = self._clock()
         day = self._ast_day(now)
         devices = await self._list_devices()
@@ -572,8 +603,8 @@ class TankPushMonitor:
             if not device_id:
                 continue
             last = device.get("last_reading")
-
-
+            # "previously reporting": a tank with no reading at all (freshly
+            # provisioned, never POSTed) is not offline, it's pending.
             if not last:
                 continue
             if now - last.get("t", 0) < TANK_OFFLINE_TIMEOUT_SECONDS:
@@ -583,7 +614,7 @@ class TankPushMonitor:
             self._offline_pushed_day[device_id] = day
             await self._emit_offline(device, last)
 
-
+    # -- emit ------------------------------------------------------------------
 
     async def _emit_low(
         self, device: dict[str, Any], status: dict[str, Any]
@@ -634,16 +665,16 @@ class TankPushMonitor:
             PRIORITY_NORMAL,
         )
 
-
+    # -- internals -------------------------------------------------------------
 
     async def _list_devices(self) -> list[dict[str, Any]]:
         try:
             return await self._hass.async_add_executor_job(self._tanks.list_devices)
-        except Exception:
+        except Exception:  # noqa: BLE001 — a storage hiccup skips this tick only
             _LOGGER.exception("Tank monitor: listing devices failed")
             return []
 
     @staticmethod
     def _ast_day(now: float) -> int:
-        """CasaSmart runtime component."""
+        """The AST (UTC+3) calendar-day index for the once-per-day dedup."""
         return int((now + _AST_OFFSET_SECONDS) // _SECONDS_PER_DAY)

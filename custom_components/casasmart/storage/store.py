@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -34,7 +33,6 @@ _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
 class HubStorage:
-    """CasaSmart runtime component."""
 
     def __init__(self, db_path: Path, backup_dir: Path | None = None) -> None:
         self._db_path = Path(db_path)
@@ -49,7 +47,7 @@ class HubStorage:
 
 
     def open(self, migrations: tuple[Migration, ...] = MIGRATIONS) -> None:
-        """CasaSmart runtime component."""
+        """Open the database: run migrations, enable WAL, verify it stuck."""
         if self._conn is not None:
             return
 
@@ -65,12 +63,12 @@ class HubStorage:
                     f"Could not enable WAL (journal_mode={journal_mode!r}). "
                     "Is the database on a filesystem that supports it?"
                 )
-
-
-
-
-
-
+            # synchronous=FULL: every COMMIT fsyncs the WAL, so a host power cut
+            # can't drop an acknowledged write (a pairing, a registry edit, a
+            # tank reading). NORMAL fsyncs only at checkpoint, which on a
+            # low-write hub can lag far behind. Affordable here because writes
+            # are small + infrequent — the tank readings table turned the one
+            # high-frequency writer into a one-row INSERT, not a 270 KB blob.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(
@@ -90,7 +88,7 @@ class HubStorage:
         )
 
     def close(self) -> None:
-        """CasaSmart runtime component."""
+        """Checkpoint the WAL and close the connection."""
         with self._lock:
             if self._conn is None:
                 return
@@ -110,7 +108,7 @@ class HubStorage:
 
 
     def table(self, namespace: str) -> "KeyValueTable":
-        """CasaSmart runtime component."""
+        """Return the dict-like view for ``namespace`` (created lazily)."""
         if not _VALID_NAMESPACE.match(namespace):
             raise ValueError(
                 f"Invalid table namespace {namespace!r}: must match "
@@ -121,11 +119,11 @@ class HubStorage:
         return self._tables[namespace]
 
     def tank_readings(self) -> "TankReadingsTable":
-        """CasaSmart runtime component."""
+        """Append-only time-series store for tank readings (one row/reading)."""
         return TankReadingsTable(self)
 
     def energy_events(self) -> "EnergyEventsTable":
-        """CasaSmart runtime component."""
+        """Append-only audit store for Energy Saving events."""
         return EnergyEventsTable(self)
 
 
@@ -169,13 +167,18 @@ class HubStorage:
                 self._transaction_depth -= 1
 
     def _fetchall(self, sql: str, params: tuple = ()) -> list[tuple]:
-        """CasaSmart runtime component."""
+        """Execute and consume a read while holding the connection lock."""
         with self._lock:
             return self._connection.execute(sql, params).fetchall()
 
 
 class KeyValueTable(MutableMapping):
-    """CasaSmart runtime component."""
+    """Dict-like view over one namespace in the ``kv`` table.
+
+    Keys are strings; values are anything ``json.dumps`` accepts. Reads
+    return fresh deserialized copies — mutating a returned value does NOT
+    write back; assign it again to persist.
+    """
 
     def __init__(self, storage: HubStorage, namespace: str) -> None:
         self._storage = storage
@@ -185,7 +188,7 @@ class KeyValueTable(MutableMapping):
     def namespace(self) -> str:
         return self._namespace
 
-
+    # -- MutableMapping interface ---------------------------------------------
 
     def __getitem__(self, key: str) -> Any:
         self._check_key(key)
@@ -200,9 +203,9 @@ class KeyValueTable(MutableMapping):
     def __setitem__(self, key: str, value: Any) -> None:
         self._check_key(key)
         try:
-
-
-
+            # allow_nan=False: a NaN/Infinity would serialize to a bare
+            # NaN/Infinity token that strict JSON parsers (the app) reject,
+            # poisoning the whole row — reject it at the write instead.
             payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as err:
             raise TypeError(
@@ -242,7 +245,12 @@ class KeyValueTable(MutableMapping):
         return int(row[0])
 
     def items(self) -> list[tuple[str, Any]]:
-        """CasaSmart runtime component."""
+        """Return one consistent key/value snapshot.
+
+        MutableMapping's default view iterates keys and then fetches each value
+        separately. A concurrent delete between those operations raises a
+        spurious KeyError in read paths such as tank/device listings.
+        """
         rows = self._storage._fetchall(
             "SELECT key, value FROM kv WHERE namespace = ? ORDER BY key",
             (self._namespace,),
@@ -250,11 +258,11 @@ class KeyValueTable(MutableMapping):
         return [(key, json.loads(value)) for key, value in rows]
 
     def __contains__(self, key: object) -> bool:
-
-
-
-
-
+        # MutableMapping's default __contains__ probes __getitem__, whose
+        # _check_key raises TypeError for non-string keys. Membership is a
+        # question, not a write — `None in table` is legitimate (optional
+        # foreign ids like a room's floor_id) and the dict answer is False,
+        # not a crash. Also saves fetching + JSON-parsing the whole value.
         if not isinstance(key, str) or not key:
             return False
         row = self._storage._execute(
@@ -266,16 +274,16 @@ class KeyValueTable(MutableMapping):
     def __repr__(self) -> str:
         return f"<KeyValueTable {self._namespace!r} ({len(self)} keys)>"
 
-
+    # -- extras ----------------------------------------------------------------
 
     def clear(self) -> None:
-        """CasaSmart runtime component."""
+        """Delete every key in this namespace (single statement, not per-key)."""
         self._storage._execute_write(
             "DELETE FROM kv WHERE namespace = ?", (self._namespace,)
         )
 
     def updated_at(self, key: str) -> str:
-        """CasaSmart runtime component."""
+        """Return the ISO-8601 UTC timestamp of the key's last write."""
         self._check_key(key)
         row = self._storage._execute(
             "SELECT updated_at FROM kv WHERE namespace = ? AND key = ?",
@@ -292,13 +300,20 @@ class KeyValueTable(MutableMapping):
 
 
 class TankReadingsTable:
-    """CasaSmart runtime component."""
+    """Append-only per-row store for tank readings (the ``tank_readings`` table).
+
+    A high-frequency time series doesn't fit the rewrite-the-whole-value
+    KeyValueTable shape — at a 5-minute cadence that re-serialized a ~270 KB
+    blob every reading. Here an ingest is a single-row INSERT and retention is a
+    bounded DELETE. Stays inside the storage layer so callers never touch SQL.
+    """
 
     def __init__(self, storage: HubStorage) -> None:
         self._storage = storage
 
     def append(self, device_id: str, t: int, v: float) -> None:
-        """CasaSmart runtime component."""
+        """Record one reading. (device_id, t) is unique — a repeated second
+        replaces rather than doubles the row."""
         self._storage._execute_write(
             """
             INSERT INTO tank_readings (device_id, t, v) VALUES (?, ?, ?)
@@ -308,7 +323,8 @@ class TankReadingsTable:
         )
 
     def latest_t(self, device_id: str) -> int | None:
-        """CasaSmart runtime component."""
+        """The newest reading's timestamp, or None — lets ingest keep t
+        monotonic across a clock step-back (an NTP correction after reboot)."""
         row = self._storage._execute(
             "SELECT MAX(t) FROM tank_readings WHERE device_id = ?",
             (device_id,),
@@ -316,7 +332,7 @@ class TankReadingsTable:
         return int(row[0]) if row and row[0] is not None else None
 
     def last(self, device_id: str) -> dict[str, Any] | None:
-        """CasaSmart runtime component."""
+        """The newest reading as ``{"t":..., "v":...}``, or None."""
         row = self._storage._execute(
             "SELECT t, v FROM tank_readings WHERE device_id = ? "
             "ORDER BY t DESC LIMIT 1",
@@ -325,7 +341,9 @@ class TankReadingsTable:
         return {"t": int(row[0]), "v": float(row[1])} if row else None
 
     def recent(self, device_id: str, since_t: int) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Readings at/after ``since_t``, NEWEST first (the app's history shape).
+
+        ORDER BY t makes 'newest first' robust to an out-of-order ingest t."""
         rows = self._storage._execute(
             "SELECT t, v FROM tank_readings WHERE device_id = ? AND t >= ? "
             "ORDER BY t DESC",
@@ -334,7 +352,8 @@ class TankReadingsTable:
         return [{"t": int(t), "v": float(v)} for t, v in rows]
 
     def prune(self, device_id: str, before_t: int) -> int:
-        """CasaSmart runtime component."""
+        """Drop readings older than ``before_t`` (age-based retention); returns
+        the count removed. Cheap + indexed — usually 0-1 rows once steady."""
         cursor = self._storage._execute_write(
             "DELETE FROM tank_readings WHERE device_id = ? AND t < ?",
             (device_id, int(before_t)),
@@ -342,14 +361,19 @@ class TankReadingsTable:
         return cursor.rowcount
 
     def delete_device(self, device_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Drop all readings for a device (when the device record is deleted)."""
         self._storage._execute_write(
             "DELETE FROM tank_readings WHERE device_id = ?", (device_id,)
         )
 
 
 class EnergyEventsTable:
-    """CasaSmart runtime component."""
+    """Row-per-event Energy Saving audit history.
+
+    State/config remain in ``KeyValueTable`` namespaces. Events need ordered,
+    bounded queries and aggregate counts, so they use migration v4's dedicated
+    table while still keeping all SQL inside the storage layer.
+    """
 
     _MAX_QUERY_LIMIT = 1000
 
@@ -366,7 +390,7 @@ class EnergyEventsTable:
         room_id: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Append one event and return its public record."""
         if isinstance(t, bool) or not isinstance(t, int) or t < 0:
             raise ValueError("t must be a non-negative integer timestamp")
         kind = self._required_text(kind, "kind", max_length=64)
@@ -407,7 +431,7 @@ class EnergyEventsTable:
         since_t: int | None = None,
         kinds: list[str] | tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """Return newest-first events with optional time/kind filters."""
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -448,7 +472,7 @@ class EnergyEventsTable:
         return [self._row(row) for row in rows]
 
     def summary(self, *, since_t: int | None = None) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Small factual aggregates only—never estimated energy or money."""
         params: tuple[Any, ...] = ()
         where = ""
         if since_t is not None:
@@ -479,7 +503,7 @@ class EnergyEventsTable:
         }
 
     def prune(self, *, before_t: int) -> int:
-        """CasaSmart runtime component."""
+        """Delete events older than ``before_t``; return the number removed."""
         if (
             isinstance(before_t, bool)
             or not isinstance(before_t, int)
@@ -492,7 +516,7 @@ class EnergyEventsTable:
         return cursor.rowcount
 
     def clear(self) -> None:
-        """CasaSmart runtime component."""
+        """Delete the complete Energy Saving event history."""
         self._storage._execute_write("DELETE FROM energy_events")
 
     @staticmethod

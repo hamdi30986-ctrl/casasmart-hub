@@ -1,4 +1,31 @@
-"""CasaSmart runtime component."""
+"""CasaSmart alarm_control_panel entity (Phase 6, block B13) — the HA face.
+
+The hub-authoritative ``AlarmEngine`` (``alarm.py``) owns every decision; the
+REST API (``alarm_api.py``) is how the *app* drives it. This platform is the
+third face: a first-class Home Assistant ``alarm_control_panel`` entity that
+mirrors the engine's arm state, so
+
+- arm/disarm shows up in HA dashboards and the logbook, and
+- installer automations trigger on a standard ``alarm_control_panel`` state
+  (``triggered`` / ``armed_away`` / …) instead of only the custom
+  ``EVENT_ALARM_TRIGGERED`` bus event. The breach->siren hook keeps working as
+  before; this just adds the native, arm-state-aware trigger surface.
+
+Both directions ride one engine. Arming through HA routes into the same
+``AlarmEngine.arm`` the app calls and fires ``EVENT_ALARM_CHANGED``; arming
+through the app fires that same event, which this entity listens to — so a
+phone-driven arm reflects on the HA panel and vice-versa, with no second
+source of truth.
+
+Option A (no PIN): ``code_arm_required`` is False and there is no code format.
+Authorisation lives at the app/JWT layer and at HA's own auth — the panel does
+not gate on a shared secret (see B13 decision log).
+
+Exit-delay grace is passive in the engine (no event fires when it lapses), so
+when the panel computes ``ARMING`` it schedules one exact refresh at the
+engine's ``arming_until`` to flip the displayed state to fully-armed — the same
+one-timer posture the adapter uses for the entry-delay countdown.
+"""
 
 from __future__ import annotations
 
@@ -30,13 +57,13 @@ from .const import DOMAIN, EVENT_ALARM_CHANGED
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
+# Arming through the HA panel/automations is recorded under this actor in the
+# engine's audit trail — it did not come from a CasaSmart app user.
 _HA_ACTOR = "homeassistant"
 
-
-
-
+# Steady (grace consumed) engine mode -> HA panel state. ARMING is derived
+# separately from ``arming_until`` because the engine has no distinct exit
+# state — a freshly armed mode is "arming" only until its grace deadline.
 _MODE_TO_STATE: dict[str, AlarmControlPanelState] = {
     MODE_DISARMED: AlarmControlPanelState.DISARMED,
     MODE_AWAY: AlarmControlPanelState.ARMED_AWAY,
@@ -48,17 +75,17 @@ _MODE_TO_STATE: dict[str, AlarmControlPanelState] = {
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
-    """CasaSmart runtime component."""
+    """Register the single CasaSmart alarm panel for this hub entry."""
     engine: AlarmEngine = entry.runtime_data.alarm
     async_add_entities([CasaSmartAlarmPanel(hass, entry.entry_id, engine)])
 
 
 class CasaSmartAlarmPanel(AlarmControlPanelEntity):
-    """CasaSmart runtime component."""
+    """One panel mirroring the hub-authoritative ``AlarmEngine``."""
 
     _attr_has_entity_name = True
     _attr_name = "Security"
-
+    # Option A: no PIN. Authorisation is the app's JWT / HA's own auth.
     _attr_code_arm_required = False
     _attr_code_format = None
     _attr_supported_features = (
@@ -81,10 +108,10 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         self._unsub_changed: Optional[Any] = None
         self._cancel_arming: Optional[Any] = None
 
-
+    # -- lifecycle -------------------------------------------------------------
 
     async def async_added_to_hass(self) -> None:
-        """CasaSmart runtime component."""
+        """Track every arm-state transition (app- or HA-driven) and follow it."""
         self._unsub_changed = self._hass.bus.async_listen(
             EVENT_ALARM_CHANGED, self._on_alarm_changed
         )
@@ -96,11 +123,11 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
             self._unsub_changed = None
         self._cancel_arming_refresh()
 
-
+    # -- state -----------------------------------------------------------------
 
     @property
     def alarm_state(self) -> AlarmControlPanelState:
-        """CasaSmart runtime component."""
+        """Live engine mode -> HA panel state (ARMING derived from grace)."""
         snap = self._engine.snapshot()
         mode = snap["mode"]
         arming_until = snap.get("arming_until")
@@ -112,7 +139,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
             return AlarmControlPanelState.ARMING
         return _MODE_TO_STATE.get(mode, AlarmControlPanelState.DISARMED)
 
-
+    # -- commands (route into the one engine, then announce) -------------------
 
     async def async_alarm_disarm(self, code: Optional[str] = None) -> None:
         await self._command(self._engine.disarm)
@@ -127,23 +154,33 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         await self._command(partial(self._engine.arm, MODE_NIGHT))
 
     async def _command(self, engine_call) -> None:
-        """CasaSmart runtime component."""
+        """Run a storage-touching engine call off-loop, then fan the change out.
+
+        Firing ``EVENT_ALARM_CHANGED`` is what keeps the three faces in sync:
+        the WS server nudges connected apps, the adapter re-syncs its
+        entry-delay timer, and our own listener refreshes this entity's state.
+        """
         await self._hass.async_add_executor_job(
             partial(engine_call, actor=_HA_ACTOR)
         )
         self._hass.bus.async_fire(EVENT_ALARM_CHANGED, {})
 
-
+    # -- transitions -----------------------------------------------------------
 
     @callback
     def _on_alarm_changed(self, _event: Event) -> None:
-        """CasaSmart runtime component."""
+        """Any arm-state move: repaint now and re-arm the grace refresh."""
         self._schedule_arming_refresh()
         self.async_write_ha_state()
 
     @callback
     def _schedule_arming_refresh(self) -> None:
-        """CasaSmart runtime component."""
+        """If we're inside an exit-grace window, schedule the flip to armed.
+
+        The engine fires no event when grace lapses (it's a passive deadline),
+        so without this the panel would sit on ``ARMING`` until the next
+        unrelated transition. Exactly one timer, rescheduled on every change.
+        """
         self._cancel_arming_refresh()
         snap = self._engine.snapshot()
         arming_until = snap.get("arming_until")

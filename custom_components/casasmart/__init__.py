@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -141,7 +140,6 @@ type CasaSmartConfigEntry = ConfigEntry[CasaSmartRuntimeData]
 
 @dataclass
 class CasaSmartRuntimeData:
-    """CasaSmart runtime component."""
 
     storage: HubStorage
     hub_config: JsonConfigStore
@@ -222,7 +220,6 @@ def _open_storage(
     str | None,
     str | None,
 ]:
-    """CasaSmart runtime component."""
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -339,7 +336,6 @@ def _open_storage(
 async def async_migrate_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
-    """CasaSmart runtime component."""
     if entry.version > CONFIG_ENTRY_VERSION:
         _LOGGER.error(
             "Cannot migrate CasaSmart config entry version %s to %s",
@@ -399,7 +395,6 @@ async def async_migrate_entry(
 async def async_setup_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
-    """CasaSmart runtime component."""
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
 
     try:
@@ -583,7 +578,15 @@ async def _async_import_registry(
     hub_config: JsonConfigStore,
     registry: RegistryEngine,
 ) -> None:
-    """CasaSmart runtime component."""
+    """B17 first-run import: seed the registry from HA's own registries.
+
+    Floors/areas/entity-area assignments become registry floors/rooms/
+    assignments KEEPING their HA ids — existing room-scoped JWTs use HA
+    area ids, so imported layouts work with them unchanged. Runs once
+    (``registry_imported`` flag); the engine additionally never
+    overwrites existing records, so a re-run after a crash mid-import
+    completes the seed without clobbering installer edits.
+    """
     if hub_config.get("registry_imported") is True:
         return
 
@@ -627,9 +630,9 @@ async def _async_import_registry(
 
     try:
         counts = await hass.async_add_executor_job(_seed)
-    except Exception:
-
-
+    except Exception:  # noqa: BLE001 — a failed seed must never kill setup
+        # Flag stays unset -> retried next boot; import_initial never
+        # overwrites, so a partial seed just gets completed then.
         _LOGGER.exception("Registry seed failed — will retry on next start")
         return
     _LOGGER.info(
@@ -652,7 +655,7 @@ _DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
 
 
 def _dev_enroll_enabled() -> bool:
-    """CasaSmart runtime component."""
+    """True only when the dev auto-enroll env flag is explicitly truthy."""
     return os.environ.get(_DEV_ENROLL_ENV, "").strip().lower() in (
         "1",
         "true",
@@ -664,7 +667,20 @@ def _dev_enroll_enabled() -> bool:
 async def _async_setup_dev_enroll(
     hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
 ) -> None:
-    """CasaSmart runtime component."""
+    """DEV-ONLY: keep the trusted dev keys enrolled across factory resets.
+
+    Gated behind [_DEV_ENROLL_ENV] (default OFF): without the opt-in the dev
+    manifest never auto-enrolls anyone, so dev/test hubs — and any hub that
+    accidentally ships a manifest — stay clean single-admin by default.
+
+    When enabled, provisions the ``dev_devices.json`` manifest now (boot /
+    service-reset reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the
+    BUTTON reset — which wipes the auth tables in place without reloading the
+    entry — also re-provisions. A no-op on any hub without the manifest (every
+    client hub). The seam is idempotent and never fires ``EVENT_AUTH_CHANGED``
+    itself, so the listener can't feed itself. The listener is torn down with
+    the entry via ``async_on_unload``.
+    """
     if not _dev_enroll_enabled():
         return
 
@@ -690,13 +706,19 @@ async def _async_start_tls(
     data_dir: Path,
     hub_version: str,
 ) -> None:
-    """CasaSmart runtime component."""
+    """B10: bring up the dedicated HTTPS listener + the daily cert check.
+
+    A corrupt identity key aborts setup loudly (re-keying silently would
+    break every paired phone's pin — tls.py documents the recovery). A
+    port that won't bind does NOT abort: it's logged and retried on the
+    daily tick, and the plain views on HA's port keep working meanwhile.
+    """
     runtime_data = entry.runtime_data
     try:
         material = await hass.async_add_executor_job(ensure_tls_material, data_dir)
     except IdentityError as err:
-
-
+        # Non-transient by definition (corrupt identity key) — retrying
+        # can't fix it, a human must. ConfigEntryError, not NotReady.
         raise ConfigEntryError(str(err)) from err
 
     port = runtime_data.hub_config.get("tls_port")
@@ -727,7 +749,17 @@ async def _async_start_tls(
 async def _async_start_mdns(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
+    """B6: advertise ``_casasmart._tcp`` so the app auto-discovers the hub.
+
+    The hub-id broadcast in the TXT record is the **permanent identity
+    fingerprint** (B10) — the same value the app pins — so discovery and
+    the TLS trust decision share one identity, and a spoofed TXT id can't
+    survive the pin. Needs that fingerprint, so it runs after TLS; if the
+    identity layer failed (``runtime_data.tls is None``) there's nothing
+    stable to advertise and discovery is skipped (the stored-IP/tunnel
+    chain still reaches the hub). Re-publishes on a slow tick to follow a
+    DHCP IP change. Failures degrade silently — mDNS is convenience.
+    """
     runtime_data = entry.runtime_data
     if runtime_data.tls is None:
         _LOGGER.info("mDNS advertiser skipped — TLS identity unavailable")
@@ -756,7 +788,6 @@ async def _async_start_mdns(
 async def _async_start_push(
     hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
 ) -> None:
-    """CasaSmart runtime component."""
     runtime_data = entry.runtime_data
     if runtime_data.tls is None:
         _LOGGER.info("Push dispatcher skipped — TLS identity unavailable")
@@ -805,7 +836,6 @@ async def _async_start_push(
     runtime_data.push_dispatcher = dispatcher
 
     async def _async_registration_ready() -> None:
-        """CasaSmart runtime component."""
         if (
             CONF_RELAY_ACTIVATION_CODE in entry.data
             or CONF_RELAY_ACTIVATION_REQUEST_ID in entry.data
@@ -816,7 +846,6 @@ async def _async_start_push(
         persistent_notification.async_dismiss(hass, _NOTIFY_RELAY_CONFIGURATION)
 
     async def _async_registration_failed(reason: str) -> None:
-        """CasaSmart runtime component."""
         persistent_notification.async_create(
             hass,
             "Automatic push-relay enrollment stopped safely: "
@@ -855,7 +884,7 @@ async def _async_start_push(
 
 
 def _tunnel_options_snapshot(entry: CasaSmartConfigEntry) -> dict[str, Any]:
-    """CasaSmart runtime component."""
+    """The tunnel-relevant slice of entry.options, for change detection."""
     return {
         CONF_CLOUDFLARE_DOMAIN: entry.options.get(CONF_CLOUDFLARE_DOMAIN),
         CONF_TUNNEL_ENABLED: entry.options.get(CONF_TUNNEL_ENABLED),
@@ -865,20 +894,31 @@ def _tunnel_options_snapshot(entry: CasaSmartConfigEntry) -> dict[str, Any]:
 async def _async_sync_tunnel_url(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
+    """Derive hub_config["tunnel_url"] from the options domain (if set).
+
+    Options are the user surface; ``hub_config["tunnel_url"]`` stays the
+    canonical *advertised* URL — the handshake (api.py) and camera URLs
+    (camera_api.py) read it live per request, so no reload is ever needed.
+    The URL keeps being advertised even while the tunnel is toggled OFF:
+    phones capture the remote path at pairing for when it returns (their
+    fallback chain tolerates a dead URL), and pairing is LAN-only anyway.
+
+    Without an options domain this is a no-op — a service-set URL from the
+    B7 installer path is never touched.
+    """
     domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
     runtime_data = entry.runtime_data
     if domain:
         url = domain_to_tunnel_url(domain)
         if url is None:
-
+            # Flow-validated domains can't get here; fail closed if one does.
             _LOGGER.warning(
                 "Configured Cloudflare domain %r is unusable — not advertising it",
                 domain,
             )
         elif runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY) != url:
-
-
+            # JsonConfigStore writes are blocking (executor), and skipped
+            # when the value is current so boot never costs a disk write.
             await hass.async_add_executor_job(
                 runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
             )
@@ -891,7 +931,6 @@ async def _async_sync_tunnel_url(
 async def _async_options_updated(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
     runtime_data = entry.runtime_data
     applied_relay = runtime_data.relay_config_applied
     configured_relay = normalize_relay_base_url(
@@ -1029,21 +1068,30 @@ async def _async_options_updated(
 async def _async_reconcile_tunnel(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
+    """Enforce the desired tunnel state (options) on the cloudflared add-on.
+
+    Desired-state model, not imperative start/stop: every run compares what
+    the add-on IS (running? boot mode?) against what the options SAY and
+    closes the gap — so a manually-started add-on while the toggle is OFF
+    gets stopped again on the next run, and installing the add-on after the
+    fact "just works". Runs at boot and after every options change; every
+    failure notifies + logs and never raises — the tunnel is one feature,
+    not the hub.
+    """
     domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
     if not domain:
-
-
+        # No domain -> fully inert. Never touch an add-on we weren't pointed
+        # at — an installed cloudflared may be tunneling something else.
         return
     desired_on = bool(entry.options.get(CONF_TUNNEL_ENABLED, False))
 
     controller = entry.runtime_data.tunnel_control
-    if controller is None:
+    if controller is None:  # unloading race — next setup reconciles
         return
 
     if not controller.available():
-
-
+        # Container/Core install (like the dev hub): domain storage and
+        # handshake advertising still work; only add-on control is inert.
         _LOGGER.info(
             "Cloudflare domain configured but tunnel control is unavailable "
             "(no add-on Supervisor on this install) — manage cloudflared "
@@ -1087,7 +1135,7 @@ async def _async_reconcile_tunnel(
             if state.running or state.boot != "manual":
                 await controller.async_disable(slug, running=state.running)
             if state.running:
-
+                # We just took a live tunnel down — say why, loudly.
                 persistent_notification.async_create(
                     hass,
                     f"The Cloudflare tunnel add-on ({slug}) was stopped and "
@@ -1111,14 +1159,22 @@ async def _async_reconcile_tunnel(
             notification_id=_NOTIFY_TUNNEL_ERROR,
         )
         return
-
+    # Reconciled clean — retire any stale failure notice from earlier runs.
     persistent_notification.async_dismiss(hass, _NOTIFY_TUNNEL_ERROR)
 
 
 async def _async_tunnel_watchdog(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
+    """Periodic edge-liveness check (Phase 9): heal a running-but-offline tunnel.
+
+    The reconciler only knows whether the add-on is *running*; cloudflared can
+    be running yet disconnected from Cloudflare's edge (network flap, edge drop)
+    — remote access goes dark with no add-on error. This probes the public
+    tunnel URL through the edge and restarts the add-on when Cloudflare reports
+    the origin unreachable. Only fires while the tunnel is meant to be ON and a
+    URL is advertised; never raises — the tunnel is one feature, not the hub.
+    """
     domain = entry.options.get(CONF_CLOUDFLARE_DOMAIN)
     if not domain or not bool(entry.options.get(CONF_TUNNEL_ENABLED, False)):
         return
@@ -1135,8 +1191,8 @@ async def _async_tunnel_watchdog(
             return
         state = await controller.async_state(slug)
         if not state.running:
-
-
+            # A stopped add-on is the reconciler's job (it starts it); the
+            # watchdog only heals a tunnel that IS running but edge-dead.
             return
         result = await controller.async_watchdog_check(
             slug, tunnel_url, time.monotonic()
@@ -1161,12 +1217,11 @@ async def _async_tunnel_watchdog(
             notification_id=_NOTIFY_TUNNEL_EDGE_DOWN,
         )
     elif result == "up":
-
+        # Edge is healthy — clear any prior auto-recovery notice.
         persistent_notification.async_dismiss(hass, _NOTIFY_TUNNEL_EDGE_DOWN)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
-    """CasaSmart runtime component."""
     if all(
         hass.services.has_service(DOMAIN, service)
         for service in (
@@ -1179,7 +1234,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
         return
 
     async def _handle_activate_scene(call) -> None:
-        """CasaSmart runtime component."""
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
@@ -1213,7 +1267,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
 
     async def _handle_set_tunnel_url(call) -> None:
-        """CasaSmart runtime component."""
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
@@ -1402,7 +1455,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
 async def async_unload_entry(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> bool:
-    """CasaSmart runtime component."""
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
@@ -1432,7 +1484,16 @@ async def async_unload_entry(
 async def async_remove_entry(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-    """CasaSmart runtime component."""
+    """Entry deleted: best-effort restore of cloudflared to boot=auto.
+
+    The reconciler may have parked the add-on at boot=manual (tunnel
+    disabled). Removing the integration must not permanently strand the
+    client's remote access, so hand auto-boot back to the Supervisor —
+    without starting the add-on (removal is not consent to open remote
+    access right now). Best effort by design: no Supervisor, no add-on, or
+    a Supervisor error is logged and dropped. runtime_data is already gone
+    here, so a fresh controller is built.
+    """
     if not entry.options.get(CONF_CLOUDFLARE_DOMAIN):
         return
     controller = CloudflaredController(hass)

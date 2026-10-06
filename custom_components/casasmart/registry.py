@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -48,15 +47,15 @@ _TAG_COLORS = frozenset(
 
 
 class RegistryError(Exception):
-    """CasaSmart runtime component."""
+    """Registry input rejected (maps to HTTP 400)."""
 
 
 class UnknownItemError(RegistryError):
-    """CasaSmart runtime component."""
+    """No floor/room/scene/assignment under that id (maps to HTTP 404)."""
 
 
 class InUseError(RegistryError):
-    """CasaSmart runtime component."""
+    """Deletion refused because something still references the item."""
 
 
 class RoomMoveConflict(InUseError):
@@ -77,14 +76,17 @@ def _clean_name(name: Any, what: str) -> str:
 
 
 def _lenient_name(name: Any, fallback: str) -> str:
-    """CasaSmart runtime component."""
+    """Import-only name cleaning: HA area/floor names are free user text
+    we don't control — truncate instead of rejecting, never raise. A
+    rejection here would abort integration setup (and keep aborting it
+    on every restart) over a name the user typed into HA years ago."""
     if not isinstance(name, str) or not name.strip():
         return fallback
     return name.strip()[:_NAME_MAX]
 
 
 def _lenient_sort_order(sort_order: Any) -> int:
-    """CasaSmart runtime component."""
+    """Import-only: anything that isn't a plain int becomes 0."""
     if isinstance(sort_order, bool) or not isinstance(sort_order, int):
         return 0
     return sort_order
@@ -101,7 +103,7 @@ def _clean_icon(icon: Any) -> str | None:
 def _clean_sort_order(sort_order: Any) -> int:
     if sort_order is None:
         return 0
-
+    # bool is an int subclass — reject it explicitly.
     if isinstance(sort_order, bool) or not isinstance(sort_order, int):
         raise RegistryError("sort_order must be an integer")
     return sort_order
@@ -114,14 +116,14 @@ def _clean_tag_color(color: Any) -> str:
 
 
 def _clean_favorite(favorite: Any) -> bool:
-    """CasaSmart runtime component."""
+    """House-wide scene-favorite flag. Must be a real bool when present."""
     if not isinstance(favorite, bool):
         raise RegistryError("favorite must be a boolean")
     return favorite
 
 
 def _clean_energy_flag(value: Any) -> bool:
-    """CasaSmart runtime component."""
+    """Whether a scene may execute while Energy Saving is active."""
     if not isinstance(value, bool):
         raise RegistryError("works_during_energy_saving must be a boolean")
     return value
@@ -130,18 +132,18 @@ def _clean_energy_flag(value: Any) -> bool:
 def _clean_entity_ids(
     value: Any, what: str = "entity_ids", max_count: int = _MAX_DEVICE_ENTITIES
 ) -> list[str]:
-    """CasaSmart runtime component."""
+    """A list of entity_id strings — deduped, order preserved, capped."""
     if not isinstance(value, list) or any(
         not isinstance(eid, str) or "." not in eid for eid in value
     ):
         raise RegistryError(f"{what} must be a list of entity_id strings")
     if len(value) > max_count:
         raise RegistryError(f"At most {max_count} {what}")
-    return list(dict.fromkeys(value))
+    return list(dict.fromkeys(value))  # preserve order, drop dupes
 
 
 def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
-    """CasaSmart runtime component."""
+    """A {gang-suffix -> value} map (gang_types / gang_names); None -> {}."""
     if value is None:
         return {}
     if not isinstance(value, dict) or any(
@@ -161,7 +163,7 @@ _KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
 
 def _clean_gang_type(value: Any) -> str:
-    """CasaSmart runtime component."""
+    """Validate a gang's presentation type against the known set."""
     if not isinstance(value, str) or value not in _KNOWN_GANG_TYPES:
         raise RegistryError(
             "gang type must be one of: " + ", ".join(sorted(_KNOWN_GANG_TYPES))
@@ -170,7 +172,6 @@ def _clean_gang_type(value: Any) -> str:
 
 
 def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
-    """CasaSmart runtime component."""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -206,13 +207,15 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
 def _gangs_backed_by(
     gangs: dict[str, dict[str, Any]], entity_ids: list[str]
 ) -> dict[str, dict[str, Any]]:
-    """CasaSmart runtime component."""
+    """Keep only gangs whose control entity_id is a grabbed relay — a gang must
+    map to a real entity in the record, never a phantom (so the gangs= write
+    path can't invent one)."""
     allowed = set(entity_ids)
     return {key: gang for key, gang in gangs.items() if key in allowed}
 
 
 def _clean_optional_room(value: Any) -> str | None:
-    """CasaSmart runtime component."""
+    """A nullable device-level room id."""
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
@@ -221,7 +224,7 @@ def _clean_optional_room(value: Any) -> str | None:
 
 
 def _clean_optional_name(name: Any) -> str | None:
-    """CasaSmart runtime component."""
+    """A nullable display name — None passes through, else validated."""
     return None if name is None else _clean_name(name, "Device")
 
 
@@ -234,7 +237,7 @@ def _clean_device_type(value: Any) -> str | None:
 
 
 def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
-    """CasaSmart runtime component."""
+    """Validate a scene's command list against the entity-bridge whitelist."""
     if not isinstance(entities, list) or not entities:
         raise RegistryError("entities must be a non-empty list")
     if len(entities) > _MAX_SCENE_ENTITIES:
@@ -263,7 +266,6 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
 
 
 class RegistryEngine:
-    """CasaSmart runtime component."""
 
     def __init__(
         self,
@@ -298,7 +300,7 @@ class RegistryEngine:
         self._room_names: dict[str, str] = {}
 
     def warm_up(self) -> None:
-        """CasaSmart runtime component."""
+        """Load the event-loop mirrors from storage (executor, at setup)."""
         with self._lock:
             assignments = {
                 entity_id: (record.get("room_id"), record.get("display_name"))
@@ -322,19 +324,20 @@ class RegistryEngine:
 
 
     def room_of(self, entity_id: str) -> Any:
-        """CasaSmart runtime component."""
+        """The entity's registry room: room_id, None (explicit Unassigned),
+        or the UNSET sentinel when no record exists (fall back to HA)."""
         with self._mirror_lock:
             cached = self._assignment_cache.get(entity_id)
         return UNSET if cached is None else cached[0]
 
     def display_name_of(self, entity_id: str) -> str | None:
-        """CasaSmart runtime component."""
+        """The installer-set display name, or None (use HA friendly name)."""
         with self._mirror_lock:
             cached = self._assignment_cache.get(entity_id)
         return None if cached is None else cached[1]
 
     def room_name(self, room_id: str) -> str | None:
-        """CasaSmart runtime component."""
+        """A room's display name, or None for an unknown room."""
         with self._mirror_lock:
             return self._room_names.get(room_id)
 
@@ -360,7 +363,8 @@ class RegistryEngine:
     def update_floor(
         self, floor_id: str, name: Any = ..., sort_order: Any = ...
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Edit a floor. ``...`` sentinels mean "leave unchanged" — an
+        explicit null is validated (and rejected) like any other value."""
         with self._lock:
             record = self._floors.get(floor_id)
             if record is None:
@@ -369,11 +373,12 @@ class RegistryEngine:
                 record["name"] = _clean_name(name, "Floor")
             if sort_order is not ...:
                 record["sort_order"] = _clean_sort_order(sort_order)
-            self._floors[floor_id] = record
+            self._floors[floor_id] = record  # persist
         return {"floor_id": floor_id, **record}
 
     def delete_floor(self, floor_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Refuse while rooms still reference the floor — explicit beats
+        a silent cascade for something the installer did by hand."""
         with self._lock:
             if floor_id not in self._floors:
                 raise UnknownItemError("Unknown floor")
@@ -426,7 +431,8 @@ class RegistryEngine:
         icon: Any = ...,
         sort_order: Any = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Edit a room. ``...`` sentinels mean "leave unchanged" — for
+        the nullable fields an explicit None clears them."""
         with self._lock:
             record = self._rooms.get(room_id)
             if record is None:
@@ -439,13 +445,12 @@ class RegistryEngine:
                 record["icon"] = _clean_icon(icon)
             if sort_order is not ...:
                 record["sort_order"] = _clean_sort_order(sort_order)
-            self._rooms[room_id] = record
+            self._rooms[room_id] = record  # persist
         with self._mirror_lock:
             self._room_names[room_id] = record["name"]
         return {"room_id": room_id, **record}
 
     def delete_room(self, room_id: str) -> int:
-        """CasaSmart runtime component."""
         with self._lock:
             if room_id not in self._rooms:
                 raise UnknownItemError("Unknown room")
@@ -640,7 +645,7 @@ class RegistryEngine:
 
 
     def list_assignments(self) -> dict[str, dict[str, Any]]:
-        """CasaSmart runtime component."""
+        """entity_id -> {room_id, display_name, sort_order}."""
         return dict(self._devices.items())
 
     def assign_device(
@@ -650,7 +655,6 @@ class RegistryEngine:
         display_name: Any = ...,
         sort_order: Any = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
         if not isinstance(entity_id, str) or "." not in entity_id:
             raise RegistryError("entity_id is required")
         with self._lock:
@@ -830,7 +834,8 @@ class RegistryEngine:
             return result
 
     def remove_assignment(self, entity_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Drop the record entirely — the entity reverts to the HA-area
+        fallback (vs ``room_id=None`` which pins it to Unassigned)."""
         with self._lock:
             try:
                 del self._devices[entity_id]
@@ -843,7 +848,8 @@ class RegistryEngine:
 
     @staticmethod
     def _scene_out(scene_id: str, record: dict[str, Any]) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Public scene shape. ``favorite`` defaults False for legacy
+        records that predate the house-wide favorites flag."""
         return {
             "scene_id": scene_id,
             **record,
@@ -896,7 +902,7 @@ class RegistryEngine:
         favorite: Any = ...,
         works_during_energy_saving: Any = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Edit a scene. ``...`` sentinels mean "leave unchanged"."""
         with self._lock:
             record = self._scenes.get(scene_id)
             if record is None:
@@ -913,7 +919,7 @@ class RegistryEngine:
                 record["works_during_energy_saving"] = _clean_energy_flag(
                     works_during_energy_saving
                 )
-            self._scenes[scene_id] = record
+            self._scenes[scene_id] = record  # persist
         return self._scene_out(scene_id, record)
 
     def delete_scene(self, scene_id: str) -> None:
@@ -933,14 +939,17 @@ class RegistryEngine:
         return list(record.get("entity_ids", []))
 
     def set_favorites(self, member_id: str, entity_ids: Any) -> list[str]:
-        """CasaSmart runtime component."""
+        """Replace a member's favorites list (order is meaningful). Keyed by
+        member_id so a person's devices share one list; the unpair path prunes
+        it when the member's last device leaves (see delete_favorites)."""
         deduped = _clean_entity_ids(entity_ids, "favorites", _MAX_FAVORITES)
         with self._lock:
             self._favorites[member_id] = {"entity_ids": deduped}
         return deduped
 
     def delete_favorites(self, member_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Drop a member's favorites row — called when their last device is
+        unpaired so the row can't orphan. No-op when the row is absent."""
         with self._lock:
             self._favorites.pop(member_id, None)
 
@@ -956,15 +965,15 @@ class RegistryEngine:
     def _serve_user_device(
         device_id: str, record: dict[str, Any]
     ) -> dict[str, Any]:
-
-
-
-
-
-
-
-
-
+        # Emit the forward shape with safe defaults so a new client always sees
+        # the fields even for a LEGACY record written before the migration:
+        #   control_entity_ids — alias of the stored entity_ids
+        #   gangs — {} (the catalog falls back to its own derivation)
+        #   room_id — None
+        # The record's own keys (via **record) win when present.
+        # control_entity_ids is DERIVED from the stored entity_ids at serve time
+        # — the v3 migration does NOT rename the stored key (records keep
+        # "entity_ids").
         return {
             "ha_device_id": device_id,
             "control_entity_ids": list(record.get("entity_ids", ())),
@@ -1000,7 +1009,6 @@ class RegistryEngine:
         custom_icon: Any = None,
         room_id: Any = None,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
         if not isinstance(ha_device_id, str) or not ha_device_id.strip():
             raise RegistryError("ha_device_id is required")
         controls = entity_ids if control_entity_ids is None else control_entity_ids
@@ -1064,7 +1072,6 @@ class RegistryEngine:
         custom_icon: Any = ...,
         room_id: Any = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
         with self._lock:
             record = self._user_devices.get(ha_device_id)
             if record is None:
@@ -1123,7 +1130,10 @@ class RegistryEngine:
     def _mutate_gang(
         self, ha_device_id: str, gang_key: str, mutate: Any
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Read-modify-write ONE gang under the lock. ``UnknownItemError`` for an
+        absent device or gang. ``mutate`` validates + sets fields on a COPY of the
+        gang dict, so a rejected value (its ``RegistryError`` -> 400) leaves the
+        stored record untouched."""
         with self._lock:
             record = self._user_devices.get(ha_device_id)
             if record is None:
@@ -1132,17 +1142,19 @@ class RegistryEngine:
             if not isinstance(gangs, dict) or gang_key not in gangs:
                 raise UnknownItemError("Unknown gang")
             gang = dict(gangs[gang_key])
-            mutate(gang)
+            mutate(gang)  # validates; may raise RegistryError before we persist
             new_gangs = dict(gangs)
             new_gangs[gang_key] = gang
             record = {**record, "gangs": new_gangs}
-            self._user_devices[ha_device_id] = record
+            self._user_devices[ha_device_id] = record  # persist
         return self._serve_user_device(ha_device_id, record)
 
     def set_gang_presentation(
         self, ha_device_id: str, gang_key: str, presentation: Any
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Flip a gang's presentation — promote (grouped->solo), delete-the-solo
+        (solo->grouped), hide (any->hidden), un-hide (hidden->grouped). Every
+        operation is a validated assignment of the single presentation field."""
 
         def mutate(gang: dict[str, Any]) -> None:
             if presentation not in _VALID_GANG_PRESENTATIONS:
@@ -1156,7 +1168,7 @@ class RegistryEngine:
     def set_gang_type(
         self, ha_device_id: str, gang_key: str, gang_type: Any
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Re-type a gang against the known relay-presentation set."""
 
         def mutate(gang: dict[str, Any]) -> None:
             gang["type"] = _clean_gang_type(gang_type)
@@ -1171,7 +1183,8 @@ class RegistryEngine:
         name: Any = ...,
         icon: Any = ...,
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
+        """Relabel a gang. ``...`` leaves a field unchanged; an explicit None
+        clears the name or icon."""
 
         def mutate(gang: dict[str, Any]) -> None:
             if name is not ...:
@@ -1186,7 +1199,6 @@ class RegistryEngine:
     def set_gang_room(
         self, ha_device_id: str, gang_key: str, room_id: Any
     ) -> dict[str, Any]:
-        """CasaSmart runtime component."""
 
         def mutate(gang: dict[str, Any]) -> None:
             gang["room_id"] = _clean_optional_room(room_id)
@@ -1203,7 +1215,8 @@ class RegistryEngine:
                 gang["room_override"] = True
 
     def delete_user_device(self, ha_device_id: str) -> None:
-        """CasaSmart runtime component."""
+        """Remove a grouped device — its entities become un-grabbed and
+        re-appear in the add-devices list."""
         with self._lock:
             if ha_device_id not in self._user_devices:
                 raise UnknownItemError("Unknown device")
@@ -1211,7 +1224,8 @@ class RegistryEngine:
         _LOGGER.info("Registry: user-device %s deleted", ha_device_id)
 
     def grabbed_entity_ids(self) -> set[str]:
-        """CasaSmart runtime component."""
+        """Every entity grabbed into a user-device — primary gangs AND config
+        entities. The add-devices list is the served set MINUS this."""
         grabbed: set[str] = set()
         for record in self._user_devices.values():
             grabbed.update(
@@ -1228,14 +1242,23 @@ class RegistryEngine:
         rooms: list[dict[str, Any]],
         assignments: list[dict[str, Any]],
     ) -> dict[str, int]:
-        """CasaSmart runtime component."""
+        """Seed the registry from HA's own registries (B17: "Auto-populate
+        from HA entities on first setup").
+
+        Imported floors/rooms KEEP their HA ids — room-scope JWT claims
+        already use HA area ids, so imported layouts work with existing
+        scoped tokens unchanged. Existing records are never overwritten
+        (re-running an import can't clobber installer edits). Names are
+        cleaned LENIENTLY (truncate, fall back — never raise): a weird
+        HA name must not be able to abort integration setup.
+        """
         counts = {"floors": 0, "rooms": 0, "assignments": 0}
         with self._lock:
             for floor in floors:
                 floor_id = floor.get("floor_id")
                 if not isinstance(floor_id, str) or not floor_id:
-
-
+                    # No usable id -> can't be stored; skip the record, never
+                    # abort the seed (same lenient posture as names).
                     continue
                 if floor_id in self._floors:
                     continue
@@ -1252,13 +1275,13 @@ class RegistryEngine:
                 icon = room.get("icon")
                 record = {
                     "name": _lenient_name(room.get("name"), room_id),
-
-
-
+                    # area.floor_id is None for any HA area not on a floor —
+                    # the NORMAL shape for apartments. A floorless room is
+                    # valid; only a dangling reference gets cleared.
                     "floor_id": floor_id
                     if isinstance(floor_id, str) and floor_id in self._floors
                     else None,
-
+                    # Same lenient posture: a bad HA icon is dropped, not fatal.
                     "icon": icon
                     if isinstance(icon, str) and 0 < len(icon) <= _ICON_MAX
                     else None,

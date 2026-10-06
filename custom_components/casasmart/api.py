@@ -1,4 +1,3 @@
-"""CasaSmart runtime component."""
 
 from __future__ import annotations
 
@@ -151,7 +150,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView]:
-    """CasaSmart runtime component."""
     return [
         CasaSmartHandshakeView(hass, hub_version),
         CasaSmartHealthView(hass, hub_version),
@@ -251,7 +249,11 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
 
 
 def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
-    """CasaSmart runtime component."""
+    """Register the CasaSmart REST views (idempotent across entry reloads).
+
+    HA's router can't unregister views, so a config-entry reload would
+    register duplicates — guard with a domain-scoped flag.
+    """
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("views_registered"):
         return
@@ -262,7 +264,7 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
 
 
 def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """CasaSmart runtime component."""
+    """Return the loaded entry's runtime data, or None if not loaded."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -270,7 +272,6 @@ def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
-    """CasaSmart runtime component."""
 
     url = f"/api/{DOMAIN}/handshake"
     name = f"api:{DOMAIN}:handshake"
@@ -279,12 +280,11 @@ class CasaSmartHandshakeView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
         self._hass = hass
         self._hub_version = hub_version
-
-
+        # The handshake doubles as the app's reachability probe, so a
+        # misconfigured tunnel_url would otherwise warn on every probe.
         self._tunnel_warned = False
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
         body: dict[str, Any] = {
             "api_version": API_VERSION,
             "min_app_version": MIN_APP_VERSION,
@@ -341,7 +341,7 @@ class CasaSmartHandshakeView(HomeAssistantView):
 
 
 class CasaSmartHealthView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/health — liveness probe for external monitoring."""
 
     url = f"/api/{DOMAIN}/health"
     name = f"api:{DOMAIN}:health"
@@ -352,7 +352,12 @@ class CasaSmartHealthView(HomeAssistantView):
         self._hub_version = hub_version
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
+        """Report integration + storage health.
+
+        200 with status "ok" only when the entry is loaded AND the storage
+        layer answers a real read (schema_version hits SQLite). Anything
+        else is 503 so dumb HTTP monitors can alert on status code alone.
+        """
         body: dict[str, Any] = {
             "status": "ok",
             "hub_version": self._hub_version,
@@ -366,13 +371,13 @@ class CasaSmartHealthView(HomeAssistantView):
             return self.json(body, HTTPStatus.SERVICE_UNAVAILABLE)
 
         try:
-
-
-
+            # schema_version is a property that executes a real PRAGMA read —
+            # proves the DB is open and answering, not just that the object
+            # exists. Wrapped in a lambda so the read runs in the executor.
             schema_version = await self._hass.async_add_executor_job(
                 lambda: runtime_data.storage.schema_version
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — health must never 500 with a traceback
             _LOGGER.exception("Health check: storage read failed")
             body["status"] = "error"
             body["storage"] = "error"
@@ -387,18 +392,18 @@ class CasaSmartHealthView(HomeAssistantView):
 
 
 class CasaSmartDevicesView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/devices — the curated device list."""
 
     url = f"/api/{DOMAIN}/devices"
     name = f"api:{DOMAIN}:devices"
-
+    # CasaSmart JWT gate (B1.6) — validated in-handler, not by HA's middleware.
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
+        """Return every exposed, visible, in-scope entity as a device."""
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
@@ -414,17 +419,21 @@ class CasaSmartDevicesView(HomeAssistantView):
 
 
 class CasaSmartDeviceView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/devices/{entity_id} — one device."""
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}"
     name = f"api:{DOMAIN}:device"
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate (B1.6)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request, entity_id: str) -> web.Response:
-        """CasaSmart runtime component."""
+        """Return a single device, 404 if unknown, unserved, or out of scope.
+
+        Out-of-scope is the SAME 404 as nonexistent — a room-scoped token
+        must not be able to enumerate what exists outside its rooms.
+        """
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
@@ -441,7 +450,6 @@ class CasaSmartDeviceView(HomeAssistantView):
 
 
 class CasaSmartCommandView(HomeAssistantView):
-    """CasaSmart runtime component."""
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}/command"
     name = f"api:{DOMAIN}:device:command"
@@ -451,7 +459,6 @@ class CasaSmartCommandView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request, entity_id: str) -> web.Response:
-        """CasaSmart runtime component."""
         claims, error = authenticate_request(
             self._hass, request, "devices.control"
         )
@@ -557,7 +564,6 @@ class CasaSmartCommandView(HomeAssistantView):
 
 
 class CasaSmartHistoryView(HomeAssistantView):
-    """CasaSmart runtime component."""
 
     url = f"/api/{DOMAIN}/history"
     name = f"api:{DOMAIN}:history"
@@ -567,7 +573,6 @@ class CasaSmartHistoryView(HomeAssistantView):
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """CasaSmart runtime component."""
         claims, error = authenticate_request(self._hass, request, "history.read")
         if error is not None:
             return error

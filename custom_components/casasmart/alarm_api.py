@@ -1,4 +1,29 @@
-"""CasaSmart runtime component."""
+"""CasaSmart alarm REST endpoints (Phase 6, block B13).
+
+The app's thin-client surface over the hub-side ``AlarmEngine``. Matches the
+established API pattern (``tank_api`` / ``registry_api``): plain views on HA's
+port and the B10 TLS port both serve these, every handler gates in-band with
+``authenticate_request``, and storage-touching engine calls hop the executor.
+
+Endpoints (one panel with zone attributes — plan B13):
+
+- ``GET    /api/casasmart/alarm/state``            — arm-state snapshot
+- ``POST   /api/casasmart/alarm/arm``              — arm away/home/night
+- ``POST   /api/casasmart/alarm/disarm``           — disarm / silence
+- ``GET    /api/casasmart/alarm/zones``            — sensor -> zone map
+- ``PUT    /api/casasmart/alarm/zones/{entity_id}``— assign a sensor's zone
+- ``DELETE /api/casasmart/alarm/zones/{entity_id}``— unassign a sensor
+- ``GET    /api/casasmart/alarm/settings``         — default entry/exit delays
+- ``PUT    /api/casasmart/alarm/settings``         — edit default delays
+- ``GET    /api/casasmart/alarm/history``          — event history
+
+Role gates (plan roles table — a plain user has NO alarm access):
+``alarm.read`` for state/zones/history, ``alarm.arm`` for arm/disarm,
+``alarm.manage`` for zone configuration. Every mutation fires
+``EVENT_ALARM_CHANGED`` so the WS server nudges connected apps and the alarm
+adapter re-syncs its entry-delay timer (an app-driven disarm cancelling a
+running countdown rides this exact path).
+"""
 
 from __future__ import annotations
 
@@ -22,7 +47,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def get_alarm(hass: HomeAssistant) -> AlarmEngine | None:
-    """CasaSmart runtime component."""
+    """The loaded entry's alarm engine, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -31,7 +56,7 @@ def get_alarm(hass: HomeAssistant) -> AlarmEngine | None:
 
 
 def _serialize_zones(zones: dict[str, dict]) -> list[dict]:
-    """CasaSmart runtime component."""
+    """``{entity_id: {zone, name}}`` -> a stable, app-friendly list."""
     return [
         {"entity_id": entity_id, "zone": record["zone"], "name": record["name"]}
         for entity_id, record in sorted(zones.items())
@@ -39,9 +64,9 @@ def _serialize_zones(zones: dict[str, dict]) -> list[dict]:
 
 
 class _AlarmView(HomeAssistantView):
-    """CasaSmart runtime component."""
+    """Shared plumbing for the alarm views."""
 
-    requires_auth = False
+    requires_auth = False  # CasaSmart JWT gate in-handler
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -55,12 +80,12 @@ class _AlarmView(HomeAssistantView):
         return alarm, None
 
     def _notify_change(self) -> None:
-        """CasaSmart runtime component."""
+        """Tell connected apps + the adapter the arm state moved."""
         self._hass.bus.async_fire(EVENT_ALARM_CHANGED, {})
 
 
 class CasaSmartAlarmStateView(_AlarmView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/alarm/state — the panel snapshot."""
 
     url = f"/api/{DOMAIN}/alarm/state"
     name = f"api:{DOMAIN}:alarm:state"
@@ -72,12 +97,16 @@ class CasaSmartAlarmStateView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-
+        # snapshot() is pure CPU (in-memory mirror) — no executor hop.
         return self.json({"state": alarm.snapshot()})
 
 
 class CasaSmartAlarmArmView(_AlarmView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/alarm/arm — command an armed mode.
+
+    Body: ``{"mode": "armed_away|armed_home|armed_night", "exit_delay"?,
+    "entry_delay"?}``. Delays are optional and clamped by the engine.
+    """
 
     url = f"/api/{DOMAIN}/alarm/arm"
     name = f"api:{DOMAIN}:alarm:arm"
@@ -110,7 +139,7 @@ class CasaSmartAlarmArmView(_AlarmView):
 
 
 class CasaSmartAlarmDisarmView(_AlarmView):
-    """CasaSmart runtime component."""
+    """POST /api/casasmart/alarm/disarm — disarm from any state."""
 
     url = f"/api/{DOMAIN}/alarm/disarm"
     name = f"api:{DOMAIN}:alarm:disarm"
@@ -130,7 +159,7 @@ class CasaSmartAlarmDisarmView(_AlarmView):
 
 
 class CasaSmartAlarmZonesView(_AlarmView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/alarm/zones — the sensor -> zone assignments."""
 
     url = f"/api/{DOMAIN}/alarm/zones"
     name = f"api:{DOMAIN}:alarm:zones"
@@ -142,12 +171,12 @@ class CasaSmartAlarmZonesView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-
+        # zones() copies the in-memory mirror — pure CPU, no executor hop.
         return self.json({"zones": _serialize_zones(alarm.zones())})
 
 
 class CasaSmartAlarmZoneView(_AlarmView):
-    """CasaSmart runtime component."""
+    """PUT/DELETE /api/casasmart/alarm/zones/{entity_id} — one assignment."""
 
     url = f"/api/{DOMAIN}/alarm/zones/{{entity_id}}"
     name = f"api:{DOMAIN}:alarm:zone"
@@ -197,7 +226,7 @@ class CasaSmartAlarmZoneView(_AlarmView):
 
 
 class CasaSmartAlarmHistoryView(_AlarmView):
-    """CasaSmart runtime component."""
+    """GET /api/casasmart/alarm/history?limit=N — event history, newest first."""
 
     url = f"/api/{DOMAIN}/alarm/history"
     name = f"api:{DOMAIN}:alarm:history"
@@ -226,7 +255,15 @@ class CasaSmartAlarmHistoryView(_AlarmView):
 
 
 class CasaSmartAlarmSettingsView(_AlarmView):
-    """CasaSmart runtime component."""
+    """GET/PUT /api/casasmart/alarm/settings — hub-owned default delays.
+
+    The app's settings screen reads these on open and writes edits here, so
+    they live on the hub (phone-independent) like everything else. ``read``
+    to view, ``manage`` to change.
+
+    PUT body: ``{"entry_delay"?: int, "exit_delay"?: int}`` (seconds). Omitted
+    fields keep their current value; both are clamped by the engine.
+    """
 
     url = f"/api/{DOMAIN}/alarm/settings"
     name = f"api:{DOMAIN}:alarm:settings"
@@ -238,7 +275,7 @@ class CasaSmartAlarmSettingsView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-
+        # get_settings() copies the in-memory mirror — pure CPU, no executor hop.
         return self.json({"settings": alarm.get_settings()})
 
     async def put(self, request: web.Request) -> web.Response:
@@ -266,9 +303,9 @@ class CasaSmartAlarmSettingsView(_AlarmView):
         return self.json({"settings": settings})
 
 
-
-
-
+# -- executor jobs (storage-touching engine calls) -----------------------------
+# Small module-level helpers so async_add_executor_job gets a plain callable
+# instead of a closure capturing request state.
 
 
 def _arm_job(alarm, mode, actor, exit_delay, entry_delay):
