@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +8,9 @@ import re
 import secrets
 import time
 from base64 import b64encode
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 import aiohttp
 
@@ -23,9 +23,7 @@ REGISTRATION_INITIAL_BACKOFF_SECONDS = 5.0
 REGISTRATION_MAX_BACKOFF_SECONDS = 6 * 60 * 60.0
 REGISTRATION_LOG_EVERY_ATTEMPTS = 8
 REGISTRATION_MAX_RESPONSE_BYTES = 4096
-_ACTIVATION_CODE_RE = re.compile(
-    r"^CSACT1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{86}$"
-)
+_ACTIVATION_CODE_RE = re.compile(r"^CSACT1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{86}$")
 
 
 def is_activation_code_format(value: object) -> bool:
@@ -33,7 +31,6 @@ def is_activation_code_format(value: object) -> bool:
 
 
 class IdentityProofSigner(Protocol):
-
     @property
     def public_spki_der(self) -> bytes: ...
 
@@ -88,7 +85,6 @@ class _AttemptResult:
 
 
 class RelayRegistrar:
-
     def __init__(
         self,
         *,
@@ -148,19 +144,11 @@ class RelayRegistrar:
             attempt += 1
             result = await self._async_attempt()
             if result.success:
-
-
-
                 self._activation_code = None
                 await self._async_callback(self._on_success)
-                _LOGGER.info(
-                    "Push relay registration ready (hub_id=%s)", self._hub_id
-                )
+                _LOGGER.info("Push relay registration ready (hub_id=%s)", self._hub_id)
                 return
             if result.permanent:
-
-
-
                 self._activation_code = None
                 await self._async_callback(self._on_permanent_failure, result.reason)
                 _LOGGER.error(
@@ -176,7 +164,6 @@ class RelayRegistrar:
                 if result.retry_after is not None
                 else self._initial_backoff * (2 ** min(attempt - 1, 20)),
             )
-
 
             delay = min(
                 self._max_backoff,
@@ -215,7 +202,7 @@ class RelayRegistrar:
             ) as response:
                 body = await self._read_response(response)
                 status = response.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
             return _AttemptResult(False, reason=type(err).__name__)
 
         response_state = body.get("status") or body.get("error")
@@ -225,8 +212,6 @@ class RelayRegistrar:
             return _AttemptResult(True)
         if status == 409 and response_state == "binding_conflict":
             return _AttemptResult(False, permanent=True, reason="binding conflict")
-
-
 
         if response_state in ("timestamp_out_of_range", "replay_detected"):
             return _AttemptResult(False, reason=f"relay response {status}")

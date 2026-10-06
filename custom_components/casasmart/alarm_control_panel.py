@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import time
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
 from homeassistant.components.alarm_control_panel import (
     AlarmControlPanelEntity,
@@ -94,9 +94,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         | AlarmControlPanelEntityFeature.ARM_NIGHT
     )
 
-    def __init__(
-        self, hass: HomeAssistant, entry_id: str, engine: AlarmEngine
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str, engine: AlarmEngine) -> None:
         self._hass = hass
         self._engine = engine
         self._attr_unique_id = f"{entry_id}_alarm"
@@ -105,8 +103,8 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
             name="CasaSmart Hub",
             manufacturer="CasaSmart",
         )
-        self._unsub_changed: Optional[Any] = None
-        self._cancel_arming: Optional[Any] = None
+        self._unsub_changed: Any | None = None
+        self._cancel_arming: Any | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -141,16 +139,16 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     # -- commands (route into the one engine, then announce) -------------------
 
-    async def async_alarm_disarm(self, code: Optional[str] = None) -> None:
+    async def async_alarm_disarm(self, code: str | None = None) -> None:
         await self._command(self._engine.disarm)
 
-    async def async_alarm_arm_away(self, code: Optional[str] = None) -> None:
+    async def async_alarm_arm_away(self, code: str | None = None) -> None:
         await self._command(partial(self._engine.arm, MODE_AWAY))
 
-    async def async_alarm_arm_home(self, code: Optional[str] = None) -> None:
+    async def async_alarm_arm_home(self, code: str | None = None) -> None:
         await self._command(partial(self._engine.arm, MODE_HOME))
 
-    async def async_alarm_arm_night(self, code: Optional[str] = None) -> None:
+    async def async_alarm_arm_night(self, code: str | None = None) -> None:
         await self._command(partial(self._engine.arm, MODE_NIGHT))
 
     async def _command(self, engine_call) -> None:
@@ -160,9 +158,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         the WS server nudges connected apps, the adapter re-syncs its
         entry-delay timer, and our own listener refreshes this entity's state.
         """
-        await self._hass.async_add_executor_job(
-            partial(engine_call, actor=_HA_ACTOR)
-        )
+        await self._hass.async_add_executor_job(partial(engine_call, actor=_HA_ACTOR))
         self._hass.bus.async_fire(EVENT_ALARM_CHANGED, {})
 
     # -- transitions -----------------------------------------------------------
@@ -189,9 +185,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         delay = arming_until - time.time()
         if delay <= 0:
             return
-        self._cancel_arming = async_call_later(
-            self._hass, delay, self._on_arming_done
-        )
+        self._cancel_arming = async_call_later(self._hass, delay, self._on_arming_done)
 
     @callback
     def _on_arming_done(self, _now: Any) -> None:

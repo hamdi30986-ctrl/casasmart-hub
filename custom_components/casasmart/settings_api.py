@@ -20,7 +20,6 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -110,9 +109,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         return in_scope(self._hass, tile.get("entityId"), scope)
 
     async def put(self, request: web.Request) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "devices.control"
-        )
+        claims, error = authenticate_request(self._hass, request, "devices.control")
         if error is not None:
             return error
         settings = get_user_settings(self._hass)

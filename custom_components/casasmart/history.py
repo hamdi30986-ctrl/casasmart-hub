@@ -13,8 +13,9 @@ a translation layer.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 # Hard caps — the recorder query runs on the hub's SQLite; an unbounded
 # range or entity list is a self-inflicted DoS, not a feature. The app's
@@ -44,7 +45,7 @@ def _parse_timestamp(raw: str, param: str) -> datetime:
         raise HistoryQueryError(
             f"Invalid {param!r}: timestamp must include a UTC offset"
         )
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def parse_history_query(

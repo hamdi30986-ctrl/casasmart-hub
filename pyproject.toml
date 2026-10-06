@@ -10,6 +10,9 @@ extend-exclude = ["deploy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# E501: the formatter owns code line length; long prose lines in docstrings and
+# comments are allowed. The SIM rules below would only restructure working code.
+ignore = ["E501", "SIM102", "SIM105", "SIM117"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

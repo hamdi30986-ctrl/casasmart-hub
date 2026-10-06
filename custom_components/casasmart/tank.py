@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -13,9 +12,6 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 
-
-
-
 TANK_SCRIPT_NAME = "CasaSmart"
 
 TANK_VOLTMETER_ID = 100
@@ -26,17 +22,11 @@ TANK_PUSH_INTERVAL_SECONDS = 300
 SCRIPT_CHUNK_SIZE = 1024
 
 
-
-
 TANK_INGEST_URL_CONFIG_KEY = "tank_ingest_url"
 
 _NAME_MAX = 64
 
 _RETENTION_SECONDS = 31 * 24 * 3600
-
-
-
-
 
 
 TANK_MAX_HEIGHT_DEFAULT = 3.0
@@ -159,12 +149,12 @@ def build_tank_script(
         f"sec:{int(interval_seconds)}}};\n"
         "function push(){\n"
         '  let v=Shelly.getComponentStatus("Voltmeter",C.vm);\n'
-        "  if(!v||typeof v.voltage!==\"number\")return;\n"
+        '  if(!v||typeof v.voltage!=="number")return;\n'
         '  Shelly.call("HTTP.Request",{method:"POST",url:C.url,'
         "body:JSON.stringify({device_token:C.token,voltage:v.voltage}),"
         'content_type:"application/json",timeout:15},'
-        "function(r,e){if(e!==0){print(\"CasaSmart push fail: \"+e);}"
-        "else if(r&&r.code>=300){print(\"CasaSmart push HTTP \"+r.code);}});\n"
+        'function(r,e){if(e!==0){print("CasaSmart push fail: "+e);}'
+        'else if(r&&r.code>=300){print("CasaSmart push HTTP "+r.code);}});\n'
         "}\n"
         "push();Timer.set(C.sec*1000,true,push);\n"
     )
@@ -195,7 +185,6 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
 
 
 class TankEngine:
-
     def __init__(self, devices_table: Any, readings: Any) -> None:
         self._devices = devices_table
         # readings: a storage TankReadingsTable (append/recent/last/prune) —
@@ -204,8 +193,6 @@ class TankEngine:
         # Serializes device-record mutations (held across SQLite I/O), same
         # posture as RegistryEngine.
         self._lock = threading.RLock()
-
-
 
     def mint_device(
         self, device_id: Any, name: Any, ip: Any, model: Any = None
@@ -229,15 +216,10 @@ class TankEngine:
                 "token_sha256": _hash_token(token),
                 "created_at": existing.get("created_at", now),
                 "provisioned_at": now,
-
-
-
                 "calibration_voltage": existing.get("calibration_voltage", 0.0),
                 "calibration_depth": existing.get("calibration_depth", 0.0),
                 "max_height": existing.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
-                "low_percent": existing.get(
-                    "low_percent", TANK_LOW_PERCENT_DEFAULT
-                ),
+                "low_percent": existing.get("low_percent", TANK_LOW_PERCENT_DEFAULT),
             }
             self._devices[device_id] = record
         _LOGGER.info("Tank %s provisioned (%s @ %s)", device_id, record["name"], ip)
@@ -266,8 +248,6 @@ class TankEngine:
                 raise UnknownTankError("Unknown tank device") from None
             self._readings.delete_device(device_id)
         _LOGGER.info("Tank %s deleted", device_id)
-
-
 
     def set_calibration(
         self,
@@ -320,9 +300,7 @@ class TankEngine:
         _LOGGER.info("Tank %s calibration updated: %s", device_id, sorted(updates))
         return self._public(device_id, merged)
 
-    def voltage_to_percent(
-        self, device_id: str, voltage: Any
-    ) -> float | None:
+    def voltage_to_percent(self, device_id: str, voltage: Any) -> float | None:
         """A raw voltage → 0-100 water-level percent via stored calibration.
 
         The equation that used to live in the app's ``tank.dart``::
@@ -360,15 +338,11 @@ class TankEngine:
             record = self._devices.get(device_id)
             if record is None:
                 raise UnknownTankError("Unknown tank device")
-            low_percent = int(
-                record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
-            )
+            low_percent = int(record.get("low_percent", TANK_LOW_PERCENT_DEFAULT))
             last = self._readings.last(device_id)
         voltage = float(last["v"]) if last else None
         percent = (
-            self.voltage_to_percent(device_id, voltage)
-            if voltage is not None
-            else None
+            self.voltage_to_percent(device_id, voltage) if voltage is not None else None
         )
         return {
             "device_id": device_id,
@@ -378,8 +352,6 @@ class TankEngine:
             "is_low": percent is not None and percent < low_percent,
             "last_reading": last,
         }
-
-
 
     def ingest(self, token: Any, voltage: Any) -> str:
         """Record one reading for the device matching ``token``.
@@ -401,9 +373,7 @@ class TankEngine:
         with self._lock:
             device_id = None
             for candidate_id, record in self._devices.items():
-                if hmac.compare_digest(
-                    record.get("token_sha256", ""), token_hash
-                ):
+                if hmac.compare_digest(record.get("token_sha256", ""), token_hash):
                     device_id = candidate_id
                     break
             if device_id is None:
@@ -453,8 +423,6 @@ class TankEngine:
         the provision wait loop polls this before the record is hot)."""
         return self._readings.last(device_id)
 
-
-
     def _public(self, device_id: str, record: dict[str, Any]) -> dict[str, Any]:
         last = self._readings.last(device_id)
         cal_v = record.get("calibration_voltage", 0.0) or 0.0
@@ -472,9 +440,7 @@ class TankEngine:
             "calibration_voltage": cal_v,
             "calibration_depth": cal_d,
             "max_height": record.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
-            "low_percent": int(
-                record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)
-            ),
+            "low_percent": int(record.get("low_percent", TANK_LOW_PERCENT_DEFAULT)),
             "is_calibrated": cal_v > 0 and cal_d > 0,
             "last_reading": last,
         }

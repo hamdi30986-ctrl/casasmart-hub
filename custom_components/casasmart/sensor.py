@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import ENTITY_ID_FORMAT, SensorEntity
@@ -46,7 +46,7 @@ def _iso(unix_seconds: float | int | None) -> str | None:
     """Unix seconds -> ISO-8601 UTC string, or None for falsy/absent."""
     if not unix_seconds:
         return None
-    return datetime.fromtimestamp(float(unix_seconds), tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(float(unix_seconds), tz=UTC).isoformat()
 
 
 async def async_setup_entry(

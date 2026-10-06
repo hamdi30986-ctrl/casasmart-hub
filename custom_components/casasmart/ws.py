@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +5,6 @@ import logging
 from typing import Any
 
 from aiohttp import WSMsgType, web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.json import json_dumps
@@ -63,7 +61,6 @@ class CasaSmartWebSocketView(HomeAssistantView):
 
 
 class WsConnection:
-
     def __init__(
         self, hass: HomeAssistant, ws: web.WebSocketResponse, hub_version: str
     ) -> None:
@@ -71,9 +68,6 @@ class WsConnection:
         self._ws = ws
         self._hub_version = hub_version
         self._subscription = ws_protocol.Subscription()
-
-
-
 
         self._send_queue = ws_protocol.CoalescingSendQueue(WS_SEND_QUEUE_MAX)
         self._sender_task: asyncio.Task | None = None
@@ -86,16 +80,12 @@ class WsConnection:
         self._unsub_tank_changed: Any = None
         self._unsub_auth_changed: Any = None
 
-
-
         self._subscribed = False
         self._token: str | None = None
 
         self._claims: dict[str, Any] | None = None
 
         self._reauth_deadline_task: asyncio.Task | None = None
-
-
 
     async def run(self) -> None:
         if not await self._authenticate_first_frame():
@@ -123,9 +113,6 @@ class WsConnection:
         self._unsub_tank_changed = self._hass.bus.async_listen(
             EVENT_TANK_CHANGED, self._on_tank_changed
         )
-
-
-
 
         self._unsub_auth_changed = self._hass.bus.async_listen(
             EVENT_AUTH_CHANGED, self._on_auth_changed
@@ -167,17 +154,13 @@ class WsConnection:
         self._sender_task = None
         self._reauth_deadline_task = None
 
-
-
     async def _authenticate_first_frame(self) -> bool:
         """Enforce the first-frame auth contract; True when authenticated."""
         try:
             async with asyncio.timeout(WS_AUTH_TIMEOUT):
                 msg = await self._ws.receive()
         except TimeoutError:
-            await self._ws.close(
-                code=WS_CLOSE_AUTH_TIMEOUT, message=b"auth timeout"
-            )
+            await self._ws.close(code=WS_CLOSE_AUTH_TIMEOUT, message=b"auth timeout")
             return False
 
         if msg.type != WSMsgType.TEXT:
@@ -241,10 +224,7 @@ class WsConnection:
             # Token died mid-connection: announce once, arm the grace
             # deadline. A fresh valid `auth` frame in the receive loop
             # disarms it; don't re-announce while a grace window is open.
-            if (
-                self._reauth_deadline_task is None
-                or self._reauth_deadline_task.done()
-            ):
+            if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
                 self._token = None
                 await self._enqueue(
                     ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE))
@@ -257,9 +237,7 @@ class WsConnection:
         """Close the connection unless re-auth lands within the grace window."""
         await asyncio.sleep(WS_REAUTH_GRACE)
         if self._token is None and not self._ws.closed:
-            await self._ws.close(
-                code=WS_CLOSE_AUTH_EXPIRED, message=b"token expired"
-            )
+            await self._ws.close(code=WS_CLOSE_AUTH_EXPIRED, message=b"token expired")
 
     @callback
     def _on_auth_changed(self, event: Event) -> None:
@@ -274,19 +252,10 @@ class WsConnection:
             return
         if await self._async_validate_token(self._token):
             return  # still valid — our device wasn't the one that changed
-        if (
-            self._reauth_deadline_task is None
-            or self._reauth_deadline_task.done()
-        ):
+        if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
             self._token = None
-            await self._enqueue(
-                ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE))
-            )
-            self._reauth_deadline_task = asyncio.create_task(
-                self._reauth_deadline()
-            )
-
-
+            await self._enqueue(ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE)))
+            self._reauth_deadline_task = asyncio.create_task(self._reauth_deadline())
 
     async def _receive_loop(self) -> None:
         """Handle client frames until the socket closes."""
@@ -349,9 +318,7 @@ class WsConnection:
         if self._reauth_deadline_task is not None:
             self._reauth_deadline_task.cancel()
             self._reauth_deadline_task = None
-        await self._enqueue(
-            ws_protocol.frame_auth_ok(self._hub_version, API_VERSION)
-        )
+        await self._enqueue(ws_protocol.frame_auth_ok(self._hub_version, API_VERSION))
         # Re-send the snapshot after EVERY re-auth (m2). The app gates data
         # frames while it re-authenticates (auth_required -> auth_ok), so any
         # state_changed the hub pushed during that grace window is dropped
@@ -361,8 +328,6 @@ class WsConnection:
         # scope-change case this used to be limited to; Phase 8).
         if self._subscribed:
             await self._emit_snapshot()
-
-
 
     @callback
     def _on_state_changed(self, event: Event) -> None:

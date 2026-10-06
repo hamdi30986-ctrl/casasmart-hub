@@ -1,11 +1,9 @@
-
 from __future__ import annotations
 
 import secrets
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -59,7 +57,6 @@ OPTIONS_SCHEMA = vol.Schema(
 
 
 class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
-
     VERSION = CONFIG_ENTRY_VERSION
 
     @staticmethod
@@ -75,9 +72,7 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            relay_base = normalize_relay_base_url(
-                user_input.get(CONF_PUSH_RELAY_URL)
-            )
+            relay_base = normalize_relay_base_url(user_input.get(CONF_PUSH_RELAY_URL))
             if relay_base is None:
                 errors[CONF_PUSH_RELAY_URL] = "invalid_relay_url"
 
@@ -98,11 +93,6 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
             if raw and domain is None:
                 errors[CONF_CLOUDFLARE_DOMAIN] = "invalid_domain"
             elif raw and not errors:
-
-
-
-
-
                 return self.async_create_entry(
                     title="CasaSmart Hub",
                     data={CONF_RELAY_ACTIVATION_CODE: activation_code},
@@ -115,8 +105,6 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-
-
             data_schema=self.add_suggested_values_to_schema(
                 STEP_USER_SCHEMA,
                 {
@@ -130,16 +118,13 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class CasaSmartOptionsFlow(OptionsFlow):
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         current_relay = self._current_relay_base()
         if user_input is not None:
-            relay_base = normalize_relay_base_url(
-                user_input.get(CONF_PUSH_RELAY_URL)
-            )
+            relay_base = normalize_relay_base_url(user_input.get(CONF_PUSH_RELAY_URL))
             if relay_base is None:
                 errors[CONF_PUSH_RELAY_URL] = "invalid_relay_url"
 
@@ -176,8 +161,6 @@ class CasaSmartOptionsFlow(OptionsFlow):
                     new_options[CONF_CLOUDFLARE_DOMAIN] = domain
                     new_options[CONF_TUNNEL_ENABLED] = enabled
                 else:
-
-
                     new_options.pop(CONF_CLOUDFLARE_DOMAIN, None)
                     new_options.pop(CONF_TUNNEL_ENABLED, None)
 
@@ -189,9 +172,8 @@ class CasaSmartOptionsFlow(OptionsFlow):
                     if activation_code is not None:
                         new_data[CONF_RELAY_ACTIVATION_CODE] = activation_code
 
-
-                        new_data[CONF_RELAY_ACTIVATION_REQUEST_ID] = (
-                            secrets.token_hex(8)
+                        new_data[CONF_RELAY_ACTIVATION_REQUEST_ID] = secrets.token_hex(
+                            8
                         )
                     changed = self.hass.config_entries.async_update_entry(
                         self.config_entry,
@@ -199,9 +181,6 @@ class CasaSmartOptionsFlow(OptionsFlow):
                         options=new_options,
                     )
                     if changed:
-
-
-
                         quiesce_relay_runtime(
                             getattr(self.config_entry, "runtime_data", None)
                         )
@@ -214,7 +193,6 @@ class CasaSmartOptionsFlow(OptionsFlow):
             CONF_TUNNEL_ENABLED: options.get(CONF_TUNNEL_ENABLED, False),
         }
         if user_input is not None:
-
             suggested.update(
                 {
                     key: value
@@ -224,9 +202,7 @@ class CasaSmartOptionsFlow(OptionsFlow):
             )
         return self.async_show_form(
             step_id="init",
-            data_schema=self.add_suggested_values_to_schema(
-                OPTIONS_SCHEMA, suggested
-            ),
+            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, suggested),
             errors=errors,
             description_placeholders={
                 "tunnel_status": await self._async_tunnel_status()
@@ -245,8 +221,6 @@ class CasaSmartOptionsFlow(OptionsFlow):
         normalized = normalize_relay_base_url(getattr(applied, "base_url", None))
         if normalized is not None:
             return normalized
-
-
 
         hub_config = getattr(runtime_data, "hub_config", None)
         if hub_config is not None:

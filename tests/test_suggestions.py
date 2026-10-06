@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from zoneinfo import ZoneInfo
@@ -19,7 +19,7 @@ sys.modules[package.__name__] = package
 policy = importlib.import_module("phase4_fixture.suggestions")
 storage = importlib.import_module("phase4_fixture.storage")
 stores = importlib.import_module("phase4_fixture.suggestion_store")
-UTC = timezone.utc
+UTC = UTC
 
 
 def rule(**changes):
@@ -119,7 +119,10 @@ class PolicyTest(unittest.TestCase):
                 "end_offset_minutes": 120,
             }
         )
-        sunset = lambda day: datetime(day.year, day.month, day.day, 18, tzinfo=UTC)
+
+        def sunset(day):
+            return datetime(day.year, day.month, day.day, 18, tzinfo=UTC)
+
         result, _ = self.evaluate(
             configured, sunset=sunset, now=datetime(2026, 10, 5, 17, 30, tzinfo=UTC)
         )

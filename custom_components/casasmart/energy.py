@@ -107,9 +107,7 @@ def _clean_id(value: Any, field: str) -> str:
         raise EnergyConfigError(f"{field} must be a non-empty string")
     clean = value.strip()
     if len(clean) > _MAX_ID_LENGTH:
-        raise EnergyConfigError(
-            f"{field} must be <= {_MAX_ID_LENGTH} characters"
-        )
+        raise EnergyConfigError(f"{field} must be <= {_MAX_ID_LENGTH} characters")
     return clean
 
 
@@ -133,18 +131,14 @@ def _clean_unique_list(
     if not isinstance(value, list):
         raise EnergyConfigError(f"{field} must be an array")
     if len(value) > _MAX_LIST_ITEMS:
-        raise EnergyConfigError(
-            f"{field} may contain at most {_MAX_LIST_ITEMS} items"
-        )
+        raise EnergyConfigError(f"{field} may contain at most {_MAX_LIST_ITEMS} items")
     cleaner = _clean_entity_id if entity_ids else _clean_id
     clean: list[str] = []
     seen: set[str] = set()
     for index, item in enumerate(value):
         normalized = cleaner(item, f"{field}[{index}]")
         if normalized in seen:
-            raise EnergyConfigError(
-                f"{field} contains duplicate value {normalized!r}"
-            )
+            raise EnergyConfigError(f"{field} contains duplicate value {normalized!r}")
         seen.add(normalized)
         clean.append(normalized)
     if not allow_empty and not clean:
@@ -187,9 +181,7 @@ def _clean_heaters(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise EnergyConfigError("heaters must be an array")
     if len(value) > _MAX_LIST_ITEMS:
-        raise EnergyConfigError(
-            f"heaters may contain at most {_MAX_LIST_ITEMS} items"
-        )
+        raise EnergyConfigError(f"heaters may contain at most {_MAX_LIST_ITEMS} items")
     clean: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, raw in enumerate(value):
@@ -204,14 +196,10 @@ def _clean_heaters(value: Any) -> list[dict[str, Any]]:
             raw.get("entity_id"), f"heaters[{index}].entity_id"
         )
         if entity_id in seen:
-            raise EnergyConfigError(
-                f"heaters contains duplicate entity {entity_id!r}"
-            )
+            raise EnergyConfigError(f"heaters contains duplicate entity {entity_id!r}")
         turn_off = raw.get("turn_off")
         if not isinstance(turn_off, bool):
-            raise EnergyConfigError(
-                f"heaters[{index}].turn_off must be a boolean"
-            )
+            raise EnergyConfigError(f"heaters[{index}].turn_off must be a boolean")
         seen.add(entity_id)
         clean.append({"entity_id": entity_id, "turn_off": turn_off})
     return clean
@@ -247,9 +235,7 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
     level = _validate_level(level)
     if not isinstance(value, dict):
         raise EnergyConfigError("configuration must be an object")
-    allowed = (
-        _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
-    )
+    allowed = _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
     unknown = set(value) - allowed
     if unknown:
         raise EnergyConfigError(
@@ -262,9 +248,7 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
         or not isinstance(schema_version, int)
         or schema_version != CONFIG_SCHEMA_VERSION
     ):
-        raise EnergyConfigError(
-            f"schema_version must be {CONFIG_SCHEMA_VERSION}"
-        )
+        raise EnergyConfigError(f"schema_version must be {CONFIG_SCHEMA_VERSION}")
 
     setup_complete = value.get("setup_complete", False)
     if not isinstance(setup_complete, bool):
@@ -306,9 +290,7 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
     )
 
     excluded = set(excluded_rooms)
-    configured_excluded = excluded.intersection(
-        set(light_keepers) | set(ac_keepers)
-    )
+    configured_excluded = excluded.intersection(set(light_keepers) | set(ac_keepers))
     if configured_excluded:
         raise EnergyConfigError(
             "excluded rooms cannot also carry light/AC picks: "
@@ -353,9 +335,7 @@ class EnergyEngine:
         self._events = events
         self._clock = clock
         self._lock = threading.RLock()
-        self._configs = {
-            level: default_level_config(level) for level in ENERGY_LEVELS
-        }
+        self._configs = {level: default_level_config(level) for level in ENERGY_LEVELS}
         self._state = self._default_state()
 
     # -- lifecycle ---------------------------------------------------------
@@ -381,9 +361,7 @@ class EnergyEngine:
             # Event history is factual/audit-only, not a source of truth. Bound
             # it at boot without touching the live state/config documents.
             now = self._now()
-            self._events.prune(
-                before_t=max(0, now - _EVENT_RETENTION_SECONDS)
-            )
+            self._events.prune(before_t=max(0, now - _EVENT_RETENTION_SECONDS))
 
     # -- configuration -----------------------------------------------------
 
@@ -435,9 +413,7 @@ class EnergyEngine:
         if not isinstance(patch, dict):
             raise EnergyConfigError("configuration patch must be an object")
         allowed = (
-            _SMART_CONFIG_FIELDS
-            if level == LEVEL_SMART
-            else _COMMON_CONFIG_FIELDS
+            _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
         )
         unknown = set(patch) - allowed
         if unknown:
@@ -464,9 +440,7 @@ class EnergyEngine:
             )
             return copy.deepcopy(normalized)
 
-    def reset_config(
-        self, level: str, *, actor: str | None = None
-    ) -> dict[str, Any]:
+    def reset_config(self, level: str, *, actor: str | None = None) -> dict[str, Any]:
         """Reset one wizard to canonical defaults."""
         level = _validate_level(level)
         clean_actor = self._optional_actor(actor)
@@ -518,15 +492,11 @@ class EnergyEngine:
             if not config["setup_complete"]:
                 raise EnergySetupRequiredError(level)
             if level != LEVEL_SMART and smart_lockout_enabled is not None:
-                raise EnergyConfigError(
-                    "smart_lockout_enabled applies only to Smart"
-                )
+                raise EnergyConfigError("smart_lockout_enabled applies only to Smart")
             if smart_lockout_enabled is not None and not isinstance(
                 smart_lockout_enabled, bool
             ):
-                raise EnergyConfigError(
-                    "smart_lockout_enabled must be a boolean"
-                )
+                raise EnergyConfigError("smart_lockout_enabled must be a boolean")
             now = self._now()
             if (
                 smart_lockout_enabled is not None
@@ -537,9 +507,7 @@ class EnergyEngine:
                 self._configs[level] = config
                 self._config_table[level] = copy.deepcopy(config)
 
-            lockout = (
-                config["lockout_enabled"] if level == LEVEL_SMART else True
-            )
+            lockout = config["lockout_enabled"] if level == LEVEL_SMART else True
             self._state = {
                 "active_level": level,
                 "activated_at": now,
@@ -633,9 +601,7 @@ class EnergyEngine:
     ) -> bool:
         """Add one device to the release set; duplicate edges are idempotent."""
         entity_id = _clean_entity_id(entity_id, "entity_id")
-        clean_room = (
-            _clean_id(room_id, "room_id") if room_id is not None else None
-        )
+        clean_room = _clean_id(room_id, "room_id") if room_id is not None else None
         clean_source = _clean_id(source, "source")
         if len(clean_source) > _MAX_SOURCE_LENGTH:
             raise EnergyConfigError(
@@ -800,9 +766,7 @@ class EnergyEngine:
                 {
                     "active": self._state["active_level"] is not None,
                     "active_level": self._state["active_level"],
-                    "released_devices": len(
-                        self._state["released_entities"]
-                    ),
+                    "released_devices": len(self._state["released_entities"]),
                     "occupied_rooms": sum(
                         1
                         for room in occupancy
@@ -814,9 +778,7 @@ class EnergyEngine:
                         if room["sensors_available"] and room["occupied"] is False
                     ),
                     "rooms_with_sensor_issues": sum(
-                        1
-                        for room in occupancy
-                        if not room["sensors_available"]
+                        1 for room in occupancy if not room["sensors_available"]
                     ),
                 }
             )
@@ -908,9 +870,7 @@ class EnergyEngine:
             state["release_details"] = details
 
             raw_occupancy = stored.get("room_occupancy")
-            if state["active_level"] == LEVEL_SMART and isinstance(
-                raw_occupancy, dict
-            ):
+            if state["active_level"] == LEVEL_SMART and isinstance(raw_occupancy, dict):
                 for raw_room_id, raw in raw_occupancy.items():
                     if not isinstance(raw, dict):
                         continue

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
-from types import ModuleType, SimpleNamespace
 import unittest
-
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 ROOT = Path(__file__).parents[1]
 
@@ -103,7 +102,8 @@ def _state(entity_id, device_class, value="24.0"):
 class OutdoorWeatherFilteringTest(unittest.TestCase):
     def setUp(self):
         self.temperature = _entry(
-            "sensor.provider_temperature", hidden_by=SimpleNamespace(value="integration")
+            "sensor.provider_temperature",
+            hidden_by=SimpleNamespace(value="integration"),
         )
         self.humidity = _entry(
             "sensor.provider_humidity", hidden_by=SimpleNamespace(value="integration")
@@ -111,14 +111,10 @@ class OutdoorWeatherFilteringTest(unittest.TestCase):
         self.weather = _entry(
             "weather.provider", config="openweather-entry", hidden_by=None
         )
-        self.registry = _EntityRegistry(
-            [self.temperature, self.humidity, self.weather]
-        )
+        self.registry = _EntityRegistry([self.temperature, self.humidity, self.weather])
         _ER.async_get = lambda hass: self.registry
         _ER.async_entries_for_device = lambda registry, device_id, **kwargs: [
-            entry
-            for entry in registry.entries.values()
-            if entry.device_id == device_id
+            entry for entry in registry.entries.values() if entry.device_id == device_id
         ]
         self.hass = SimpleNamespace(
             states=_States(
@@ -128,18 +124,16 @@ class OutdoorWeatherFilteringTest(unittest.TestCase):
                 ]
             ),
             config_entries=SimpleNamespace(
-                async_get_entry=lambda entry_id: SimpleNamespace(
-                    domain="openweathermap"
+                async_get_entry=lambda entry_id: (
+                    SimpleNamespace(domain="openweathermap")
+                    if entry_id == "openweather-entry"
+                    else None
                 )
-                if entry_id == "openweather-entry"
-                else None
             ),
         )
 
     def test_hidden_openweathermap_temperature_and_humidity_are_served(self):
-        self.assertTrue(
-            _FILTERING.is_served(self.hass, self.temperature.entity_id)
-        )
+        self.assertTrue(_FILTERING.is_served(self.hass, self.temperature.entity_id))
         self.assertTrue(_FILTERING.is_served(self.hass, self.humidity.entity_id))
 
     def test_unrelated_hidden_sensor_stays_private(self):
@@ -156,9 +150,7 @@ class OutdoorWeatherFilteringTest(unittest.TestCase):
 
     def test_disabled_or_missing_measurement_fails_closed(self):
         self.hass.states._states.pop(self.temperature.entity_id)
-        self.assertFalse(
-            _FILTERING.is_served(self.hass, self.temperature.entity_id)
-        )
+        self.assertFalse(_FILTERING.is_served(self.hass, self.temperature.entity_id))
 
     def test_non_environmental_weather_child_stays_filtered(self):
         pressure = _entry(

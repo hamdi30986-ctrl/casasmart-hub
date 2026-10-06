@@ -18,10 +18,10 @@ import json
 import logging
 import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from .exceptions import MigrationError
 
@@ -105,8 +105,18 @@ _V3_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 # the app's kGangSuffixLabels). Used to map a suffix-keyed legacy map back to the
 # control entity_id that carries that suffix.
 _V3_GANG_SUFFIX_KEYS = (
-    "left", "right", "center", "l1", "l2", "l3",
-    "endpoint_1", "endpoint_2", "endpoint_3", "gang_1", "gang_2", "gang_3",
+    "left",
+    "right",
+    "center",
+    "l1",
+    "l2",
+    "l3",
+    "endpoint_1",
+    "endpoint_2",
+    "endpoint_3",
+    "gang_1",
+    "gang_2",
+    "gang_3",
 )
 
 
@@ -171,9 +181,7 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
             )
             if not isinstance(gtype, str) or gtype not in _V3_KNOWN_GANG_TYPES:
                 gtype = "switch"
-            gname = gang_names.get(eid) or (
-                gang_names.get(suffix) if suffix else None
-            )
+            gname = gang_names.get(eid) or (gang_names.get(suffix) if suffix else None)
             gangs[eid] = {
                 "type": gtype,
                 "icon": None,
@@ -209,12 +217,9 @@ def _migration_v4(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute("CREATE INDEX idx_energy_events_t ON energy_events (t DESC, id DESC)")
     conn.execute(
-        "CREATE INDEX idx_energy_events_t ON energy_events (t DESC, id DESC)"
-    )
-    conn.execute(
-        "CREATE INDEX idx_energy_events_kind_t "
-        "ON energy_events (kind, t DESC, id DESC)"
+        "CREATE INDEX idx_energy_events_kind_t ON energy_events (kind, t DESC, id DESC)"
     )
 
 
@@ -241,7 +246,7 @@ def backup_database(db_path: Path, backup_dir: Path) -> Path:
     that includes uncheckpointed WAL pages.
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     backup_path = backup_dir / f"{db_path.stem}-v{{ver}}-{stamp}.db"
 
     # NOTE: sqlite3 connections must be closed explicitly — `with conn:` only

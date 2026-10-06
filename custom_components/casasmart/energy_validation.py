@@ -53,8 +53,10 @@ def validate_config_against_discovery(
     eligible_light_rooms: set[str] = set()
     for room_id, room in rooms.items():
         candidates = {item["entity_id"] for item in room["lights"]}
-        if room_id not in excluded and len(candidates) > 1 and not (
-            level == LEVEL_SMART and room["automatic"]
+        if (
+            room_id not in excluded
+            and len(candidates) > 1
+            and not (level == LEVEL_SMART and room["automatic"])
         ):
             eligible_light_rooms.add(room_id)
         if room_id not in config["light_keepers"]:
@@ -90,9 +92,10 @@ def validate_config_against_discovery(
     }
     if not {item["entity_id"] for item in config["heaters"]}.issubset(heaters):
         raise EnergyConfigError("heaters contains a stale or non-heater entity")
-    if config["setup_complete"] and {
-        item["entity_id"] for item in config["heaters"]
-    } != heaters:
+    if (
+        config["setup_complete"]
+        and {item["entity_id"] for item in config["heaters"]} != heaters
+    ):
         raise EnergyConfigError("heater setup is incomplete or stale")
 
     eligible_ac_rooms: set[str] = set()
@@ -100,11 +103,7 @@ def validate_config_against_discovery(
         candidates = {item["entity_id"] for item in room["climates"]}
         if room_id not in excluded and (
             (level == LEVEL_MEDIUM and len(candidates) > 1)
-            or (
-                level == LEVEL_SMART
-                and not room["automatic"]
-                and bool(candidates)
-            )
+            or (level == LEVEL_SMART and not room["automatic"] and bool(candidates))
         ):
             eligible_ac_rooms.add(room_id)
         if room_id in config["ac_keepers"] and not set(

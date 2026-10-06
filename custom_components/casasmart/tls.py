@@ -1,15 +1,13 @@
-
 from __future__ import annotations
 
 import logging
 import os
 import ssl
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
-
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -18,9 +16,6 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.x509.oid import NameOID
 
 _LOGGER = logging.getLogger(__name__)
-
-
-
 
 
 IDENTITY_KEY_FILENAME = "identity_key.pem"
@@ -32,11 +27,9 @@ TLS_CERT_VALIDITY_DAYS = 365
 TLS_CERT_RENEW_MARGIN_DAYS = 30
 
 
-
 _ISSUER_CN = "CasaSmart Hub Identity"
 _SUBJECT_CN = "casasmart-hub"
 _SAN_DNS = "casasmart-hub.local"
-
 
 
 _BACKDATE = timedelta(hours=1)
@@ -47,7 +40,6 @@ class IdentityError(Exception):
 
 
 class TlsIdentitySigner:
-
     _SCALAR_BYTES = 32
 
     def __init__(self, private_key: ec.EllipticCurvePrivateKey) -> None:
@@ -71,7 +63,6 @@ class TlsIdentitySigner:
 
 @dataclass(frozen=True)
 class TlsMaterial:
-
     identity_public_pem: str
     identity_fingerprint: str
     identity_signer: TlsIdentitySigner
@@ -79,9 +70,6 @@ class TlsMaterial:
     key_path: Path
     cert_not_after: datetime
     leaf_rotated: bool
-
-
-
 
 
 def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
@@ -122,10 +110,14 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
 
 
 def _identity_public_pem(key: ec.EllipticCurvePrivateKey) -> str:
-    return key.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    return (
+        key.public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
 
 
 def _identity_fingerprint(key: ec.EllipticCurvePrivateKey) -> str:
@@ -136,9 +128,6 @@ def _identity_fingerprint(key: ec.EllipticCurvePrivateKey) -> str:
     digest = hashes.Hash(hashes.SHA256())
     digest.update(spki)
     return digest.finalize().hex()
-
-
-
 
 
 def _leaf_is_valid(
@@ -189,7 +178,7 @@ def _leaf_is_valid(
 
     not_after = cert.not_valid_after_utc
     margin = timedelta(days=TLS_CERT_RENEW_MARGIN_DAYS)
-    if datetime.now(timezone.utc) >= not_after - margin:
+    if datetime.now(UTC) >= not_after - margin:
         return None
     return not_after
 
@@ -202,18 +191,14 @@ def _mint_leaf(
 ) -> datetime:
     """Mint a fresh leaf keypair + cert signed by the identity key."""
     leaf_key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # X.509 time has whole-second resolution — truncate up front so the
     # value we report always equals what the cert actually says.
     not_after = (now + timedelta(days=validity_days)).replace(microsecond=0)
     cert = (
         x509.CertificateBuilder()
-        .subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _SUBJECT_CN)])
-        )
-        .issuer_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _ISSUER_CN)])
-        )
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _SUBJECT_CN)]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _ISSUER_CN)]))
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - _BACKDATE)
@@ -222,9 +207,7 @@ def _mint_leaf(
             x509.SubjectAlternativeName([x509.DNSName(_SAN_DNS)]),
             critical=False,
         )
-        .add_extension(
-            x509.BasicConstraints(ca=False, path_length=None), critical=True
-        )
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .sign(identity, hashes.SHA256())
     )
 
@@ -233,9 +216,7 @@ def _mint_leaf(
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    fd = os.open(
-        key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-    )
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(key_pem)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -267,9 +248,6 @@ def ensure_tls_material(
         cert_not_after=not_after,
         leaf_rotated=rotated,
     )
-
-
-
 
 
 class CasaSmartTlsServer:

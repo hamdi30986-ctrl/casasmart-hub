@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +6,11 @@ import logging
 import secrets
 import time
 from base64 import b64encode
+from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
-
 from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
@@ -37,18 +36,13 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-
 PUSH_TYPE_SECURITY = "security"
 PUSH_TYPE_LOCK = "lock"
-
 
 
 PUSH_TYPE_DEVICE_PAIRED = "device_paired"
 
 PUSH_TYPE_HQ_REMINDER = "hq_reminder"
-
-
-
 
 
 _OWNER_ONLY_TYPES = frozenset(
@@ -67,12 +61,8 @@ PRIORITY_CRITICAL = "critical"
 PRIORITY_NORMAL = "normal"
 
 
-
-
-
 STATE_LOCKED = "locked"
 STATE_UNLOCKED = "unlocked"
-
 
 
 _LOCK_PREFIX = "lock."
@@ -80,16 +70,9 @@ _LOCK_SETTLED = frozenset({STATE_LOCKED, STATE_UNLOCKED})
 _LOCK_FLAP_STATES = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
 
-
-
-
-
-
 _WIDGET_DOMAINS = frozenset(
     {"light", "switch", "input_boolean", "lock", "cover", "climate", "fan"}
 )
-
-
 
 
 _WIDGET_PUSH_COALESCE_SECONDS = 15.0
@@ -97,18 +80,16 @@ _WIDGET_PUSH_COALESCE_SECONDS = 15.0
 _WIDGET_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
 
-
 _NONCE_BYTES = 32
 
 
 class PushDispatcher:
-
     def __init__(
         self,
         hass: HomeAssistant,
         *,
-        push_store: "PushTokenStore",
-        signer: "PushSigner",
+        push_store: PushTokenStore,
+        signer: PushSigner,
         hub_id: str,
         relay_url: str,
         session: aiohttp.ClientSession,
@@ -121,18 +102,16 @@ class PushDispatcher:
         self._relay_url = relay_url
         self._session = session
         self._clock = clock
-        self._unsub_alarm: Optional[Callable[[], None]] = None
-        self._unsub_state: Optional[Callable[[], None]] = None
+        self._unsub_alarm: Callable[[], None] | None = None
+        self._unsub_state: Callable[[], None] | None = None
 
-        self._widget_flush_cancel: Optional[Callable[[], None]] = None
+        self._widget_flush_cancel: Callable[[], None] | None = None
         self._active = False
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def relay_url(self) -> str:
         return self._relay_url
-
-
 
     @callback
     def async_start(self) -> None:
@@ -172,8 +151,6 @@ class PushDispatcher:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-
-
     @callback
     def _on_alarm_triggered(self, event: Event) -> None:
         data = self._build_security_payload(event.data or {})
@@ -187,14 +164,10 @@ class PushDispatcher:
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
 
-
         if entity_id.startswith(_LOCK_PREFIX):
             if self._is_real_lock_transition(old_state, new_state):
                 data = self._build_lock_payload(entity_id, new_state)
                 self._schedule_dispatch(self._dispatch(data, PRIORITY_NORMAL))
-
-
-
 
         if self._is_widget_relevant_change(entity_id, old_state, new_state):
             self._mark_widgets_dirty()
@@ -246,14 +219,14 @@ class PushDispatcher:
             return False
         return old_state.state != new_state.state
 
-
-
     def _build_security_payload(self, alarm_event: dict[str, Any]) -> dict[str, str]:
         """Plaintext security notification from an alarm event dict."""
         life_safety = bool(alarm_event.get("life_safety"))
         entity_id = alarm_event.get("entity_id")
         zone = alarm_event.get("zone")
-        name = self._friendly_name(entity_id) or (zone if isinstance(zone, str) else None)
+        name = self._friendly_name(entity_id) or (
+            zone if isinstance(zone, str) else None
+        )
         title = "Life-safety alarm" if life_safety else "Security alarm"
         body = f"{name} triggered the alarm" if name else "The alarm was triggered"
         data = {"type": PUSH_TYPE_SECURITY, "title": title, "body": body}
@@ -265,9 +238,7 @@ class PushDispatcher:
             data["entity_id"] = entity_id
         return data
 
-    def _build_lock_payload(
-        self, entity_id: str, new_state: Any
-    ) -> dict[str, str]:
+    def _build_lock_payload(self, entity_id: str, new_state: Any) -> dict[str, str]:
         """Plaintext lock notification for a settled lock transition."""
         locked = new_state.state == STATE_LOCKED
         name = self._friendly_name(entity_id) or entity_id
@@ -279,7 +250,7 @@ class PushDispatcher:
             "entity_id": entity_id,
         }
 
-    def _friendly_name(self, entity_id: Any) -> Optional[str]:
+    def _friendly_name(self, entity_id: Any) -> str | None:
         """The entity's friendly name from the live state, or None."""
         if not isinstance(entity_id, str) or not entity_id:
             return None
@@ -288,8 +259,6 @@ class PushDispatcher:
             return None
         name = state.attributes.get("friendly_name")
         return name if isinstance(name, str) and name else None
-
-
 
     async def async_send(self, data: dict[str, str], priority: str) -> dict[str, str]:
         return await self._dispatch(data, priority)
@@ -323,7 +292,9 @@ class PushDispatcher:
             _LOGGER.exception("Push dispatch failed for a %s event", data.get("type"))
             return {"delivery": "failed", "reason": "dispatcher_error"}
 
-    async def _dispatch_inner(self, data: dict[str, str], priority: str) -> dict[str, str]:
+    async def _dispatch_inner(
+        self, data: dict[str, str], priority: str
+    ) -> dict[str, str]:
         if not self._active:
             return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         try:
@@ -334,13 +305,8 @@ class PushDispatcher:
             _LOGGER.exception("Push dispatch: reading device tokens failed")
             return {"delivery": "failed", "reason": "token_store_error"}
 
-
-
-
-
         owner_only = (
-            data.get("type") in _OWNER_ONLY_TYPES
-            and data.get("life_safety") != "1"
+            data.get("type") in _OWNER_ONLY_TYPES and data.get("life_safety") != "1"
         )
         engine = None
         if owner_only:
@@ -406,7 +372,7 @@ class PushDispatcher:
             ) as resp:
                 status = resp.status
                 payload = await self._read_json(resp)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
             _LOGGER.warning("Push relay unreachable (%s): %s", self._relay_url, err)
             return {"delivery": "failed", "reason": "relay_unreachable"}
 
@@ -442,7 +408,7 @@ class PushDispatcher:
             return
         try:
             removed = await self._hass.async_add_executor_job(self._remove_tokens, dead)
-        except Exception:  # noqa: BLE001 — cleanup is best-effort, never fatal
+        except Exception:
             _LOGGER.exception("Push dispatch: dead-token cleanup failed")
             return
         if removed:
@@ -458,9 +424,6 @@ class PushDispatcher:
             if rec.get("fcm_token") in dead and self._push_store.unregister(device_id):
                 removed += 1
         return removed
-
-
-
 
 
 TANK_LOW_CHECK_UTC_HOUR = 15
@@ -501,7 +464,7 @@ class TankPushMonitor:
         self,
         hass: HomeAssistant,
         *,
-        tanks: "TankEngine",
+        tanks: TankEngine,
         notifier: PushDispatcher,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -509,8 +472,8 @@ class TankPushMonitor:
         self._tanks = tanks
         self._notifier = notifier
         self._clock = clock
-        self._unsub_daily: Optional[Callable[[], None]] = None
-        self._unsub_offline: Optional[Callable[[], None]] = None
+        self._unsub_daily: Callable[[], None] | None = None
+        self._unsub_offline: Callable[[], None] | None = None
         # device_id -> AST day index of the last push, one map per channel so a
         # low-water push and an offline push don't suppress each other.
         self._low_pushed_day: dict[str, int] = {}
@@ -585,7 +548,7 @@ class TankPushMonitor:
                 status = await self._hass.async_add_executor_job(
                     self._tanks.status, device_id
                 )
-            except Exception:  # noqa: BLE001 — one bad tank must not stop the sweep
+            except Exception:
                 _LOGGER.exception("Tank %s: status read failed", device_id)
                 continue
             if status.get("percent") is None or not status.get("is_low"):
@@ -616,12 +579,10 @@ class TankPushMonitor:
 
     # -- emit ------------------------------------------------------------------
 
-    async def _emit_low(
-        self, device: dict[str, Any], status: dict[str, Any]
-    ) -> None:
+    async def _emit_low(self, device: dict[str, Any], status: dict[str, Any]) -> None:
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
-        percent = int(round(status["percent"]))
+        percent = round(status["percent"])
         self._hass.bus.async_fire(
             EVENT_TANK_LOW,
             {
@@ -642,9 +603,7 @@ class TankPushMonitor:
             PRIORITY_NORMAL,
         )
 
-    async def _emit_offline(
-        self, device: dict[str, Any], last: dict[str, Any]
-    ) -> None:
+    async def _emit_offline(self, device: dict[str, Any], last: dict[str, Any]) -> None:
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
         self._hass.bus.async_fire(
@@ -670,7 +629,7 @@ class TankPushMonitor:
     async def _list_devices(self) -> list[dict[str, Any]]:
         try:
             return await self._hass.async_add_executor_job(self._tanks.list_devices)
-        except Exception:  # noqa: BLE001 — a storage hiccup skips this tick only
+        except Exception:
             _LOGGER.exception("Tank monitor: listing devices failed")
             return []
 

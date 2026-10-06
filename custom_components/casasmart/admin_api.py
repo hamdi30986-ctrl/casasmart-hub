@@ -37,7 +37,6 @@ from typing import Any
 
 import voluptuous as vol
 from aiohttp import web
-
 from homeassistant import data_entry_flow
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import SOURCE_USER
@@ -45,6 +44,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
 )
 
@@ -87,9 +88,7 @@ class _AdminView(HomeAssistantView):
         """Run a service call with a timeout; an error response or None."""
         try:
             await asyncio.wait_for(
-                self._hass.services.async_call(
-                    domain, service, data, blocking=True
-                ),
+                self._hass.services.async_call(domain, service, data, blocking=True),
                 timeout=_SERVICE_CALL_TIMEOUT,
             )
         except TimeoutError:
@@ -196,9 +195,7 @@ class CasaSmartAdminRegistryView(_AdminView):
                     else None
                 ),
                 "hidden_by": (
-                    str(entry.hidden_by.value)
-                    if entry.hidden_by is not None
-                    else None
+                    str(entry.hidden_by.value) if entry.hidden_by is not None else None
                 ),
                 "disabled_by": (
                     str(entry.disabled_by.value)
@@ -271,9 +268,7 @@ class CasaSmartAdminEntityView(_AdminView):
         # parse_entity_patch yields exactly {"name": ...}.
         # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:
-            entry = registry.async_update_entity(
-                entity_id, name=changes["name"]
-            )
+            entry = registry.async_update_entity(entity_id, name=changes["name"])
         except ValueError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json(
@@ -323,9 +318,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
             )
         handler = payload.get("handler")
         if handler not in ALLOWED_FLOW_HANDLERS:
-            return self.json_message(
-                "Handler not allowed", HTTPStatus.BAD_REQUEST
-            )
+            return self.json_message("Handler not allowed", HTTPStatus.BAD_REQUEST)
         try:
             result = await self._hass.config_entries.flow.async_init(
                 handler, context={"source": SOURCE_USER}
@@ -371,9 +364,7 @@ class CasaSmartAdminConfigFlowView(_AdminView):
         except data_entry_flow.UnknownFlow:
             return self.json_message("Unknown flow", HTTPStatus.NOT_FOUND)
         except data_entry_flow.InvalidData as err:
-            return self.json(
-                {"errors": err.schema_errors}, HTTPStatus.BAD_REQUEST
-            )
+            return self.json({"errors": err.schema_errors}, HTTPStatus.BAD_REQUEST)
         except vol.Invalid as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json(serialize_flow_result(result))
@@ -409,6 +400,4 @@ class CasaSmartAdminRemoteCommandView(_AdminView):
         )
         if failed is not None:
             return failed
-        return self.json(
-            {"ok": True, "entity_id": entity_id, "sent": len(commands)}
-        )
+        return self.json({"ok": True, "entity_id": entity_id, "sent": len(commands)})

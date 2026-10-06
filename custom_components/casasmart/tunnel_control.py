@@ -26,12 +26,10 @@ live add-on listing, never hardcoded.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 
 import aiohttp
-
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -114,7 +112,9 @@ class CloudflaredController:
         try:
             addons = await self._addons().list()
         except SupervisorError as err:
-            raise TunnelControlError(f"Supervisor add-on listing failed: {err}") from err
+            raise TunnelControlError(
+                f"Supervisor add-on listing failed: {err}"
+            ) from err
 
         listing = [
             (addon.slug, addon.name, _enum_value(addon.state)) for addon in addons
@@ -165,12 +165,8 @@ class CloudflaredController:
             if not running:
                 await self._addons().start_addon(slug)
         except SupervisorError as err:
-            raise TunnelControlError(
-                f"Enabling add-on {slug} failed: {err}"
-            ) from err
-        _LOGGER.info(
-            "Cloudflare tunnel add-on %s enabled (started, boot=auto)", slug
-        )
+            raise TunnelControlError(f"Enabling add-on {slug} failed: {err}") from err
+        _LOGGER.info("Cloudflare tunnel add-on %s enabled (started, boot=auto)", slug)
 
     async def async_disable(self, slug: str, *, running: bool) -> None:
         """Enact OFF: stop if running, then boot=manual.
@@ -186,9 +182,7 @@ class CloudflaredController:
                 slug, AddonsOptions(boot=AddonBoot.MANUAL)
             )
         except SupervisorError as err:
-            raise TunnelControlError(
-                f"Disabling add-on {slug} failed: {err}"
-            ) from err
+            raise TunnelControlError(f"Disabling add-on {slug} failed: {err}") from err
         _LOGGER.info(
             "Cloudflare tunnel add-on %s disabled (stopped, boot=manual)", slug
         )
@@ -213,7 +207,7 @@ class CloudflaredController:
                 headers={"user-agent": "casasmart-edge-watchdog"},
             ) as resp:
                 return not is_edge_origin_down(resp.status)
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (TimeoutError, aiohttp.ClientError):
             return None
 
     async def async_restart(self, slug: str) -> None:
@@ -221,16 +215,10 @@ class CloudflaredController:
         try:
             await self._addons().restart_addon(slug)
         except SupervisorError as err:
-            raise TunnelControlError(
-                f"Restarting add-on {slug} failed: {err}"
-            ) from err
-        _LOGGER.info(
-            "Cloudflare tunnel add-on %s restarted (edge reconnect)", slug
-        )
+            raise TunnelControlError(f"Restarting add-on {slug} failed: {err}") from err
+        _LOGGER.info("Cloudflare tunnel add-on %s restarted (edge reconnect)", slug)
 
-    async def async_watchdog_check(
-        self, slug: str, tunnel_url: str, now: float
-    ) -> str:
+    async def async_watchdog_check(self, slug: str, tunnel_url: str, now: float) -> str:
         """One edge-liveness cycle: probe, decide, and restart if warranted.
 
         [now] is a monotonic timestamp (injected for testability). Returns the

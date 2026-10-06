@@ -96,8 +96,6 @@ class FailureThrottle:
             return
         now = time.monotonic()
         for key in [
-            k
-            for k, v in self._entries.items()
-            if v.get("locked_until", 0.0) <= now
+            k for k, v in self._entries.items() if v.get("locked_until", 0.0) <= now
         ][: len(self._entries) - MAX_ENTRIES + 1]:
             del self._entries[key]

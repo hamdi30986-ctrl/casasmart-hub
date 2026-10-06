@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-from pathlib import Path
 import sys
-from types import ModuleType
 import unittest
-
+from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).parents[1]
 
@@ -65,7 +64,9 @@ def _load_now_api():
     energy = _module("casasmart.energy_runtime")
     energy.energy_lockout_applies = lambda *args: False
     filtering = _module("casasmart.filtering")
-    filtering.area_id_of = lambda hass, entity_id: hass.states.get(entity_id).attributes.get("room")
+    filtering.area_id_of = lambda hass, entity_id: hass.states.get(
+        entity_id
+    ).attributes.get("room")
     filtering.in_scope = lambda *args: True
     filtering.is_served = lambda *args: True
     filtering.serialize_device = lambda hass, state: {"entity_id": state.entity_id}
@@ -141,7 +142,9 @@ class _Hass:
 
 
 class NowBulkBehaviorTest(unittest.TestCase):
-    def test_contact_config_accepts_real_locks_and_rejects_unrelated_domains(self) -> None:
+    def test_contact_config_accepts_real_locks_and_rejects_unrelated_domains(
+        self,
+    ) -> None:
         hass = _Hass(
             _States(
                 [
@@ -163,7 +166,9 @@ class NowBulkBehaviorTest(unittest.TestCase):
         self.assertEqual(rejected["status"].value, 400)
         self.assertIn("not a door/window contact", rejected["message"])
 
-    def test_contact_api_counts_unlocked_as_open_and_never_closes_transients(self) -> None:
+    def test_contact_api_counts_unlocked_as_open_and_never_closes_transients(
+        self,
+    ) -> None:
         hass = _Hass(
             _States(
                 [

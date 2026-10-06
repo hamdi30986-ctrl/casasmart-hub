@@ -1,13 +1,12 @@
-
 from __future__ import annotations
 
-import logging
 import hashlib
 import json
+import logging
 import re
-import time
 import secrets
 import threading
+import time
 from typing import Any
 
 try:
@@ -16,7 +15,6 @@ except ImportError:
     from entity_bridge import CommandError, validate_command
 
 _LOGGER = logging.getLogger(__name__)
-
 
 
 UNSET = object()
@@ -156,9 +154,6 @@ def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
 _VALID_GANG_PRESENTATIONS = frozenset({"grouped", "solo", "hidden"})
 
 
-
-
-
 _KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
 
@@ -182,9 +177,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
             raise RegistryError("gangs entries must be {entity_id: {...}}")
         presentation = gang.get("presentation", "grouped")
         if presentation not in _VALID_GANG_PRESENTATIONS:
-            raise RegistryError(
-                "gang presentation must be grouped, solo or hidden"
-            )
+            raise RegistryError("gang presentation must be grouped, solo or hidden")
         gtype = gang.get("type")
         clean_type = "switch" if gtype is None else _clean_gang_type(gtype)
         icon = gang.get("icon")
@@ -241,9 +234,7 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
     if not isinstance(entities, list) or not entities:
         raise RegistryError("entities must be a non-empty list")
     if len(entities) > _MAX_SCENE_ENTITIES:
-        raise RegistryError(
-            f"A scene may hold at most {_MAX_SCENE_ENTITIES} entities"
-        )
+        raise RegistryError(f"A scene may hold at most {_MAX_SCENE_ENTITIES} entities")
     cleaned: list[dict[str, Any]] = []
     for item in entities:
         if not isinstance(item, dict):
@@ -266,7 +257,6 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
 
 
 class RegistryEngine:
-
     def __init__(
         self,
         floors_table: Any,
@@ -287,13 +277,7 @@ class RegistryEngine:
 
         self._lock = threading.RLock()
 
-
-
-
-
         self._mirror_lock = threading.Lock()
-
-
 
         self._assignment_cache: dict[str, tuple[str | None, str | None]] = {}
 
@@ -321,8 +305,6 @@ class RegistryEngine:
                 record.get("display_name"),
             )
 
-
-
     def room_of(self, entity_id: str) -> Any:
         """The entity's registry room: room_id, None (explicit Unassigned),
         or the UNSET sentinel when no record exists (fall back to HA)."""
@@ -340,8 +322,6 @@ class RegistryEngine:
         """A room's display name, or None for an unknown room."""
         with self._mirror_lock:
             return self._room_names.get(room_id)
-
-
 
     def list_floors(self) -> list[dict[str, Any]]:
         return [
@@ -394,12 +374,9 @@ class RegistryEngine:
             del self._floors[floor_id]
         _LOGGER.info("Registry: floor %s deleted", floor_id)
 
-
-
     def list_rooms(self) -> list[dict[str, Any]]:
         return [
-            {"room_id": room_id, **record}
-            for room_id, record in self._rooms.items()
+            {"room_id": room_id, **record} for room_id, record in self._rooms.items()
         ]
 
     def create_room(
@@ -460,7 +437,6 @@ class RegistryEngine:
                     record["room_id"] = None
                     self._devices[entity_id] = record
 
-
                     self._mirror_assignment(entity_id, record)
                     cleared += 1
             # Solo cards carry their room on the gang, not the entity
@@ -469,18 +445,26 @@ class RegistryEngine:
             for device_id, device in list(self._user_devices.items()):
                 gangs = device.get("gangs", {})
                 if any(gang.get("room_id") == room_id for gang in gangs.values()):
-                    self._user_devices[device_id] = {**device, "gangs": {
-                        key: ({**gang, "room_id": None, "room_override": True}
-                              if gang.get("room_id") == room_id else gang)
-                        for key, gang in gangs.items()
-                    }}
+                    self._user_devices[device_id] = {
+                        **device,
+                        "gangs": {
+                            key: (
+                                {**gang, "room_id": None, "room_override": True}
+                                if gang.get("room_id") == room_id
+                                else gang
+                            )
+                            for key, gang in gangs.items()
+                        },
+                    }
             tags = self._room_tags_doc()
             tags_changed = False
             for tag_id, tag in list(tags.items()):
                 assigned = tag.get("room_ids", [])
                 if room_id not in assigned:
                     continue
-                remaining = [candidate for candidate in assigned if candidate != room_id]
+                remaining = [
+                    candidate for candidate in assigned if candidate != room_id
+                ]
                 if remaining:
                     tag["room_ids"] = remaining
                 else:
@@ -534,8 +518,7 @@ class RegistryEngine:
                             dict.fromkeys(
                                 room_id
                                 for room_id in room_ids
-                                if isinstance(room_id, str)
-                                and room_id in known_rooms
+                                if isinstance(room_id, str) and room_id in known_rooms
                             )
                         ),
                     }
@@ -642,8 +625,6 @@ class RegistryEngine:
             raise RegistryError("Unknown floor_id")
         return floor_id
 
-
-
     def list_assignments(self) -> dict[str, dict[str, Any]]:
         """entity_id -> {room_id, display_name, sort_order}."""
         return dict(self._devices.items())
@@ -673,7 +654,6 @@ class RegistryEngine:
                 if display_name is not None and not isinstance(display_name, str):
                     raise RegistryError("display_name must be a string or null")
                 if display_name is not None:
-
                     display_name = (
                         _clean_name(display_name, "Device")
                         if display_name.strip()
@@ -687,8 +667,13 @@ class RegistryEngine:
         return {"entity_id": entity_id, **record}
 
     def move_device_room(
-        self, storage, actor: str, payload: dict[str, Any], *,
-        assignable_ids: set[str], fallback_rooms: dict[str, str | None],
+        self,
+        storage,
+        actor: str,
+        payload: dict[str, Any],
+        *,
+        assignable_ids: set[str],
+        fallback_rooms: dict[str, str | None],
         scope: list[str] | None = None,
     ) -> dict[str, Any]:
         """Move one saved device (or solo gang) in one durable transaction.
@@ -698,8 +683,14 @@ class RegistryEngine:
         snapshot. The idempotency receipt is committed with the assignments.
         No HA control or entity-registry mutation is performed here.
         """
-        allowed = {"ha_device_id", "gang_entity_id", "room_id",
-                   "expected_rooms", "expected_gang_override", "idempotency_key"}
+        allowed = {
+            "ha_device_id",
+            "gang_entity_id",
+            "room_id",
+            "expected_rooms",
+            "expected_gang_override",
+            "idempotency_key",
+        }
         if set(payload) - allowed or "room_id" not in payload:
             raise RegistryError("Invalid room move fields")
         device_id = payload.get("ha_device_id")
@@ -722,14 +713,22 @@ class RegistryEngine:
             raise RegistryError("Invalid idempotency_key")
         if room_id is not None and (not isinstance(room_id, str) or not room_id):
             raise RegistryError("Invalid room_id")
-        if not isinstance(expected, dict) or not 0 < len(expected) <= _MAX_DEVICE_ENTITIES:
+        if (
+            not isinstance(expected, dict)
+            or not 0 < len(expected) <= _MAX_DEVICE_ENTITIES
+        ):
             raise RegistryError("expected_rooms must contain 1-100 primary entities")
-        if any(not isinstance(k, str) or len(k) > 255 or "." not in k
-               or (v is not None and not isinstance(v, str)) for k, v in expected.items()):
+        if any(
+            not isinstance(k, str)
+            or len(k) > 255
+            or "." not in k
+            or (v is not None and not isinstance(v, str))
+            for k, v in expected.items()
+        ):
             raise RegistryError("Invalid expected_rooms")
-        fingerprint = hashlib.sha256(json.dumps(
-            payload, sort_keys=True, separators=(",", ":")
-        ).encode()).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         receipt_key = hashlib.sha256(f"{actor}:{key}".encode()).hexdigest()
         receipts = storage.table("registry_room_moves")
         now = time.time()
@@ -737,16 +736,25 @@ class RegistryEngine:
             record = self._user_devices.get(device_id)
             if record is None:
                 raise UnknownItemError("Device is no longer imported")
-            primary_entities = list(dict.fromkeys(
-                eid for eid in record.get("entity_ids", [])
-                if eid not in record.get("config_entity_ids", [])
-            ))
+            primary_entities = list(
+                dict.fromkeys(
+                    eid
+                    for eid in record.get("entity_ids", [])
+                    if eid not in record.get("config_entity_ids", [])
+                )
+            )
             entities = primary_entities
             gang = None
             if gang_id is not None:
                 gang = record.get("gangs", {}).get(gang_id)
-                if gang_id not in entities or not gang or gang.get("presentation") != "solo":
-                    raise RoomMoveConflict("Device presentation changed; refresh and retry")
+                if (
+                    gang_id not in entities
+                    or not gang
+                    or gang.get("presentation") != "solo"
+                ):
+                    raise RoomMoveConflict(
+                        "Device presentation changed; refresh and retry"
+                    )
                 entities = [gang_id]
             if not entities or set(entities) != set(expected):
                 raise RoomMoveConflict("Device membership changed; refresh and retry")
@@ -757,8 +765,13 @@ class RegistryEngine:
             current = {}
             for eid in entities:
                 assignment = self._devices.get(eid)
-                current[eid] = (assignment.get("room_id") if assignment is not None
-                                else fallback_rooms.get(eid) if fallback_rooms.get(eid) in self._rooms else None)
+                current[eid] = (
+                    assignment.get("room_id")
+                    if assignment is not None
+                    else fallback_rooms.get(eid)
+                    if fallback_rooms.get(eid) in self._rooms
+                    else None
+                )
             permission_rooms = dict(current)
             if gang is not None:
                 if gang.get("room_id") is not None or gang.get("room_override") is True:
@@ -770,15 +783,20 @@ class RegistryEngine:
                 for eid in primary_entities:
                     other = record.get("gangs", {}).get(eid, {})
                     assignment = self._devices.get(eid)
-                    inherited = (assignment.get("room_id") if assignment is not None
-                                 else fallback_rooms.get(eid))
+                    inherited = (
+                        assignment.get("room_id")
+                        if assignment is not None
+                        else fallback_rooms.get(eid)
+                    )
                     permission_rooms[eid] = (
                         other.get("room_id")
-                        if other.get("room_override") is True or other.get("room_id") is not None
+                        if other.get("room_override") is True
+                        or other.get("room_id") is not None
                         else inherited
                     )
             if scope is not None and (
-                room_id not in scope or any(value not in scope for value in permission_rooms.values())
+                room_id not in scope
+                or any(value not in scope for value in permission_rooms.values())
             ):
                 raise RoomMoveDenied("Room move is outside your allowed rooms")
             receipt = receipts.get(receipt_key)
@@ -789,48 +807,84 @@ class RegistryEngine:
                 return {**receipt["result"], "replayed": True}
             if current != expected:
                 raise RoomMoveConflict("Room assignment changed; refresh and retry")
-            if gang is not None and (gang.get("room_override") is True) != expected_override:
-                raise RoomMoveConflict("Gang room inheritance changed; refresh and retry")
+            if (
+                gang is not None
+                and (gang.get("room_override") is True) != expected_override
+            ):
+                raise RoomMoveConflict(
+                    "Gang room inheritance changed; refresh and retry"
+                )
             assignments = []
             updated_record = None
             with storage.transaction():
                 if gang is not None:
-                    updated_record = {**record, "gangs": {
-                        **record.get("gangs", {}),
-                        gang_id: {**gang, "room_id": room_id, "room_override": True},
-                    }}
+                    updated_record = {
+                        **record,
+                        "gangs": {
+                            **record.get("gangs", {}),
+                            gang_id: {
+                                **gang,
+                                "room_id": room_id,
+                                "room_override": True,
+                            },
+                        },
+                    }
                     self._user_devices[device_id] = updated_record
                 else:
                     for eid in entities:
-                        assignment = {**(self._devices.get(eid) or {
-                            "display_name": None, "sort_order": 0,
-                        }), "room_id": room_id}
+                        assignment = {
+                            **(
+                                self._devices.get(eid)
+                                or {
+                                    "display_name": None,
+                                    "sort_order": 0,
+                                }
+                            ),
+                            "room_id": room_id,
+                        }
                         self._devices[eid] = assignment
                         assignments.append({"entity_id": eid, **assignment})
                 result = {
-                    "ha_device_id": device_id, "gang_entity_id": gang_id,
-                    "room_id": room_id, "assignments": assignments,
-                    "user_device": (self._serve_user_device(device_id, updated_record)
-                                    if updated_record is not None else None),
+                    "ha_device_id": device_id,
+                    "gang_entity_id": gang_id,
+                    "room_id": room_id,
+                    "assignments": assignments,
+                    "user_device": (
+                        self._serve_user_device(device_id, updated_record)
+                        if updated_record is not None
+                        else None
+                    ),
                     "replayed": False,
                 }
                 # Bounded receipts. Pruning and receipt creation share the
                 # transaction, so disk failure cannot produce a false receipt.
-                entries = sorted(receipts.items(), key=lambda item: item[1].get("expires_at", 0))
+                entries = sorted(
+                    receipts.items(), key=lambda item: item[1].get("expires_at", 0)
+                )
                 for old_key, value in entries:
                     if value.get("expires_at", 0) <= now:
                         del receipts[old_key]
                 while len(receipts) >= 1024:
-                    old_key = min(receipts.items(), key=lambda item: item[1]["expires_at"])[0]
+                    old_key = min(
+                        receipts.items(), key=lambda item: item[1]["expires_at"]
+                    )[0]
                     del receipts[old_key]
-                receipts[receipt_key] = {"fingerprint": fingerprint,
-                                         "expires_at": now + 86400, "result": result}
+                receipts[receipt_key] = {
+                    "fingerprint": fingerprint,
+                    "expires_at": now + 86400,
+                    "result": result,
+                }
             # Publish the in-memory room mirror only after SQLite commits.
             with self._mirror_lock:
-                self._assignment_cache.update({
-                    item["entity_id"]: (item.get("room_id"), item.get("display_name"))
-                    for item in assignments
-                })
+                self._assignment_cache.update(
+                    {
+                        item["entity_id"]: (
+                            item.get("room_id"),
+                            item.get("display_name"),
+                        )
+                        for item in assignments
+                    }
+                )
             return result
 
     def remove_assignment(self, entity_id: str) -> None:
@@ -843,8 +897,6 @@ class RegistryEngine:
                 raise UnknownItemError("No assignment for that entity") from None
         with self._mirror_lock:
             self._assignment_cache.pop(entity_id, None)
-
-
 
     @staticmethod
     def _scene_out(scene_id: str, record: dict[str, Any]) -> dict[str, Any]:
@@ -930,8 +982,6 @@ class RegistryEngine:
                 raise UnknownItemError("Unknown scene") from None
         _LOGGER.info("Registry: scene %s deleted", scene_id)
 
-
-
     def get_favorites(self, member_id: str) -> list[str]:
         record = self._favorites.get(member_id)
         if record is None:
@@ -953,18 +1003,8 @@ class RegistryEngine:
         with self._lock:
             self._favorites.pop(member_id, None)
 
-
-
-
-
-
-
-
-
     @staticmethod
-    def _serve_user_device(
-        device_id: str, record: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _serve_user_device(device_id: str, record: dict[str, Any]) -> dict[str, Any]:
         # Emit the forward shape with safe defaults so a new client always sees
         # the fields even for a LEGACY record written before the migration:
         #   control_entity_ids — alias of the stored entity_ids
@@ -1031,9 +1071,6 @@ class RegistryEngine:
             previous = self._user_devices.get(ha_device_id) or {}
             self._retain_room_overrides(record["gangs"], previous.get("gangs", {}))
 
-
-
-
             taken: set[str] = set()
             for other_id, other in self._user_devices.items():
                 if other_id == ha_device_id:
@@ -1076,15 +1113,9 @@ class RegistryEngine:
             record = self._user_devices.get(ha_device_id)
             if record is None:
                 raise UnknownItemError("Unknown device")
-            controls = (
-                entity_ids if control_entity_ids is ... else control_entity_ids
-            )
+            controls = entity_ids if control_entity_ids is ... else control_entity_ids
             if controls is not ...:
                 new_ids = _clean_entity_ids(controls)
-
-
-
-
 
                 dropped = [e for e in record["entity_ids"] if e not in new_ids]
                 if dropped:
@@ -1114,18 +1145,9 @@ class RegistryEngine:
             if room_id is not ...:
                 record["room_id"] = _clean_optional_room(room_id)
 
-
             record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
             self._user_devices[ha_device_id] = record
         return self._serve_user_device(ha_device_id, record)
-
-
-
-
-
-
-
-
 
     def _mutate_gang(
         self, ha_device_id: str, gang_key: str, mutate: Any
@@ -1158,9 +1180,7 @@ class RegistryEngine:
 
         def mutate(gang: dict[str, Any]) -> None:
             if presentation not in _VALID_GANG_PRESENTATIONS:
-                raise RegistryError(
-                    "gang presentation must be grouped, solo or hidden"
-                )
+                raise RegistryError("gang presentation must be grouped, solo or hidden")
             gang["presentation"] = presentation
 
         return self._mutate_gang(ha_device_id, gang_key, mutate)
@@ -1233,8 +1253,6 @@ class RegistryEngine:
             )
             grabbed.update(record.get("config_entity_ids", ()))
         return grabbed
-
-
 
     def import_initial(
         self,

@@ -8,11 +8,11 @@ the client after a restart.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import re
 import threading
-from typing import Any, Iterable
-
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 _MAX_RECENTS = 48
 _MAX_PINNED_MOMENTS = 12
@@ -25,6 +25,8 @@ _ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
 # is not a safety classification, so it must never be admitted to a room bulk
 # operation.  The Hub policy must additionally name every participating entity.
 _SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
+
+
 class NowDataError(Exception):
     """Raised when persisted Now configuration is invalid."""
 
@@ -38,7 +40,7 @@ def _optional_entity_id(value: Any, field: str) -> str | None:
 
 
 def _timestamp(value: datetime | None = None) -> str:
-    return (value or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    return (value or datetime.now(UTC)).astimezone(UTC).isoformat()
 
 
 def _state_value(state: Any, field: str, default: Any = None) -> Any:
@@ -75,13 +77,18 @@ def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) ->
     """
 
     entity_id = _state_value(state, "entity_id", "")
-    return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(state)
+    return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(
+        state
+    )
 
 
 def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
     """A running room device is an eligible device whose state is ``on``."""
 
-    return is_room_activity_eligible(state, eligible_entity_ids) and _state_value(state, "state") == "on"
+    return (
+        is_room_activity_eligible(state, eligible_entity_ids)
+        and _state_value(state, "state") == "on"
+    )
 
 
 def summarize_openings(
@@ -202,12 +209,16 @@ class NowDataEngine:
 
     def room_policy(self, room_id: str) -> dict[str, Any]:
         record = self._policies.get(room_id) or {}
-        entity_ids = record.get("eligible_entity_ids") if isinstance(record, dict) else []
+        entity_ids = (
+            record.get("eligible_entity_ids") if isinstance(record, dict) else []
+        )
         return {
             "participates": bool(record.get("participates") is True),
             "eligible_entity_ids": [
                 entity_id for entity_id in entity_ids if isinstance(entity_id, str)
-            ] if isinstance(entity_ids, list) else [],
+            ]
+            if isinstance(entity_ids, list)
+            else [],
         }
 
     def room_participates(self, room_id: str) -> bool:
@@ -225,7 +236,9 @@ class NowDataEngine:
         }
         unknown = set(payload) - allowed
         if unknown:
-            raise NowDataError(f"Unknown Now configuration field: {sorted(unknown)[0]!r}")
+            raise NowDataError(
+                f"Unknown Now configuration field: {sorted(unknown)[0]!r}"
+            )
         with self._lock:
             record = self._config.get("global") or {}
             if "outdoor_weather_entity_id" in payload:
@@ -244,7 +257,9 @@ class NowDataEngine:
             if "contact_entity_ids" in payload:
                 raw = payload["contact_entity_ids"]
                 if not isinstance(raw, list) or len(raw) > _MAX_CONTACTS:
-                    raise NowDataError(f"contact_entity_ids must contain at most {_MAX_CONTACTS} entity ids")
+                    raise NowDataError(
+                        f"contact_entity_ids must contain at most {_MAX_CONTACTS} entity ids"
+                    )
                 if any(
                     not isinstance(item, str)
                     or not item.startswith(("binary_sensor.", "lock."))
@@ -257,7 +272,9 @@ class NowDataEngine:
             if "pinned_scene_ids" in payload:
                 raw = payload["pinned_scene_ids"]
                 if not isinstance(raw, list) or len(raw) > _MAX_PINNED_MOMENTS:
-                    raise NowDataError(f"pinned_scene_ids must contain at most {_MAX_PINNED_MOMENTS} scene ids")
+                    raise NowDataError(
+                        f"pinned_scene_ids must contain at most {_MAX_PINNED_MOMENTS} scene ids"
+                    )
                 if any(not isinstance(item, str) or not item for item in raw):
                     raise NowDataError("pinned_scene_ids must be scene id strings")
                 record["pinned_scene_ids"] = list(dict.fromkeys(raw))
@@ -288,11 +305,18 @@ class NowDataEngine:
         return dict(result) if isinstance(result, dict) else None
 
     def save_idempotent_result(
-        self, member_id: str, room_id: str, action: str, key: str, result: dict[str, Any]
+        self,
+        member_id: str,
+        room_id: str,
+        action: str,
+        key: str,
+        result: dict[str, Any],
     ) -> None:
         with self._lock:
             record = self._idempotency.get(member_id) or {}
-            results = record.get("results") if isinstance(record.get("results"), dict) else {}
+            results = (
+                record.get("results") if isinstance(record.get("results"), dict) else {}
+            )
             results[f"{room_id}:{action}:{key}"] = result
             # Deterministic bounded persistence; insertion order is preserved by JSON.
             while len(results) > _MAX_IDEMPOTENCY_ENTRIES:
@@ -308,7 +332,10 @@ class NowDataEngine:
         ids = list(dict.fromkeys(entity_ids))
         with self._lock:
             if ids:
-                self._restores[room_id] = {"entity_ids": ids, "captured_at": _timestamp()}
+                self._restores[room_id] = {
+                    "entity_ids": ids,
+                    "captured_at": _timestamp(),
+                }
             else:
                 self._restores.pop(room_id, None)
 

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -6,8 +5,8 @@ import logging
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
 from collections.abc import Iterator, MutableMapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,21 +18,13 @@ _LOGGER = logging.getLogger(__name__)
 _VALID_NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
-
 _BUSY_TIMEOUT_MS = 5000
-
-
-
-
-
-
 
 
 _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
 class HubStorage:
-
     def __init__(self, db_path: Path, backup_dir: Path | None = None) -> None:
         self._db_path = Path(db_path)
         self._backup_dir = (
@@ -43,8 +34,6 @@ class HubStorage:
         self._lock = threading.RLock()
         self._tables: dict[str, KeyValueTable] = {}
         self._transaction_depth = 0
-
-
 
     def open(self, migrations: tuple[Migration, ...] = MIGRATIONS) -> None:
         """Open the database: run migrations, enable WAL, verify it stuck."""
@@ -71,9 +60,7 @@ class HubStorage:
             # high-frequency writer into a one-row INSERT, not a 270 KB blob.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute(
-                f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}"
-            )
+            conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
         except Exception:
             conn.close()
             raise
@@ -105,9 +92,7 @@ class HubStorage:
         with self._lock:
             return get_user_version(self._connection)
 
-
-
-    def table(self, namespace: str) -> "KeyValueTable":
+    def table(self, namespace: str) -> KeyValueTable:
         """Return the dict-like view for ``namespace`` (created lazily)."""
         if not _VALID_NAMESPACE.match(namespace):
             raise ValueError(
@@ -118,15 +103,13 @@ class HubStorage:
             self._tables[namespace] = KeyValueTable(self, namespace)
         return self._tables[namespace]
 
-    def tank_readings(self) -> "TankReadingsTable":
+    def tank_readings(self) -> TankReadingsTable:
         """Append-only time-series store for tank readings (one row/reading)."""
         return TankReadingsTable(self)
 
-    def energy_events(self) -> "EnergyEventsTable":
+    def energy_events(self) -> EnergyEventsTable:
         """Append-only audit store for Energy Saving events."""
         return EnergyEventsTable(self)
-
-
 
     @property
     def _connection(self) -> sqlite3.Connection:
@@ -437,17 +420,11 @@ class EnergyEventsTable:
             or not isinstance(limit, int)
             or not 1 <= limit <= self._MAX_QUERY_LIMIT
         ):
-            raise ValueError(
-                f"limit must be between 1 and {self._MAX_QUERY_LIMIT}"
-            )
+            raise ValueError(f"limit must be between 1 and {self._MAX_QUERY_LIMIT}")
         clauses: list[str] = []
         params: list[Any] = []
         if since_t is not None:
-            if (
-                isinstance(since_t, bool)
-                or not isinstance(since_t, int)
-                or since_t < 0
-            ):
+            if isinstance(since_t, bool) or not isinstance(since_t, int) or since_t < 0:
                 raise ValueError("since_t must be a non-negative integer")
             clauses.append("t >= ?")
             params.append(since_t)
@@ -455,8 +432,7 @@ class EnergyEventsTable:
             if not isinstance(kinds, (list, tuple)) or not kinds:
                 raise ValueError("kinds must be a non-empty list or tuple")
             clean_kinds = [
-                self._required_text(kind, "kind", max_length=64)
-                for kind in kinds
+                self._required_text(kind, "kind", max_length=64) for kind in kinds
             ]
             clauses.append(f"kind IN ({','.join('?' for _ in clean_kinds)})")
             params.extend(clean_kinds)
@@ -476,11 +452,7 @@ class EnergyEventsTable:
         params: tuple[Any, ...] = ()
         where = ""
         if since_t is not None:
-            if (
-                isinstance(since_t, bool)
-                or not isinstance(since_t, int)
-                or since_t < 0
-            ):
+            if isinstance(since_t, bool) or not isinstance(since_t, int) or since_t < 0:
                 raise ValueError("since_t must be a non-negative integer")
             where = "WHERE t >= ?"
             params = (since_t,)
@@ -504,11 +476,7 @@ class EnergyEventsTable:
 
     def prune(self, *, before_t: int) -> int:
         """Delete events older than ``before_t``; return the number removed."""
-        if (
-            isinstance(before_t, bool)
-            or not isinstance(before_t, int)
-            or before_t < 0
-        ):
+        if isinstance(before_t, bool) or not isinstance(before_t, int) or before_t < 0:
             raise ValueError("before_t must be a non-negative integer")
         cursor = self._storage._execute_write(
             "DELETE FROM energy_events WHERE t < ?", (before_t,)
@@ -541,9 +509,7 @@ class EnergyEventsTable:
         return clean
 
     @classmethod
-    def _optional_text(
-        cls, value: Any, field: str, *, max_length: int
-    ) -> str | None:
+    def _optional_text(cls, value: Any, field: str, *, max_length: int) -> str | None:
         if value is None:
             return None
         return cls._required_text(value, field, max_length=max_length)

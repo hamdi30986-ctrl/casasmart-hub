@@ -1,8 +1,8 @@
 """Generated scenes: pure policy plus real handlers, SQLite and executor."""
 
+import unittest
 from datetime import timedelta
 from types import SimpleNamespace as NS
-import unittest
 
 import test_suggestion_api as api_fixture
 from phase4_fixture.generated_suggestions import room_actions

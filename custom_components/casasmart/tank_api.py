@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -39,9 +37,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-
 _SHELLY_RPC_TIMEOUT = aiohttp.ClientTimeout(total=8)
-
 
 
 _FIRST_READING_WAIT = 12.0
@@ -107,9 +103,7 @@ async def _shelly_rpc(
     return result if isinstance(result, dict) else {}
 
 
-async def _fetch_device_info(
-    session: aiohttp.ClientSession, ip: str
-) -> dict[str, Any]:
+async def _fetch_device_info(session: aiohttp.ClientSession, ip: str) -> dict[str, Any]:
     """``GET /shelly`` — generation + stable device id, pre-credentials."""
     try:
         async with session.get(
@@ -138,9 +132,7 @@ async def _find_script_id(
     return None
 
 
-async def _remove_script(
-    session: aiohttp.ClientSession, ip: str, name: str
-) -> bool:
+async def _remove_script(session: aiohttp.ClientSession, ip: str, name: str) -> bool:
     """Stop + delete the named script; False when it wasn't there."""
     script_id = await _find_script_id(session, ip, name)
     if script_id is None:
@@ -153,9 +145,7 @@ async def _remove_script(
     return True
 
 
-async def _push_script(
-    session: aiohttp.ClientSession, ip: str, code: str
-) -> int:
+async def _push_script(session: aiohttp.ClientSession, ip: str, code: str) -> int:
     """Create/replace + upload + autostart + start the monitoring script."""
     await _remove_script(session, ip, TANK_SCRIPT_NAME)
     created = await _shelly_rpc(
@@ -223,10 +213,8 @@ class _TankView(HomeAssistantView):
         try:
             from homeassistant.components import network
 
-            ip = await network.async_get_source_ip(
-                self._hass, network.MDNS_TARGET_IP
-            )
-        except Exception as err:  # noqa: BLE001 — degrade, never crash provision
+            ip = await network.async_get_source_ip(self._hass, network.MDNS_TARGET_IP)
+        except Exception as err:
             _LOGGER.warning("Tank ingest URL: source IP lookup failed: %s", err)
             return None
         if not ip:
@@ -236,14 +224,11 @@ class _TankView(HomeAssistantView):
 
 
 class CasaSmartTankProvisionView(_TankView):
-
     url = f"/api/{DOMAIN}/tank/provision"
     name = f"api:{DOMAIN}:tank:provision"
 
     async def post(self, request: web.Request) -> web.Response:
-        claims, error = authenticate_request(
-            self._hass, request, "registry.manage"
-        )
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
         if error is not None:
             return error
         tanks, not_ready = self._tanks_or_503()
@@ -256,9 +241,7 @@ class CasaSmartTankProvisionView(_TankView):
             )
         ip = payload.get("ip")
         if not isinstance(ip, str) or not _is_lan_target(ip.strip()):
-            return self.json_message(
-                "ip must be a LAN address", HTTPStatus.BAD_REQUEST
-            )
+            return self.json_message("ip must be a LAN address", HTTPStatus.BAD_REQUEST)
         ip = ip.strip()
 
         ingest_url = self._ingest_url() or await self._default_ingest_url()
@@ -289,8 +272,6 @@ class CasaSmartTankProvisionView(_TankView):
                 HTTPStatus.BAD_REQUEST,
             )
         if info.get("auth_en") is True:
-
-
             return self.json_message(
                 "Shelly has device authentication enabled — disable it "
                 "and provision again",
@@ -316,14 +297,10 @@ class CasaSmartTankProvisionView(_TankView):
             script = build_tank_script(ingest_url, token)
             script_id = await _push_script(session, ip, script)
         except (ShellyRpcError, TankError) as err:
-
-
             _LOGGER.warning("Tank provision failed for %s: %s", ip, err)
             return self.json_message(
                 f"Provisioning failed: {err}", HTTPStatus.BAD_GATEWAY
             )
-
-
 
         verified = False
         first_reading = None
@@ -332,9 +309,7 @@ class CasaSmartTankProvisionView(_TankView):
             reading = await self._hass.async_add_executor_job(
                 tanks.last_reading, record["device_id"]
             )
-            if reading is not None and reading.get("t", 0) >= int(
-                provisioned_at - 1
-            ):
+            if reading is not None and reading.get("t", 0) >= int(provisioned_at - 1):
                 verified = True
                 first_reading = reading
                 break
@@ -414,9 +389,7 @@ class CasaSmartTankReadingView(_TankView):
             _INGEST_THROTTLE.record_failure(source)
             # One generic bucket — no hint whether the token is unknown,
             # rotated or malformed.
-            return self.json_message(
-                "Invalid device token", HTTPStatus.UNAUTHORIZED
-            )
+            return self.json_message("Invalid device token", HTTPStatus.UNAUTHORIZED)
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
@@ -481,14 +454,10 @@ class CasaSmartTankDeviceView(_TankView):
                     async_get_clientsession(self._hass), ip, TANK_SCRIPT_NAME
                 )
             except ShellyRpcError as err:
-                _LOGGER.info(
-                    "Tank %s: script cleanup skipped (%s)", device_id, err
-                )
+                _LOGGER.info("Tank %s: script cleanup skipped (%s)", device_id, err)
 
         try:
-            await self._hass.async_add_executor_job(
-                tanks.delete_device, device_id
-            )
+            await self._hass.async_add_executor_job(tanks.delete_device, device_id)
         except UnknownTankError:
             return self.json_message("Unknown tank device", HTTPStatus.NOT_FOUND)
         return self.json({"deleted": device_id})
@@ -529,8 +498,6 @@ class CasaSmartTankReadingsView(_TankView):
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json({"device_id": device_id, "readings": readings})
-
-
 
 
 _CALIBRATION_FIELDS = (
@@ -605,9 +572,7 @@ class CasaSmartTankStatusView(_TankView):
         if not_ready is not None:
             return not_ready
         try:
-            status = await self._hass.async_add_executor_job(
-                tanks.status, device_id
-            )
+            status = await self._hass.async_add_executor_job(tanks.status, device_id)
         except UnknownTankError:
             return self.json_message("Unknown tank device", HTTPStatus.NOT_FOUND)
         return self.json(status)

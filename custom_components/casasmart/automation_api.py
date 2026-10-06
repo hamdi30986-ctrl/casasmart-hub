@@ -40,9 +40,8 @@ from typing import Any
 
 import voluptuous as vol
 from aiohttp import web
-
 from homeassistant.components.automation import DOMAIN as AUTOMATION_DOMAIN
-from homeassistant.components.automation.config import (  # noqa: PLC2701 — the same validator HA's own config API uses
+from homeassistant.components.automation.config import (
     async_validate_config_item,
 )
 from homeassistant.components.http import HomeAssistantView
@@ -125,9 +124,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         self, request: web.Request
     ) -> tuple[dict[str, Any] | None, web.Response | None]:
         """Auth + scope + ownership, shared by all three verbs."""
-        claims, error = authenticate_request(
-            self._hass, request, "automations.manage"
-        )
+        claims, error = authenticate_request(self._hass, request, "automations.manage")
         if error is not None:
             return None, error
         if claims.get("rooms") is not None:
@@ -206,9 +203,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             enabled = await self._hass.async_add_executor_job(
                 flags.works_during_energy_saving, config_key
             )
-        return self.json(
-            {**value, "works_during_energy_saving": enabled}
-        )
+        return self.json({**value, "works_during_energy_saving": enabled})
 
     async def post(self, request: web.Request, config_key: str) -> web.Response:
         """Create or update — validate with HA's validator, write, reload."""
@@ -230,9 +225,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 "works_during_energy_saving must be a boolean",
                 HTTPStatus.BAD_REQUEST,
             )
-        if (
-            energy_flag is not _UNSET
-            and not AuthEngine.authorize(claims, "energy.manage")
+        if energy_flag is not _UNSET and not AuthEngine.authorize(
+            claims, "energy.manage"
         ):
             return self.json_message(
                 "Energy Saving flags require admin access",
@@ -323,9 +317,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
 
         flags = self._energy_flags()
         if flags is not None:
-            await self._hass.async_add_executor_job(
-                flags.delete_automation, config_key
-            )
+            await self._hass.async_add_executor_job(flags.delete_automation, config_key)
 
         return self.json({"result": "ok", "id": config_key})
 

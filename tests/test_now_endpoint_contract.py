@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 
@@ -15,15 +14,21 @@ class NowEndpointContractTest(unittest.TestCase):
         api = (ROOT / "custom_components" / "casasmart" / "api.py").read_text()
 
         for path in (
-            '/api/{DOMAIN}/now',
-            '/api/{DOMAIN}/now/config',
-            '/api/{DOMAIN}/now/rooms/{{room_id}}/activity-policy',
-            '/api/{DOMAIN}/now/rooms/{{room_id}}/activity',
+            "/api/{DOMAIN}/now",
+            "/api/{DOMAIN}/now/config",
+            "/api/{DOMAIN}/now/rooms/{{room_id}}/activity-policy",
+            "/api/{DOMAIN}/now/rooms/{{room_id}}/activity",
         ):
             self.assertIn(path, source)
-        self.assertIn('authenticate_request(self._hass, request, "devices.read")', source)
-        self.assertIn('authenticate_request(self._hass, request, "devices.control")', source)
-        self.assertIn('authenticate_request(self._hass, request, "registry.manage")', source)
+        self.assertIn(
+            'authenticate_request(self._hass, request, "devices.read")', source
+        )
+        self.assertIn(
+            'authenticate_request(self._hass, request, "devices.control")', source
+        )
+        self.assertIn(
+            'authenticate_request(self._hass, request, "registry.manage")', source
+        )
         for view in (
             "CasaSmartNowView(hass)",
             "CasaSmartNowConfigView(hass)",
@@ -41,7 +46,9 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn("consume_restore_set", source)
         self.assertIn("energy_lockout_applies", source)
 
-    def test_bulk_membership_and_idempotency_are_server_owned_and_action_scoped(self) -> None:
+    def test_bulk_membership_and_idempotency_are_server_owned_and_action_scoped(
+        self,
+    ) -> None:
         source = (ROOT / "custom_components" / "casasmart" / "now_api.py").read_text()
         data = (ROOT / "custom_components" / "casasmart" / "now_data.py").read_text()
         self.assertIn("eligible_entity_ids must be an explicit list", source)

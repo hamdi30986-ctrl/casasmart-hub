@@ -36,7 +36,9 @@ MAX_TICKETS = 64
 # master_playlist.m3u8 / playlist.m3u8 / init.mp4 /
 # segment/<seq>.m4s / segment/<seq>.<part>.m4s — one optional directory
 # level, simple dotted names. No "..", no absolute paths, no schemes.
-_HLS_FILENAME = re.compile(r"^[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+(?:\.[0-9]+)?)?\.[A-Za-z0-9]+$")
+_HLS_FILENAME = re.compile(
+    r"^[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+(?:\.[0-9]+)?)?\.[A-Za-z0-9]+$"
+)
 
 
 class TicketError(Exception):
