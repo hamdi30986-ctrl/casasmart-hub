@@ -74,7 +74,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             mid = engine.member_id_for(sub) if engine else sub
             return mid, settings.get(mid)
 
-        member_id, doc = await self._hass.async_add_executor_job(_load)
+        _member_id, doc = await self._hass.async_add_executor_job(_load)
         # Widget-tile parity with favorites: filter an absent/unserved ENTITY
         # tile from this response, but do not mutate storage from GET. During
         # HA startup entity states are populated incrementally; persisting the

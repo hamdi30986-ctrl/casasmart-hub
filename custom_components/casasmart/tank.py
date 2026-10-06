@@ -204,22 +204,22 @@ class TankEngine:
             raise TankError("ip is required")
         now = int(time.time())
         with self._lock:
-            existing = self._devices.get(device_id)
-            if existing is not None:
+            # A second provision of the same tank is refused (HTTP 409, e92d82d):
+            # after a hub IP change the supported path is delete + re-add.
+            if self._devices.get(device_id) is not None:
                 raise DuplicateTankError("Tank is already registered")
             token = secrets.token_hex(16)
-            existing = {}
             record = {
                 "name": _clean_name(name),
                 "ip": ip.strip(),
                 "model": model if isinstance(model, str) and model else None,
                 "token_sha256": _hash_token(token),
-                "created_at": existing.get("created_at", now),
+                "created_at": now,
                 "provisioned_at": now,
-                "calibration_voltage": existing.get("calibration_voltage", 0.0),
-                "calibration_depth": existing.get("calibration_depth", 0.0),
-                "max_height": existing.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
-                "low_percent": existing.get("low_percent", TANK_LOW_PERCENT_DEFAULT),
+                "calibration_voltage": 0.0,
+                "calibration_depth": 0.0,
+                "max_height": TANK_MAX_HEIGHT_DEFAULT,
+                "low_percent": TANK_LOW_PERCENT_DEFAULT,
             }
             self._devices[device_id] = record
         _LOGGER.info("Tank %s provisioned (%s @ %s)", device_id, record["name"], ip)

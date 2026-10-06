@@ -370,10 +370,6 @@ class EnergyEngine:
         with self._lock:
             return copy.deepcopy(self._configs[level])
 
-    def all_configs(self) -> dict[str, dict[str, Any]]:
-        with self._lock:
-            return copy.deepcopy(self._configs)
-
     def replace_config(
         self,
         level: str,

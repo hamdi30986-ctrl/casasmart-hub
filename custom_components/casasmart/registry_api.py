@@ -1221,7 +1221,7 @@ class CasaSmartFavoritesView(_RegistryView):
             return mid, registry.get_favorites(mid)
 
         try:
-            member_id, stored = await self._hass.async_add_executor_job(_load)
+            _member_id, stored = await self._hass.async_add_executor_job(_load)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         # Do not paint a currently absent/unserved entity, but never persist
