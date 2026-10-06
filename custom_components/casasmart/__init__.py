@@ -83,7 +83,11 @@ from .hq_notifications import (
     HqNotificationError,
     normalize_public_key,
 )
-from .lan_ingress import LAN_RELAY_INGRESS_CONFIG_KEY, resolve_lan_relay_ingress
+from .lan_ingress import (
+    LAN_RELAY_INGRESS_CONFIG_KEY,
+    is_recognized_lan_relay_ingress,
+    resolve_lan_relay_ingress,
+)
 from .now_data import NowDataEngine
 from .pairing import PairingManager
 from .pairing import hash_code as pairing_hash_code
@@ -654,8 +658,16 @@ async def _async_start_tls(
     if not isinstance(port, int):
         port = TLS_PORT_DEFAULT
 
+    ingress_setting = runtime_data.hub_config.get(LAN_RELAY_INGRESS_CONFIG_KEY)
+    if not is_recognized_lan_relay_ingress(ingress_setting):
+        _LOGGER.warning(
+            'Ignoring unrecognized %s %r in hub config (expected "auto", "on" or '
+            '"off"); using "auto"',
+            LAN_RELAY_INGRESS_CONFIG_KEY,
+            ingress_setting,
+        )
     trusted_lan, reason = resolve_lan_relay_ingress(
-        runtime_data.hub_config.get(LAN_RELAY_INGRESS_CONFIG_KEY),
+        ingress_setting,
         await hass.async_add_executor_job(_read_proc_version),
     )
     if trusted_lan:

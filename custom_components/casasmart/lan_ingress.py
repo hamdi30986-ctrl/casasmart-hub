@@ -34,6 +34,20 @@ LAN_RELAY_INGRESS_CONFIG_KEY = "lan_relay_ingress"
 LAN_RELAY_INGRESS_AUTO = "auto"
 LAN_RELAY_INGRESS_ON = "on"
 LAN_RELAY_INGRESS_OFF = "off"
+_LAN_RELAY_INGRESS_VALUES = (
+    LAN_RELAY_INGRESS_AUTO,
+    LAN_RELAY_INGRESS_ON,
+    LAN_RELAY_INGRESS_OFF,
+)
+
+
+def is_recognized_lan_relay_ingress(setting: object) -> bool:
+    """True for a value :func:`resolve_lan_relay_ingress` understands (unset counts)."""
+    return (
+        setting is None
+        or isinstance(setting, bool)
+        or setting in _LAN_RELAY_INGRESS_VALUES
+    )
 
 
 def is_docker_desktop_kernel(proc_version: str | None) -> bool:
