@@ -82,15 +82,17 @@ integration's **Configure** dialog and paste a fresh code.
 - favorites, scenes, per-person settings, Now and suggestion data;
 - push tokens, HQ notification data, the alarm log and armed state;
 - audio and Energy Saving data;
-- the room layout, which re-seeds from Home Assistant.
+- room tags, and the floors, rooms and device grouping, which re-seed from
+  Home Assistant.
 
 **It keeps** tanks, alarm zones and settings, the hub's identity, relay
 registration, tunnel settings, and everything in Home Assistant itself.
 
 ## Networking
 
-The hub serves the apps on its own TLS port (8443). That's separate from Home
-Assistant's port 8123, which only the tunnel uses.
+The hub serves the apps on its own TLS port (8443). Home Assistant's own port
+(8123) carries the Cloudflare tunnel and, on the LAN, readings from tank
+sensors.
 
 | Home Assistant install | What to do |
 |---|---|
@@ -139,9 +141,8 @@ none of them.
 | `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. |
 | `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
-| `pairing_extra_lan_cidrs` | list of private CIDRs | Extra address ranges that count as local, e.g. `["10.8.0.0/24"]` for a VPN. Public ranges are refused. |
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
-| `tank_ingest_url` | `http(s)://…` | Address tank sensors report to (default: the hub's LAN address on HA's port) |
+| `tank_ingest_url` | full URL | Where tank sensors post readings, e.g. `http://192.168.1.20:8123/api/casasmart/tank/reading`. The default uses the hub's own LAN address and HA's port; set this when that address isn't reachable from the LAN (Docker Desktop, bridge networking). |
 | `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
 
 **`lan_relay_ingress` values:**
@@ -149,7 +150,9 @@ none of them.
 - `"on"` trusts every connection on the TLS port as local. It's meant for the
   [Docker Desktop setup](deploy/macos/README.md), where the port is published
   to `127.0.0.1` only and reached through the LAN-only relay. Never use it if
-  the port is reachable any other way.
+  the port is reachable any other way. That includes anything on the same
+  machine that forwards outside traffic to it: Tailscale Serve or Funnel, ngrok,
+  `ssh -R`, or a reverse-proxy container.
 
 The hub logs a WARNING at startup whenever the TLS port is trusted. On Docker
 Desktop with the setting unset, it logs a WARNING saying what to set instead.
