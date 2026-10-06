@@ -17,8 +17,12 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import types
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 _CC = Path(__file__).resolve().parent.parent / "custom_components"
 _PKG = _CC / "casasmart"
@@ -49,7 +53,7 @@ from const import (  # noqa: E402
 from storage import HubStorage  # noqa: E402
 from tank import TankEngine  # noqa: E402
 
-# A fixed epoch so day bucketing is deterministic; +1 day crosses an AST day.
+# A fixed epoch so day bucketing is deterministic; +1 day crosses a calendar day.
 _T0 = 1_700_000_000
 _DAY = 86400
 
@@ -180,7 +184,7 @@ class LowWaterTests(TankPushTestCase):
         await self.monitor.async_check_low_water()  # same day -> no second push
         self.assertEqual(len(self.notifier.sent), 1)
 
-        # Next AST day, with a fresh low reading -> pushes again.
+        # Next day, with a fresh low reading -> pushes again.
         self.clock.t = _T0 + _DAY
         self._put_reading("dev-1", _T0 + _DAY, 0.4)
         await self.monitor.async_check_low_water()
@@ -262,6 +266,68 @@ class ChannelIndependenceTests(TankPushTestCase):
         self.assertEqual(
             types_sent, sorted([PUSH_TYPE_TANK_LOW, PUSH_TYPE_TANK_OFFLINE])
         )
+
+
+class HaTimeZoneTests(TankPushTestCase):
+    """The sweep runs at 18:00 and dedups by calendar day in HA's time zone.
+
+    New York is used because its days and UTC+3 days disagree, which is what
+    the hard-coded Arabia Standard Time got wrong for every hub outside UTC+3.
+    """
+
+    NY = ZoneInfo("America/New_York")
+
+    def _use_time_zone(self, name: str) -> None:
+        self.hass.config = types.SimpleNamespace(time_zone=name)
+
+    async def _low_reading_at(self, t: float) -> None:
+        self.clock.t = t
+        self._put_reading("dev-1", t, 0.4)
+        await self.monitor.async_check_low_water()
+
+    async def test_a_new_local_day_pushes_again(self) -> None:
+        self._use_time_zone("America/New_York")
+        self._calibrated("dev-1", low_percent=20)
+        # 23:30 then 00:30 in New York: two days there, one day in UTC+3.
+        late = datetime(2023, 11, 14, 23, 30, tzinfo=self.NY).timestamp()
+        await self._low_reading_at(late)
+        await self._low_reading_at(late + 3600)
+        self.assertEqual(len(self.notifier.sent), 2)
+
+    async def test_the_same_local_day_dedups(self) -> None:
+        self._use_time_zone("America/New_York")
+        self._calibrated("dev-1", low_percent=20)
+        # 15:30 then 16:30 in New York: one day there, two days in UTC+3.
+        afternoon = datetime(2023, 11, 14, 15, 30, tzinfo=self.NY).timestamp()
+        await self._low_reading_at(afternoon)
+        await self._low_reading_at(afternoon + 3600)
+        self.assertEqual(len(self.notifier.sent), 1)
+
+    async def test_unknown_time_zone_falls_back_to_utc(self) -> None:
+        self._use_time_zone("Not/AZone")
+        self._calibrated("dev-1", low_percent=20)
+        await self._low_reading_at(_T0)
+        self.assertEqual(len(self.notifier.sent), 1)
+
+    def test_daily_sweep_is_scheduled_at_18_local_time(self) -> None:
+        local_calls: list[dict] = []
+
+        def track_local(hass, action, **kwargs):
+            local_calls.append(kwargs)
+            return lambda: None
+
+        with (
+            mock.patch(
+                "homeassistant.helpers.event.async_track_time_change", track_local
+            ),
+            mock.patch(
+                "homeassistant.helpers.event.async_track_time_interval",
+                lambda hass, action, interval: lambda: None,
+            ),
+        ):
+            self.monitor.async_start()
+        self.addCleanup(self.monitor.async_stop)
+        self.assertEqual(local_calls, [{"hour": 18, "minute": 0, "second": 0}])
 
 
 class NoDeviceTests(TankPushTestCase):
