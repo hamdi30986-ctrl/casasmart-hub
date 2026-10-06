@@ -491,10 +491,6 @@ class EnergyAdapter:
             ),
         )
 
-    def manages(self, entity_id: str) -> bool:
-        """Whether the active adapter context owns this device."""
-        return entity_id in self._managed_entities
-
     def _notify_changed(self) -> None:
         if self._change_callback is not None:
             self._change_callback()
