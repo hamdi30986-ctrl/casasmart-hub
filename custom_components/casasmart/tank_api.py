@@ -334,12 +334,14 @@ class CasaSmartTankProvisionView(_TankView):
 
 
 def _client_ip(request: web.Request) -> str:
-    """Best-effort real client IP (for throttle keying + logging). Prefers the
-    Cloudflare-set header when a reading arrives via the tunnel, else the peer."""
-    for header in ("CF-Connecting-IP", "X-Forwarded-For"):
-        value = request.headers.get(header)
-        if value:
-            return value.split(",")[0].strip()
+    """Client address for throttle keying + logging.
+
+    Home Assistant has already resolved ``request.remote`` from
+    ``X-Forwarded-For`` for its trusted proxies, so behind the tunnel it is the
+    real client. Raw ``CF-Connecting-IP`` / ``X-Forwarded-For`` headers are not
+    read here: any peer can send them, which used to let a client pick a fresh
+    throttle bucket on every request.
+    """
     return request.remote or "unknown"
 
 
@@ -350,8 +352,8 @@ class CasaSmartTankReadingView(_TankView):
     "voltage": ...}``). Accepted from ANY source — the Shelly may reach the hub
     directly on the LAN or via the Cloudflare tunnel, and a tank reading is
     low-stakes (a water-level number). Bad tokens are throttled per real client
-    (X-Forwarded-For / CF-Connecting-IP behind the tunnel) with the shared
-    escalating walls. Pairing/recovery stay LAN-locked (see ``is_lan_request``)
+    (HA's resolved ``request.remote`` — the trusted-proxy X-Forwarded-For behind
+    the tunnel) with the shared escalating walls. Pairing/recovery stay LAN-locked (see ``is_lan_request``)
     — this relaxation is scoped to tank ingest only.
     """
 
