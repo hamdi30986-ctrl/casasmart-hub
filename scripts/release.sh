@@ -40,10 +40,11 @@ run_python() {
 
 gates() {
   step "gates for $tag"
-  [ "$(git branch --show-current)" = "main" ] || die "not on main"
   [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
+  # Any branch or worktree may release, as long as HEAD is exactly what is on
+  # GitHub's main.
   git fetch --quiet origin main --tags
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "HEAD is not origin/main (push or pull first)"
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "HEAD is not origin/main (push it first: git push origin HEAD:main)"
   local mv
   mv="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$manifest")"
   [ "$mv" = "$version" ] || die "manifest.json version is $mv, expected $version"
