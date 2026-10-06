@@ -27,6 +27,6 @@ The app previews exact devices and actions, then requires a separate Run scene c
 
 Dismissal and snooze are member-scoped and survive plan changes within the same room/kind/window. Execution claims are global for that slot: concurrent clients, changed action hashes, partial failures, lost responses and restarts cannot blindly execute it again. Successful, partial and unknown attempts suppress the slot for the rest of its window. Snooze lasts at most 30 minutes. Registry/state changes trigger privacy-preserving invalidations; reads and timers never execute scenes.
 
-## Rollout
+## Compatibility
 
-This contract requires both the new hub capability and the matching app. Missing capability uses the existing manual-rule behavior. Source commits do not publish a HACS release or update a running Home Assistant instance. Physical AC behavior and energy reduction require supervised household acceptance; fixture tests do not establish measured savings.
+This contract requires both the hub capability and an app that supports it. Without the capability, the app keeps the manual-rule behavior.

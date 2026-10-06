@@ -1,6 +1,6 @@
 # Contextual suggestions API contract
 
-Phase 4 implements hub recommendations for existing CasaSmart scenes. Rules never execute automatically. An unrestricted administrator must explicitly enable them, and execution requires a separate authenticated Run request. Phase 5 supplies the app editor and NOW card; this document is its integration contract.
+The hub recommends existing CasaSmart scenes based on time and device state. Rules never execute automatically. An unrestricted administrator must explicitly enable them, and execution requires a separate authenticated Run request. This document is the contract between the hub and the app's rule editor and NOW card.
 
 ## Capability and endpoints
 
@@ -85,7 +85,7 @@ An execution receipt contains `occurrence_id`, `status`, `ok`, `expires_at`, `st
 
 A claim rejected before the scene executor is called can be released safely. Storage failure before acquiring a claim cannot execute a scene. Once dispatch may have begun, uncertainty is retained rather than treated as permission to retry. Request replay is only available while the unchanged occurrence is current and its references remain visible; otherwise HTTP 409 is returned. Ordinary manual scene activation remains a separate, explicit existing workflow.
 
-Error objects use `error` codes. Validation returns 400, denied permissions/lockouts 403, stale/ineligible occurrences and revision conflicts 409, bounded-state capacity 429, and unavailable action/management storage or service 503. Recommendation reads can instead return HTTP 200 with `status: unavailable` and no suggestion. A full active receipt/suppression store refuses new work rather than evicting safety records.
+Error objects use `error` codes. Validation returns 400, denied permissions/lockouts 403, stale/ineligible occurrences, revision conflicts and a scene skipped because Energy Saving is active (`scene_skipped_energy_saving`) 409, bounded-state capacity 429, and unavailable action/management storage or service 503. Recommendation reads can instead return HTTP 200 with `status: unavailable` and no suggestion. A full active receipt/suppression store refuses new work rather than evicting safety records.
 
 ## Refresh and backward compatibility
 
@@ -93,10 +93,8 @@ Authenticated, subscribed WebSocket clients receive only `{type: "suggestions_ch
 
 The existing NOW snapshot adds `contextual_suggestion` with the same response envelope. Its old `suggested_routine` remains a nullable scene object, used only for the explicitly configured static fallback when no contextual rules exist. `suggested_routine_source` labels that fallback `featured_manual`. Contextual cards use the new action endpoint, not the old scene activation endpoint. Existing static choices are not converted to time rules, and nothing is automatically enabled on upgrade.
 
-## Storage and release limits
+## Storage and limits
 
 State lives in the additive `suggestions_v1` namespace of the existing SQLite KV store. No schema-version migration or legacy NOW rewrite is required. The document holds version, collection revision, rules, per-member suppressions and execution receipts. Existing transaction/savepoint support makes revision changes and claims durable. Old hub code ignores this namespace; upgrading again retains it. Factory reset clears it.
 
 Limits are 64 rules, 16 conditions per rule, 4,096 suppression records and 2,048 execution receipts. Mutations prune records more than one day past occurrence expiry; active safety records are never evicted to make space. Startup converts interrupted execution claims to `unknown` without executing anything.
-
-Verification uses deterministic clocks, real SQLite transactions and fake HA service boundaries. It does not establish live HA installation, tablet rendering or physical-device acceptance. No release, deployment, restart or automatic migration activation is authorized by this contract.
