@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any
 
+# ThrottledError is re-exported: callers (and the tests) catch the engine's
+# throttle refusal as ``auth_engine.ThrottledError``.
 try:
     from . import auth_keys, auth_tokens
     from .auth_tokens import (
@@ -26,10 +28,7 @@ except ImportError:
         VALID_ROLES,
         TokenError,
     )
-    from throttle import (
-        FailureThrottle,
-        ThrottledError,
-    )
+    from throttle import FailureThrottle, ThrottledError  # noqa: F401 — re-exported
 
 _LOGGER = logging.getLogger(__name__)
 
