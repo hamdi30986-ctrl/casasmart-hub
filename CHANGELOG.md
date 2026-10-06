@@ -3,10 +3,11 @@
 Release tags are `vX.Y.Z` and always equal `manifest.json`'s `version`; HACS
 installs by tag. Earlier tags (v1.8, v2.0, v2.1) omitted the patch digit.
 
-## [2.2.0] - Unreleased
+## [2.3.0] - Unreleased
 
 A hardening release. The REST API, WebSocket frames, handshake capabilities and
-storage schema (version 4) are unchanged, so existing apps keep working.
+storage schema (version 4) are unchanged, so existing apps keep working. A 2.2.0
+was prepared but never published; everything it contained is in 2.3.0.
 
 ### Fixed
 - Pairing a new phone, owner recovery and keyless speaker provisioning work on
@@ -15,11 +16,15 @@ storage schema (version 4) are unchanged, so existing apps keep working.
   these LAN-only requests were refused. The hub now detects Docker Desktop and
   trusts its loopback-published TLS listener (behind the LAN-only relay in
   `deploy/macos`) as the LAN proof. The new `lan_relay_ingress` hub-config key
-  (`auto` / `on` / `off`) can override the detection. Other hubs are unchanged,
-  and Cloudflare-proxied requests are never LAN.
-- `hacs.json` now requires Home Assistant 2025.3. The code depends on
-  `config_entries.async_loaded_entries`, which arrived in 2025.3; on 2025.1–2025.2
-  the integration failed at setup.
+  (`auto` / `on` / `off`) can override the detection; any other value logs a
+  warning and counts as `auto`. Other hubs are unchanged, and Cloudflare-proxied
+  requests are never LAN.
+- Several phones pairing (or using the app) at the same moment no longer fail
+  at random. Storage reads were finished outside the database lock, so a
+  concurrent write could make a just-paired phone look unknown (login 404) or
+  return a torn row (500). About 1 in 8 phones failed when 8–12 paired at once.
+- `hacs.json` now declares the minimum Home Assistant version, 2025.3. Earlier
+  releases declared none.
 - Alarm and lock alerts are delivered to every registered device when device
   roles can't be resolved. Since 1.8 they were dropped in that case. Tank,
   device-paired and HQ reminder pushes still fail closed.
@@ -50,7 +55,7 @@ storage schema (version 4) are unchanged, so existing apps keep working.
 ### Internal
 - Restored the comments and docstrings removed by the 1.7.0 sanitize, wherever
   the code is provably unchanged (AST-checked).
-- Restored the original test suite: 1,170 tests, plus about 150 that need a real
+- Restored the original test suite: 1,172 tests, plus about 150 that need a real
   Home Assistant.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest,
   hassfest, HACS validation, tag/manifest check) and `scripts/release.sh`.
