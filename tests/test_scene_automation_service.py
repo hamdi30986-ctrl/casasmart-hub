@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
 try:
-    from casasmart import _async_register_services
+    _async_register_services = H.import_integration()._async_register_services
     from casasmart.const import DOMAIN
 
     _ERR = None

@@ -24,6 +24,7 @@ so it only runs where those exist — the hub container / CI. Run e.g.:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import secrets
 import sys
@@ -49,6 +50,41 @@ try:  # Home Assistant + cryptography only exist in the container / CI.
 except Exception as err:
     auth_tokens = AuthEngine = RegistryEngine = AudioEngine = HubStorage = None
     IMPORT_ERROR = err
+
+
+def import_integration() -> types.ModuleType:
+    """The real ``casasmart`` package module, with its ``__init__`` executed.
+
+    In a full run, other suites register a stub ``casasmart`` package
+    (``tests/hastubs``) so submodules import without Home Assistant's runtime.
+    ``from casasmart import <setup helper>`` then finds nothing. This loads the
+    real package module once, leaving the stub in ``sys.modules`` for the
+    suites that rely on it. Needs a real Home Assistant.
+    """
+    pkg = sys.modules.get("casasmart")
+    if pkg is not None and getattr(pkg, "__file__", None):
+        return pkg
+    global _INTEGRATION
+    if _INTEGRATION is None:
+        spec = importlib.util.spec_from_file_location(
+            "casasmart",
+            _CC / "casasmart" / "__init__.py",
+            submodule_search_locations=[str(_CC / "casasmart")],
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        stub = sys.modules.get("casasmart")
+        sys.modules["casasmart"] = module  # relative imports resolve against it
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if stub is not None:
+                sys.modules["casasmart"] = stub
+        _INTEGRATION = module
+    return _INTEGRATION
+
+
+_INTEGRATION: types.ModuleType | None = None
 
 
 # --------------------------------------------------------------------------- #
