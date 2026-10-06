@@ -83,6 +83,7 @@ from .hq_notifications import (
     HqNotificationError,
     normalize_public_key,
 )
+from .lan_ingress import LAN_RELAY_INGRESS_CONFIG_KEY, resolve_lan_relay_ingress
 from .now_data import NowDataEngine
 from .pairing import PairingManager
 from .pairing import hash_code as pairing_hash_code
@@ -620,6 +621,14 @@ async def _async_setup_dev_enroll(
     entry.async_on_unload(hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed))
 
 
+def _read_proc_version() -> str | None:
+    """The kernel banner (identifies Docker Desktop's VM), or None off Linux."""
+    try:
+        return Path("/proc/version").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 async def _async_start_tls(
     hass: HomeAssistant,
     entry: CasaSmartConfigEntry,
@@ -645,7 +654,25 @@ async def _async_start_tls(
     if not isinstance(port, int):
         port = TLS_PORT_DEFAULT
 
-    server = CasaSmartTlsServer(hass, port, material)
+    trusted_lan, reason = resolve_lan_relay_ingress(
+        runtime_data.hub_config.get(LAN_RELAY_INGRESS_CONFIG_KEY),
+        await hass.async_add_executor_job(_read_proc_version),
+    )
+    if trusted_lan:
+        # WARNING, not INFO: Home Assistant hides INFO by default, and this is a
+        # deliberate relaxation of the LAN gate that operators must be able to see.
+        _LOGGER.warning(
+            "LAN relay ingress on (%s): connections on the hub TLS port %s count "
+            "as LAN for pairing, recovery and speaker provisioning. Publish that "
+            "port to 127.0.0.1 only and reach it through the CasaSmart LAN relay "
+            "(deploy/macos), which admits only LAN clients.",
+            reason,
+            port,
+        )
+    else:
+        _LOGGER.debug("LAN relay ingress off (%s)", reason)
+
+    server = CasaSmartTlsServer(hass, port, material, trusted_lan_ingress=trusted_lan)
     runtime_data.tls = server
     await server.async_start(build_views(hass, hub_version))
 

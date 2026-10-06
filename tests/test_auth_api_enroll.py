@@ -506,3 +506,95 @@ class LanSourceTests(unittest.TestCase):
         # A routable address (PUBLIC_IP above is a documentation range, which
         # Python's ipaddress classifies as private).
         self.assertFalse(self._is_lan("8.8.8.8"))
+
+
+# Docker Desktop hands the hub synthetic, unstable source addresses — after a
+# container restart they can be arbitrary PUBLIC addresses. Through the trusted
+# TLS listener (published to 127.0.0.1 only, behind the LAN-only relay) pairing
+# must still work.
+SYNTHETIC_PUBLIC_IP = "8.8.4.4"
+
+
+class TrustedLanIngressTests(EnrollGateTests):
+    """v2.2.0: on a TLS listener trusted as LAN ingress, the listener is the
+    LAN proof; anywhere else the source address still decides."""
+
+    def _request(self, body, remote, *, listener=None, headers=None):
+        from casasmart.tls import TLS_LISTENER_TRUSTED_LAN
+
+        request = H.FakeRequest(headers=headers or {}, body=body, remote=remote)
+        if listener is not None:  # None = served by HA's own HTTP app
+            request.app = {TLS_LISTENER_TRUSTED_LAN: listener}
+        return request
+
+    async def _enroll_on(self, code, remote, **kw):
+        body = {"pairing_code": code, "public_key": make_public_pem(), "name": "Phone"}
+        return H.read_response(await self.view.post(self._request(body, remote, **kw)))
+
+    async def test_member_code_pairs_through_trusted_listener_from_synthetic_address(
+        self,
+    ) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll_on(
+            issued["code"], SYNTHETIC_PUBLIC_IP, listener=True
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "user")
+
+    async def test_owner_claim_through_trusted_listener(self) -> None:
+        code = self.pairing.ensure_bootstrap_code()
+        status, body = await self._enroll_on(code, SYNTHETIC_PUBLIC_IP, listener=True)
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")
+
+    async def test_untrusted_listener_keeps_the_address_rule(self) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll_on(
+            issued["code"], SYNTHETIC_PUBLIC_IP, listener=False
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(body["message"], LAN_ONLY_MSG)
+        # ...and a real LAN address still pairs on that listener.
+        status, _ = await self._enroll_on(issued["code"], LAN_IP, listener=False)
+        self.assertEqual(status, 201)
+
+    async def test_ha_port_is_never_trusted_by_listener(self) -> None:
+        # HA's own HTTP app carries no marker: the tunnel enters there.
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, _ = await self._enroll_on(issued["code"], SYNTHETIC_PUBLIC_IP)
+        self.assertEqual(status, 403)
+
+    async def test_cloudflare_beats_a_trusted_listener(self) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, body = await self._enroll_on(
+            issued["code"], "127.0.0.1", listener=True, headers=CLOUDFLARE_HEADERS
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(body["message"], LAN_ONLY_MSG)
+
+    async def test_recovery_passes_the_lan_gate_on_trusted_listener(self) -> None:
+        from casasmart.auth_api import CasaSmartRecoverView
+        from casasmart.recovery import RecoveryManager
+
+        self._claim_hub()
+        self.runtime.recovery = RecoveryManager(
+            self.storage.table("recovery_codes"), self.auth.has_admin
+        )
+        self.runtime.recovery.ensure_armed()
+        view = CasaSmartRecoverView(self.hass)
+        body = {"recovery_code": "WRONGWRONG", "public_key": make_public_pem()}
+        # Trusted listener: past the LAN gate, refused on the (wrong) code.
+        resp = await view.post(self._request(body, SYNTHETIC_PUBLIC_IP, listener=True))
+        status, _ = H.read_response(resp)
+        self.assertEqual(status, 401)
+        # Untrusted listener, same address: refused at the LAN gate.
+        resp = await view.post(self._request(body, SYNTHETIC_PUBLIC_IP, listener=False))
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 403)
+        self.assertEqual(
+            body["message"], "Recovery is only available on the hub's own network"
+        )
