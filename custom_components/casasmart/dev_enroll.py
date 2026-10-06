@@ -1,21 +1,26 @@
-"""Dev-only auto-enrollment seam — re-provisions trusted dev keys after a reset.
+"""Developer seam: keep trusted test devices enrolled across resets.
 
-The problem it kills for good: the dev tooling (``.dev/mint_token.py`` and the
-``b*_verify.py`` scripts) authenticates as a hub device whose id was, until now,
-hand-injected into ``hub.db``. Every factory reset wiped that row, so every reset
-meant another manual re-enrollment. This seam makes the dev identity survive any
-reset automatically — no SQLite surgery, ever again.
+Meant for development and test hubs, where automated tooling signs in as a hub
+device. A factory reset or "Regenerate pairing code" unpairs every device, so
+without this seam that tooling would have to be paired again after each reset.
 
-How: on the dev hub a ``dev_devices.json`` manifest lists each trusted dev key.
-The seam re-enrolls every entry as a **sub-admin** under a **fixed device id**
-(:meth:`AuthEngine.ensure_enrolled`), so a hardcoded id never goes stale. It is
-idempotent — already-correct entries are skipped — so it is safe to run on every
-boot and after every reset.
+Off unless BOTH are true:
 
-INERT on client hubs by construction: it does nothing unless a manifest file is
-present, and the manifest never ships in the integration (it lives in the hub's
-data dir / the gitignored ``.dev/`` kit, never in the package). A production hub
-simply has no manifest, so this module is a no-op there.
+* the ``CASASMART_DEV_ENROLL`` environment variable is set (``__init__.py``
+  checks it and logs a WARNING whenever it is on), and
+* a ``dev_devices.json`` manifest exists, either in the hub's data dir
+  (``/config/casasmart/dev_devices.json``) or in a ``.dev/`` folder next to
+  ``custom_components/`` (an untracked kit in a development checkout). The
+  manifest never ships in the integration.
+
+The manifest is a JSON array. Each entry has a ``public_key`` (PEM, or
+``public_key_pem``) and optionally a ``device_id`` (default: derived from the
+key, so it is still stable), a ``label`` or ``name``, a ``role`` (``sub-admin``
+by default or ``user``; ``admin`` is refused) and a ``rooms`` list for a
+room-scoped user. Every entry is enrolled under its fixed id
+(:meth:`AuthEngine.ensure_enrolled`); already-correct entries are skipped, so
+running on every boot and after every reset is safe. Bad entries are logged
+and skipped, never fatal.
 
 Wired in two places (see ``__init__.py``):
 
@@ -62,8 +67,8 @@ DEV_DEVICES_FILENAME = "dev_devices.json"
 
 # Default role for a provisioned dev device. Sub-admin sidesteps the
 # single-admin invariant (the real owner / bootstrap admin code is untouched)
-# and already carries automations.manage + cameras.view — exactly what the dev
-# verify scripts exercise.
+# and already carries automations.manage + cameras.view, which is what test
+# tooling usually needs.
 DEFAULT_DEV_ROLE = ROLE_SUB_ADMIN
 
 
@@ -72,7 +77,7 @@ def _candidate_paths(data_dir: Path) -> list[Path]:
 
     1. ``<data_dir>/dev_devices.json`` — the hub's own persistent data dir
        (``/config/casasmart`` in the container). Survives every factory reset.
-    2. ``<repo_root>/.dev/dev_devices.json`` — the gitignored dev proof kit,
+    2. ``<repo_root>/.dev/dev_devices.json`` — an untracked development kit,
        resolved RELATIVE to this file so the same code finds it on the host
        repo AND inside the container (both keep ``custom_components/`` and
        ``.dev/`` as siblings under one root: the repo root on the host,
@@ -121,10 +126,10 @@ def _deterministic_device_id(canonical_pem: str) -> str:
 def _normalize_entry(entry: Any) -> dict[str, Any] | None:
     """Validate + canonicalize one manifest entry, or None to skip it.
 
-    Tolerant on field names — accepts the task's ``public_key`` / ``label`` and
-    the design-doc's ``public_key_pem`` / ``name`` interchangeably — and
-    fail-soft: any bad entry is logged and skipped, never fatal. NEVER yields an
-    admin entry; the dev seam is sub-admin / user only by construction.
+    Tolerant on field names — ``public_key`` / ``public_key_pem`` and
+    ``label`` / ``name`` are interchangeable — and fail-soft: any bad entry is
+    logged and skipped, never fatal. NEVER yields an admin entry; the dev seam
+    is sub-admin / user only by construction.
     """
     if not isinstance(entry, dict):
         _LOGGER.error(
@@ -179,7 +184,7 @@ def ensure_dev_devices(data_dir: Path, auth: AuthEngine) -> list[str]:
 
     BLOCKING (storage I/O) — call via the executor, like the rest of the auth
     engine's storage methods. Returns ``[]`` when no manifest exists, which is
-    the case on every client hub (so this is a cheap no-op there). Idempotent:
+    the case on a normal hub (so this is a cheap no-op there). Idempotent:
     only ids whose stored record actually changed are returned, so a
     steady-state call writes nothing and reports nothing.
     """
