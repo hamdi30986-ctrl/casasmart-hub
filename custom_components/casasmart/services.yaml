@@ -35,10 +35,12 @@ activate_scene:
       selector:
         text:
 configure_hq_notifications:
-  name: Configure Hamdi HQ notifications
+  name: Configure HQ notifications
   description: >-
-    Trust the independent Ed25519 public key used by the owner-local Hamdi HQ
-    reminder sender. Requires a Home Assistant administrator.
+    Trust the Ed25519 public key of an external HQ reminder sender (for example
+    a household or installer dashboard). Its signed requests become content-free
+    "private update" pushes to the owner. Requires a Home Assistant
+    administrator.
   fields:
     public_key:
       name: HQ notification public key
@@ -47,3 +49,12 @@ configure_hq_notifications:
       selector:
         text:
           multiline: true
+    sender_name:
+      name: Sender name
+      description: >-
+        Title of the reminder pushes on the owner's phone (one line, up to 40
+        characters). Leave empty for "CasaSmart HQ".
+      required: false
+      example: Family HQ
+      selector:
+        text:

@@ -86,8 +86,11 @@ from .energy_runtime import (
 from .entity_bridge import is_exposed
 from .hq_notifications import (
     HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY,
+    HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY,
+    HQ_SENDER_NAME_MAX_LENGTH,
     HqNotificationError,
     normalize_public_key,
+    normalize_sender_name,
 )
 from .lan_ingress import (
     LAN_RELAY_INGRESS_CONFIG_KEY,
@@ -1252,17 +1255,33 @@ def _async_register_services(hass: HomeAssistant) -> None:
             public_key, fingerprint = normalize_public_key(call.data.get("public_key"))
         except HqNotificationError as err:
             raise HomeAssistantError("A valid Ed25519 public key is required") from err
+        try:
+            sender_name = normalize_sender_name(call.data.get("sender_name"))
+        except HqNotificationError as err:
+            raise HomeAssistantError(
+                "The sender name must be a single line of at most "
+                f"{HQ_SENDER_NAME_MAX_LENGTH} characters"
+            ) from err
         runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
 
         def _install_key() -> None:
             runtime_data.hub_config.set(
                 HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY, public_key
             )
+            # Each call defines the whole trust: no name means the default title.
+            if sender_name is None:
+                runtime_data.hub_config.delete(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
+            else:
+                runtime_data.hub_config.set(
+                    HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY, sender_name
+                )
             runtime_data.storage.table("hq_notifications").clear()
 
         await hass.async_add_executor_job(_install_key)
         _LOGGER.info(
-            "Hamdi HQ notification trust configured (fingerprint=%s)", fingerprint
+            "HQ notification trust configured (fingerprint=%s, sender name=%s)",
+            fingerprint,
+            sender_name or "default",
         )
 
     async def _handle_factory_reset(call) -> None:
@@ -1291,6 +1310,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY)
+            runtime_data.hub_config.delete(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
 
         await hass.async_add_executor_job(_wipe)
         _LOGGER.warning(

@@ -1,4 +1,4 @@
-"""Security and contract tests for the private Hamdi HQ push ingress."""
+"""Security and contract tests for the private HQ reminder push ingress."""
 
 from __future__ import annotations
 
@@ -157,6 +157,31 @@ class HqNotificationVerifierTest(unittest.TestCase):
         )
 
 
+class HqSenderNameTest(unittest.TestCase):
+    """The push title is the owner's chosen sender name, or a neutral default."""
+
+    def test_default_when_unset_or_blank(self) -> None:
+        for value in (None, "", "   "):
+            self.assertIsNone(MODULE.normalize_sender_name(value))
+        self.assertEqual(MODULE.hq_push_title(None), "CasaSmart HQ")
+        self.assertEqual(MODULE.hq_push_title(""), "CasaSmart HQ")
+
+    def test_custom_name_is_trimmed_and_used(self) -> None:
+        self.assertEqual(MODULE.normalize_sender_name("  Villa HQ "), "Villa HQ")
+        self.assertEqual(MODULE.normalize_sender_name("مكتب المنزل"), "مكتب المنزل")
+        self.assertEqual(MODULE.hq_push_title("Villa HQ"), "Villa HQ")
+
+    def test_invalid_names_are_refused(self) -> None:
+        for value in ("x" * 41, "line\nbreak", "tab\there", 42, ["HQ"]):
+            with self.assertRaises(MODULE.HqNotificationError):
+                MODULE.normalize_sender_name(value)
+
+    def test_stored_garbage_falls_back_to_the_default(self) -> None:
+        # hub_config.json is hand-editable; a bad value must not break pushes.
+        self.assertEqual(MODULE.hq_push_title("x" * 41), "CasaSmart HQ")
+        self.assertEqual(MODULE.hq_push_title(42), "CasaSmart HQ")
+
+
 class HqNotificationSurfaceContractTest(unittest.TestCase):
     def test_route_is_registered_owner_only_and_uses_generic_content(self) -> None:
         push_api = (
@@ -173,7 +198,8 @@ class HqNotificationSurfaceContractTest(unittest.TestCase):
         self.assertIn("PUSH_TYPE_HQ_REMINDER", dispatcher)
         owner_block = dispatcher[dispatcher.index("_OWNER_ONLY_TYPES") :]
         self.assertIn("PUSH_TYPE_HQ_REMINDER", owner_block.split(")", 1)[0])
-        self.assertIn('"title": "Hamdi HQ"', push_api)
+        self.assertIn('"title": hq_push_title(', push_api)
+        self.assertNotIn("Hamdi", push_api)
         self.assertIn('"body": "You have a private update."', push_api)
         self.assertNotIn('verified.event_id,\n                    "title"', push_api)
         self.assertIn("user is None or not user.is_admin", init)

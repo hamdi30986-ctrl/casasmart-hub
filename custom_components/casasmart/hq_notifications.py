@@ -1,4 +1,11 @@
-"""Authenticated, privacy-safe ingress for Hamdi HQ reminder notifications."""
+"""Authenticated, privacy-safe ingress for HQ reminder notifications.
+
+"HQ" is an external reminder sender the hub owner chooses to trust, such as a
+household or installer dashboard. Its requests are signed with an Ed25519 key
+an HA admin registers (``casasmart.configure_hq_notifications``) and carry no
+content: each accepted request becomes one generic "private update" push to the
+owner, titled with the sender name stored next to the key.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +23,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY = "hq_notification_public_key"
+HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY = "hq_notification_sender_name"
+HQ_DEFAULT_SENDER_NAME = "CasaSmart HQ"
+HQ_SENDER_NAME_MAX_LENGTH = 40
 HQ_NOTIFICATION_PATH = "/api/casasmart/notifications/hq"
 HQ_NOTIFICATION_MAX_SKEW_SECONDS = 60
 HQ_NOTIFICATION_NONCE_RETENTION_SECONDS = 5 * 60
@@ -81,6 +91,38 @@ def normalize_public_key(value: str | None) -> tuple[str, str]:
         serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode("ascii")
     return pem, hashlib.sha256(raw).hexdigest()[:16]
+
+
+def normalize_sender_name(value: object) -> str | None:
+    """The sender name to store, or None for the default title.
+
+    Blank means "use the default". Anything else must be a single line of at
+    most ``HQ_SENDER_NAME_MAX_LENGTH`` characters.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HqNotificationError("invalid_sender_name")
+    name = value.strip()
+    if not name:
+        return None
+    if len(name) > HQ_SENDER_NAME_MAX_LENGTH or any(
+        ord(char) < 0x20 or ord(char) == 0x7F for char in name
+    ):
+        raise HqNotificationError("invalid_sender_name")
+    return name
+
+
+def hq_push_title(stored: object) -> str:
+    """The title HQ reminder pushes carry: the stored sender name or the default.
+
+    ``hub_config.json`` is hand-editable, so an invalid stored value falls back
+    to the default instead of breaking delivery.
+    """
+    try:
+        return normalize_sender_name(stored) or HQ_DEFAULT_SENDER_NAME
+    except HqNotificationError:
+        return HQ_DEFAULT_SENDER_NAME
 
 
 class HqNotificationVerifier:

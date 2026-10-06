@@ -16,8 +16,10 @@ from .const import DOMAIN
 from .hq_notifications import (
     HQ_NOTIFICATION_MAX_BODY_BYTES,
     HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY,
+    HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY,
     HqNotificationError,
     HqNotificationVerifier,
+    hq_push_title,
 )
 from .push import MAX_TOKEN_LENGTH, VALID_PLATFORMS
 from .push_dispatcher import PRIORITY_NORMAL, PUSH_TYPE_HQ_REMINDER
@@ -237,7 +239,9 @@ class CasaSmartHqNotificationView(HomeAssistantView):
             result: dict[str, Any] = await runtime.push_dispatcher.async_send(
                 {
                     "type": PUSH_TYPE_HQ_REMINDER,
-                    "title": "Hamdi HQ",
+                    "title": hq_push_title(
+                        runtime.hub_config.get(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
+                    ),
                     "body": "You have a private update.",
                     "target": "today",
                 },
