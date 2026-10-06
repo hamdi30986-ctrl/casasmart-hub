@@ -6,9 +6,9 @@ import asyncio
 import importlib.util
 import sys
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 
@@ -55,7 +55,7 @@ def _load_now_api():
     exceptions.HomeAssistantError = HomeAssistantError
     entity_registry.async_get = lambda hass: None
 
-    casa = _module("casasmart", package=True)
+    _module("casasmart", package=True)
     auth = _module("casasmart.auth_api")
     auth.authenticate_request = lambda *args: ({}, None)
     auth.get_engine = lambda hass: None

@@ -14,5 +14,10 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # comments are allowed. The SIM rules below would only restructure working code.
 ignore = ["E501", "SIM102", "SIM105", "SIM117"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test idioms: unused unpacked results, list defaults on fake classes,
+# assertRaises(Exception) around deliberately broken fakes.
+"tests/**" = ["RUF005", "RUF012", "RUF015", "RUF059", "B017"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
