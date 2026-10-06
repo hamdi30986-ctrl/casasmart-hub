@@ -30,21 +30,21 @@ class MdnsPublisherTest(unittest.TestCase):
                 "api_version": 1,
                 "tls": {"identity_fingerprint_sha256": fingerprint},
             },
-            address="192.168.8.25",
+            address="192.168.1.25",
             advertised_port=8443,
             hub_name="CasaSmart Hub",
         )
         command = MDNS.dns_sd_command(advertisement, "/usr/bin/dns-sd")
         self.assertIn(f"id={fingerprint}", command)
         self.assertIn("api=1", command)
-        self.assertIn("192.168.8.25", command)
+        self.assertIn("192.168.1.25", command)
         self.assertIn("8443", command)
 
     def test_invalid_handshake_identity_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             MDNS.advertisement_from_handshake(
                 {"api_version": 1, "tls": {"identity_fingerprint_sha256": "bad"}},
-                address="192.168.8.25",
+                address="192.168.1.25",
                 advertised_port=8443,
                 hub_name="CasaSmart Hub",
             )
@@ -52,7 +52,7 @@ class MdnsPublisherTest(unittest.TestCase):
 
 class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
     def test_only_local_address_ranges_are_accepted(self) -> None:
-        self.assertTrue(RELAY.is_lan_peer(("192.168.8.25", 12345)))
+        self.assertTrue(RELAY.is_lan_peer(("192.168.1.25", 12345)))
         self.assertTrue(RELAY.is_lan_peer(("10.0.0.8", 12345)))
         self.assertTrue(RELAY.is_lan_peer(("127.0.0.1", 12345)))
         self.assertTrue(RELAY.is_lan_peer(("fe80::1%en0", 12345, 0, 4)))

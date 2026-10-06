@@ -1,0 +1,15 @@
+# Tooling only: the integration ships through HACS as custom_components/casasmart,
+# so nothing here is packaged. Home Assistant 2025.3+ runs on Python 3.13.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+# deploy/macos is run in place by launchd on the macOS LAN bridge host; it is
+# kept byte-stable and is not reformatted.
+extend-exclude = ["deploy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

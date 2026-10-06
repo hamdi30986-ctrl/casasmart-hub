@@ -1,0 +1,6 @@
+# The tests stub Home Assistant; these are the real third-party packages the
+# integration imports outside the HA core.
+pytest>=8.3
+aiohttp>=3.11
+cryptography>=44
+voluptuous>=0.15

@@ -39,7 +39,7 @@ class TankDuplicateTest(unittest.TestCase):
         devices: dict[str, dict] = {}
         engine = TANK.TankEngine(devices, _Readings())
         first, _ = engine.mint_device(
-            "ShellyPlusUni-AABBCC", "Roof Tank", "192.168.8.59", "SNSN-0043X"
+            "ShellyPlusUni-AABBCC", "Roof Tank", "192.168.1.59", "SNSN-0043X"
         )
         before = deepcopy(devices)
 
@@ -47,7 +47,7 @@ class TankDuplicateTest(unittest.TestCase):
             engine.mint_device(
                 "  SHELLYPLUSUNI-AABBCC  ",
                 "Replacement",
-                "192.168.8.99",
+                "192.168.1.99",
                 "different-model",
             )
 
