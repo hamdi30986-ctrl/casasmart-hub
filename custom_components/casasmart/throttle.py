@@ -1,14 +1,9 @@
-"""Server-side failure throttle (Track B — B2): exponential backoff.
+"""Server-side failure throttle: exponential backoff.
 
-The plan's brute-force posture, one reusable piece: "Every secret-guessing
-surface is throttled server-side... N failed attempts (e.g. 5) from a
-source -> lock that surface for a growing window (1 min -> 5 -> 30 ->
-1 hr). Counter is per-source + per-account, resets on success."
-
-B1.6 shipped a flat 30-minute wall inside the auth engine; B2 extracts
-the throttle so the pairing surface (keyed per source IP) and the login
-surface (keyed per device id) share one audited implementation, and
-upgrades the flat wall to the plan's escalating windows.
+One reusable brute-force posture for every secret-guessing surface:
+``MAX_FAILURES`` (5) failed attempts against one key lock that key out for
+a growing window (1 min -> 5 -> 30 -> 1 hr). Keys are caller-chosen (a
+source IP, a device id); a success resets the counter.
 
 Pure stdlib, no HA imports — unit-testable like the rest of the auth
 stack. All state is in-memory: a hub reboot clears it, which costs an

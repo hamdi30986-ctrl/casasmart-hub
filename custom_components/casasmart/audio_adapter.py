@@ -3,15 +3,15 @@
 The pure decision+state engine lives in ``audio.py`` (stdlib only, no network,
 unit-tested on a temp DB). This module is everything that engine deliberately
 does NOT do: it is the hub's **single, only** MQTT client — the whole point of
-hub-side audio is that the phone stops holding broker creds and opening its own
-``MqttServerClient``; the hub owns the one connection and the phone just reads
+hub-side audio is that the phone never holds broker creds or opens its own
+MQTT connection; the hub owns the one connection and the phone just reads
 hub state over REST/WS.
 
 What it does:
 
 - Connects to the broker with the **engine's** stored creds (``get_broker``),
-  so the credentials live in exactly one place (the hub) instead of in every
-  phone's ``SharedPreferences``.
+  so the credentials live in exactly one place (the hub) instead of on every
+  phone.
 - Subscribes the three speaker topics and feeds them into the engine:
   ``speakers/announce`` -> ``ingest_announce`` (discovery beacon),
   ``speakers/+/status`` -> ``ingest_status`` (retained online/offline),

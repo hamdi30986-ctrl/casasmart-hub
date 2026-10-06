@@ -1,18 +1,23 @@
 """Pure self-update logic — no HA imports.
 
-The version math and GitHub-release parsing behind ``update_api.py``,
-kept import-free so the unit tests run without a Home Assistant install
-(same split as ``automations.py`` / ``history.py`` / ``entity_bridge.py``).
+The version math, GitHub-release parsing and install-side filesystem logic
+behind ``update_api.py`` and ``update_install.py``, kept import-free so the
+unit tests run without a Home Assistant install (same split as
+``automations.py`` / ``history.py`` / ``entity_bridge.py``).
 
-Two jobs, both pure:
+The update check:
 
 - ``parse_release`` turns the GitHub ``releases/latest`` JSON into a
   ``ReleaseInfo`` (or ``None`` for a draft / malformed payload).
 - ``is_newer`` answers "is the released version newer than the one the
   hub is running" with a small, dependency-free semver comparison.
 
-No network, no HA, no global state — the checker in ``update_api.py``
-owns the aiohttp fetch + caching and leans on these for the decisions.
+The install side (signature check, locate / version-match / atomic swap)
+has its own section below.
+
+No network, no HA, no global state — the checker in ``update_api.py`` and
+the installer in ``update_install.py`` own the network side and lean on
+these for the decisions.
 """
 
 from __future__ import annotations

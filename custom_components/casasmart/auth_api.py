@@ -398,7 +398,7 @@ class CasaSmartEnrollView(HomeAssistantView):
         # The code is still checked, just not consumed. Recognising the key is
         # NOT sufficient on its own: a hub that merely remembers a phone would
         # otherwise accept a code minted by a DIFFERENT hub, and with two hubs
-        # on one LAN (bench hub + the client's real one, both holding the same
+        # on one LAN (a test hub + the home's real one, both holding the same
         # key) the app's enroll chain takes the first hub that answers yes —
         # so typing the RIGHT hub's code silently paired to the WRONG hub, with
         # every layer reporting success and nothing to see in any log.
@@ -514,7 +514,7 @@ class CasaSmartRecoverView(HomeAssistantView):
 
     Lost phone + no cloud backup: the owner presents the recovery code
     plus a NEW keypair; the hub swaps its admin (old admin's JWTs die
-    instantly) and re-arms with a fresh code. Same posture as enroll:
+    instantly) and the card stays valid. Same posture as enroll:
     the code is the credential, LAN-only, throttled per source.
     """
 
@@ -564,13 +564,14 @@ class CasaSmartRecoverView(HomeAssistantView):
                 )
             )
         except EnrollError as err:
-            # The code is spent (single-use is non-negotiable) but the old
-            # admin is untouched — replace_admin validates before swapping.
-            # Re-arm so the hub is never left without a recovery path.
+            # The old admin is untouched — replace_admin validates before
+            # swapping — and the permanent code is still armed. arm_recovery
+            # is a safety net: it only mints a code when none is armed.
             await self._hass.async_add_executor_job(arm_recovery, self._hass)
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        # Fresh code for the next card — surfaced to the HA admin only.
+        # Safety net: mint (and surface to the HA admin) a code only when
+        # none is armed.
         await self._hass.async_add_executor_job(arm_recovery, self._hass)
 
         # The admin device changed identity — refresh the per-user sensors.
@@ -595,16 +596,16 @@ class CasaSmartRecoverView(HomeAssistantView):
 #                             handshake), present only while the options
 #                             toggle says the tunnel is ON.
 #   ``payload_version``       2.
-#   ``qr_payload``            the canonical v2 deep link. The current app's
-#                             scanner reads ONLY the ``code`` query param and
-#                             ignores the rest (qr_scanner_screen.dart), so a
-#                             v2 QR still pairs a v1 phone on the LAN.
+#   ``qr_payload``            the canonical v2 deep link. A v1 app's scanner
+#                             reads ONLY the ``code`` query param and ignores
+#                             the rest, so a v2 QR still pairs a v1 phone on
+#                             the LAN.
 #
 # Strictly additive: every v1 field is returned unchanged, and v1 clients
 # keep building their own ``casasmart://family?code=`` links from ``code``.
 PAIRING_PAYLOAD_VERSION = 2
 # Matches the app's deep-link contract ``casasmart://<type>?code=...`` —
-# admin-minted codes are family/member invites (QrType.family).
+# admin-minted codes are family/member invites.
 _DEEP_LINK_BASE = "casasmart://family"
 
 

@@ -1,8 +1,8 @@
 """Installer admin endpoints.
 
-The REST surface that retires the app's last raw-HA-token call sites —
-the five installer screens (pairing sheet, switch domain swap, IR
-wizard, tools, discovered devices). Every endpoint here is gated by
+The REST surface the app's installer screens use instead of raw-HA-token
+calls (pairing sheet, entity rename, IR wizard, tools, discovered
+devices). Every endpoint here is gated by
 ``installer.manage`` (admin and sub-admin — see ``auth_engine.PERMISSIONS``;
 these reshape the home's hardware):
 

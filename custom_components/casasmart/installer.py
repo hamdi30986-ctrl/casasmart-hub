@@ -1,6 +1,6 @@
 """Installer-surface helpers: the pure logic
 behind the admin endpoints that replace the app's raw-HA-token installer
-calls (pairing sheet, switch domain swap, IR wizard, discovered devices).
+calls (pairing sheet, entity rename, IR wizard, discovered devices).
 
 No HA imports — unit-testable without an HA install, exactly like
 ``entity_bridge``, ``camera_streams`` and ``pairing``. The views in

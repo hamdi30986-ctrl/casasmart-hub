@@ -1,9 +1,10 @@
 """Per-user settings endpoints.
 
 ``GET/PUT /api/casasmart/me/settings`` — the caller's own settings doc
-(display name + widget layout today), keyed by the JWT's ``sub`` exactly
-like ``/me/favorites``: a token can never read or write another user's
-settings, which is the whole permission story for personal data.
+(display name + widget layout today), keyed by the person behind the JWT's
+``sub`` (its ``member_id``) exactly like ``/me/favorites``: a token can
+never read or write another user's settings, which is the whole permission
+story for personal data.
 
 GET rides ``devices.read`` and PUT ``devices.control`` — the favorites
 posture: every current role may keep its own settings, but a future

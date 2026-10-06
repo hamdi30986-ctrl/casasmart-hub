@@ -1,17 +1,18 @@
 """Remote-access tunnel formalization.
 
-The hub itself never dials Cloudflare — ``cloudflared`` runs as its own
-service on the box, configured at client onboarding (one-time
-install, per-client subdomain, ingress routed at the CasaSmart TLS port
-only — never bare HA). What the integration formalizes is the *contract*:
-the installer records the hub's public tunnel URL in ``hub_config.json``
-(key ``tunnel_url``), and the handshake advertises it so the app captures
-the remote path AT PAIRING — exactly like the TLS pin. No Supabase
-``hubs`` table, no manual URL entry on the phone.
+The hub itself does not run the tunnel — ``cloudflared`` runs as its own
+service on the box, configured at onboarding (one-time install, per-hub
+subdomain, ingress routed at the CasaSmart TLS port only — never bare HA).
+What the integration formalizes is the *contract*: the hub's public tunnel
+URL lives in ``hub_config.json`` (key ``tunnel_url``) — set by the installer
+or derived from the options-flow Cloudflare domain — and the handshake
+advertises it so the app captures the remote path AT PAIRING — exactly like
+the TLS pin. No manual URL entry on the phone.
 
-This module is the pure validation half (stdlib only, flat-importable by
-the unit tests like ``discovery.py``/``ws_protocol.py``): one function
-that decides whether a configured value is a publishable tunnel URL.
+This module is the pure half (stdlib only, flat-importable by the unit
+tests like ``discovery.py``/``ws_protocol.py``): tunnel URL and domain
+validation, cloudflared add-on slug matching, and the edge-liveness
+watchdog decision.
 
 Validation doctrine — **fail closed, never publish garbage**:
 

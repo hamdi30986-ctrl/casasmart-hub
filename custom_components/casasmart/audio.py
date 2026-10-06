@@ -1,11 +1,9 @@
 """Hub-side audio engine — the pure half.
 
-Flips the speaker stack to match the rest of Phase 6: hub = brain, phone =
-display, Pi = dumb endpoint. Today it is inverted — the phone holds the MQTT
-broker creds + PA host/key in ``SharedPreferences``, opens its own
-``MqttServerClient`` to drive speakers, and the Pi begs a dead Supabase edge
-function for its broker credentials. This module is the hub-side source of
-truth that ends all three.
+The hub-side source of truth for the speaker stack: hub = brain, phone =
+display, Pi = dumb endpoint. The hub, not the phone, holds the MQTT broker
+creds + PA host/key and drives the speakers, and the Pi pulls its broker
+credentials from the hub.
 
 Like ``alarm.py``/``registry.py``/``tank.py`` this is the flat-importable
 engine: **stdlib only, no Home Assistant imports, no network I/O**. It owns
@@ -17,8 +15,8 @@ what lets this be unit-tested on a temp SQLite file with a hand-cranked clock.
 What it owns:
 
 - **Broker config** — host / port / TLS / username / password. The single
-  source of truth the Pi pulls on boot (``provision``) instead of Supabase,
-  and the only place the creds live (the phone stops holding them).
+  source of truth the Pi pulls on boot (``provision``), and the only place
+  the creds live (phones never hold them).
 - **PA config** — the PA service host / port / api-key the adapter proxies
   uploads through.
 - **Athan config** — stored hub-side and relayed (retained) to the scheduler.
@@ -412,10 +410,10 @@ class AudioEngine:
             return dict(updated)
 
     def provision(self) -> dict[str, Any]:
-        """Broker coordinates the Pi pulls on boot (replaces the Supabase 404).
+        """Broker coordinates the Pi pulls on boot.
 
         This is the cred source for ``GET /audio/provision``. Returns the
-        shared broker identity the dev Pi connects with; per-speaker unique
+        shared broker identity the speaker Pis connect with; per-speaker unique
         creds are a hardening layer addable later without app changes (the
         speaker record already has room for them).
         """
