@@ -57,10 +57,11 @@ jobs:
   hacs:
     runs-on: ubuntu-latest
     steps:
+      # The licence is proprietary (no OSI licence, which HACS's check wants).
       - uses: hacs/action@main
         with:
           category: integration
-          ignore: brands
+          ignore: license
 
   # HACS installs by release tag while Home Assistant reports manifest.json's
   # version: a tag that disagrees with the manifest it ships must never build.

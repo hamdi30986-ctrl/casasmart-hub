@@ -217,4 +217,7 @@ Releases are cut only with `scripts/release.sh` (`check`, `tag`, `publish`,
 
 ## License
 
-Proprietary software. © CasaSmart. All rights reserved. See [LICENSE](LICENSE).
+Proprietary, not open source. You may install and use the hub, unmodified, on
+a Home Assistant installation you own or administer, for use with CasaSmart
+apps and services. Modifying or redistributing it needs written permission
+from CasaSmart. See [LICENSE](LICENSE).
