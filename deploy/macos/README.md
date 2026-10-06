@@ -48,9 +48,9 @@ services:
 ```
 
 > **Never publish 8443 on all interfaces, and never forward it from your router.**
-> On Docker Desktop the hub treats every connection on its TLS port as coming
-> from the LAN (see step 4). The loopback-only mapping plus the LAN-only relay
-> is what makes that safe.
+> Step 4 tells the hub to treat every connection on its TLS port as coming from
+> the LAN. The loopback-only mapping plus the LAN-only relay is what makes that
+> safe.
 
 ## 3. Install the launch agents
 
@@ -87,24 +87,23 @@ To remove them, run `launchctl bootout gui/$(id -u)/com.casasmart.hub-tls-relay`
 (and the same for `hub-mdns`), then delete the two plists from
 `~/Library/LaunchAgents`.
 
-## 4. How the hub decides "LAN" here
+## 4. Tell the hub to trust its TLS port
 
-On Docker Desktop the hub can't use a client's address, so the hub setting
-`lan_relay_ingress` decides instead:
+On Docker Desktop the hub can't use a client's address to decide "is this phone
+on the LAN?", so pairing, owner recovery and keyless speaker provisioning are
+refused until you tell it to trust its TLS port instead. Do this only after
+steps 2 and 3, because the hub can't check them itself:
 
-- `"auto"` (the default) trusts the hub's TLS listener as the LAN when the hub
-  runs under Docker Desktop (its VM kernel reports `linuxkit`). Elsewhere the
-  hub checks addresses.
-- `"on"` always trusts the TLS listener. Use it for another setup where the TLS
-  port is reachable only through a LAN-only relay.
-- `"off"` always checks addresses.
+1. Stop Home Assistant.
+2. In `/config/casasmart/hub_config.json`, add `"lan_relay_ingress": "on"`.
+3. Start Home Assistant.
+
+The hub then logs a WARNING that starts with "LAN relay ingress on". Until you
+set it, the hub logs a WARNING that starts with "Docker Desktop detected" at
+every start. See [Hub settings](../../README.md#hub-settings).
 
 Requests that crossed Cloudflare are never LAN, whatever this says. Home
 Assistant's own port (8123, where a tunnel enters) is never trusted this way.
-
-At startup the hub logs a WARNING that starts with "LAN relay ingress on" when
-it trusts the listener. To change the setting, see "Hub settings" in the
-[main README](../../README.md#hub-settings).
 
 Behind the relay every phone looks the same to the hub, so they share one
 pairing throttle. After five wrong codes from anyone, everyone waits a minute.

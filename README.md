@@ -105,8 +105,9 @@ accepted from the hub's own network.
 
 - **Normally** the hub checks the client's address: private or link-local
   addresses count, loopback doesn't.
-- **On Docker Desktop**, where addresses are hidden, it trusts its own TLS port
-  behind the LAN-only relay instead (`lan_relay_ingress`, below).
+- **On Docker Desktop**, where addresses are hidden, you can tell it to trust
+  its own TLS port behind the LAN-only relay instead (`lan_relay_ingress`,
+  below). It never does this on its own.
 - **Through Cloudflare**, requests are never local, so a tunnel can't be used
   to pair.
 
@@ -136,7 +137,7 @@ none of them.
 |---|---|---|
 | `hub_name` | string | Name shown when phones discover the hub (default "CasaSmart Hub") |
 | `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. |
-| `lan_relay_ingress` | `"auto"` / `"on"` / `"off"` | Whether the TLS port counts as local network. See below. |
+| `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
 | `pairing_extra_lan_cidrs` | list of private CIDRs | Extra address ranges that count as local, e.g. `["10.8.0.0/24"]` for a VPN. Public ranges are refused. |
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
@@ -144,13 +145,14 @@ none of them.
 | `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
 
 **`lan_relay_ingress` values:**
-- `"auto"` (the default) trusts the TLS port as local when the hub runs under
-  Docker Desktop. Everywhere else it checks addresses.
-- `"on"` always trusts the TLS port as local. Use it only when that port is
-  reachable through a LAN-only relay and nothing else.
-- `"off"` always checks addresses.
+- `"off"` (the default) checks client addresses.
+- `"on"` trusts every connection on the TLS port as local. It's meant for the
+  [Docker Desktop setup](deploy/macos/README.md), where the port is published
+  to `127.0.0.1` only and reached through the LAN-only relay. Never use it if
+  the port is reachable any other way.
 
-The hub logs a WARNING at startup whenever the TLS port is trusted.
+The hub logs a WARNING at startup whenever the TLS port is trusted. On Docker
+Desktop with the setting unset, it logs a WARNING saying what to set instead.
 
 Don't edit the other keys in the file. They hold the hub's secrets, code hashes
 and relay state.
