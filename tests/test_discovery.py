@@ -9,6 +9,7 @@ directly (the package ``__init__`` pulls in ``homeassistant``).
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -26,7 +27,7 @@ from discovery import (
     build_txt_records,
 )
 
-FP = "93d9d6cf2262bf61f998f754357b16578ffa7a4702c71e3f5130afb127a30124"
+FP = hashlib.sha256(b"casasmart-sample-identity").hexdigest()
 
 
 class TxtRecordTests(unittest.TestCase):
@@ -60,7 +61,7 @@ class TxtRecordTests(unittest.TestCase):
 class InstanceNameTests(unittest.TestCase):
     def test_appends_short_fingerprint_for_uniqueness(self) -> None:
         name = build_instance_name("Villa", FP)
-        self.assertEqual(name, "Villa (93d9d6cf)")
+        self.assertEqual(name, f"Villa ({FP[:8]})")
 
     def test_default_name_when_unset(self) -> None:
         self.assertTrue(build_instance_name(None, FP).startswith(DEFAULT_HUB_NAME))
@@ -82,8 +83,8 @@ class ServiceDescriptorTests(unittest.TestCase):
         )
         self.assertEqual(d.service_type, SERVICE_TYPE)
         self.assertEqual(d.port, 8443)
-        self.assertEqual(d.instance_name, "Villa (93d9d6cf)")
-        self.assertEqual(d.full_name, f"Villa (93d9d6cf).{SERVICE_TYPE}")
+        self.assertEqual(d.instance_name, f"Villa ({FP[:8]})")
+        self.assertEqual(d.full_name, f"Villa ({FP[:8]}).{SERVICE_TYPE}")
         self.assertEqual(d.properties["id"], FP.encode())
 
     def test_invalid_port_rejected(self) -> None:
