@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +35,11 @@ HQ_NOTIFICATION_MAX_AUDIT_ROWS = 500
 HQ_NOTIFICATION_MAX_BODY_BYTES = 2048
 
 _EVENT_ID = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
+# Bidi embedding, override and isolate controls: they can make a title display
+# as different text. Joiners (U+200C/U+200D) and marks stay allowed.
+_BIDI_CONTROLS = frozenset(
+    chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
 
 
@@ -97,7 +103,8 @@ def normalize_sender_name(value: object) -> str | None:
     """The sender name to store, or None for the default title.
 
     Blank means "use the default". Anything else must be a single line of at
-    most ``HQ_SENDER_NAME_MAX_LENGTH`` characters.
+    most ``HQ_SENDER_NAME_MAX_LENGTH`` characters, without control characters
+    or bidi overrides.
     """
     if value is None:
         return None
@@ -107,7 +114,8 @@ def normalize_sender_name(value: object) -> str | None:
     if not name:
         return None
     if len(name) > HQ_SENDER_NAME_MAX_LENGTH or any(
-        ord(char) < 0x20 or ord(char) == 0x7F for char in name
+        unicodedata.category(char) in ("Cc", "Zl", "Zp") or char in _BIDI_CONTROLS
+        for char in name
     ):
         raise HqNotificationError("invalid_sender_name")
     return name

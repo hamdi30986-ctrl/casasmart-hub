@@ -176,6 +176,19 @@ class HqSenderNameTest(unittest.TestCase):
             with self.assertRaises(MODULE.HqNotificationError):
                 MODULE.normalize_sender_name(value)
 
+    def test_unicode_line_breaks_and_bidi_overrides_are_refused(self) -> None:
+        # One visible line only, and no direction overrides that could make
+        # the title display as something else.
+        for char in ("\u2028", "\u2029", "\u0085", "\u202e", "\u2066", "\x00"):
+            with self.assertRaises(MODULE.HqNotificationError):
+                MODULE.normalize_sender_name(f"Villa{char}HQ")
+
+    def test_joiners_used_by_emoji_and_scripts_are_allowed(self) -> None:
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467 HQ"  # ZWJ emoji
+        persian = "\u062e\u0627\u0646\u0647\u200c\u0645\u0627"  # with a ZWNJ
+        for name in (family, persian):
+            self.assertEqual(MODULE.normalize_sender_name(name), name)
+
     def test_stored_garbage_falls_back_to_the_default(self) -> None:
         # hub_config.json is hand-editable; a bad value must not break pushes.
         self.assertEqual(MODULE.hq_push_title("x" * 41), "CasaSmart HQ")
@@ -199,7 +212,7 @@ class HqNotificationSurfaceContractTest(unittest.TestCase):
         owner_block = dispatcher[dispatcher.index("_OWNER_ONLY_TYPES") :]
         self.assertIn("PUSH_TYPE_HQ_REMINDER", owner_block.split(")", 1)[0])
         self.assertIn('"title": hq_push_title(', push_api)
-        self.assertNotIn("Hamdi", push_api)
+        self.assertEqual(MODULE.hq_push_title(None), MODULE.HQ_DEFAULT_SENDER_NAME)
         self.assertIn('"body": "You have a private update."', push_api)
         self.assertNotIn('verified.event_id,\n                    "title"', push_api)
         self.assertIn("user is None or not user.is_admin", init)
