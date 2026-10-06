@@ -1,4 +1,4 @@
-"""Hub-side alarm adapter (Phase 6, block B13) — the Home Assistant glue.
+"""Hub-side alarm adapter — the Home Assistant glue.
 
 The pure decision engine lives in ``alarm.py`` (stdlib only, unit-tested on a
 temp DB). This module is everything that engine deliberately does NOT do: it
@@ -16,13 +16,13 @@ wires the engine to live Home Assistant. Specifically it
   how an app-driven disarm cancels a running countdown), and
 - fires ``EVENT_ALARM_TRIGGERED`` — carrying the alarm event — ONLY when an
   armed zone or a life-safety sensor actually trips. That bus event is the
-  installer's automation hook (siren, lights flash, "whatever the operator
-  configures per client", plan B13). Tamper does not fire it.
+  installer's automation hook (siren, flashing lights, whatever is configured
+  for the home), and the push dispatcher listens for it to send the critical
+  phone alert. Tamper does not fire it.
 
-What this module pointedly does NOT touch: the engine's ``alert_sink``. That
-is the encrypted-push seam (B8), left at its no-op default until the relay
-ships — the siren leg (HA automation) is a separate concern from the
-push-to-a-dead-app's-phone leg, so wiring one doesn't pre-empt the other.
+This module leaves the engine's ``alert_sink`` at its default (the alert is
+logged). The siren hook and phone push both hang off ``EVENT_ALARM_TRIGGERED``,
+so nothing here depends on the sink.
 
 The event-loop hot path (``_on_state_changed`` runs for EVERY state change in
 HA) is a single in-memory ``zone_of`` dict lookup; only edges on mapped

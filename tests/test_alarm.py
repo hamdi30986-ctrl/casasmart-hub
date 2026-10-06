@@ -396,6 +396,24 @@ class AlarmTestCase(unittest.TestCase):
         self.assertEqual(event["kind"], EVENT_LIFE_SAFETY)
         self.assertEqual(engine.snapshot()["mode"], MODE_TRIGGERED)
 
+    def test_default_alert_sink_logs_the_alert_accurately(self):
+        # Production builds the engine without a sink: alerts are logged (tamper
+        # has no other log trace), and the line must not claim push is unwired.
+        engine = AlarmEngine(
+            self.storage.table("alarm_state3"),
+            self.storage.table("alarm_zones3"),
+            self.storage.table("alarm_history3"),
+            self.storage.table("alarm_settings3"),
+            clock=self.clock,
+        )
+        engine.warm_up()
+        engine.set_zone("binary_sensor.smoke", ZONE_LIFE_SAFETY, "Smoke")
+        with self.assertLogs("alarm", level="WARNING") as logs:
+            engine.process_sensor("binary_sensor.smoke", True)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("Alarm alert (life_safety)", logs.output[0])
+        self.assertNotIn("not yet wired", logs.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()
