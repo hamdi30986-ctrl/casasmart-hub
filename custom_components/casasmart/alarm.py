@@ -1,11 +1,8 @@
-"""Hub-side security / alarm engine (Phase 6, block B13) — the pure half.
+"""Hub-side security / alarm engine — the pure half.
 
-Replaces the Flutter client-side alarm (``alarm_engine.dart``, 1,395 lines)
-whose own code admits "kill the app = alarm dies": sensor monitoring only
-ran while the app process was alive + WS-connected. That is a liability for
-a security feature. The arm state machine moves into the hub integration so
-it survives a dead app, a backgrounded app, and (state persisted to disk) a
-hub reboot.
+The arm state machine runs in the hub, not in the app, so the alarm keeps
+working when the app is closed or backgrounded, and (state persisted to disk)
+across a hub reboot.
 
 This module is the flat-importable engine (stdlib only, no HA imports —
 unit-tested on a temp SQLite file like ``registry.py``/``tank.py``). It owns
@@ -17,18 +14,16 @@ the *decisions*; it never talks to Home Assistant. The split is deliberate:
   a sensor's active/clear edge it decides nothing / entry-delay countdown /
   immediate trigger, honouring the current arm mode and the per-zone rules.
 - **Life Safety is always armed.** Smoke/gas/CO/leak fire regardless of arm
-  mode — *including ``disarmed``*. This is new behaviour vs the Flutter
-  engine (whose life-safety was arm-gated), and the shadow-mode comparator
-  (B13 step 2) must whitelist this exact class as an expected delta.
-- **The push leg is a stub.** Alerts are emitted through an injected
-  ``alert_sink`` callback that defaults to a no-op logger. Wiring the real
-  encrypted push dispatch (B8 relay) into that sink is a one-line change with
-  no engine edits — that is the whole point of the seam.
+  mode — *including ``disarmed``*.
+- **Alerts go to an injected ``alert_sink``** (trigger, life-safety, tamper).
+  The default sink logs each one as a WARNING. Phone push does not go through
+  the sink: the adapter fires ``EVENT_ALARM_TRIGGERED`` for triggers and
+  life-safety, and the push dispatcher listens for that event. Tamper is
+  deliberately neither sounded nor pushed; it is recorded and logged.
 
-What is intentionally NOT here (it lives in the HA adapter, a later piece):
-subscribing to ``state_changed`` events, real async timers, firing sirens /
-automations via ``haService.callService``, and the ``alarm_control_panel``
-entity mapping. The engine is driven by the adapter calling ``process_sensor``
+What is intentionally NOT here (it lives in ``alarm_adapter.py``):
+subscribing to ``state_changed`` events, real async timers, firing the siren
+automation hook, and the ``alarm_control_panel`` entity mapping. The engine is driven by the adapter calling ``process_sensor``
 / ``tick`` and reading ``snapshot()``; time is injected so it stays pure and
 deterministic under test.
 
@@ -68,7 +63,7 @@ ZONE_ENTRY = "entry"  # entry doors — get the entry delay
 ZONE_LIFE_SAFETY = "life_safety"  # smoke / gas / CO / leak — ALWAYS armed
 ALL_ZONES = (ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY, ZONE_LIFE_SAFETY)
 
-# Which non-life-safety zones are active per arm mode (plan B13 "Arm Modes").
+# Which non-life-safety zones are active per arm mode.
 # Away = everything; Home = perimeter only (motion ignored); Night = perimeter
 # + entry doors (no motion). Life Safety is added unconditionally below.
 _ACTIVE_ZONES_BY_MODE: dict[str, frozenset[str]] = {
@@ -155,10 +150,10 @@ class AlarmEngine:
       * ``zones_table``   — one row per sensor: ``entity_id -> {zone, name}``.
       * ``history_table`` — one bounded ``{"entries": [...]}`` row.
 
-    ``alert_sink`` is the B8 push seam: called with each alert dict the moment
-    an alarm fires (trigger / life-safety / tamper). Defaults to a no-op
-    logger. ``clock`` is injectable for deterministic tests; production passes
-    the default ``time.time``.
+    ``alert_sink`` is called with each alert dict the moment an alarm fires
+    (trigger / life-safety / tamper). It defaults to logging the alert as a
+    WARNING. ``clock`` is injectable for deterministic tests; production
+    passes the default ``time.time``.
     """
 
     def __init__(
@@ -421,7 +416,7 @@ class AlarmEngine:
     ) -> dict[str, Any] | None:
         """Evaluate one sensor edge. Returns the event it caused, or ``None``.
 
-        Rules (plan B13):
+        Rules:
           * Life Safety active -> trigger *immediately, in any mode* incl.
             disarmed (this is the whitelisted shadow-mode delta).
           * ``active`` is False (sensor cleared) -> never triggers.
@@ -565,7 +560,7 @@ class AlarmEngine:
         self._emit_alert(event)
         return event
 
-    # -- alerts (the B8 push seam) ---------------------------------------------
+    # -- alerts ----------------------------------------------------------------
 
     def _emit_alert(self, event: dict[str, Any]) -> None:
         """Hand the event to the push sink, never letting a sink fault break
@@ -577,9 +572,9 @@ class AlarmEngine:
 
     @staticmethod
     def _default_alert_sink(event: dict[str, Any]) -> None:
-        # B8 stub: until the encrypted push relay is wired, alerts are logged
-        # so a triggered alarm is at least visible in the hub log.
-        _LOGGER.warning("ALARM ALERT (push not yet wired — B8): %s", event)
+        # The hub log is the only log trace of a tamper event, and a useful one
+        # for triggers too; phone push is driven by EVENT_ALARM_TRIGGERED.
+        _LOGGER.warning("Alarm alert (%s): %s", event.get("kind"), event)
 
     # -- history (storage) -----------------------------------------------------
 
