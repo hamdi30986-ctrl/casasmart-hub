@@ -1,4 +1,4 @@
-"""v2.2.0: the tank ingest throttle keys on Home Assistant's resolved client
+"""Since 2.3.0: the tank ingest throttle keys on Home Assistant's resolved client
 address, never on client-supplied proxy headers."""
 
 from __future__ import annotations

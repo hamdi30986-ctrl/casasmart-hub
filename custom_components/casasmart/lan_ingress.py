@@ -18,7 +18,7 @@ proof, and the rewritten address is not.
 - ``"auto"`` (default): trust the TLS listener as LAN when running under Docker
   Desktop (its VM kernel identifies as ``linuxkit``), else check addresses.
 - ``"on"``: always trust the TLS listener as LAN (another relay-only setup).
-- ``"off"``: always check addresses (the pre-2.2 behavior).
+- ``"off"``: always check addresses (the behavior before 2.3.0).
 
 Requests that crossed Cloudflare are never LAN whatever this says (checked
 first in ``is_lan_request``), and HA's own HTTP port is never trusted this way:

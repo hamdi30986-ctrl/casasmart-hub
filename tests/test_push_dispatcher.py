@@ -694,7 +694,7 @@ if __name__ == "__main__":
 
 
 class AudienceWithoutRolesTests(DispatcherTestCase):
-    """v2.2.0: who receives an owner-only push when roles can't be resolved."""
+    """Since 2.3.0: who receives an owner-only push when roles can't be resolved."""
 
     def _two_devices(self) -> None:
         self.push_store.register("dev-owner", "fcm-owner", "ios")

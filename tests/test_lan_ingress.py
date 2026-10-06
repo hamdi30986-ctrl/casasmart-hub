@@ -1,4 +1,4 @@
-"""LAN relay ingress (v2.2.0): which listener may vouch for "this client is on
+"""LAN relay ingress (since 2.3.0): which listener may vouch for "this client is on
 the LAN" — the pure policy, and the marker carried end to end through a real
 TLS listener and aiohttp routing."""
 

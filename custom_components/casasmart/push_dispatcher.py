@@ -60,7 +60,7 @@ _OWNER_ONLY_TYPES = frozenset(
 # When device roles can't be resolved (the auth engine isn't loaded), owner-only
 # pushes fail CLOSED — except alarm and lock alerts, which fail OPEN to every
 # registered device: a missed break-in or door alert is worse than one extra
-# notification on a family member's phone (v2.2.0 decision).
+# notification on a family member's phone.
 _FAIL_OPEN_WITHOUT_ROLES = frozenset({PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK})
 
 

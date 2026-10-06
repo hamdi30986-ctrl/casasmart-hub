@@ -1,4 +1,4 @@
-"""v2.2.0: the self-update installs only a signed casasmart.zip, and extraction
+"""Since 2.3.0: the self-update installs only a signed casasmart.zip, and extraction
 can't write outside its staging dir."""
 
 from __future__ import annotations
