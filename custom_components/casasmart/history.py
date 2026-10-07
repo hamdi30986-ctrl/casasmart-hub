@@ -32,7 +32,11 @@ def _parse_timestamp(raw: str, param: str) -> datetime:
         raise HistoryQueryError(
             f"Invalid {param!r}: timestamp must include a UTC offset"
         )
-    return value.astimezone(UTC)
+    try:
+        return value.astimezone(UTC)
+    except OverflowError as err:
+        # Year 1 or 9999 with an offset falls outside datetime's range in UTC.
+        raise HistoryQueryError(f"Invalid {param!r}: timestamp out of range") from err
 
 
 def parse_history_query(
