@@ -953,12 +953,16 @@ class EnergyAdapter:
             )
             await self._set_occupancy(room_id, None, sensors_available=False)
             return
+        await self._follow_occupancy(room)
+
+    async def _follow_occupancy(self, room: RoomInventory) -> None:
+        """Welcome an occupied room now; an empty one starts the grace."""
         if room.occupied:
-            self._cancel_empty(room_id)
-            await self._set_occupancy(room_id, True)
+            self._cancel_empty(room.room_id)
+            await self._set_occupancy(room.room_id, True)
             await self._apply_comfort_posture(room)
         else:
-            self._schedule_empty(room_id)
+            self._schedule_empty(room.room_id)
 
     @callback
     def _schedule_empty(self, room_id: str) -> None:
@@ -1218,12 +1222,7 @@ class EnergyAdapter:
 
         occupancy = self._engine.snapshot()["room_occupancy"].get(room_id, {})
         if room.automatic and not occupancy.get("sensors_available", False):
-            if room.occupied:
-                self._cancel_empty(room_id)
-                await self._set_occupancy(room_id, True)
-                await self._apply_comfort_posture(room)
-            else:
-                self._schedule_empty(room_id)
+            await self._follow_occupancy(room)
             return
 
         boost = self._boosts.get(room_id)
