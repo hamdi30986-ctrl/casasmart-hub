@@ -18,7 +18,9 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+import paho.mqtt.client as mqtt
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.util.ssl import client_context
 
 from .audio import (
     TOPIC_ATHAN_CONFIG,
@@ -63,8 +65,6 @@ def _build_paho_client(client_id: str) -> Any:
     paho 2.x needs an explicit callback API version. VERSION1 keeps the
     callback signatures the same on 1.x and 2.x, as the speaker agent does.
     """
-    import paho.mqtt.client as mqtt  # lazy: hubs without speakers never load it
-
     if hasattr(mqtt, "CallbackAPIVersion"):  # paho 2.x
         return mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
@@ -117,7 +117,9 @@ class AudioAdapter:
         if username:
             client.username_pw_set(username, broker.get("password"))
         if broker.get("tls"):
-            client.tls_set()
+            # tls_set() would load the CA certificates on the event loop; HA's
+            # shared client context is built once, at import.
+            client.tls_set_context(client_context())
         client.reconnect_delay_set(
             min_delay=_RECONNECT_MIN_DELAY, max_delay=_RECONNECT_MAX_DELAY
         )
