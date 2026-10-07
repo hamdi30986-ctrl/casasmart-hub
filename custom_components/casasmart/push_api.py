@@ -65,6 +65,8 @@ class CasaSmartPushTokenView(HomeAssistantView):
         try:
             body = await request.json()
         except (ValueError, KeyError):
+            body = None
+        if not isinstance(body, dict):
             return web.json_response(
                 {"message": "Invalid JSON body"},
                 status=HTTPStatus.BAD_REQUEST,
