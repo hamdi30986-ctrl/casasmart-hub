@@ -12,11 +12,14 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import asyncio
 import datetime
 import sys
 import unittest
+import zoneinfo
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 _CC = Path(__file__).resolve().parent.parent / "custom_components"
 _PKG = _CC / "casasmart"
@@ -198,7 +201,7 @@ class TestConfigResolution(unittest.TestCase):
         )
 
 
-class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
+class TestFireAndArming(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase):
     def test_fire_builds_broadcast_play(self):
         adapter = _Adapter()
         s = A.AthanScheduler(
@@ -227,7 +230,7 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
         s._fire_athan("Fajr")
         self.assertEqual(adapter.published, [])
 
-    def test_reschedule_arms_only_future_prayers(self):
+    async def test_reschedule_arms_only_future_prayers(self):
         armed = []
         A.async_track_point_in_time = lambda hass, action, when: (
             armed.append(when) or (lambda: None)
@@ -246,14 +249,14 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
             ),
             _Adapter(),
         )
-        s.reschedule()
+        await s.async_reschedule()
         # Fajr was 3h past → skipped; the other four are ahead → armed.
         self.assertEqual(len(armed), 4)
         now = datetime.datetime.now(datetime.UTC)
         for when in armed:
             self.assertGreater((when - now).total_seconds(), -A._GRACE_SEC)
 
-    def test_reschedule_keeps_home_coordinates_out_of_info_logs(self):
+    async def test_reschedule_keeps_home_coordinates_out_of_info_logs(self):
         A.async_track_point_in_time = lambda hass, action, when: lambda: None
         A.compute_prayer_times_utc = _future_times()
         s = A.AthanScheduler(
@@ -262,24 +265,26 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
             _Adapter(),
         )
         with self.assertLogs(A._LOGGER, level="DEBUG") as logs:
-            s.reschedule()
+            await s.async_reschedule()
         info = [r.getMessage() for r in logs.records if r.levelname != "DEBUG"]
         debug = [r.getMessage() for r in logs.records if r.levelname == "DEBUG"]
         self.assertTrue(any("Athan scheduled" in m for m in info))
         self.assertFalse(any("24.71" in m or "46.67" in m for m in info))
         self.assertTrue(any("24.7136,46.6753" in m for m in debug))
 
-    def test_reschedule_disabled_arms_nothing(self):
+    async def test_reschedule_disabled_arms_nothing(self):
         armed = []
         A.async_track_point_in_time = lambda hass, action, when: (
             armed.append(when) or (lambda: None)
         )
         A.compute_prayer_times_utc = _future_times()
-        A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter()).reschedule()
+        await A.AthanScheduler(
+            _Hass(), _Engine({"enabled": False}), _Adapter()
+        ).async_reschedule()
         self.assertEqual(armed, [])
 
-    def test_a_prayer_that_fired_is_not_armed_again(self):
-        # reschedule() arms anything up to _GRACE_SEC past, and it runs every
+    async def test_a_prayer_that_fired_is_not_armed_again(self):
+        # A reschedule arms anything up to _GRACE_SEC past, and it runs every
         # hour at minute 1 and on every config save. A prayer that has just
         # fired must not be armed (and so played) a second time.
         armed = []
@@ -309,23 +314,23 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
             ),
             adapter,
         )
-        s.reschedule()
+        await s.async_reschedule()
         dhuhr = [action for action, when in armed if when == times["Dhuhr"]]
         self.assertEqual(len(dhuhr), 1)
         dhuhr[0](now)  # its timer fires
         self.assertEqual(len(adapter.published), 1)
 
         armed.clear()
-        s.reschedule()  # e.g. the hourly re-arm a minute later
+        await s.async_reschedule()  # e.g. the hourly re-arm a minute later
         self.assertEqual(
             [when for _, when in armed],
             [times["Asr"], times["Maghrib"], times["Isha"]],
         )
         self.assertEqual(s.schedule_snapshot()["next"]["name"], "Asr")
 
-    def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
+    async def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
         # zoneinfo raises ValueError, not "not found", for keys like these. The
-        # stored athan config is an opaque blob and reschedule() runs during
+        # stored athan config is an opaque blob and a reschedule runs during
         # setup, so a bad key must read as an unknown timezone, not raise.
         armed = []
         A.async_track_point_in_time = lambda hass, action, when: (
@@ -337,7 +342,7 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
                 s = A.AthanScheduler(
                     _Hass(), _Engine({"enabled": True, "timezone": tz_name}), _Adapter()
                 )
-                s.reschedule()
+                await s.async_reschedule()
                 self.assertEqual(armed, [])
                 snap = s.schedule_snapshot()
                 self.assertTrue(snap["enabled"])
@@ -400,8 +405,8 @@ class TestTargeting(unittest.TestCase):
         self.assertEqual(adapter.published, [])
 
 
-class TestScheduleSnapshot(_RestoresModuleGlobals, unittest.TestCase):
-    def test_snapshot_reports_next_and_targets(self):
+class TestScheduleSnapshot(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_reports_next_and_targets(self):
         A.compute_prayer_times_utc = _future_times()
         eng = _Engine(
             {
@@ -415,7 +420,7 @@ class TestScheduleSnapshot(_RestoresModuleGlobals, unittest.TestCase):
             speakers=[{"mac6": "aabbcc"}],
         )
         s = A.AthanScheduler(_Hass(), eng, _Adapter())
-        s.reschedule()
+        await s.async_reschedule()
         snap = s.schedule_snapshot()
         self.assertTrue(snap["enabled"])
         self.assertEqual(snap["speakers_mode"], "subset")
@@ -423,9 +428,9 @@ class TestScheduleSnapshot(_RestoresModuleGlobals, unittest.TestCase):
         self.assertEqual(len(snap["prayers"]), 5)
         self.assertEqual(snap["next"]["name"], "Dhuhr")  # Fajr past, Dhuhr next
 
-    def test_snapshot_disabled_is_minimal(self):
+    async def test_snapshot_disabled_is_minimal(self):
         s = A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter())
-        s.reschedule()
+        await s.async_reschedule()
         self.assertEqual(s.schedule_snapshot(), {"enabled": False})
 
 
@@ -442,6 +447,62 @@ class TestHourlyRearm(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0], {"minute": 1, "second": 0})
         self.assertNotIn("hour", calls[0])
+
+    async def test_the_timezone_is_resolved_without_blocking_the_loop(self):
+        # dt_util.get_time_zone reads tzdata from disk for a zone HA hasn't
+        # loaded yet, and the scheduler runs on the event loop: it must use
+        # the async helper.
+        looked_up = []
+
+        async def _async_get_time_zone(name):
+            looked_up.append(name)
+            return zoneinfo.ZoneInfo(name)
+
+        A.compute_prayer_times_utc = _future_times()
+        athan = {
+            "enabled": True,
+            "lat": 24.7136,
+            "lon": 46.6753,
+            "timezone": "Europe/Istanbul",
+        }
+        s = A.AthanScheduler(_Hass(), _Engine(athan), _Adapter())
+        blocking = AssertionError("blocking timezone lookup on the event loop")
+        with (
+            mock.patch.object(A.dt_util, "get_time_zone", side_effect=blocking),
+            mock.patch.object(
+                A.dt_util, "async_get_time_zone", _async_get_time_zone, create=True
+            ),
+        ):
+            await s.async_start()
+        self.assertEqual(looked_up, ["Europe/Istanbul"])
+        self.assertEqual(s.schedule_snapshot()["timezone"], "Europe/Istanbul")
+        self.assertEqual(s.schedule_snapshot()["next"]["name"], "Dhuhr")
+
+    async def test_a_reschedule_still_loading_its_timezone_at_stop_arms_nothing(
+        self,
+    ):
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append(when) or (lambda: None)
+        )
+        A.compute_prayer_times_utc = _future_times()
+        release = asyncio.Event()
+
+        async def _slow_time_zone(name):
+            await release.wait()
+            return zoneinfo.ZoneInfo(name)
+
+        athan = {"enabled": True, "lat": 24.7136, "lon": 46.6753}
+        s = A.AthanScheduler(_Hass(), _Engine(athan), _Adapter())
+        with mock.patch.object(
+            A.dt_util, "async_get_time_zone", _slow_time_zone, create=True
+        ):
+            pending = asyncio.ensure_future(s.async_reschedule())
+            await asyncio.sleep(0)
+            await s.async_stop()  # unload while the lookup is in flight
+            release.set()
+            await pending
+        self.assertEqual(armed, [])
 
 
 if __name__ == "__main__":

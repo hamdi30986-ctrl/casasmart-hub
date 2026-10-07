@@ -19,8 +19,9 @@ lookup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 import homeassistant.util.dt as dt_util
@@ -141,10 +142,16 @@ class AthanScheduler:
         # Last computed schedule, for the GET /audio/athan `schedule` block so
         # the app can show "next athan" and a silent failure can't hide.
         self._schedule: dict[str, Any] = {"enabled": False}
-        # (date, prayer) pairs whose timer already fired. reschedule() arms
+        # (date, prayer) pairs whose timer already fired. A reschedule arms
         # anything up to _GRACE_SEC past, so without this the hourly re-arm
         # or a config save right after a prayer would play it again.
         self._fired: set[tuple[str, str]] = set()
+        # Reschedules await the timezone lookup; one at a time, so the last
+        # one to start (with the newest config) is the one that arms.
+        self._reschedule_lock = asyncio.Lock()
+        # Set by async_stop, so a reschedule still awaiting its timezone
+        # lookup arms nothing after unload.
+        self._stopped = False
 
     async def async_start(self) -> None:
         """Arm today's prayers and a self-healing hourly recompute.
@@ -152,24 +159,25 @@ class AthanScheduler:
         The hourly tick (at :01) both rolls the day over at 00:01 AND re-arms
         every hour — so timers lost to a slept host, a dropped timer or a toggle
         that raced setup are back within the hour for the prayers still ahead,
-        instead of a whole day going silent. Re-running reschedule() costs one
-        offline prayer-time calc and a cancel/re-arm.
+        instead of a whole day going silent. Re-running async_reschedule()
+        costs one offline prayer-time calc and a cancel/re-arm.
         """
         self._unsub_recompute = async_track_time_change(
-            self._hass, self._handle_recompute, minute=1, second=0
+            self._hass, self._async_handle_recompute, minute=1, second=0
         )
-        self.reschedule()
+        await self.async_reschedule()
 
     async def async_stop(self) -> None:
         """Cancel every armed timer (idempotent)."""
+        self._stopped = True
         self._cancel_prayers()
         if self._unsub_recompute is not None:
             self._unsub_recompute()
             self._unsub_recompute = None
 
-    @callback
-    def _handle_recompute(self, _now: datetime) -> None:
-        self.reschedule()
+    async def _async_handle_recompute(self, _now: datetime) -> None:
+        """The hourly tick: re-arm (and roll the day over after midnight)."""
+        await self.async_reschedule()
 
     def schedule_snapshot(self) -> dict[str, Any]:
         """The last computed schedule (today's times + which are still ahead +
@@ -182,30 +190,45 @@ class AthanScheduler:
             unsub()
         self._unsub_prayers = []
 
-    @callback
-    def reschedule(self) -> None:
+    async def async_reschedule(self) -> None:
         """(Re)compute today's times and arm timers for the prayers still ahead.
 
         Safe to call any time — from setup, the hourly tick, or a config PUT.
         "Ahead" means not yet fired today and at most ``_GRACE_SEC`` past, so a
         hub that restarts just after a prayer still calls it, once. A no-op
         (all timers cleared) when athan is disabled or no location or timezone
-        is resolvable.
+        is resolvable. The timezone is loaded with HA's async helper: a zone
+        HA hasn't loaded yet is read from disk, which must not happen on the
+        event loop.
         """
+        async with self._reschedule_lock:
+            resolved = self._resolve_config()
+            tz: tzinfo | None = None
+            if resolved is not None:
+                try:
+                    tz = await dt_util.async_get_time_zone(resolved[2])
+                except ValueError:
+                    # zoneinfo raises (rather than "not found") for a malformed
+                    # key such as "../x". This runs during setup, so it must
+                    # not raise.
+                    tz = None
+            if not self._stopped:
+                self._arm(resolved, tz)
+
+    @callback
+    def _arm(
+        self,
+        resolved: tuple[float, float, str, str, str] | None,
+        tz: tzinfo | None,
+    ) -> None:
+        """Replace the armed timers with today's for ``resolved`` in ``tz``."""
         self._cancel_prayers()
-        resolved = self._resolve_config()
         if resolved is None:
             _LOGGER.debug("Athan: disabled or no location — nothing scheduled")
             self._schedule = {"enabled": False}
             return
         lat, lon, tz_name, method, school = resolved
 
-        try:
-            tz = dt_util.get_time_zone(tz_name)
-        except ValueError:
-            # zoneinfo raises (rather than "not found") for a malformed key
-            # such as "../x". This runs during setup, so it must not raise.
-            tz = None
         if tz is None:
             _LOGGER.warning("Athan: unknown timezone %r — nothing scheduled", tz_name)
             self._schedule = {"enabled": True, "error": f"unknown timezone {tz_name!r}"}
