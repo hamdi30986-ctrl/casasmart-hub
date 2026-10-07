@@ -161,7 +161,13 @@ class HqNotificationVerifier:
         if not raw_body or len(raw_body) > HQ_NOTIFICATION_MAX_BODY_BYTES:
             raise HqNotificationError("invalid_body_size")
         timestamp_raw = headers.get("X-CasaSmart-HQ-Timestamp", "")
-        if not isinstance(timestamp_raw, str) or not timestamp_raw.isdigit():
+        # ASCII digits only: isdigit() alone also passes superscripts, which
+        # int() rejects with a bare ValueError.
+        if (
+            not isinstance(timestamp_raw, str)
+            or not timestamp_raw.isascii()
+            or not timestamp_raw.isdigit()
+        ):
             raise HqNotificationError("invalid_timestamp")
         timestamp = int(timestamp_raw)
         current = time.time() if now is None else now
