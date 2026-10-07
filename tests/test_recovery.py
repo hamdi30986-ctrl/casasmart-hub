@@ -6,6 +6,7 @@ Run from the repo root:
 
 import hashlib
 import hmac
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -247,6 +248,35 @@ class ReplaceAdminTests(unittest.TestCase):
         table[self.admin_id] = record
         new_id = self.engine.replace_admin("New Phone", self.new_pem)
         self.assertEqual(self.engine.member_id_for(new_id), self.admin_id)
+
+    def test_a_failed_write_keeps_the_old_admin(self):
+        # A disk error (or power cut) between removing the old admin and
+        # storing the new one must not leave the hub without an owner.
+        table_type = type(self.storage.table("auth_devices"))
+        real_setitem = table_type.__setitem__
+
+        def _failing_setitem(table, key, value):
+            if key != self.admin_id:
+                raise sqlite3.OperationalError("disk I/O error")
+            real_setitem(table, key, value)
+
+        old_token = self._login(self.admin_id, self.old_key)["token"]
+        with (
+            mock.patch.object(table_type, "__setitem__", _failing_setitem),
+            self.assertRaises(sqlite3.OperationalError),
+        ):
+            self.engine.replace_admin("New Phone", self.new_pem)
+
+        self.assertEqual(self.engine.validate_token(old_token)["sub"], self.admin_id)
+        self.assertEqual(
+            [d["device_id"] for d in self.engine.list_devices()], [self.admin_id]
+        )
+        restarted = AuthEngine(
+            self.storage.table("auth_devices"),
+            JsonConfigStore(Path(self._tmp.name) / "cfg.json"),
+        )
+        restarted.warm_up()
+        self.assertTrue(restarted.has_admin())
 
     def test_other_devices_survive_recovery(self):
         user_key, user_pem = make_keypair()
