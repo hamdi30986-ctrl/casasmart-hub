@@ -59,12 +59,17 @@ def normalize_tunnel_url(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     candidate = value.strip()
-    if not candidate:
+    if not candidate or any(char.isspace() for char in candidate):
         return None
 
+    # urlsplit only rejects a non-numeric or out-of-range port when .port is
+    # read, so read it here; port 0 can't be dialled either.
     try:
         parts = urlsplit(candidate)
+        port = parts.port
     except ValueError:
+        return None
+    if port == 0:
         return None
 
     if parts.scheme != "https":
