@@ -1,20 +1,12 @@
-"""Hub-native athan (prayer-call) scheduler.
+"""Athan (prayer call) scheduler.
 
-Computes the five daily prayer times locally via
-``prayer-times-calculator-offline`` (the same offline, no-network library Home
-Assistant's *Islamic Prayer Times* integration uses) from the athan config the
-app stores through ``PUT /audio/athan`` (``lat``/``lon``/``timezone``/
-``method``/``school``), falling back to the hub's own configured location
-(``hass.config.latitude/longitude/time_zone``). It arms one HA timer per
-prayer and, at prayer time, publishes a ``play`` command (priority
-``athan``) through the audio adapter — the same play path PA uses: one
-broadcast, or one command per selected speaker when the config names some.
-
-The hub owns audio, so it owns athan scheduling too — no separate scheduler
-daemon. The library returns UTC timestamps, so DST/offset handling is inherent
-(no fixed table), and it supports Hanafi/Shafi Asr, high-latitude rules and
-~24 regional calculation methods — correct in any region, with no cloud
-lookup.
+Computes the five daily prayer times offline with
+prayer-times-calculator-offline (the library Home Assistant's Islamic Prayer
+Times integration uses) from the config saved through PUT /audio/athan,
+falling back to the hub's own location and timezone. At each prayer time it
+publishes a play command with priority "athan" through the audio adapter:
+one broadcast, or one command per selected speaker. The library works in
+UTC, so daylight saving needs no special handling.
 """
 
 from __future__ import annotations
@@ -39,14 +31,12 @@ _LOGGER = logging.getLogger(__name__)
 ATHAN_DIR = "/var/lib/speaker/athans"
 PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 
-# If the hub was down/asleep across a prayer time, don't blast a stale athan on
-# wake — skip anything already more than this many seconds past.
+# A prayer up to this many seconds past still plays (say, after a restart);
+# anything older is skipped.
 _GRACE_SEC = 120
 
-# The library's accepted calculation methods (lower-case). The app may send
-# "egyptian" (the library's "egypt") or "umalqura"/"umm_al_qura" (the
-# library's "makkah"), so those are aliased. Anything unknown falls back to
-# _DEFAULT_METHOD.
+# Calculation methods the library accepts. _METHOD_ALIASES maps other names
+# the app may send; anything unknown uses _DEFAULT_METHOD.
 _LIB_METHODS = frozenset(
     {
         "mwl",
@@ -83,11 +73,10 @@ _ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
 def compute_prayer_times_utc(
     lat: float, lon: float, method: str, school: str, date_str: str
 ) -> dict[str, datetime] | None:
-    """The five prayer times as timezone-aware UTC datetimes for ``date_str``.
+    """The five prayer times on date_str, as aware UTC datetimes.
 
-    Uses ``prayer-times-calculator-offline`` (pure local math, no network).
     Returns None if the library is missing or the calculation fails, so the
-    caller schedules nothing rather than crashing the loop.
+    caller schedules nothing.
     """
     try:
         from prayer_times_calculator_offline import PrayerTimesCalculator
@@ -124,14 +113,14 @@ def compute_prayer_times_utc(
             dt = datetime.fromisoformat(value)
         except (TypeError, ValueError):
             continue
-        if dt.tzinfo is None:  # library emits +00:00, but be defensive
+        if dt.tzinfo is None:  # the library emits +00:00
             dt = dt.replace(tzinfo=UTC)
         out[prayer] = dt
     return out or None
 
 
 class AthanScheduler:
-    """Computes prayer times off the athan config and fires them on HA's clock."""
+    """Arms HA timers for today's prayers from the athan config."""
 
     def __init__(self, hass: HomeAssistant, engine: Any, adapter: Any) -> None:
         self._hass = hass
@@ -139,28 +128,24 @@ class AthanScheduler:
         self._adapter = adapter
         self._unsub_prayers: list[Any] = []
         self._unsub_recompute: Any | None = None
-        # Last computed schedule, for the GET /audio/athan `schedule` block so
-        # the app can show "next athan" and a silent failure can't hide.
+        # Last computed schedule, served by GET /audio/athan.
         self._schedule: dict[str, Any] = {"enabled": False}
-        # (date, prayer) pairs whose timer already fired. A reschedule arms
-        # anything up to _GRACE_SEC past, so without this the hourly re-arm
-        # or a config save right after a prayer would play it again.
+        # (date, prayer) pairs already played. A reschedule arms prayers up
+        # to _GRACE_SEC past, so this keeps one from playing twice.
         self._fired: set[tuple[str, str]] = set()
-        # Reschedules await the timezone lookup; one at a time, so the last
-        # one to start (with the newest config) is the one that arms.
+        # Reschedules await a timezone lookup; one at a time, so the newest
+        # config arms last.
         self._reschedule_lock = asyncio.Lock()
-        # Set by async_stop, so a reschedule still awaiting its timezone
-        # lookup arms nothing after unload.
+        # Stops a reschedule still awaiting its timezone from arming after
+        # unload.
         self._stopped = False
 
     async def async_start(self) -> None:
-        """Arm today's prayers and a self-healing hourly recompute.
+        """Arm today's prayers and an hourly recompute.
 
-        The hourly tick (at :01) both rolls the day over at 00:01 AND re-arms
-        every hour — so timers lost to a slept host, a dropped timer or a toggle
-        that raced setup are back within the hour for the prayers still ahead,
-        instead of a whole day going silent. Re-running async_reschedule()
-        costs one offline prayer-time calc and a cancel/re-arm.
+        The hourly run (at minute 1) moves to the new day after midnight and
+        re-arms the prayers still ahead, so a lost timer (a sleeping host, a
+        toggle racing setup) costs at most an hour.
         """
         self._unsub_recompute = async_track_time_change(
             self._hass, self._async_handle_recompute, minute=1, second=0
@@ -168,7 +153,7 @@ class AthanScheduler:
         await self.async_reschedule()
 
     async def async_stop(self) -> None:
-        """Cancel every armed timer (idempotent)."""
+        """Cancel all timers (idempotent)."""
         self._stopped = True
         self._cancel_prayers()
         if self._unsub_recompute is not None:
@@ -176,30 +161,26 @@ class AthanScheduler:
             self._unsub_recompute = None
 
     async def _async_handle_recompute(self, _now: datetime) -> None:
-        """The hourly tick: re-arm (and roll the day over after midnight)."""
+        """The hourly recompute."""
         await self.async_reschedule()
 
     def schedule_snapshot(self) -> dict[str, Any]:
-        """The last computed schedule (today's times + which are still ahead +
-        target speakers), for the athan API's observability block."""
+        """The last computed schedule, for GET /audio/athan."""
         return dict(self._schedule)
 
     def _cancel_prayers(self) -> None:
-        """Cancel every armed prayer timer."""
+        """Cancel the prayer timers."""
         for unsub in self._unsub_prayers:
             unsub()
         self._unsub_prayers = []
 
     async def async_reschedule(self) -> None:
-        """(Re)compute today's times and arm timers for the prayers still ahead.
+        """Recompute today's times and arm timers for the prayers still ahead.
 
-        Safe to call any time — from setup, the hourly tick, or a config PUT.
-        "Ahead" means not yet fired today and at most ``_GRACE_SEC`` past, so a
-        hub that restarts just after a prayer still calls it, once. A no-op
-        (all timers cleared) when athan is disabled or no location or timezone
-        is resolvable. The timezone is loaded with HA's async helper: a zone
-        HA hasn't loaded yet is read from disk, which must not happen on the
-        event loop.
+        Safe to call at any time. "Ahead" means not yet played today and at
+        most _GRACE_SEC past. All timers are cleared when athan is off or no
+        location or timezone resolves. The timezone is loaded with HA's async
+        helper because a zone HA hasn't loaded yet is read from disk.
         """
         async with self._reschedule_lock:
             resolved = self._resolve_config()
@@ -208,9 +189,8 @@ class AthanScheduler:
                 try:
                     tz = await dt_util.async_get_time_zone(resolved[2])
                 except ValueError:
-                    # zoneinfo raises (rather than "not found") for a malformed
-                    # key such as "../x". This runs during setup, so it must
-                    # not raise.
+                    # zoneinfo raises for a malformed key such as "../x", and
+                    # this runs during setup.
                     tz = None
             if not self._stopped:
                 self._arm(resolved, tz)
@@ -221,7 +201,7 @@ class AthanScheduler:
         resolved: tuple[float, float, str, str, str] | None,
         tz: tzinfo | None,
     ) -> None:
-        """Replace the armed timers with today's for ``resolved`` in ``tz``."""
+        """Replace the timers with today's, for the resolved config in tz."""
         self._cancel_prayers()
         if resolved is None:
             _LOGGER.debug("Athan: disabled or no location — nothing scheduled")
@@ -269,7 +249,7 @@ class AthanScheduler:
                 }
             )
             if not upcoming:
-                continue  # already fired, or well past (grace covers a late wake)
+                continue  # already played, or past the grace period
             unsub = async_track_point_in_time(
                 self._hass, self._make_fire(prayer, day), fire_at
             )
@@ -295,9 +275,8 @@ class AthanScheduler:
             "next": next_prayer,
         }
 
-        # A configured selection that resolves to zero enrolled speakers means
-        # athan is ENABLED but would fire NOWHERE — surface it loudly (visible
-        # even when the hub logs at WARNING); it's a real misconfiguration.
+        # A selection with no enrolled speakers means athan never plays. Warn,
+        # so it shows even when HA logs only warnings.
         if has_sel and not targets:
             _LOGGER.warning(
                 "Athan enabled for %s but its selected speakers are all un-enrolled — "
@@ -305,8 +284,8 @@ class AthanScheduler:
                 today,
             )
 
-        # The home's coordinates stay out of INFO: logs get pasted into public
-        # issues. They are in the DEBUG line for troubleshooting.
+        # The home's coordinates stay out of INFO, since logs get pasted into
+        # public issues.
         _LOGGER.debug("Athan location for %s: %.4f,%.4f", today, lat, lon)
         _LOGGER.info(
             "Athan scheduled for %s (%s/%s, %s) on %s: %s",
@@ -325,12 +304,11 @@ class AthanScheduler:
         )
 
     def _resolve_targets(self, athan: dict[str, Any]) -> tuple[bool, list[str]]:
-        """``(has_selection, target_mac6s)``.
+        """Return (has_selection, target mac6s).
 
-        No selection (absent/empty ``speakers``) => broadcast to ALL speakers.
-        A selection is normalised and intersected with the currently-enrolled
-        speakers, so a removed/renamed speaker silently drops out — an explicit
-        selection NEVER falls back to blasting everyone (unlike PA).
+        No selection means every speaker. A selection is matched against the
+        enrolled speakers, so removed ones drop out; unlike PA, it never falls
+        back to a broadcast.
         """
         raw = athan.get("speakers")
         if not raw or not isinstance(raw, list):
@@ -350,7 +328,7 @@ class AthanScheduler:
         return True, targets
 
     def _make_fire(self, prayer: str, day: str) -> Any:
-        """The timer callback for one prayer on ``day`` (records it as fired)."""
+        """The timer callback for one prayer on day; records it as played."""
 
         @callback
         def _fire(_now: datetime) -> None:
@@ -360,12 +338,12 @@ class AthanScheduler:
         return _fire
 
     def _fire_athan(self, prayer: str) -> None:
-        """Publish the athan play for ``prayer`` to its target speakers.
+        """Publish the athan play for prayer to its target speakers.
 
         A speaker the bus can't reach right now is logged and skipped: the
         adapter refuses rather than queues, so an athan never plays late.
         """
-        # Re-check at fire time: the config may have been disabled since arming.
+        # Athan may have been turned off since the timer was armed.
         if self._resolve_config() is None:
             _LOGGER.info(
                 "Athan: %s reached but athan is now disabled — skipping", prayer
@@ -382,8 +360,7 @@ class AthanScheduler:
             )
             return
 
-        # No selection => a single broadcast (mac=None). A selection => one
-        # targeted play per chosen speaker (the same path PA uses).
+        # mac=None is a broadcast; a selection gets one play per speaker.
         macs: list[str | None] = targets if has_sel else [None]
         delivered = 0
         for mac in macs:
@@ -415,11 +392,10 @@ class AthanScheduler:
     def _resolve_config(
         self,
     ) -> tuple[float, float, str, str, str] | None:
-        """Return ``(lat, lon, tz_name, method, school)`` or None if athan is off.
+        """Return (lat, lon, tz_name, method, school), or None if athan is off.
 
-        Location and timezone fall back to the hub's own HA config so a hub
-        configured with the home's location works with no app-side setup.
-        Each coordinate falls back on its own.
+        Each coordinate and the timezone fall back to the hub's HA config, so
+        athan works without a location set in the app.
         """
         try:
             athan = self._engine.get_athan()

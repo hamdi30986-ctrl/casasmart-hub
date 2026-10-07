@@ -1,29 +1,10 @@
-"""CasaSmart alarm_control_panel entity — the HA face.
+"""The alarm as a Home Assistant alarm_control_panel entity.
 
-The hub-authoritative ``AlarmEngine`` (``alarm.py``) owns every decision; the
-REST API (``alarm_api.py``) is how the *app* drives it. This platform is the
-third face: a first-class Home Assistant ``alarm_control_panel`` entity that
-mirrors the engine's arm state, so
-
-- arm/disarm shows up in HA dashboards and the logbook, and
-- installer automations can trigger on a standard ``alarm_control_panel``
-  state (``triggered`` / ``armed_away`` / …) as well as on the custom
-  ``EVENT_ALARM_TRIGGERED`` bus event, which still carries the siren hook.
-
-Both directions ride one engine. Arming through HA routes into the same
-``AlarmEngine.arm`` the app calls and fires ``EVENT_ALARM_CHANGED``; arming
-through the app fires that same event, which this entity listens to — so a
-phone-driven arm reflects on the HA panel and vice-versa, with no second
-source of truth.
-
-No PIN: ``code_arm_required`` is False and there is no code format.
-Authorisation lives at the app/JWT layer and at HA's own auth — the panel does
-not gate on a shared secret.
-
-Exit-delay grace is passive in the engine (no event fires when it lapses), so
-when the panel computes ``ARMING`` it schedules one exact refresh at the
-engine's ``arming_until`` to flip the displayed state to fully-armed — the same
-one-timer posture the adapter uses for the entry-delay countdown.
+AlarmEngine makes every decision; this entity mirrors its arm state, so it
+shows on HA dashboards and in the logbook, and installers can automate on
+standard panel states. Arming from HA calls the same engine as the app, and
+both fire EVENT_ALARM_CHANGED, which the entity follows. There is no PIN:
+access is controlled by the app's tokens and HA's own auth.
 """
 
 from __future__ import annotations
@@ -53,13 +34,11 @@ from .alarm import (
 )
 from .const import DOMAIN, EVENT_ALARM_CHANGED
 
-# Arming through the HA panel/automations is recorded under this actor in the
-# engine's audit trail — it did not come from a CasaSmart app user.
+# Actor recorded in the alarm history for commands from HA.
 _HA_ACTOR = "homeassistant"
 
-# Steady (grace consumed) engine mode -> HA panel state. ARMING is derived
-# separately from ``arming_until`` because the engine has no distinct exit
-# state — a freshly armed mode is "arming" only until its grace deadline.
+# Engine mode -> panel state. ARMING has no engine mode: alarm_state derives
+# it from arming_until.
 _MODE_TO_STATE: dict[str, AlarmControlPanelState] = {
     MODE_DISARMED: AlarmControlPanelState.DISARMED,
     MODE_AWAY: AlarmControlPanelState.ARMED_AWAY,
@@ -77,11 +56,10 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
 
 
 class CasaSmartAlarmPanel(AlarmControlPanelEntity):
-    """One panel mirroring the hub-authoritative ``AlarmEngine``."""
+    """The hub's alarm panel, mirroring AlarmEngine."""
 
     _attr_has_entity_name = True
     _attr_name = "Security"
-    # No PIN. Authorisation is the app's JWT / HA's own auth.
     _attr_code_arm_required = False
     _attr_code_format = None
     _attr_supported_features = (
@@ -105,14 +83,14 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
     # -- lifecycle -------------------------------------------------------------
 
     async def async_added_to_hass(self) -> None:
-        """Track every arm-state transition (app- or HA-driven) and follow it."""
+        """Follow every arm-state change, from the app or from HA."""
         self._unsub_changed = self._hass.bus.async_listen(
             EVENT_ALARM_CHANGED, self._on_alarm_changed
         )
         self._schedule_arming_refresh()
 
     async def async_will_remove_from_hass(self) -> None:
-        """Drop the listener and any pending grace refresh."""
+        """Remove the listener and any pending exit-delay refresh."""
         if self._unsub_changed is not None:
             self._unsub_changed()
             self._unsub_changed = None
@@ -122,7 +100,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     @property
     def alarm_state(self) -> AlarmControlPanelState:
-        """Live engine mode -> HA panel state (ARMING derived from grace)."""
+        """The engine mode as a panel state; ARMING while the exit delay runs."""
         snap = self._engine.snapshot()
         mode = snap["mode"]
         arming_until = snap.get("arming_until")
@@ -134,7 +112,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
             return AlarmControlPanelState.ARMING
         return _MODE_TO_STATE.get(mode, AlarmControlPanelState.DISARMED)
 
-    # -- commands (route into the one engine, then announce) -------------------
+    # -- commands --------------------------------------------------------------
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         await self._command(self._engine.disarm)
@@ -149,11 +127,10 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         await self._command(partial(self._engine.arm, MODE_NIGHT))
 
     async def _command(self, engine_call) -> None:
-        """Run a storage-touching engine call off-loop, then fan the change out.
+        """Run an engine call in the executor, then fire EVENT_ALARM_CHANGED.
 
-        Firing ``EVENT_ALARM_CHANGED`` is what keeps the three faces in sync:
-        the WS server nudges connected apps, the adapter re-syncs its
-        entry-delay timer, and our own listener refreshes this entity's state.
+        The event updates connected apps, the adapter's entry-delay timer and
+        this entity's state.
         """
         await self._hass.async_add_executor_job(partial(engine_call, actor=_HA_ACTOR))
         self._hass.bus.async_fire(EVENT_ALARM_CHANGED, {})
@@ -162,17 +139,16 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     @callback
     def _on_alarm_changed(self, _event: Event) -> None:
-        """Any arm-state move: repaint now and re-arm the grace refresh."""
+        """Repaint, and reschedule the exit-delay refresh."""
         self._schedule_arming_refresh()
         self.async_write_ha_state()
 
     @callback
     def _schedule_arming_refresh(self) -> None:
-        """If we're inside an exit-grace window, schedule the flip to armed.
+        """During the exit delay, schedule a repaint for when it ends.
 
-        The engine fires no event when grace lapses (it's a passive deadline),
-        so without this the panel would sit on ``ARMING`` until the next
-        unrelated transition. Exactly one timer, rescheduled on every change.
+        The engine fires no event when the exit delay ends, so without this
+        the panel would show ARMING until the next transition.
         """
         self._cancel_arming_refresh()
         snap = self._engine.snapshot()
@@ -186,13 +162,13 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     @callback
     def _on_arming_done(self, _now: Any) -> None:
-        """The exit grace lapsed: repaint ARMING as the armed state."""
+        """The exit delay ended: repaint ARMING as the armed state."""
         self._cancel_arming = None
         self.async_write_ha_state()
 
     @callback
     def _cancel_arming_refresh(self) -> None:
-        """Cancel the pending grace refresh, if any."""
+        """Cancel the pending exit-delay refresh, if any."""
         if self._cancel_arming is not None:
             self._cancel_arming()
             self._cancel_arming = None
