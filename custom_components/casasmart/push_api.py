@@ -44,6 +44,20 @@ def _get_runtime_data(hass: HomeAssistant):
     return entries[0].runtime_data if entries else None
 
 
+def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
+    """The ONE HQ delivery lock, shared across view instances.
+
+    ``build_views`` constructs fresh view objects for HA's own HTTP app and
+    the TLS listener (and again on each daily TLS refresh). A retry of the
+    same HQ event must wait for the first delivery to be recorded whichever
+    listener it arrives on, so the lock lives in ``hass.data``, never on a
+    view.
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault(
+        "hq_notification_lock", asyncio.Lock()
+    )
+
+
 class CasaSmartPushTokenView(HomeAssistantView):
     """POST + DELETE /api/casasmart/auth/push-token."""
 
@@ -146,7 +160,7 @@ class CasaSmartHqNotificationView(HomeAssistantView):
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        self._lock = asyncio.Lock()
+        self._lock = _hq_delivery_lock(hass)
         self._attempts: dict[str, deque[float]] = defaultdict(deque)
 
     def _rate_limited(self, peer: str) -> bool:
