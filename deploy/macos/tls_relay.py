@@ -6,6 +6,9 @@ container port directly. CasaSmart pairing is intentionally LAN-only, so the
 hub rejects that rewritten address. This byte-for-byte TCP relay accepts the
 LAN connection on macOS and forwards it through the loopback-only Docker port.
 TLS remains end-to-end between the app and the hub.
+
+Standard library only, and kept runnable by macOS's own python3 (3.9), which
+launchd starts at login (deploy/macos/README.md).
 """
 
 from __future__ import annotations
@@ -22,7 +25,11 @@ _BUFFER_SIZE = 64 * 1024
 
 
 def is_lan_peer(peer: object) -> bool:
-    """Return whether a socket peer belongs to a local-only address range."""
+    """Return whether a socket peer belongs to a local-only address range.
+
+    Private, link-local and loopback addresses count; a zone suffix
+    (``fe80::1%en0``) is ignored. Anything else, or no address, doesn't.
+    """
     if not isinstance(peer, tuple) or not peer or not isinstance(peer[0], str):
         return False
     try:
@@ -33,6 +40,7 @@ def is_lan_peer(peer: object) -> bool:
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Copy bytes one way until EOF or a dropped connection, then close."""
     try:
         while data := await reader.read(_BUFFER_SIZE):
             writer.write(data)
@@ -52,6 +60,7 @@ async def relay_connection(
     upstream_host: str,
     upstream_port: int,
 ) -> None:
+    """Serve one client: refuse a non-LAN peer, else pipe both ways upstream."""
     peer = client_writer.get_extra_info("peername")
     if not is_lan_peer(peer):
         _LOGGER.warning("refusing non-LAN client %s", peer)
@@ -84,6 +93,8 @@ async def start_relay(
     upstream_host: str,
     upstream_port: int,
 ) -> asyncio.AbstractServer:
+    """Listen on ``listen_host:listen_port`` and relay each client upstream."""
+
     async def _accept(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -112,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    """Serve until SIGINT or SIGTERM (launchd stops agents with SIGTERM)."""
     server = await start_relay(
         args.listen_host,
         args.listen_port,
