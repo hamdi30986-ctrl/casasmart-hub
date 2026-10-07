@@ -11,7 +11,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.json import json_dumps
@@ -44,6 +44,23 @@ from .filtering import in_scope, is_served, serialize_device
 
 _LOGGER = logging.getLogger(__name__)
 
+# The live connections of both listeners, so unload can close them.
+_DATA_CONNECTIONS = f"{DOMAIN}_ws_connections"
+
+# How long unload waits for a phone to answer the close before dropping it.
+_CLOSE_TIMEOUT = 1.0
+
+
+async def async_close_connections(hass: HomeAssistant) -> None:
+    """Close every live CasaSmart WebSocket with "going away".
+
+    Otherwise a socket would outlive the entry, and the TLS listener would
+    wait for it on shutdown. The app reconnects once the hub is back.
+    """
+    connections = hass.data.get(_DATA_CONNECTIONS)
+    if connections:
+        await asyncio.gather(*(conn.async_close() for conn in list(connections)))
+
 
 class CasaSmartWebSocketView(HomeAssistantView):
     """GET /api/casasmart/ws: the real-time push channel."""
@@ -62,9 +79,12 @@ class CasaSmartWebSocketView(HomeAssistantView):
         ws = web.WebSocketResponse(heartbeat=55.0)
         await ws.prepare(request)
         connection = WsConnection(self._hass, ws, self._hub_version)
+        connections = self._hass.data.setdefault(_DATA_CONNECTIONS, set())
+        connections.add(connection)
         try:
             await connection.run()
         finally:
+            connections.discard(connection)
             connection.cleanup()
         return ws
 
@@ -119,6 +139,17 @@ class WsConnection:
             await self._receive_loop()
         finally:
             recheck_task.cancel()
+
+    async def async_close(self) -> None:
+        """Close the socket with "going away", dropping it if the phone is slow."""
+        try:
+            async with asyncio.timeout(_CLOSE_TIMEOUT):
+                await self._ws.close(
+                    code=WSCloseCode.GOING_AWAY, message=b"hub unloading"
+                )
+        except TimeoutError:
+            # aiohttp closes the transport when the close is cut short.
+            pass
 
     def cleanup(self) -> None:
         """Drop every listener and cancel the connection's tasks (idempotent)."""

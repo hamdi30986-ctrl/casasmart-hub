@@ -48,6 +48,11 @@ _SAN_DNS = "casasmart-hub.local"
 _BACKDATE = timedelta(hours=1)
 
 
+# As on Home Assistant's own HTTP server: on shutdown, wait this long for open
+# requests and then cancel them.
+_SHUTDOWN_TIMEOUT = 10.0
+
+
 # Set on the TLS listener's aiohttp app when it is trusted as LAN ingress
 # (lan_ingress.py). Requests served by HA's own HTTP server never carry it.
 TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
@@ -343,7 +348,9 @@ class CasaSmartTlsServer:
             app[TLS_LISTENER_TRUSTED_LAN] = self._trusted_lan_ingress
             for view in views:
                 view.register(self._hass, app, app.router)
-            self._runner = web.AppRunner(app)
+            # No handler_cancellation: a phone dropping mid-request must not
+            # cancel a service call half-way through a device command.
+            self._runner = web.AppRunner(app, shutdown_timeout=_SHUTDOWN_TIMEOUT)
             await self._runner.setup()
         try:
             context = await self._hass.async_add_executor_job(self._ssl_context)

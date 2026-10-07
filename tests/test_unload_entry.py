@@ -63,6 +63,7 @@ class UnloadEntryTests(unittest.IsolatedAsyncioTestCase):
                 async_unload_platforms=_unload_platforms
             ),
             async_add_executor_job=_executor,
+            data={},
         )
         return hass, types.SimpleNamespace(runtime_data=runtime), calls
 
