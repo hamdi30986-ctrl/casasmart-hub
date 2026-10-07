@@ -172,10 +172,6 @@ class KeyValueTable(MutableMapping):
         self._storage = storage
         self._namespace = namespace
 
-    @property
-    def namespace(self) -> str:
-        return self._namespace
-
     # -- MutableMapping interface ---------------------------------------------
 
     def __getitem__(self, key: str) -> Any:
