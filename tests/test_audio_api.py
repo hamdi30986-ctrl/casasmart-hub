@@ -314,6 +314,23 @@ class AthanView(AudioViewTestCase):
         self.assertEqual(body["location"]["lat"], 41.0)
         self.assertEqual(body["location"]["timezone"], "Europe/Istanbul")
 
+    async def test_get_location_falls_back_per_coordinate_like_the_scheduler(
+        self,
+    ) -> None:
+        # With one coordinate pinned, the scheduler uses it plus the home's
+        # other one; the GET must report the location the scheduler uses.
+        from casasmart.athan_scheduler import AthanScheduler
+
+        for pinned in ({"lat": 41.0}, {"lon": 29.0}):
+            with self.subTest(pinned=pinned):
+                self.rt.audio.set_athan({"enabled": True, **pinned})
+                resp = await self.view.get(H.FakeRequest(headers=self._admin()))
+                location = H.read_response(resp)[1]["location"]
+                scheduler = AthanScheduler(self.hass, self.rt.audio, None)
+                lat, lon, *_ = scheduler._resolve_config()
+                self.assertEqual((location["lat"], location["lon"]), (lat, lon))
+                self.assertEqual(location["source"], "config")
+
     async def test_put_stores_and_extra_keys_survive(self) -> None:
         # Opaque-blob round-trip: the hub does NOT model per_prayer / a
         # nested override map, yet those EXTRA keys must survive PUT -> GET.
