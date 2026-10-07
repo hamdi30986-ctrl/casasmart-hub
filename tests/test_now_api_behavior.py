@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
@@ -73,6 +74,8 @@ def _load_now_api():
     filtering.serialize_device = lambda hass, state: {"entity_id": state.entity_id}
     registry = _module("casasmart.registry")
     registry.RegistryEngine = object
+    storage = _module("casasmart.storage")
+    storage.StorageError = type("StorageError", (Exception,), {})
 
     now_spec = importlib.util.spec_from_file_location(
         "casasmart.now_data", ROOT / "custom_components" / "casasmart" / "now_data.py"
@@ -325,6 +328,99 @@ class RepeatedRoomOffTest(unittest.TestCase):
             self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "off"}
         )
         self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+
+class _ExecutorTrackingHass(_Hass):
+    """Records whether a function runs as an executor job."""
+
+    def __init__(self, states: _States, runtime=None) -> None:
+        super().__init__(states)
+        self.in_executor = False
+        if runtime is not None:
+            self.config_entries = SimpleNamespace(
+                async_loaded_entries=lambda domain: [
+                    SimpleNamespace(runtime_data=runtime)
+                ]
+            )
+
+    async def async_add_executor_job(self, func, *args):
+        self.in_executor = True
+        try:
+            return func(*args)
+        finally:
+            self.in_executor = False
+
+
+class MemberLookupTest(unittest.TestCase):
+    """Who sent a request is a storage read: it runs in the executor, and a
+    storage error there is a clean 500 before anything is switched."""
+
+    ROOM = "room-kitchen"
+
+    def setUp(self) -> None:
+        self.states = _States([_State("light.a", "on", self.ROOM)])
+        self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.engine.set_room_policy(self.ROOM, True, ["light.a"])
+        runtime = SimpleNamespace(
+            now_data=self.engine,
+            energy=None,
+            registry=SimpleNamespace(
+                list_rooms=list, list_scenes=list, get_favorites=lambda member: []
+            ),
+        )
+        self.hass = _ExecutorTrackingHass(self.states, runtime)
+        self.lookups: list[bool] = []
+
+    def _lookup(self, sub: str) -> str:
+        self.lookups.append(self.hass.in_executor)
+        return "member-a"
+
+    @staticmethod
+    def _unavailable(sub: str) -> str:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def _patched(self, lookup):
+        async def body(request):
+            return {"action": "turn_off", "idempotency_key": "off-key-0001"}
+
+        return patch.multiple(
+            _API,
+            authenticate_request=lambda *args: ({"sub": "dev-1"}, None),
+            json_body=body,
+            get_now_data=lambda hass: self.engine,
+            get_engine=lambda hass: SimpleNamespace(member_id_for=lookup),
+        )
+
+    def _room_command(self, lookup):
+        view = _API.CasaSmartRoomActivityCommandView(self.hass)
+
+        async def accessible(room_id, scope):
+            return True
+
+        with self._patched(lookup), patch.object(view, "_room_accessible", accessible):
+            return asyncio.run(view.post(None, self.ROOM))
+
+    def _snapshot(self, lookup):
+        with self._patched(lookup):
+            return asyncio.run(_API.CasaSmartNowView(self.hass).get(None))
+
+    def test_room_command_looks_up_the_member_in_the_executor(self) -> None:
+        result = self._room_command(self._lookup)
+        self.assertEqual(self.lookups, [True])
+        self.assertEqual([o["entity_id"] for o in result["outcomes"]], ["light.a"])
+
+    def test_room_command_storage_error_is_a_clean_500(self) -> None:
+        result = self._room_command(self._unavailable)
+        self.assertEqual(result, {"message": "Storage failure", "status": 500})
+        self.assertEqual(self.hass.services.calls, [])
+
+    def test_now_snapshot_looks_up_the_member_in_the_executor(self) -> None:
+        self._snapshot(self._lookup)
+        self.assertEqual(self.lookups, [True])
+
+    def test_now_snapshot_storage_error_is_a_clean_500(self) -> None:
+        result = self._snapshot(self._unavailable)
+        self.assertEqual(result, {"message": "Storage failure", "status": 500})
 
 
 class NowConfigSceneValidationTest(unittest.TestCase):
