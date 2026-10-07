@@ -35,6 +35,12 @@ from .suggestions import SuggestionError, evaluate, next_boundary, state_value
 
 _LOGGER = logging.getLogger(__name__)
 
+# A burst of changes becomes one refresh this long after the last of them.
+_DEBOUNCE_SECONDS = 0.2
+# The shortest timer delay, and the retry delay after a failed refresh.
+_MIN_DELAY_SECONDS = 0.05
+_RETRY_SECONDS = 60
+
 
 class SuggestionRuntime:
     """Rule-based suggestions over live HA state.
@@ -173,12 +179,12 @@ class SuggestionRuntime:
 
     @callback
     def _changed(self, _event=None):
-        """Coalesce a burst of changes into one refresh 0.2 s after the last."""
+        """Coalesce a burst of changes into one refresh."""
         if self._stopped:
             return
         if self._debounce:
             self._debounce.cancel()
-        self._debounce = self.hass.loop.call_later(0.2, self._kick)
+        self._debounce = self.hass.loop.call_later(_DEBOUNCE_SECONDS, self._kick)
 
     @callback
     def _kick(self):
@@ -238,7 +244,7 @@ class SuggestionRuntime:
                         delay = min(delay, seconds)
             except Exception:
                 _LOGGER.exception("Suggestion refresh failed")
-                delay = 60
+                delay = _RETRY_SECONDS
             if self._timer:
                 self._timer.cancel()
             if not self._stopped:
@@ -247,7 +253,7 @@ class SuggestionRuntime:
     def _seconds_to_boundary(self, data, now, zone):
         """Seconds until the next window opens or closes."""
         return max(
-            0.05,
+            _MIN_DELAY_SECONDS,
             (
                 next_boundary(data["rules"], now, zone, self.sunset) - now
             ).total_seconds(),
@@ -444,7 +450,7 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         """The rule boundary or the end of the two-hour window, if sooner."""
         return min(
             super()._seconds_to_boundary(data, now, zone),
-            max(0.05, (window(now)[1] - now).total_seconds()),
+            max(_MIN_DELAY_SECONDS, (window(now)[1] - now).total_seconds()),
         )
 
     def payload_from(self, context, member, scope):
