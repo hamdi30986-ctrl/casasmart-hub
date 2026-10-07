@@ -147,6 +147,9 @@ class EnergyApiTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(status, 403)
         self.assertEqual(body["error"], "energy_lockout")
+        # The phone keeps "code" on a 403: it tells the lockout apart from a
+        # credential that a re-login would fix.
+        self.assertEqual(body["code"], "energy_lockout")
         self.assertEqual(self.hass.services.calls, [])
 
     async def test_scene_gate_distinguishes_locked_role_and_unflagged_scene(self):
@@ -164,6 +167,7 @@ class EnergyApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 403)
         self.assertEqual(body["error"], "energy_lockout")
+        self.assertEqual(body["code"], "energy_lockout")
 
         status, body = H.read_response(
             await view.post(H.FakeRequest(headers=self.admin), scene["scene_id"])
