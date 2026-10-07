@@ -80,49 +80,40 @@ def _get_loaded_entry(hass: HomeAssistant):
     return entries[0] if entries else None
 
 
+def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
+    """The loaded entry's runtime data, or None when not set up."""
+    entry = _get_loaded_entry(hass)
+    return entry.runtime_data if entry is not None else None
+
+
 def _get_push_store(hass: HomeAssistant):
     """The loaded entry's push-token store, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.push
+    runtime_data = _runtime_data(hass)
+    return runtime_data.push if runtime_data is not None else None
 
 
 def _get_push_dispatcher(hass: HomeAssistant):
     """The loaded entry's push dispatcher, or None when push isn't running."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.push_dispatcher
+    runtime_data = _runtime_data(hass)
+    return runtime_data.push_dispatcher if runtime_data is not None else None
 
 
 def get_engine(hass: HomeAssistant) -> AuthEngine | None:
     """The loaded entry's auth engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.auth
+    runtime_data = _runtime_data(hass)
+    return runtime_data.auth if runtime_data is not None else None
 
 
 def get_pairing(hass: HomeAssistant) -> PairingManager | None:
     """The loaded entry's pairing manager, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.pairing
+    runtime_data = _runtime_data(hass)
+    return runtime_data.pairing if runtime_data is not None else None
 
 
 def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
     """The loaded entry's recovery manager, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.recovery
+    runtime_data = _runtime_data(hass)
+    return runtime_data.recovery if runtime_data is not None else None
 
 
 def get_provision_secret(hass: HomeAssistant) -> str | None:
@@ -131,10 +122,9 @@ def get_provision_secret(hass: HomeAssistant) -> str | None:
     A speaker sends it in the X-CasaSmart-Provision-Key header on
     GET /audio/provision to fetch its broker settings from any address.
     """
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
+    runtime_data = _runtime_data(hass)
+    if runtime_data is None:
         return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.hub_config.get(PROVISION_SECRET_CONFIG_KEY)
 
 
@@ -144,11 +134,11 @@ def is_keyless_speaker_provisioning_enabled(hass: HomeAssistant) -> bool:
     When on, GET /audio/provision also serves a LAN client without the
     provisioning key. Only a literal true turns it on.
     """
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return False
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True
+    runtime_data = _runtime_data(hass)
+    return (
+        runtime_data is not None
+        and runtime_data.hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True
+    )
 
 
 def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
@@ -230,11 +220,11 @@ def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
     which still keeps the bootstrap owner claim LAN-only. Only a literal true
     turns it on.
     """
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return False
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.hub_config.get(REMOTE_PAIRING_ENABLED_CONFIG_KEY) is True
+    runtime_data = _runtime_data(hass)
+    return (
+        runtime_data is not None
+        and runtime_data.hub_config.get(REMOTE_PAIRING_ENABLED_CONFIG_KEY) is True
+    )
 
 
 def authenticate_request(
@@ -353,10 +343,10 @@ class CasaSmartEnrollView(HomeAssistantView):
         It still identifies this hub's own code after the live code is
         dropped on claim, so the owner can re-run onboarding on their hub.
         """
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
+        runtime_data = _runtime_data(self._hass)
+        if runtime_data is None:
             return None
-        stored = entries[0].runtime_data.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
+        stored = runtime_data.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
         return stored if isinstance(stored, str) and stored else None
 
     async def post(self, request: web.Request) -> web.Response:
@@ -771,8 +761,7 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
         if push is not None:
             await self._hass.async_add_executor_job(push.unregister, device_id)
 
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        runtime = entries[0].runtime_data if entries else None
+        runtime = _runtime_data(self._hass)
         unclaimed = False
         if runtime is not None:
 
@@ -1002,8 +991,7 @@ class CasaSmartUserView(HomeAssistantView):
 
         # A member's favorites and settings go with their last device; a
         # member with another paired device keeps them.
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        runtime = entries[0].runtime_data if entries else None
+        runtime = _runtime_data(self._hass)
         if runtime is not None:
 
             def _prune_orphaned_member() -> None:
