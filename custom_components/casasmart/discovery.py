@@ -11,6 +11,7 @@ the TXT schema version. Nothing in the record is secret.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
@@ -121,7 +122,8 @@ class MdnsAdvertiser:
 
     Sharing HA's instance avoids a second mDNS responder. Discovery is a
     convenience (the app also reaches the hub by its stored address or the
-    tunnel), so every failure here is logged and swallowed.
+    tunnel), so every failure here is logged and swallowed. Once stopped it
+    publishes nothing, even for a refresh that was already running.
     """
 
     def __init__(
@@ -145,9 +147,17 @@ class MdnsAdvertiser:
         self._aiozc = None
         self._info = None  # zeroconf.ServiceInfo once registered
         self._current_ip: str | None = None
+        # Start, refresh and stop take turns, so a stop can't land mid-publish.
+        self._lock = asyncio.Lock()
+        self._stopped = False
 
     async def async_start(self) -> None:
         """Register the record under the hub's current LAN address."""
+        async with self._lock:
+            if not self._stopped:
+                await self._async_start()
+
+    async def _async_start(self) -> None:
         try:
             from homeassistant.components import zeroconf as ha_zeroconf
 
@@ -182,9 +192,14 @@ class MdnsAdvertiser:
 
     async def async_refresh(self, _now=None) -> None:
         """Re-publish the record when DHCP has given the hub a new address."""
+        async with self._lock:
+            if not self._stopped:
+                await self._async_refresh()
+
+    async def _async_refresh(self) -> None:
         if self._aiozc is None:
             # Zeroconf was unavailable at setup; try a full start.
-            await self.async_start()
+            await self._async_start()
             return
         ip = await self._async_source_ip()
         if ip == self._current_ip and self._info is not None:
@@ -206,15 +221,17 @@ class MdnsAdvertiser:
 
     async def async_stop(self) -> None:
         """Unregister so other apps stop trying to reach a dead service."""
-        if self._aiozc is None or self._info is None:
-            return
-        try:
-            await self._aiozc.async_unregister_service(self._info)
-        except Exception as err:
-            _LOGGER.debug("mDNS unregister failed (harmless on shutdown): %s", err)
-        finally:
-            self._info = None
-            self._current_ip = None
+        self._stopped = True
+        async with self._lock:
+            if self._aiozc is None or self._info is None:
+                return
+            try:
+                await self._aiozc.async_unregister_service(self._info)
+            except Exception as err:
+                _LOGGER.debug("mDNS unregister failed (harmless on shutdown): %s", err)
+            finally:
+                self._info = None
+                self._current_ip = None
 
     async def _async_source_ip(self) -> str | None:
         """The hub's LAN-facing IPv4, or None to register hostname-only."""

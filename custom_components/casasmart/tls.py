@@ -11,6 +11,7 @@ automatically: losing it unpairs every phone.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import ssl
@@ -304,7 +305,8 @@ class CasaSmartTlsServer:
 
     Serves the same views as the HA port (both come from api.build_views)
     behind the hub-issued leaf. A rotated leaf goes live by restarting the
-    site; the runner is kept.
+    site; the runner is kept. Once stopped it stays stopped, even for a
+    daily check that was already running.
     """
 
     def __init__(
@@ -321,6 +323,9 @@ class CasaSmartTlsServer:
         self._trusted_lan_ingress = trusted_lan_ingress
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        # Start, refresh and stop take turns, so a stop can't land mid-start.
+        self._lock = asyncio.Lock()
+        self._stopped = False
 
     @property
     def port(self) -> int:
@@ -343,6 +348,12 @@ class CasaSmartTlsServer:
 
     async def async_start(self, views) -> bool:
         """Bring the listener up. False (logged) when the port won't bind."""
+        async with self._lock:
+            return await self._async_start(views)
+
+    async def _async_start(self, views) -> bool:
+        if self._stopped:
+            return False
         if self._runner is None:
             app = web.Application()
             app[TLS_LISTENER_TRUSTED_LAN] = self._trusted_lan_ingress
@@ -375,20 +386,25 @@ class CasaSmartTlsServer:
         with a fresh SSL context. Phones reconnect without noticing because
         the pinned identity is unchanged.
         """
-        rotated = material.leaf_rotated
-        self._material = material
-        if self._site is not None and not rotated:
-            return
-        if self._site is not None:
-            await self._site.stop()
-            self._site = None
-        await self.async_start(views)
+        async with self._lock:
+            if self._stopped:
+                return
+            rotated = material.leaf_rotated
+            self._material = material
+            if self._site is not None and not rotated:
+                return
+            if self._site is not None:
+                await self._site.stop()
+                self._site = None
+            await self._async_start(views)
 
     async def async_stop(self) -> None:
-        """Close the listener and release the aiohttp runner."""
-        if self._site is not None:
-            await self._site.stop()
-            self._site = None
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
+        """Close the listener and release the aiohttp runner, for good."""
+        self._stopped = True
+        async with self._lock:
+            if self._site is not None:
+                await self._site.stop()
+                self._site = None
+            if self._runner is not None:
+                await self._runner.cleanup()
+                self._runner = None
