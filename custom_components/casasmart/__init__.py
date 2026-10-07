@@ -1438,7 +1438,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
     if entry.runtime_data.energy_controller is not None:
-        entry.runtime_data.energy_controller.async_stop()
+        await entry.runtime_data.energy_controller.async_stop()
     if entry.runtime_data.alarm_adapter is not None:
         entry.runtime_data.alarm_adapter.async_stop()
     if entry.runtime_data.tank_push_monitor is not None:

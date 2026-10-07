@@ -30,13 +30,12 @@ except Exception as err:
 # Runtimes with a synchronous stop, then those with an async one.
 _SYNC_STOPS = {
     "suggestions": "stop",
-    "energy_controller": "async_stop",
     "alarm_adapter": "async_stop",
     "tank_push_monitor": "async_stop",
     "relay_registrar": "stop",
     "push_dispatcher": "async_stop",
 }
-_ASYNC_STOPS = ("athan_scheduler", "audio_adapter", "mdns", "tls")
+_ASYNC_STOPS = ("energy_controller", "athan_scheduler", "audio_adapter", "mdns", "tls")
 
 
 @unittest.skipIf(_ERR, f"CasaSmart unimportable: {_ERR}")
