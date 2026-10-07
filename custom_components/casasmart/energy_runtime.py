@@ -92,9 +92,6 @@ class EnergyFlags:
         else:
             self._table.pop(_DISABLED_KEY, None)
 
-    def clear(self) -> None:
-        self._table.clear()
-
 
 def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool:
     """True when the caller is non-admin and the active level locks control."""
