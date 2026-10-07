@@ -150,10 +150,10 @@ def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
         hass,
         f"Owner recovery code: **{code}**\n\n"
         "Engrave this on the recovery card and store it with the owner. "
-        "It is permanent and reusable (LAN-only) — redeeming it re-installs "
+        "It is permanent and reusable (LAN-only): redeeming it re-installs "
         "the owner's phone as admin, and the same card keeps working. A "
         "factory reset replaces it with a new code.",
-        title="CasaSmart Hub — recovery code",
+        title="CasaSmart Hub: recovery code",
         notification_id=f"{DOMAIN}_recovery_code",
     )
 
@@ -803,13 +803,13 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
                     # A new random code would be one nobody can read, so only
                     # log it; a reset from Home Assistant re-claims the hub.
                     _LOGGER.warning(
-                        "Last admin left but no stored bootstrap hash — "
+                        "Last admin left but no stored bootstrap hash; "
                         "re-claim needs the hub's reset button"
                     )
                     return True
                 runtime.pairing.install_bootstrap_hash(code_hash)
                 _LOGGER.info(
-                    "Last admin left — hub is unclaimed and the permanent "
+                    "Last admin left: hub is unclaimed and the permanent "
                     "pairing code is armed again"
                 )
                 return True

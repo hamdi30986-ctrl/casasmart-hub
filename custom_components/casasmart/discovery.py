@@ -164,7 +164,7 @@ class MdnsAdvertiser:
             self._aiozc = await ha_zeroconf.async_get_async_instance(self._hass)
         except Exception as err:
             _LOGGER.warning(
-                "mDNS advertiser unavailable (zeroconf not ready): %s — the "
+                "mDNS advertiser unavailable (zeroconf not ready): %s; the "
                 "app will still reach the hub via stored IP / tunnel",
                 err,
             )

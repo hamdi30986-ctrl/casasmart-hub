@@ -413,7 +413,7 @@ class RegistryEngine:
             ]
             if in_use:
                 raise InUseError(
-                    f"Floor still has {len(in_use)} room(s) — move them first"
+                    f"Floor still has {len(in_use)} room(s); move them first"
                 )
             del self._floors[floor_id]
         _LOGGER.info("Registry: floor %s deleted", floor_id)

@@ -402,7 +402,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) 
             "delivery remains disabled until Settings → Devices & services → "
             "CasaSmart Hub → Configure receives an explicit relay origin and "
             "a fresh Hub activation code.",
-            title="CasaSmart Hub — relay configuration required",
+            title="CasaSmart Hub: relay configuration required",
             notification_id=_NOTIFY_RELAY_CONFIGURATION,
         )
     _LOGGER.info("CasaSmart config entry migrated to version %s", CONFIG_ENTRY_VERSION)
@@ -495,7 +495,7 @@ async def _async_start_hub(
             f"Initial admin pairing code: **{bootstrap_code}**\n\n"
             "Use it in the CasaSmart app (on this network) to claim the "
             "hub. It stays valid until an admin is paired.",
-            title="CasaSmart Hub — pairing code",
+            title="CasaSmart Hub: pairing code",
             notification_id=f"{DOMAIN}_bootstrap_pairing",
         )
 
@@ -621,7 +621,7 @@ async def _async_import_registry(
         counts = await hass.async_add_executor_job(_seed)
     except Exception:
         # The flag stays unset, so the next start retries.
-        _LOGGER.exception("Registry seed failed — will retry on next start")
+        _LOGGER.exception("Registry seed failed; will retry on next start")
         return
     _LOGGER.info(
         "Registry seeded from HA: %d floors, %d rooms, %d assignments",
@@ -655,7 +655,7 @@ async def _async_setup_dev_enroll(
     if not _dev_enroll_enabled():
         return
     _LOGGER.warning(
-        "%s is set: dev device auto-enrollment is ACTIVE on this hub — never "
+        "%s is set: dev device auto-enrollment is active on this hub. Never "
         "enable it on a hub that people rely on",
         _DEV_ENROLL_ENV,
     )
@@ -829,7 +829,7 @@ async def _async_start_mdns(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     """
     runtime_data = entry.runtime_data
     if runtime_data.tls is None:
-        _LOGGER.info("mDNS advertiser skipped — TLS identity unavailable")
+        _LOGGER.info("mDNS advertiser skipped: TLS identity unavailable")
         return
 
     hub_name = runtime_data.hub_config.get(HUB_NAME_CONFIG_KEY)
@@ -864,7 +864,7 @@ async def _async_start_push(
     """
     runtime_data = entry.runtime_data
     if runtime_data.tls is None:
-        _LOGGER.info("Push dispatcher skipped — TLS identity unavailable")
+        _LOGGER.info("Push dispatcher skipped: TLS identity unavailable")
         return
 
     relay_config = relay_config_snapshot(entry.options, entry.data)
@@ -876,7 +876,7 @@ async def _async_start_push(
             "origin is configured. Open Settings → Devices & services → "
             "CasaSmart Hub → Configure and submit an explicit relay origin "
             "with a fresh Hub activation code.",
-            title="CasaSmart Hub — relay configuration required",
+            title="CasaSmart Hub: relay configuration required",
             notification_id=_NOTIFY_RELAY_CONFIGURATION,
         )
         return
@@ -886,7 +886,7 @@ async def _async_start_push(
             ensure_push_identity, data_dir, runtime_data.hub_config
         )
     except PushIdentityError:
-        _LOGGER.exception("Push dispatcher skipped — push-identity key unusable")
+        _LOGGER.exception("Push dispatcher skipped: push-identity key unusable")
         return
     except (OSError, ConfigError) as err:
         # A read-only or full data directory; push is optional.
@@ -982,7 +982,7 @@ async def _async_sync_tunnel_url(
         if url is None:
             # Flow-validated domains can't get here; fail closed if one does.
             _LOGGER.warning(
-                "Configured Cloudflare domain %r is unusable — not advertising it",
+                "Configured Cloudflare domain %r is unusable; not advertising it",
                 domain,
             )
         elif runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY) != url:
@@ -1043,7 +1043,7 @@ async def _async_options_updated(
             "activation code was invalid. Open Settings → Devices & services → "
             "CasaSmart Hub → Configure and try again. The previous relay "
             "remains selected.",
-            title="CasaSmart Hub — invalid relay setting",
+            title="CasaSmart Hub: invalid relay setting",
             notification_id=_NOTIFY_RELAY_CONFIGURATION,
         )
         _LOGGER.warning("CasaSmart rejected an invalid relay configuration update")
@@ -1074,7 +1074,7 @@ async def _async_options_updated(
                 "re-registering requires a complete fresh Hub activation code. "
                 "Open Settings → Devices & services → CasaSmart Hub → Configure "
                 "and try again. The previous relay remains selected.",
-                title="CasaSmart Hub — relay change rejected",
+                title="CasaSmart Hub: relay change rejected",
                 notification_id=_NOTIFY_RELAY_CONFIGURATION,
             )
             _LOGGER.warning(
@@ -1094,7 +1094,7 @@ async def _async_options_updated(
                 "reload it. Push delivery is paused so the old server cannot be "
                 "used. Reload the CasaSmart Hub integration, then open Configure "
                 "again if registration still needs recovery.",
-                title="CasaSmart Hub — relay reload required",
+                title="CasaSmart Hub: relay reload required",
                 notification_id=_NOTIFY_RELAY_CONFIGURATION,
             )
         else:
@@ -1116,7 +1116,7 @@ async def _async_options_updated(
                     hub_config.delete, TUNNEL_URL_CONFIG_KEY
                 )
                 _LOGGER.info(
-                    "Cloudflare domain cleared — no longer advertising %s",
+                    "Cloudflare domain cleared; no longer advertising %s",
                     derived,
                 )
             # Without a domain the reconciler leaves the add-on alone, so undo
@@ -1164,7 +1164,7 @@ async def _async_reconcile_tunnel(
         # there is no add-on to control.
         _LOGGER.info(
             "Cloudflare domain configured but tunnel control is unavailable "
-            "(no add-on Supervisor on this install) — manage cloudflared "
+            "(no add-on Supervisor on this install). Manage cloudflared "
             "manually; the options toggle has no effect here"
         )
         persistent_notification.async_create(
@@ -1173,7 +1173,7 @@ async def _async_reconcile_tunnel(
             "Assistant install has no add-on Supervisor, so the CasaSmart "
             "hub cannot start/stop cloudflared for you. Manage the tunnel "
             "where it runs; the domain keeps being advertised to phones.",
-            title="CasaSmart — tunnel control unavailable",
+            title="CasaSmart: tunnel control unavailable",
             notification_id=_NOTIFY_TUNNEL_UNAVAILABLE,
         )
         return
@@ -1183,7 +1183,7 @@ async def _async_reconcile_tunnel(
         if slug is None:
             _LOGGER.warning(
                 "Cloudflare domain configured but no cloudflared add-on is "
-                "installed — desired tunnel state (%s) saved; it will be "
+                "installed. Desired tunnel state (%s) saved; it will be "
                 "applied once the add-on is installed",
                 "enabled" if desired_on else "disabled",
             )
@@ -1192,7 +1192,7 @@ async def _async_reconcile_tunnel(
                 "A Cloudflare tunnel domain is configured, but no cloudflared "
                 "add-on is installed. Install the Cloudflare Tunnel add-on and "
                 "the CasaSmart hub will manage it automatically.",
-                title="CasaSmart — cloudflared add-on not found",
+                title="CasaSmart: cloudflared add-on not found",
                 notification_id=_NOTIFY_TUNNEL_UNAVAILABLE,
             )
             return
@@ -1214,7 +1214,7 @@ async def _async_reconcile_tunnel(
                     "home until you turn the tunnel back on there (gear "
                     "icon). Pairing doesn't need it: phones pair over the "
                     "local network.",
-                    title="CasaSmart — Cloudflare tunnel disabled",
+                    title="CasaSmart: Cloudflare tunnel disabled",
                     notification_id=_NOTIFY_TUNNEL_AUTO_DISABLED,
                 )
     except TunnelControlError as err:
@@ -1225,7 +1225,7 @@ async def _async_reconcile_tunnel(
             "The hub keeps running and the tunnel was left as-is. Check the "
             "Supervisor, then save the CasaSmart integration options again "
             "to retry.",
-            title="CasaSmart — tunnel control error",
+            title="CasaSmart: tunnel control error",
             notification_id=_NOTIFY_TUNNEL_ERROR,
         )
         return
@@ -1272,7 +1272,7 @@ async def _async_tunnel_watchdog(
     if result == "restart":
         _LOGGER.warning(
             "cloudflared %s was running but its Cloudflare edge connection was "
-            "down — restarted it to restore remote access",
+            "down; restarted it to restore remote access",
             slug,
         )
         persistent_notification.async_create(
@@ -1281,7 +1281,7 @@ async def _async_tunnel_watchdog(
             "its connection to Cloudflare's edge, so remote access was down. "
             "The hub restarted it automatically to reconnect. If this repeats, "
             "check the add-on logs and your Cloudflare tunnel credentials.",
-            title="CasaSmart — tunnel auto-recovered",
+            title="CasaSmart: tunnel auto-recovered",
             notification_id=_NOTIFY_TUNNEL_EDGE_DOWN,
         )
     elif result == "up":
@@ -1338,7 +1338,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         url = normalize_tunnel_url(call.data.get("url"))
         if url is None:
             raise HomeAssistantError(
-                "Invalid tunnel URL — must be a plain https origin "
+                "Invalid tunnel URL: it must be a plain https origin "
                 "(no userinfo/query/fragment)"
             )
 
@@ -1349,7 +1349,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         except ConfigError as err:
             raise HomeAssistantError(f"Could not save the tunnel URL: {err}") from err
         _LOGGER.info(
-            "CasaSmart tunnel URL set to %s — advertised on the next handshake",
+            "CasaSmart tunnel URL set to %s; advertised on the next handshake",
             url,
         )
 
@@ -1364,7 +1364,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             hass.config_entries.async_update_entry(entry, options=new_options)
         elif domain is None:
             _LOGGER.debug(
-                "Tunnel URL %s is not a bare origin — not mirrored to options",
+                "Tunnel URL %s is not a bare origin; not mirrored to options",
                 url,
             )
 
@@ -1472,7 +1472,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "recovery, favorites, scenes, settings, push, alarm log/state, "
             "audio config + speakers, Energy Saving data, and the registry "
             "org layer (floors/rooms/tags/"
-            "assignments/grouping) — re-seeding from HA on reload; printed "
+            "assignments/grouping). Re-seeding from HA on reload; printed "
             "codes rotated"
         )
 
@@ -1573,7 +1573,7 @@ async def _async_restore_tunnel_boot(
         if slug is not None:
             await controller.async_restore_boot_auto(slug)
             _LOGGER.info(
-                "%s — cloudflared add-on %s restored to boot=auto", reason, slug
+                "%s: cloudflared add-on %s restored to boot=auto", reason, slug
             )
     except TunnelControlError as err:
         _LOGGER.warning("Could not restore cloudflared boot mode (%s): %s", reason, err)

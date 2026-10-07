@@ -36,7 +36,7 @@ class JsonConfigStore:
     def _load(self) -> dict[str, Any]:
         """Read the file; a missing file is an empty config, a bad one an error."""
         if not self._path.exists():
-            _LOGGER.info("Config file %s missing — starting empty", self._path)
+            _LOGGER.info("Config file %s missing; starting empty", self._path)
             return {}
         try:
             with self._path.open(encoding="utf-8") as fh:

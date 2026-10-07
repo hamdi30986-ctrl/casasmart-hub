@@ -344,7 +344,7 @@ class CasaSmartHandshakeView(HomeAssistantView):
             elif raw_tunnel is not None and not self._tunnel_warned:
                 self._tunnel_warned = True
                 _LOGGER.warning(
-                    "Configured %s is not a usable https URL — "
+                    "Configured %s is not a usable https URL; "
                     "tunnel not advertised: %r",
                     TUNNEL_URL_CONFIG_KEY,
                     raw_tunnel,

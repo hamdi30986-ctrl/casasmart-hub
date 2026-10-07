@@ -206,13 +206,13 @@ class AthanScheduler:
         """Replace the timers with today's, for the resolved config in tz."""
         self._cancel_prayers()
         if resolved is None:
-            _LOGGER.debug("Athan: disabled or no location — nothing scheduled")
+            _LOGGER.debug("Athan: disabled or no location; nothing scheduled")
             self._schedule = {"enabled": False}
             return
         lat, lon, tz_name, method, school = resolved
 
         if tz is None:
-            _LOGGER.warning("Athan: unknown timezone %r — nothing scheduled", tz_name)
+            _LOGGER.warning("Athan: unknown timezone %r; nothing scheduled", tz_name)
             self._schedule = {"enabled": True, "error": f"unknown timezone {tz_name!r}"}
             return
 
@@ -281,8 +281,8 @@ class AthanScheduler:
         # so it shows even when HA logs only warnings.
         if has_sel and not targets:
             _LOGGER.warning(
-                "Athan enabled for %s but its selected speakers are all un-enrolled — "
-                "athan will fire on NO speakers until the selection is fixed.",
+                "Athan enabled for %s but its selected speakers are all un-enrolled; "
+                "athan will fire on no speakers until the selection is fixed.",
                 today,
             )
 
@@ -300,7 +300,7 @@ class AthanScheduler:
             else (
                 f"{len(targets)} speaker(s): {','.join(targets)}"
                 if targets
-                else "NO speakers (empty selection)"
+                else "no speakers (empty selection)"
             ),
             ", ".join(armed) if armed else "none remaining today",
         )
@@ -348,7 +348,7 @@ class AthanScheduler:
         # Athan may have been turned off since the timer was armed.
         if self._resolve_config() is None:
             _LOGGER.info(
-                "Athan: %s reached but athan is now disabled — skipping", prayer
+                "Athan: %s reached but athan is now disabled; skipping", prayer
             )
             return
         athan = self._engine.get_athan() or {}
@@ -357,7 +357,7 @@ class AthanScheduler:
 
         if has_sel and not targets:
             _LOGGER.warning(
-                "Athan: %s — selected speakers are all un-enrolled; firing nowhere",
+                "Athan: %s, selected speakers are all un-enrolled; firing nowhere",
                 prayer,
             )
             return
@@ -378,7 +378,7 @@ class AthanScheduler:
                 delivered += 1
             except Exception:
                 _LOGGER.warning(
-                    "Athan: %s not delivered to %s — MQTT bus unavailable",
+                    "Athan: %s not delivered to %s: MQTT bus unavailable",
                     prayer,
                     topic,
                 )

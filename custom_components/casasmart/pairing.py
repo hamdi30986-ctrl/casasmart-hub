@@ -253,7 +253,7 @@ class PairingManager:
             for code_id in list(self._codes):
                 del self._codes[code_id]
         if count:
-            _LOGGER.info("Wiped all %d pairing code(s) — pairing factory reset", count)
+            _LOGGER.info("Wiped all %d pairing code(s); pairing factory reset", count)
         return count
 
     # -- enrollment gate ---------------------------------------------------------

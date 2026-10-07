@@ -104,7 +104,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             body = (
                 f"New owner pairing code: **{code}**\n\n"
                 "Role: admin · never expires · LAN-only · valid while unclaimed.\n"
-                "⚠️ This ROTATES the permanent code — the OLD printed sticker is "
+                "This rotates the permanent code: the old printed sticker is "
                 "now dead. Re-sticker the hub with this new code.\n\n"
                 f"Pairing was reset: {device_count} device(s) unpaired, "
                 f"{code_count} code(s) cleared.\n\n"
@@ -117,13 +117,13 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             body = (
                 f"Pairing was reset: {device_count} device(s) unpaired, "
                 f"{code_count} code(s) cleared.\n\n"
-                "No new code was minted — re-run the reset or check the logs."
+                "No new code was minted. Re-run the reset or check the logs."
             )
 
         persistent_notification.async_create(
             self._hass,
             body,
-            title="CasaSmart Hub — pairing reset",
+            title="CasaSmart Hub: pairing reset",
             notification_id=f"{DOMAIN}_regenerated_pairing",
         )
         # Updates the per-device sensors.
@@ -171,14 +171,14 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         _LOGGER.warning("CasaSmart factory reset requested via button")
         persistent_notification.async_create(
             self._hass,
-            "Factory reset triggered — the app layer (paired phones, codes, "
+            "Factory reset triggered. The app layer (paired phones, codes, "
             "favorites, scenes, settings, push tokens, alarm log/state) is being "
             "wiped and the previous owner's device labels scrubbed. Rooms re-seed "
             "from Home Assistant; tanks, alarm zones and everything in Home "
-            "Assistant are kept. FRESH admin + recovery codes will be posted here "
-            "after the reset — the OLD printed sticker and metal card are now "
+            "Assistant are kept. Fresh admin + recovery codes will be posted here "
+            "after the reset. The old printed sticker and metal card are now "
             "dead; re-sticker the hub with the new code.",
-            title="CasaSmart Hub — factory reset",
+            title="CasaSmart Hub: factory reset",
             notification_id=f"{DOMAIN}_factory_reset",
         )
         await self._hass.services.async_call(DOMAIN, "factory_reset", blocking=False)

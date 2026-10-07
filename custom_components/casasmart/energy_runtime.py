@@ -65,7 +65,7 @@ def energy_lockout_refusal() -> dict[str, str]:
     """
     return {
         "error": "energy_lockout",
-        "message": "Energy saving is active — controls are locked by the admin",
+        "message": "Energy saving is active: controls are locked by the admin",
         "code": "energy_lockout",
     }
 

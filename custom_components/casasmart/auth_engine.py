@@ -405,7 +405,7 @@ class AuthEngine:
                 "ver": 1,
             }
         _LOGGER.info(
-            "Owner recovery: admin %s replaced by %s (%s) — old admin tokens dead",
+            "Owner recovery: admin %s replaced by %s (%s); old admin tokens dead",
             old_admin_id,
             device_id,
             name,
@@ -592,7 +592,7 @@ class AuthEngine:
                 "ver": record["ver"],
             }
         _LOGGER.info(
-            "Device %s updated (role=%s, rooms=%s) — outstanding tokens invalidated",
+            "Device %s updated (role=%s, rooms=%s); outstanding tokens invalidated",
             device_id,
             new_role,
             "all" if new_rooms is None else len(new_rooms),
@@ -623,7 +623,7 @@ class AuthEngine:
             self._device_cache.pop(device_id, None)
             # A re-paired phone shouldn't inherit an old lockout.
             self._clear_throttle(device_id)
-        _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
+        _LOGGER.info("Device %s unpaired; all tokens dead", device_id)
         return member_id
 
     def leave_hub(self, device_id: str) -> str:
@@ -644,7 +644,7 @@ class AuthEngine:
             self._device_cache.pop(device_id, None)
             self._clear_throttle(device_id)
         _LOGGER.info(
-            "Device %s left the hub at its own request (role=%s) — all tokens dead",
+            "Device %s left the hub at its own request (role=%s); all tokens dead",
             device_id,
             record.get("role"),
         )
@@ -664,7 +664,7 @@ class AuthEngine:
                 self._clear_throttle(device_id)
             self._device_cache.clear()
         if wiped:
-            _LOGGER.info("Wiped all %d device(s) — hub reset to unclaimed", len(wiped))
+            _LOGGER.info("Wiped all %d device(s); hub reset to unclaimed", len(wiped))
         return wiped
 
     # -- challenge-response login ---------------------------------------------

@@ -152,4 +152,4 @@ class RecoveryManager:
             # and replace_admin's need for an existing admin protect it.
 
         self.throttle.clear(source_key)
-        _LOGGER.info("Owner recovery code redeemed (permanent — card stays valid)")
+        _LOGGER.info("Owner recovery code redeemed (permanent; the card stays valid)")

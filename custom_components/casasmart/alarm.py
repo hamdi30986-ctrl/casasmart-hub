@@ -174,7 +174,7 @@ class AlarmEngine:
             # pending alarm fails secure to triggered.
             if self._state["mode"] == MODE_PENDING:
                 _LOGGER.warning(
-                    "Alarm restored from disk mid entry-delay — failing secure to triggered"
+                    "Alarm restored from disk mid entry-delay; failing secure to triggered"
                 )
                 self._enter_triggered(
                     self._state.get("trigger_entity"),

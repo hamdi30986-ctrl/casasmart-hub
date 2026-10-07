@@ -307,7 +307,7 @@ class CasaSmartTankProvisionView(_TankView):
         ingest_url = self._ingest_url() or await self._default_ingest_url()
         if ingest_url is None:
             return self.json_message(
-                "Hub LAN address unknown — set tank_ingest_url in hub config",
+                "Hub LAN address unknown: set tank_ingest_url in hub config",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -333,7 +333,7 @@ class CasaSmartTankProvisionView(_TankView):
             )
         if info.get("auth_en") is True:
             return self.json_message(
-                "Shelly has device authentication enabled — disable it "
+                "Shelly has device authentication enabled; disable it "
                 "and provision again",
                 HTTPStatus.BAD_REQUEST,
             )

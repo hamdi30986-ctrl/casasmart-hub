@@ -642,7 +642,7 @@ class TankPushMonitor:
             {
                 "type": PUSH_TYPE_TANK_OFFLINE,
                 "title": "Water tank offline",
-                "body": f"{name} — no readings for 20+ minutes",
+                "body": f"{name}: no readings for 20+ minutes",
                 "device_id": device_id,
             },
             PRIORITY_NORMAL,
