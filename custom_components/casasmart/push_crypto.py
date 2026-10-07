@@ -10,7 +10,6 @@ match the one registered with the relay.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -19,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .storage import JsonConfigStore
+from .tls import create_key_file
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,10 +76,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
 
     private_key = Ed25519PrivateKey.generate()
     raw = private_key.private_bytes_raw()
-    # 0600 from creation; O_EXCL stops two concurrent first boots making two keys.
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(raw)
+    create_key_file(key_path, raw)
     _LOGGER.info("Generated permanent Ed25519 push-identity key at %s", key_path)
     return private_key
 
