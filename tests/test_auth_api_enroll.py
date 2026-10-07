@@ -35,7 +35,7 @@ install_homeassistant_stubs()
 install_casasmart_package()
 
 import view_harness as H  # noqa: E402
-from casasmart.auth_api import CasaSmartEnrollView  # noqa: E402
+from casasmart.auth_api import CasaSmartEnrollView, async_member_id  # noqa: E402
 from casasmart.auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine  # noqa: E402
 from casasmart.const import (  # noqa: E402
     BOOTSTRAP_CODE_HASH_CONFIG_KEY,
@@ -442,6 +442,33 @@ class IdempotentRePairCodeTests(EnrollGateTests):
         # The wall goes up exactly as it does on the redeem path — a
         # remembered key must not become a free code-guessing oracle.
         self.assertEqual(status, 429)
+
+
+class MemberLookupTests(unittest.IsolatedAsyncioTestCase):
+    """async_member_id: the member behind a token, read off the event loop."""
+
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.hass, self.rt = H.make_hub(self._tmp.name)
+        self.addCleanup(self.rt.storage.close)
+
+    async def test_reads_the_member_in_the_executor(self) -> None:
+        device_id = H.enroll(self.rt.auth, member_id="mem-owner")
+        jobs = []
+
+        async def executor(func, *args):
+            jobs.append(func)
+            return func(*args)
+
+        self.hass.async_add_executor_job = executor
+        member = await async_member_id(self.hass, {"sub": device_id})
+        self.assertEqual(member, "mem-owner")
+        self.assertEqual(jobs, [self.rt.auth.member_id_for])
+
+    async def test_the_device_is_its_own_member_while_the_hub_is_loading(self) -> None:
+        self.hass.config_entries.async_loaded_entries = lambda domain: []
+        self.assertEqual(await async_member_id(self.hass, {"sub": "dev-1"}), "dev-1")
 
 
 if __name__ == "__main__":

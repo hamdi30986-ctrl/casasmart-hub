@@ -91,6 +91,18 @@ def get_engine(hass: HomeAssistant) -> AuthEngine | None:
     return runtime_data.auth if runtime_data is not None else None
 
 
+async def async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
+    """The member behind the token; a device with no member is its own.
+
+    Reads storage in the executor, so it may raise StorageError or
+    sqlite3.Error.
+    """
+    engine = get_engine(hass)
+    if engine is None:
+        return claims["sub"]
+    return await hass.async_add_executor_job(engine.member_id_for, claims["sub"])
+
+
 def get_pairing(hass: HomeAssistant) -> PairingManager | None:
     """The loaded entry's pairing manager, or None when not set up."""
     runtime_data = loaded_runtime_data(hass)

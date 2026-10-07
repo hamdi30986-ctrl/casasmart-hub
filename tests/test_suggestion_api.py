@@ -6,7 +6,6 @@ import asyncio
 import importlib.util
 import sys
 import tempfile
-import threading
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -64,6 +63,9 @@ def load_boundaries():
     async def body(request):
         return request.body
 
+    async def member_id(hass, claims):
+        return claims["sub"].split(":")[0]
+
     def track(hass, ids, callback):
         key = object()
         hass.tracked[key] = (set(ids), callback)
@@ -86,7 +88,7 @@ def load_boundaries():
         "phase4_fixture.auth_api",
         authenticate_request=authenticate,
         json_body=body,
-        get_engine=lambda h: NS(member_id_for=lambda sub: sub.split(":")[0]),
+        async_member_id=member_id,
     )
     module(
         "phase4_fixture.energy_runtime",
@@ -485,21 +487,19 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, 200)
         self.assertEqual(len(self.calls), 1)
 
-    async def test_member_lookup_runs_off_the_event_loop(self):
-        # Resolving the person behind the token reads SQLite: it belongs in
-        # the executor, for the list and the actions alike.
-        on_loop = []
+    async def test_member_is_looked_up_for_the_list_and_both_action_checks(self):
+        # Suppressions follow the person behind the token, whichever device
+        # they use; async_member_id reads it in the executor.
+        lookups = []
 
-        def member_id_for(sub):
-            on_loop.append(threading.current_thread() is threading.main_thread())
-            return sub.split(":")[0]
+        async def member_id(hass, claims):
+            lookups.append(claims["sub"])
+            return claims["sub"].split(":")[0]
 
-        engine = NS(member_id_for=member_id_for)
-        with patch.object(API, "get_engine", lambda hass: engine):
+        with patch.object(API, "async_member_id", member_id):
             oid = (await self.selected())["occurrence_id"]
             self.assertEqual((await self.action("run", oid)).status, 200)
-        self.assertEqual(len(on_loop), 3)  # list, action, re-check before running
-        self.assertFalse(any(on_loop), on_loop)
+        self.assertEqual(len(lookups), 3)  # list, action, re-check before running
 
     async def test_success_suppresses_globally_and_replay_does_not_execute(self):
         oid = (await self.selected())["occurrence_id"]

@@ -17,7 +17,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .auth_api import authenticate_request, get_engine, read_json_object
+from .auth_api import async_member_id, authenticate_request, read_json_object
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .filtering import in_scope, is_served
 from .runtime_lookup import loaded_runtime_data
@@ -56,14 +56,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         settings = get_user_settings(self._hass)
         if settings is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        # A legacy device with no member is its own member.
-        engine = get_engine(self._hass)
-        sub = claims["sub"]
-
-        def _load() -> dict:
-            return settings.get(engine.member_id_for(sub) if engine else sub)
-
-        doc = await self._hass.async_add_executor_job(_load)
+        member_id = await async_member_id(self._hass, claims)
+        doc = await self._hass.async_add_executor_job(settings.get, member_id)
         # Filter for the reply only: during HA startup states are still
         # arriving, and saving the filtered list would erase the layout.
         if doc.get("widget_tiles"):
@@ -111,13 +105,10 @@ class CasaSmartUserSettingsView(HomeAssistantView):
                         f"Unknown device {tile.get('entityId')!r}",
                         HTTPStatus.BAD_REQUEST,
                     )
-        engine = get_engine(self._hass)
-        sub = claims["sub"]
+        member_id = await async_member_id(self._hass, claims)
         try:
             doc = await self._hass.async_add_executor_job(
-                lambda: settings.update(
-                    engine.member_id_for(sub) if engine else sub, payload
-                )
+                settings.update, member_id, payload
             )
         except SettingsError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)

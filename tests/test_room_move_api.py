@@ -47,7 +47,7 @@ def load_api():
     module(
         "room_api_fixture.auth_api",
         authenticate_request=None,
-        get_engine=None,
+        async_member_id=None,
         read_json_object=None,
         ready_or_503=ready_or_503,
     )
@@ -108,9 +108,11 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.api.get_registry = lambda hass: self.engine
         self.api.loaded_runtime_data = lambda hass: SimpleNamespace(storage=self.store)
-        self.api.get_engine = lambda hass: SimpleNamespace(
-            member_id_for=lambda sub: "member"
-        )
+
+        async def member_id(hass, claims):
+            return "member"
+
+        self.api.async_member_id = member_id
         self.api.authenticate_request = authenticate
         self.api.read_json_object = body
         self.api.is_assignable = lambda hass, eid: eid in {"light.one", "cover.two"}

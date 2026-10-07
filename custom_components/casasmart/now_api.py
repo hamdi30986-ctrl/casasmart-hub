@@ -27,7 +27,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .auth_api import authenticate_request, get_engine, read_json_object, ready_or_503
+from .auth_api import (
+    async_member_id,
+    authenticate_request,
+    read_json_object,
+    ready_or_503,
+)
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .filtering import area_id_of, in_scope, is_served, serialize_device
@@ -72,17 +77,6 @@ def get_now_data(hass: HomeAssistant) -> NowDataEngine | None:
     """The Now store of the loaded entry, or None while the hub isn't loaded."""
     runtime_data = loaded_runtime_data(hass)
     return runtime_data.now_data if runtime_data is not None else None
-
-
-async def _async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
-    """The member behind the token, so all their devices share recents.
-
-    Runs in the executor and may raise StorageError or sqlite3.Error.
-    """
-    engine = get_engine(hass)
-    if engine is None:
-        return claims["sub"]
-    return await hass.async_add_executor_job(engine.member_id_for, claims["sub"])
 
 
 def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
@@ -155,7 +149,7 @@ class CasaSmartNowView(_NowView):
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
 
         try:
-            member_id = await _async_member_id(self._hass, claims)
+            member_id = await async_member_id(self._hass, claims)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         scope = claims.get("rooms")
@@ -655,7 +649,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         except NowDataError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         try:
-            member_id = await _async_member_id(self._hass, claims)
+            member_id = await async_member_id(self._hass, claims)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         lock = self._room_locks.setdefault(room_id, asyncio.Lock())

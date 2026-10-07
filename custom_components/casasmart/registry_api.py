@@ -23,7 +23,12 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .auth_api import authenticate_request, get_engine, read_json_object, ready_or_503
+from .auth_api import (
+    async_member_id,
+    authenticate_request,
+    read_json_object,
+    ready_or_503,
+)
 from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .energy_runtime import energy_lockout_applies
@@ -688,12 +693,8 @@ class CasaSmartRoomMoveView(_RegistryView):
             return self.json_message("Invalid expected_rooms", HTTPStatus.BAD_REQUEST)
         assignable = {eid for eid in ids if is_assignable(self._hass, eid)}
         fallback = {eid: ha_area_id_of(self._hass, eid) for eid in assignable}
-        auth = get_engine(self._hass)
-        sub = claims["sub"]
         try:
-            actor = await self._hass.async_add_executor_job(
-                lambda: auth.member_id_for(sub) if auth else sub
-            )
+            actor = await async_member_id(self._hass, claims)
             result = await self._hass.async_add_executor_job(
                 lambda: registry.move_device_room(
                     runtime.storage,
@@ -1141,16 +1142,12 @@ class CasaSmartFavoritesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        # A legacy device with no member is its own member.
-        engine = get_engine(self._hass)
-        sub = claims["sub"]
         scope = claims.get("rooms")
-
-        def _load() -> list[str]:
-            return registry.get_favorites(engine.member_id_for(sub) if engine else sub)
-
         try:
-            stored = await self._hass.async_add_executor_job(_load)
+            member_id = await async_member_id(self._hass, claims)
+            stored = await self._hass.async_add_executor_job(
+                registry.get_favorites, member_id
+            )
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         # Filter for the reply only: during HA startup states are still
@@ -1191,16 +1188,10 @@ class CasaSmartFavoritesView(_RegistryView):
                 return self.json_message(
                     f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
                 )
-        engine = get_engine(self._hass)
-        sub = claims["sub"]
-
-        def _load_mid_stored() -> tuple[str, list[str]]:
-            mid = engine.member_id_for(sub) if engine else sub
-            return mid, registry.get_favorites(mid)
-
         try:
-            member_id, stored = await self._hass.async_add_executor_job(
-                _load_mid_stored
+            member_id = await async_member_id(self._hass, claims)
+            stored = await self._hass.async_add_executor_job(
+                registry.get_favorites, member_id
             )
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
