@@ -1351,7 +1351,7 @@ class EnergyAdapter:
                 if occupancy.get("occupied") is True:
                     continue
             for entity in room.covers:
-                if entity.state not in {"closed", "closing"}:
+                if entity.available and entity.state not in {"closed", "closing"}:
                     await self._close_cover(entity.entity_id)
         self._schedule_sun_timer()
 

@@ -726,6 +726,23 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.calls(), [])
 
+    async def test_heat_window_start_skips_an_unavailable_cover(self):
+        sun = _sun(self.now, day=True, since_sunrise_hours=0.5, until_sunset_hours=5)
+        adapter, _ = self.make_adapter(
+            [_State("cover.curtain", "open"), _State("cover.blind", "open"), sun],
+            {"cover.curtain": "suite", "cover.blind": "suite"},
+        )
+        self.activate(LEVEL_MEDIUM)
+        await adapter.async_apply()
+        start_timer = self.timers.latest(30 * 60)
+
+        self.hass.states.set(_State("cover.blind", "unavailable"))
+        self.wall.advance(30 * 60)
+        self.timers.fire(start_timer)
+        await self.drain()
+        self.assertEqual(len(self.calls("cover.curtain", "close_cover")), 1)
+        self.assertEqual(self.calls("cover.blind"), [])
+
     async def test_room_excluded_mid_session_ignores_the_sunset_edge(self):
         sun = _sun(self.now, day=True)
         states = [
