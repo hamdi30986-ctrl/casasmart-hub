@@ -74,10 +74,11 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "update.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "update.install": (ROLE_ADMIN,),
     "widget.token": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
-    # This device's own identity: its push registration and leaving the hub.
-    # Every role's session holds it; deliberately outside
-    # WIDGET_SCOPE_PERMISSIONS, so a widget token can't repoint its owner's
-    # notifications or unpair its owner.
+    # The session's own writes that aren't device control: this device's push
+    # registration and leaving the hub, and its person's settings, favorites
+    # and suggestion dismiss/snooze. Every role's session holds it;
+    # deliberately outside WIDGET_SCOPE_PERMISSIONS, so a widget token reads
+    # and controls devices and nothing else.
     "session.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
 

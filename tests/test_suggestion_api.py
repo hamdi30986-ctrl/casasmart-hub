@@ -17,6 +17,11 @@ from unittest.mock import patch
 import test_suggestions as fixtures
 from test_room_move_api import load_api
 
+# The real cap the auth engine puts on a home-screen widget's token.
+WIDGET_SCOPE_PERMISSIONS = importlib.import_module(
+    "phase4_fixture.auth_engine"
+).WIDGET_SCOPE_PERMISSIONS
+
 
 def load_boundaries():
     modules = {}
@@ -43,6 +48,13 @@ def load_boundaries():
                 data={"error": "forbidden", "message": "Permission denied"}, status=403
             )
         if permission == "devices.control" and not claims.get("control", True):
+            return None, NS(
+                data={"error": "forbidden", "message": "Permission denied"}, status=403
+            )
+        if (
+            claims.get("scope") == "widget"
+            and permission not in WIDGET_SCOPE_PERMISSIONS
+        ):
             return None, NS(
                 data={"error": "forbidden", "message": "Permission denied"}, status=403
             )
@@ -443,6 +455,34 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(minutes=20)
         self.assertIsNotNone(await self.selected(sub="bob:phone"))
         self.assertEqual(self.calls, [])
+
+    async def test_widget_token_cannot_dismiss_or_snooze(self):
+        # Dismiss/snooze write the person's suggestion state, not a device: a
+        # session write. A home-screen widget's token is refused and nothing
+        # is suppressed, for the member or anyone else.
+        oid = (await self.selected())["occurrence_id"]
+        for action in ("dismiss", "snooze"):
+            with self.subTest(action=action):
+                result = await self.action(action, oid, scope="widget")
+                self.assertEqual(result.status, 403)
+        self.assertEqual(self.store.snapshot()["suppressions"], {})
+        self.assertEqual((await self.selected())["occurrence_id"], oid)
+        # Every role's session still dismisses and snoozes (one person each,
+        # since a suppression hides the suggestion from that person).
+        for role in ("admin", "sub-admin", "user"):
+            for action, status in (("snooze", "snoozed"), ("dismiss", "dismissed")):
+                with self.subTest(role=role, action=action):
+                    sub = f"{role}-{action}:phone"
+                    result = await self.action(action, oid, role=role, sub=sub)
+                    self.assertEqual(result.data["status"], status)
+        self.assertEqual(self.calls, [])
+
+    async def test_widget_token_still_runs_a_suggestion(self):
+        # Run activates a scene — device control, which a widget may do.
+        oid = (await self.selected())["occurrence_id"]
+        result = await self.action("run", oid, scope="widget")
+        self.assertEqual(result.status, 200)
+        self.assertEqual(len(self.calls), 1)
 
     async def test_success_suppresses_globally_and_replay_does_not_execute(self):
         oid = (await self.selected())["occurrence_id"]

@@ -6,9 +6,9 @@
 never read or write another user's settings, which is the whole permission
 story for personal data.
 
-GET rides ``devices.read`` and PUT ``devices.control`` — the favorites
-posture: every current role may keep its own settings, but a future
-read-only role must not slip through a read permission into a mutation.
+GET rides ``devices.read`` and PUT ``session.manage`` — the favorites
+posture: every role's session may keep its own settings, but a home-screen
+widget's token (device read + control only) can't rewrite them.
 PUT is a partial update (only the named fields move; explicit null
 clears) so the profile screen and the widget editor write independently
 without clobbering each other.
@@ -110,7 +110,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         return in_scope(self._hass, tile.get("entityId"), scope)
 
     async def put(self, request: web.Request) -> web.Response:
-        claims, error = authenticate_request(self._hass, request, "devices.control")
+        claims, error = authenticate_request(self._hass, request, "session.manage")
         if error is not None:
             return error
         settings = get_user_settings(self._hass)

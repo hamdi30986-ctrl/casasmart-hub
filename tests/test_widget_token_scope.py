@@ -41,12 +41,19 @@ from casasmart.pairing import (  # noqa: E402
 from casasmart.push import PushTokenStore  # noqa: E402
 from casasmart.push_api import CasaSmartPushTokenView  # noqa: E402
 
-try:  # The device views pull in HA's recorder: real Home Assistant only.
+try:  # These views pull in HA's recorder / registries: real Home Assistant only.
     from casasmart.api import (
         CasaSmartCommandView,
         CasaSmartDevicesView,
         CasaSmartDeviceView,
     )
+    from casasmart.registry_api import CasaSmartFavoritesView
+    from casasmart.settings_api import CasaSmartUserSettingsView
+    from casasmart.suggestion_api import (
+        CasaSmartGeneratedSuggestionActionView,
+        CasaSmartSuggestionActionView,
+    )
+    from casasmart.user_settings import UserSettingsEngine
 
     _DEVICE_VIEWS_ERR: Exception | None = None
 except Exception as err:
@@ -275,6 +282,94 @@ class WidgetTokenKeepsItsDeviceSurfaceTests(_HubTestCase):
             [(d, s) for d, s, _data, _blocking in self.hass.services.calls],
             [("light", "turn_off")],
         )
+
+
+@unittest.skipIf(
+    _DEVICE_VIEWS_ERR is not None,
+    f"Home Assistant unavailable: {_DEVICE_VIEWS_ERR}",
+)
+class WidgetTokenCannotWritePersonalStateTests(_HubTestCase):
+    """Settings, favorites and suggestion dismiss/snooze belong to the person,
+    not to a device: session writes, out of a widget token's reach."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.hass.states.add("light.lamp", state="on")
+        self.settings = UserSettingsEngine(self.rt.storage.table("user_settings"))
+        self.rt.user_settings = self.settings
+        for module in ("registry_api", "settings_api"):
+            patcher = mock.patch.multiple(
+                f"casasmart.{module}",
+                is_served=lambda hass, eid: True,
+                in_scope=lambda hass, eid, rooms: True,
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def _put_settings(self, headers):
+        return H.read_response(
+            await CasaSmartUserSettingsView(self.hass).put(
+                H.FakeRequest(headers=headers, body={"display_name": "Changed"})
+            )
+        )
+
+    async def _put_favorites(self, headers):
+        return H.read_response(
+            await CasaSmartFavoritesView(self.hass).put(
+                H.FakeRequest(headers=headers, body={"entity_ids": ["light.lamp"]})
+            )
+        )
+
+    async def test_widget_token_cannot_write_settings_or_favorites(self) -> None:
+        for role in _ROLES:
+            with self.subTest(role=role):
+                device_id = H.enroll(self.rt.auth, role=role)
+                member = self.rt.auth.member_id_for(device_id)
+                self.settings.update(member, {"display_name": "Original"})
+                widget = self._widget_headers(device_id)
+
+                self.assertEqual((await self._put_settings(widget))[0], 403)
+                self.assertEqual((await self._put_favorites(widget))[0], 403)
+
+                self.assertEqual(self.settings.get(member)["display_name"], "Original")
+                self.assertEqual(self.rt.registry.get_favorites(member), [])
+        self.assertEqual(self.hass.bus.fired, [])  # no settings/favorites nudge
+
+    async def test_every_role_session_still_writes_settings_and_favorites(self) -> None:
+        for role in _ROLES:
+            with self.subTest(role=role):
+                device_id, headers = H.session(self.rt.auth, role=role)
+                member = self.rt.auth.member_id_for(device_id)
+
+                status, body = await self._put_settings(headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["display_name"], "Changed")
+                status, body = await self._put_favorites(headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(self.rt.registry.get_favorites(member), ["light.lamp"])
+
+    async def test_widget_token_cannot_dismiss_or_snooze_a_suggestion(self) -> None:
+        # Refused before the suggestion service is touched: spec-less stand-ins
+        # raise on any attribute access, so a 403 here proves nothing ran.
+        self.rt.suggestions = mock.NonCallableMock(
+            spec=["generated"], generated=mock.NonCallableMock(spec=[])
+        )
+        widget = self._widget_headers(H.enroll(self.rt.auth, role="admin"))
+        for view in (
+            CasaSmartSuggestionActionView,
+            CasaSmartGeneratedSuggestionActionView,
+        ):
+            for action in ("dismiss", "snooze"):
+                with self.subTest(view=view.__name__, action=action):
+                    status, _ = H.read_response(
+                        await view(self.hass).post(
+                            H.FakeRequest(
+                                headers=widget,
+                                body={"action": action, "occurrence_id": "0" * 64},
+                            )
+                        )
+                    )
+                    self.assertEqual(status, 403)
 
 
 if __name__ == "__main__":
