@@ -18,6 +18,7 @@ install_homeassistant_stubs()
 install_casasmart_package()
 
 import aiohttp  # noqa: E402
+import view_harness as H  # noqa: E402
 from aiohttp import web  # noqa: E402
 from casasmart.auth_api import is_lan_request  # noqa: E402
 from casasmart.lan_ingress import (  # noqa: E402
@@ -27,6 +28,12 @@ from casasmart.lan_ingress import (  # noqa: E402
     resolve_lan_relay_ingress,
 )
 from casasmart.tls import CasaSmartTlsServer, ensure_tls_material  # noqa: E402
+
+try:  # The setup module (``__init__``) needs a real Home Assistant.
+    _INTEGRATION = H.import_integration()
+    _INTEGRATION_ERR: Exception | None = None
+except Exception as err:
+    _INTEGRATION_ERR = err
 
 # Real kernel banners.
 DOCKER_DESKTOP = (
@@ -70,6 +77,44 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(is_recognized_lan_relay_ingress(setting), setting)
         for setting in ("auto", "yes", "On", "true", "", 1, 0, [], {}):
             self.assertFalse(is_recognized_lan_relay_ingress(setting), setting)
+
+
+@unittest.skipIf(
+    _INTEGRATION_ERR is not None, f"Home Assistant unavailable: {_INTEGRATION_ERR}"
+)
+class RelayIngressStartupWarningTests(unittest.TestCase):
+    """The "LAN relay ingress on" warning names only what the LAN gate guards.
+
+    Pairing and recovery always ride it. Speaker provisioning does only when
+    ``keyless_speaker_provisioning`` is exactly true; by default it needs the
+    provisioning key, so the relay changes nothing for it.
+    """
+
+    def _warning(self, keyless=None) -> str:
+        hub_config = H.FakeHubConfig()
+        if keyless is not None:
+            hub_config.set("keyless_speaker_provisioning", keyless)
+        with self.assertLogs("casasmart", level="WARNING") as logs:
+            _INTEGRATION._warn_lan_relay_ingress_on(hub_config, 8443)
+        self.assertEqual(len(logs.records), 1)
+        return logs.records[0].getMessage()
+
+    def test_pairing_and_recovery_only_by_default(self) -> None:
+        for keyless in (None, False, "true", 1):
+            with self.subTest(keyless=keyless):
+                message = self._warning(keyless)
+                self.assertIn(
+                    "connections on the hub TLS port 8443 count as LAN for "
+                    "pairing and recovery.",
+                    message,
+                )
+                self.assertNotIn("provisioning", message)
+
+    def test_names_speaker_provisioning_when_keyless_is_on(self) -> None:
+        self.assertIn(
+            "count as LAN for pairing, recovery and keyless speaker provisioning.",
+            self._warning(True),
+        )
 
 
 class _Hass:

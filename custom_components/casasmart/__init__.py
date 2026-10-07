@@ -656,6 +656,24 @@ def _warn_keyless_speaker_provisioning(
     )
 
 
+def _warn_lan_relay_ingress_on(hub_config: JsonConfigStore, port: int) -> None:
+    """Say which LAN-gated features the trusted relay listener now admits."""
+    # Speaker provisioning rides the LAN gate only when keyless provisioning
+    # is on; by default it needs the provisioning key wherever it comes from.
+    gated = "pairing and recovery"
+    if hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True:
+        gated = "pairing, recovery and keyless speaker provisioning"
+    # WARNING, not INFO: Home Assistant hides INFO by default, and this is a
+    # deliberate relaxation of the LAN gate that operators must be able to see.
+    _LOGGER.warning(
+        "LAN relay ingress on: connections on the hub TLS port %s count as "
+        "LAN for %s. Publish that port to 127.0.0.1 only and reach it through "
+        "the CasaSmart LAN relay (deploy/macos), which admits only LAN clients.",
+        port,
+        gated,
+    )
+
+
 _RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"
 
 
@@ -711,15 +729,7 @@ async def _async_start_tls(
         )
     trusted_lan = resolve_lan_relay_ingress(ingress_setting)
     if trusted_lan:
-        # WARNING, not INFO: Home Assistant hides INFO by default, and this is a
-        # deliberate relaxation of the LAN gate that operators must be able to see.
-        _LOGGER.warning(
-            "LAN relay ingress on: connections on the hub TLS port %s count as "
-            "LAN for pairing, recovery and speaker provisioning. Publish that "
-            "port to 127.0.0.1 only and reach it through the CasaSmart LAN relay "
-            "(deploy/macos), which admits only LAN clients.",
-            port,
-        )
+        _warn_lan_relay_ingress_on(runtime_data.hub_config, port)
     elif needs_relay_ingress_hint(
         ingress_setting, await hass.async_add_executor_job(_read_proc_version)
     ):
