@@ -217,6 +217,21 @@ def is_lan_request(request: web.Request) -> bool:
     return (remote.is_private or remote.is_link_local) and not remote.is_loopback
 
 
+def client_address(request: web.Request) -> str:
+    """The client address throttles key on.
+
+    Every tunnel request reaches the hub from cloudflared's address, so a
+    request carrying Cloudflare's proxy headers is keyed on the client
+    address Cloudflare reports. X-Forwarded-For is never read.
+    """
+    if _arrived_through_cloudflare(request):
+        reported = str(request.headers.get("CF-Connecting-IP", "")).strip()
+        if reported:
+            # Its own namespace, so a faked header can't share a LAN peer's key.
+            return f"cf:{reported}"
+    return request.remote or "unknown"
+
+
 def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
     """Whether remote pairing is on in hub config (default off).
 
@@ -609,7 +624,7 @@ class CasaSmartChallengeView(HomeAssistantView):
 
         try:
             challenge = await self._hass.async_add_executor_job(
-                engine.create_challenge, device_id, request.remote or "unknown"
+                engine.create_challenge, device_id, client_address(request)
             )
         except ThrottledError as err:
             return _throttled_response(err)
@@ -654,7 +669,7 @@ class CasaSmartTokenView(HomeAssistantView):
                 device_id,
                 challenge_id,
                 signature,
-                request.remote or "unknown",
+                client_address(request),
             )
         except ThrottledError as err:
             return _throttled_response(err)

@@ -20,7 +20,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .auth_api import authenticate_request, get_push_store
+from .auth_api import authenticate_request, client_address, get_push_store
 from .const import DOMAIN
 from .hq_notifications import (
     HQ_NOTIFICATION_MAX_BODY_BYTES,
@@ -206,7 +206,7 @@ class CasaSmartHqNotificationView(HomeAssistantView):
                 {"accepted": False, "code": "PUSH_UNAVAILABLE"},
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             )
-        peer = request.remote if isinstance(request.remote, str) else "unknown"
+        peer = client_address(request)
         if self._rate_limited(peer):
             return web.json_response(
                 {"accepted": False, "code": "RATE_LIMITED"},
