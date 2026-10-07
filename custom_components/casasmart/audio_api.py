@@ -58,6 +58,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
+from aiohttp.http_exceptions import BadHttpMessage
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
@@ -715,50 +716,63 @@ class CasaSmartAudioPaView(_AudioView):
         Returns ``(filename, content_type, data, targets, None)`` or
         ``("", "", b"", [], error_response)``.
         """
+        not_multipart = "Body must be multipart/form-data with an 'audio' file"
         try:
             reader = await request.multipart()
-        except (AssertionError, ValueError):
+        except (AssertionError, KeyError, ValueError):
             return (
                 "",
                 "",
                 b"",
                 [],
-                self.json_message(
-                    "Body must be multipart/form-data with an 'audio' file",
-                    HTTPStatus.BAD_REQUEST,
-                ),
+                self.json_message(not_multipart, HTTPStatus.BAD_REQUEST),
             )
         filename = content_type = ""
         data: bytes | None = None
         targets: list[str] = []
-        async for part in reader:
-            if part.name == "targets":
-                targets = _parse_targets(await part.text())
-                continue
-            if part.name != "audio":
-                continue
-            filename = part.filename or "pa.mp3"
-            content_type = part.headers.get("Content-Type", "application/octet-stream")
-            chunks: list[bytes] = []
-            size = 0
-            while True:
-                chunk = await part.read_chunk()
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > _PA_MAX_BYTES:
-                    return (
-                        "",
-                        "",
-                        b"",
-                        [],
-                        self.json_message(
-                            f"Audio too large (max {_PA_MAX_BYTES} bytes)",
-                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                        ),
-                    )
-                chunks.append(chunk)
-            data = b"".join(chunks)
+        try:
+            async for part in reader:
+                # A nested multipart part has no name; it is not an upload field.
+                name = getattr(part, "name", None)
+                if name == "targets":
+                    targets = _parse_targets(await part.text())
+                    continue
+                if name != "audio":
+                    continue
+                filename = part.filename or "pa.mp3"
+                content_type = part.headers.get(
+                    "Content-Type", "application/octet-stream"
+                )
+                chunks: list[bytes] = []
+                size = 0
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > _PA_MAX_BYTES:
+                        return (
+                            "",
+                            "",
+                            b"",
+                            [],
+                            self.json_message(
+                                f"Audio too large (max {_PA_MAX_BYTES} bytes)",
+                                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                            ),
+                        )
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+        except (AssertionError, BadHttpMessage, LookupError, ValueError):
+            # What aiohttp's multipart parser raises for a malformed body (some
+            # versions assert), and text() for a field it can't decode.
+            return (
+                "",
+                "",
+                b"",
+                [],
+                self.json_message(not_multipart, HTTPStatus.BAD_REQUEST),
+            )
         if data is None:
             return (
                 "",
