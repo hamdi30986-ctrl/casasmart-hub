@@ -71,6 +71,14 @@ class HqNotificationVerifierTest(unittest.TestCase):
             self.verifier.previous(verified.event_id)["outcome"], "relay_accepted"
         )
 
+    def test_expired_nonces_are_pruned(self) -> None:
+        # The verifier takes any MutableMapping; a plain dict must work too.
+        self.verifier.reserve_nonce("a" * 24, self.now)
+        later = self.now + MODULE.HQ_NOTIFICATION_NONCE_RETENTION_SECONDS + 1
+        self.verifier.reserve_nonce("b" * 24, later)
+        self.assertNotIn("nonce:" + "a" * 24, self.table)
+        self.assertIn("nonce:" + "b" * 24, self.table)
+
     def test_failed_delivery_is_audited_but_remains_retryable(self) -> None:
         verified = self.verifier.verify(self.headers(), self.raw, self.now)
         self.verifier.reserve_nonce(verified.nonce, self.now)
