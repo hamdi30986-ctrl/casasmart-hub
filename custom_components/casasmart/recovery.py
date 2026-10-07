@@ -62,16 +62,23 @@ def hash_code(code: str) -> str:
 
 
 class RecoveryManager:
-    """Mints and redeems the hub's single owner recovery code."""
+    """Mints and redeems the hub's single owner recovery code.
+
+    save_hash stores a code's hash in hub_config, where boot reinstalls the
+    permanent card from.
+    """
 
     def __init__(
         self,
         codes_table: Any,
         admin_exists: Callable[[], bool],
         throttle: FailureThrottle | None = None,
+        *,
+        save_hash: Callable[[str], None],
     ) -> None:
         self._codes = codes_table
         self._admin_exists = admin_exists
+        self._save_hash = save_hash
         self.throttle = throttle or FailureThrottle("recovery")
         # Callers run on executor threads and read-modify-write the table.
         self._lock = threading.Lock()
@@ -81,8 +88,8 @@ class RecoveryManager:
 
         Returns the plaintext only when the code was minted here, else None.
         On a hub without an admin it drops any installed code, so call it only
-        once an admin exists. A code minted here isn't saved to hub_config; the
-        stored hash reinstalled at boot stays the permanent card.
+        once an admin exists. A new code's hash is saved first, so the code
+        shown is the permanent card; if saving raises, nothing is installed.
         """
         with self._lock:
             if not self._admin_exists():
@@ -93,8 +100,10 @@ class RecoveryManager:
             if RECOVERY_CODE_ID in self._codes:
                 return None
             code = _new_code()
+            code_hash = hash_code(code)
+            self._save_hash(code_hash)
             self._codes[RECOVERY_CODE_ID] = {
-                "code_hash": hash_code(code),
+                "code_hash": code_hash,
                 "created_at": time.time(),
             }
         _LOGGER.info("Owner recovery code armed")

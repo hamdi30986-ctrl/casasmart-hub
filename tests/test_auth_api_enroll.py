@@ -602,7 +602,11 @@ class TrustedLanIngressTests(EnrollGateTests):
 
         self._claim_hub()
         self.runtime.recovery = RecoveryManager(
-            self.storage.table("recovery_codes"), self.auth.has_admin
+            self.storage.table("recovery_codes"),
+            self.auth.has_admin,
+            save_hash=lambda code_hash: self.hub_config.set(
+                "recovery_code_hash", code_hash
+            ),
         )
         self.runtime.recovery.ensure_armed()
         view = CasaSmartRecoverView(self.hass)
@@ -637,7 +641,11 @@ class NonAsciiCodeTests(EnrollGateTests):
         from casasmart.recovery import RecoveryManager
 
         self.runtime.recovery = RecoveryManager(
-            self.storage.table("recovery_codes"), self.auth.has_admin
+            self.storage.table("recovery_codes"),
+            self.auth.has_admin,
+            save_hash=lambda code_hash: self.hub_config.set(
+                "recovery_code_hash", code_hash
+            ),
         )
         return self.runtime.recovery.ensure_armed()
 
@@ -733,8 +741,11 @@ class OwnerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.pairing = PairingManager(
             self.storage.table("pairing_codes"), self.auth.has_admin
         )
+        hub_config = H.FakeHubConfig()
         self.recovery = RecoveryManager(
-            self.storage.table("recovery_codes"), self.auth.has_admin
+            self.storage.table("recovery_codes"),
+            self.auth.has_admin,
+            save_hash=lambda code_hash: hub_config.set("recovery_code_hash", code_hash),
         )
         self.recovery.install_recovery_hash(recovery_hash_code(self.CARD))
         self.push = PushTokenStore(self.storage.table("push_tokens"))
@@ -743,7 +754,7 @@ class OwnerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 auth=self.auth,
                 pairing=self.pairing,
                 recovery=self.recovery,
-                hub_config=H.FakeHubConfig(),
+                hub_config=hub_config,
                 push=self.push,
                 push_dispatcher=None,
             )
