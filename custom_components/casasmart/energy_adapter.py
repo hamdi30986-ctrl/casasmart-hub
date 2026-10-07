@@ -1530,8 +1530,7 @@ class EnergyAdapter:
         return True
 
     async def _turn_off(self, entity_id: str, *, honor_release: bool = True) -> bool:
-        service = "turn_off"
-        return await self._command(entity_id, service, honor_release=honor_release)
+        return await self._command(entity_id, "turn_off", honor_release=honor_release)
 
     async def _turn_on_light(self, entity_id: str, brightness_pct: int) -> bool:
         return await self._command(
