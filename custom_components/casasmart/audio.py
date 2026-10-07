@@ -745,7 +745,8 @@ class AudioEngine:
         mac6 = normalize_mac6(mac)
         if mac6 not in self._speakers:
             raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
-        if cmd not in CONTROL_COMMANDS:
+        # isinstance first: an unhashable JSON value can't be looked up in a set.
+        if not isinstance(cmd, str) or cmd not in CONTROL_COMMANDS:
             raise AudioError(
                 f"Unknown command {cmd!r} (expected one of {sorted(CONTROL_COMMANDS)})"
             )
@@ -766,7 +767,7 @@ class AudioEngine:
         mac6 = normalize_mac6(mac)
         if mac6 not in self._speakers:
             raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
-        verb = AIRPLAY_ACTIONS.get(action)
+        verb = AIRPLAY_ACTIONS.get(action) if isinstance(action, str) else None
         if verb is None:
             raise AudioError(
                 f"Unknown airplay action {action!r} "
@@ -801,7 +802,7 @@ class AudioEngine:
         if volume is not None:
             payload["volume"] = _validate_volume(volume)
         if priority is not None:
-            if priority not in PRIORITY_VALUES:
+            if not isinstance(priority, str) or priority not in PRIORITY_VALUES:
                 raise AudioError(f"priority must be one of {sorted(PRIORITY_VALUES)}")
             payload["priority"] = priority
         payload["ts"] = self._clock() if now is None else now

@@ -555,6 +555,17 @@ class CommandView(AudioViewTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(self.adapter.published, [])  # nothing published
 
+    async def test_non_string_command_is_400(self) -> None:
+        # An unhashable JSON value used to escape as a TypeError (500).
+        for cmd in ([], {"cmd": "stop"}):
+            with self.subTest(cmd=cmd), self._with_adapter():
+                resp = await self.view.post(
+                    H.FakeRequest(headers=self._admin(), body={"cmd": cmd}),
+                    mac6="ddeeff",
+                )
+                self.assertEqual(H.read_response(resp)[0], 400)
+        self.assertEqual(self.adapter.published, [])
+
     async def test_play_is_not_a_control_command(self) -> None:
         # "play" is deliberately excluded from the per-speaker control path —
         # audio sources must go via broadcast/PA, never smuggled through command.
