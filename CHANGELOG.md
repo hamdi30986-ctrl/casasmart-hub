@@ -337,7 +337,7 @@ everything in it is here.
 - The comments and docstrings removed by the 1.7.0 sanitize are back wherever
   the code is provably unchanged (AST-checked), rewritten to be short and
   without internal plan references.
-- The original test suite is back: 1,673 tests, 266 of which need a real
+- The original test suite is back: 1,710 tests, 278 of which need a real
   Home Assistant. Test data no longer contains anyone's network, names
   or devices.
 - Dead code removed, ruff formatting applied, and CI added (ruff, pytest with
