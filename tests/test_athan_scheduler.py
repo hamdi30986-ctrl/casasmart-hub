@@ -412,6 +412,30 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase
         self.assertEqual(armed, [])
         self.assertTrue(any("giving up" in line for line in logs.output))
 
+    async def test_a_timer_that_fires_past_the_grace_does_not_play(self):
+        # A host waking from sleep fires every overdue timer at once; the
+        # clock, not the timer's time, decides whether the prayer is stale.
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append((action, when)) or (lambda: None)
+        )
+        now = datetime.datetime.now(datetime.UTC)
+        times = {"Dhuhr": now - timedelta(seconds=5)}
+        adapter = _Adapter()
+        s = self._scheduler_with(times, adapter)
+        await s.async_reschedule()
+        (dhuhr,) = [action for action, when in armed if when == times["Dhuhr"]]
+        armed.clear()
+        woke_at = now + timedelta(minutes=10)
+        with (
+            mock.patch.object(A.dt_util, "utcnow", return_value=woke_at),
+            self.assertLogs("casasmart.athan_scheduler", level="WARNING") as logs,
+        ):
+            dhuhr(times["Dhuhr"])
+        self.assertEqual(adapter.published, [])
+        self.assertEqual(armed, [])
+        self.assertTrue(any("giving up" in line for line in logs.output))
+
     async def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
         # zoneinfo raises ValueError, not "not found", for keys like these. The
         # stored athan config is an opaque blob and a reschedule runs during
