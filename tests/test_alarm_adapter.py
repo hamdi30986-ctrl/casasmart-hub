@@ -215,9 +215,13 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             coro = self.hass._pending_coros.pop(0)
             await coro
 
-    def _state_changed(self, entity_id: str, state):
+    def _state_changed(self, entity_id: str, state, old=None):
         new_state = None if state is None else _FakeState(state)
-        self._emit("state_changed", {"entity_id": entity_id, "new_state": new_state})
+        old_state = None if old is None else _FakeState(old)
+        self._emit(
+            "state_changed",
+            {"entity_id": entity_id, "old_state": old_state, "new_state": new_state},
+        )
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -314,6 +318,35 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await self._drain()
         self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
         self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_TRIGGERED), 1)
+
+    async def test_attribute_only_update_does_not_trigger(self):
+        # HA fires state_changed for attribute updates too. A window left open
+        # through the exit delay must not trip the alarm on its next attribute
+        # update (battery, signal strength), and an offline sensor's attribute
+        # updates are not new tamper events.
+        self.adapter.async_start()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self._state_changed("binary_sensor.window", "on", old="on")
+        self._state_changed(
+            "binary_sensor.hall_motion", "unavailable", old="unavailable"
+        )
+        await self._drain()
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_AWAY)
+        self.assertEqual(self.engine.history()[0]["kind"], "armed")
+        self.assertEqual(self.hass.bus.fired, [])
+
+    async def test_real_transitions_still_trigger(self):
+        # Including from unavailable/unknown: a sensor that comes back
+        # reporting "open" while armed is an open sensor.
+        for old in ("off", "unavailable", "unknown", None):
+            with self.subTest(old=old):
+                self.engine.disarm()
+                self.engine.arm(MODE_AWAY, exit_delay=0)
+                self.adapter.async_start()
+                self._state_changed("binary_sensor.window", "on", old=old)
+                await self._drain()
+                self.adapter.async_stop()
+                self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
 
     async def test_engine_exception_is_swallowed_no_bus_fire(self):
         self.adapter.async_start()
