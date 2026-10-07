@@ -255,6 +255,10 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
             validate_command(entity_id, item.get("action"), item.get("data"))
         except CommandError as err:
             raise RegistryError(f"{entity_id}: {err}") from err
+        try:
+            json.dumps(item.get("data") or {}, allow_nan=False)
+        except (TypeError, ValueError) as err:
+            raise RegistryError(f"{entity_id}: data must be plain JSON") from err
         cleaned.append(
             {
                 "entity_id": entity_id,

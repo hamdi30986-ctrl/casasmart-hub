@@ -393,6 +393,26 @@ class SceneTests(RegistryTestCase):
             with self.assertRaises(RegistryError, msg=repr(entities)):
                 self.engine.create_scene("Bad", entities)
 
+    def test_non_finite_number_in_command_data_is_rejected(self):
+        # The request parser accepts NaN/Infinity, which storage refuses to
+        # write; they must be rejected as input, not fail at the write.
+        scene = self.engine.create_scene("Movie", self.GOOD)
+        for value in (float("nan"), float("inf")):
+            bad = [
+                {
+                    "entity_id": "light.sofa",
+                    "action": "turn_on",
+                    "data": {"brightness": value},
+                }
+            ]
+            with self.assertRaises(RegistryError, msg=repr(value)):
+                self.engine.create_scene("Bad", bad)
+            with self.assertRaises(RegistryError, msg=repr(value)):
+                self.engine.update_scene(scene["scene_id"], entities=bad)
+        self.assertEqual(
+            self.engine.get_scene(scene["scene_id"])["entities"], self.GOOD
+        )
+
 
 class FavoritesTests(RegistryTestCase):
     def test_replace_dedupe_and_isolation(self):
