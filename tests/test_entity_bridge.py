@@ -24,6 +24,8 @@ from entity_bridge import (
     entity_domain,
     is_category_served,
     is_exposed,
+    light_data_in_kelvin,
+    light_data_with_mireds,
     serialize_state,
     validate_command,
 )
@@ -514,6 +516,30 @@ class TestColourTemperatureBridge(unittest.TestCase):
         for bad in ("warm", None, True, 0, -5, [300], float("nan")):
             with self.subTest(bad=bad), self.assertRaises(CommandError):
                 validate_command("light.living1", "turn_on", {"color_temp": bad})
+
+    def test_saved_kelvin_reads_back_as_the_mireds_the_app_chose(self):
+        # Automations are stored in kelvin; the app's editor must get its own
+        # mired value back, or every save would drift.
+        for mireds in range(100, 1001):
+            kelvin = light_data_in_kelvin({"color_temp": mireds})["color_temp_kelvin"]
+            read_back = light_data_with_mireds({"color_temp_kelvin": kelvin})
+            self.assertEqual(read_back["color_temp"], mireds)
+
+    def test_mireds_are_added_only_from_a_usable_kelvin(self):
+        for data in (
+            {},
+            {"color_temp_kelvin": None},
+            {"color_temp_kelvin": "{{ 2700 }}"},
+            {"color_temp_kelvin": 0},
+            {"color_temp_kelvin": True},
+            {"color_temp_kelvin": 2700, "color_temp": 300},
+        ):
+            with self.subTest(data=data):
+                self.assertIs(light_data_with_mireds(data), data)
+        self.assertEqual(
+            light_data_with_mireds({"color_temp_kelvin": 20000}),
+            {"color_temp_kelvin": 20000, "color_temp": 100},
+        )
 
     def test_kelvin_only_light_also_reports_mireds(self):
         attrs = serialize_state(

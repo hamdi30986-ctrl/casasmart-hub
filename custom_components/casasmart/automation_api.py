@@ -8,6 +8,9 @@ reachable, and callers need automations.manage and an unscoped token
 before automations.yaml is written. Like HA's config view, a delete removes
 the registry entry and does not reload.
 
+The apps work in mireds and HA 2026 runs light actions in kelvin only, so a
+save stores color_temp as color_temp_kelvin and a read gives it back in both.
+
 works_during_energy_saving is kept in the hub's EnergyFlags store, not in
 automations.yaml, and setting it needs energy.manage. Automation state and
 on/off/trigger go through the devices feed and the command endpoint.
@@ -18,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 
@@ -48,6 +52,7 @@ from .automations import (
     upsert_automation,
 )
 from .const import DOMAIN
+from .entity_bridge import CommandError, light_data_in_kelvin, light_data_with_mireds
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +100,57 @@ def _shared_mutation_lock(hass: HomeAssistant) -> asyncio.Lock:
     return hass.data.setdefault(DOMAIN, {}).setdefault(
         "automation_mutation_lock", asyncio.Lock()
     )
+
+
+# -- Light colour temperature ---------------------------------------------------
+
+# Both spellings HA accepts for an automation's action list.
+_ACTION_KEYS = ("action", "actions")
+
+
+def _map_light_data(
+    node: Any, convert: Callable[[dict[str, Any]], dict[str, Any]]
+) -> Any:
+    """A copy of an action tree with convert applied to each light action's data.
+
+    Every nested list and mapping is walked, so the actions inside choose, if,
+    parallel, repeat and sequence blocks are included.
+    """
+    if isinstance(node, list):
+        return [_map_light_data(item, convert) for item in node]
+    if not isinstance(node, dict):
+        return node
+    mapped = {key: _map_light_data(value, convert) for key, value in node.items()}
+    service = mapped.get("action", mapped.get("service"))
+    if (
+        isinstance(service, str)
+        and service.startswith("light.")
+        and isinstance(mapped.get("data"), dict)
+    ):
+        mapped["data"] = convert(mapped["data"])
+    return mapped
+
+
+def _map_actions(
+    config: dict[str, Any], convert: Callable[[dict[str, Any]], dict[str, Any]]
+) -> dict[str, Any]:
+    """A copy of an automation config with convert applied to its light data."""
+    return {
+        key: _map_light_data(value, convert) if key in _ACTION_KEYS else value
+        for key, value in config.items()
+    }
+
+
+def _in_kelvin(data: dict[str, Any]) -> dict[str, Any]:
+    """Light data with a mired color_temp in kelvin, which HA 2026 requires.
+
+    A value that isn't a number of mireds, such as a template, is kept for HA
+    to report when the automation runs.
+    """
+    try:
+        return light_data_in_kelvin(data)
+    except CommandError:
+        return data
 
 
 # -- The view -------------------------------------------------------------------
@@ -222,6 +278,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return self.json_message(
                 f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
             )
+        # The apps' editor reads a light's colour temperature in mireds.
+        value = _map_actions(value, light_data_with_mireds)
         enabled = await self._energy_flag(config_key)
         return self.json({**value, "works_during_energy_saving": enabled})
 
@@ -253,6 +311,10 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 "Energy Saving flags require admin access",
                 HTTPStatus.FORBIDDEN,
             )
+
+        # The apps save light actions in mireds, which HA 2026 accepts here
+        # but refuses when the automation runs.
+        payload = _map_actions(payload, _in_kelvin)
 
         # The validator HA's config API runs. An invalid file would take
         # every automation down on the next reload.
