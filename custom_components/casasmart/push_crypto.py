@@ -1,24 +1,10 @@
-"""Ed25519 push-identity key for relay dispatch.
+"""The hub's Ed25519 push-identity key, which signs every batch sent to the relay.
 
-The hub signs every push batch it sends to the relay with a permanent
-Ed25519 key generated on first boot. The relay verifies that signature
-against the hub's public key, which the hub registers itself when it is
-activated (``relay_registration.py``: a proof signed by the P-256 TLS
-identity, plus a single-use activation code). The private key never leaves
-the box (``push_identity_key.bin``, 0600); the public key (lowercase hex) is
-mirrored into ``hub_config.json`` (``push_public_key``) so an operator can
-read it without opening the key file.
-
-This is a deliberately SEPARATE key from the P-256 TLS identity in
-``tls.py``: that one pins the LAN certificate, this one authenticates
-relay pushes. Different algorithm, different job, different blast radius
-if either ever leaks.
-
-Failure posture mirrors the TLS identity: a corrupt key is a hard error
-(``PushIdentityError``), never silently re-generated. Re-keying would
-orphan the public key already registered with the relay, so every push
-would start failing signature verification — a human must decide to
-delete the file and re-register.
+The key is generated on first boot and stays in push_identity_key.bin (0600);
+its public key is mirrored into hub_config.json for operators. It is separate
+from the P-256 TLS identity in tls.py, which pins the LAN certificate. A
+corrupt key file is a hard error and is not replaced: a new key would not
+match the one registered with the relay.
 """
 
 from __future__ import annotations
@@ -36,19 +22,16 @@ from .storage import JsonConfigStore
 
 _LOGGER = logging.getLogger(__name__)
 
-# Raw 32-byte Ed25519 private key (seed). Lives next to the TLS identity
-# under <ha-config>/casasmart/.
+# The raw 32-byte private key, next to the TLS identity in <config>/casasmart/.
 PUSH_IDENTITY_KEY_FILENAME = "push_identity_key.bin"
-# hub_config key holding the public key (lowercase hex, 64 chars), for
-# operators; the registration itself reads it from the signer.
+# For operators only (64 hex chars); registration reads the key from the signer.
 PUSH_PUBLIC_KEY_CONFIG_KEY = "push_public_key"
 
-# Ed25519 raw private/public keys are always exactly 32 bytes.
 _ED25519_KEY_BYTES = 32
 
 
 class PushIdentityError(Exception):
-    """The permanent push-identity key is unusable — never auto-recovered."""
+    """The push-identity key file is unusable and needs a person to fix it."""
 
 
 class PushSigner:
@@ -64,14 +47,14 @@ class PushSigner:
         return self._public_key_hex
 
     def sign(self, message: bytes) -> bytes:
-        """Return the raw 64-byte Ed25519 signature over ``message``."""
+        """Return the raw 64-byte Ed25519 signature over message."""
         return self._private_key.sign(message)
 
 
 def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
     """Load the raw key file, or mint and save one at 0600 on first boot.
 
-    Raises ``PushIdentityError`` for a file of the wrong size or content.
+    Raises PushIdentityError for a file of the wrong size or content.
     """
     if key_path.exists():
         raw = key_path.read_bytes()
@@ -84,7 +67,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
         try:
             return Ed25519PrivateKey.from_private_bytes(raw)
         except (ValueError, UnsupportedAlgorithm) as err:
-            # NEVER silently re-key: the relay only trusts the matching pubkey.
+            # Don't replace it: the relay trusts only the registered public key.
             raise PushIdentityError(
                 f"Push identity key at {key_path} is unreadable ({err}). "
                 "Restore it from backup, or delete the file to re-key — "
@@ -93,8 +76,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
 
     private_key = Ed25519PrivateKey.generate()
     raw = private_key.private_bytes_raw()
-    # 0600 from the first byte, never world-readable even briefly (O_EXCL so a
-    # concurrent first boot can't race two keys into existence).
+    # 0600 from creation; O_EXCL stops two concurrent first boots making two keys.
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(raw)
@@ -103,12 +85,10 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
 
 
 def ensure_push_identity(data_dir: Path, hub_config: JsonConfigStore) -> PushSigner:
-    """Load-or-create the push-identity key (blocking — executor only).
+    """Load or create the push-identity key. Blocking: run it in the executor.
 
-    Mirrors the public key (hex) into ``hub_config`` whenever it is missing
-    or out of date, so the published value always matches the private key
-    actually used to sign. Raises ``PushIdentityError`` only for an unusable
-    key file.
+    Also keeps push_public_key in hub_config in step with the key. Raises
+    PushIdentityError for an unusable key file.
     """
     signer = PushSigner(_load_or_create_identity(data_dir / PUSH_IDENTITY_KEY_FILENAME))
     if hub_config.get(PUSH_PUBLIC_KEY_CONFIG_KEY) != signer.public_key_hex:

@@ -1,24 +1,18 @@
-"""Authenticated, privacy-safe ingress for HQ reminder notifications.
+"""Signed, content-free reminder notifications from HQ.
 
-"HQ" is an external reminder sender the hub owner chooses to trust, such as a
-household or installer dashboard. Its requests are signed with an Ed25519 key
-an HA admin registers (``casasmart.configure_hq_notifications``) and carry no
-content: each accepted request becomes one generic "private update" push to the
-owner, titled with the sender name stored next to the key.
+HQ is an external reminder sender the owner chooses to trust, such as a
+household or installer dashboard. An HA admin registers its Ed25519 key
+(casasmart.configure_hq_notifications). Each accepted request becomes one
+generic "private update" push to the owner. The request, served by push_api:
 
-The request (``POST /api/casasmart/notifications/hq``, served by ``push_api``):
+- POST /api/casasmart/notifications/hq with exactly {"event_id": ...,
+  "source_type": "reminder", "target": "today"}, at most 2 KiB;
+- X-CasaSmart-HQ-Timestamp: Unix seconds, within 60 s of the hub's clock;
+- X-CasaSmart-HQ-Nonce: single-use, remembered for 5 minutes;
+- X-CasaSmart-HQ-Signature: base64 Ed25519 signature of canonical_request.
 
-- the body is exactly ``{"event_id": ..., "source_type": "reminder",
-  "target": "today"}``, at most 2 KiB;
-- ``X-CasaSmart-HQ-Timestamp`` is Unix seconds within 60 s of the hub's clock;
-- ``X-CasaSmart-HQ-Nonce`` is single-use (remembered for 5 minutes);
-- ``X-CasaSmart-HQ-Signature`` is the base64 Ed25519 signature of
-  ``canonical_request``, which covers the path, timestamp, nonce and a
-  SHA-256 of the body.
-
-An event that was already delivered (one of the latest 1000) is answered as
-a duplicate, so HQ can retry safely. Only a bounded audit of outcomes is kept,
-never the request.
+A retry of a delivered event (one of the latest 1000) is answered as a
+duplicate. Only a bounded audit of outcomes is kept, never request content.
 """
 
 from __future__ import annotations
@@ -46,8 +40,8 @@ HQ_NOTIFICATION_PATH = "/api/casasmart/notifications/hq"
 HQ_NOTIFICATION_MAX_SKEW_SECONDS = 60
 HQ_NOTIFICATION_NONCE_RETENTION_SECONDS = 5 * 60
 HQ_NOTIFICATION_MAX_NONCES = 1000
-# Delivered events remembered for the duplicate check, newest first. Far more
-# than HQ retries within: the rate limit allows 30 requests a minute.
+# Delivered events kept for the duplicate check: far more than HQ can send
+# while retrying, at 30 requests a minute.
 HQ_NOTIFICATION_MAX_EVENTS = 1000
 HQ_NOTIFICATION_MAX_AUDIT_ROWS = 500
 HQ_NOTIFICATION_MAX_BODY_BYTES = 2048
@@ -64,7 +58,7 @@ _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
 
 
 class HqNotificationError(ValueError):
-    """A request that must not reach the CasaSmart push dispatcher."""
+    """A refused HQ request or setting; code is the audited reason."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -73,17 +67,17 @@ class HqNotificationError(ValueError):
 
 @dataclass(frozen=True)
 class VerifiedHqNotification:
-    """The deliberately tiny notification request accepted from HQ."""
+    """The fields of a verified HQ request."""
 
     event_id: str
     nonce: str
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """``json.loads`` hook: refuse an object that repeats a key.
+    """json.loads hook: refuse an object that repeats a key.
 
     Parsers disagree on which copy of a repeated key wins, so a signed body
-    with one must not be read at all.
+    with one isn't read at all.
     """
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -94,8 +88,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def canonical_request(timestamp: int, nonce: str, raw_body: bytes) -> bytes:
-    """Return the exact v1 request bytes signed by the independent HQ key."""
-
+    """The v1 bytes HQ signs: method, path, timestamp, nonce and body SHA-256."""
     digest = hashlib.sha256(raw_body).hexdigest()
     return (f"v1\nPOST\n{HQ_NOTIFICATION_PATH}\n{timestamp}\n{nonce}\n{digest}").encode(
         "ascii"
@@ -103,8 +96,7 @@ def canonical_request(timestamp: int, nonce: str, raw_body: bytes) -> bytes:
 
 
 def normalize_public_key(value: str | None) -> tuple[str, str]:
-    """Validate one Ed25519 public key and return canonical PEM + fingerprint."""
-
+    """Validate an Ed25519 public key; return its canonical PEM and fingerprint."""
     if not isinstance(value, str) or not value.strip():
         raise HqNotificationError("public_key_required")
     try:
@@ -127,9 +119,9 @@ def normalize_public_key(value: str | None) -> tuple[str, str]:
 def normalize_sender_name(value: object) -> str | None:
     """The sender name to store, or None for the default title.
 
-    Blank means "use the default". Anything else must be a single line of at
-    most ``HQ_SENDER_NAME_MAX_LENGTH`` characters, without control characters
-    or bidi overrides.
+    Blank means the default. Anything else must be one line of at most
+    HQ_SENDER_NAME_MAX_LENGTH characters, without control characters or bidi
+    overrides.
     """
     if value is None:
         return None
@@ -149,8 +141,8 @@ def normalize_sender_name(value: object) -> str | None:
 def hq_push_title(stored: object) -> str:
     """The title HQ reminder pushes carry: the stored sender name or the default.
 
-    ``hub_config.json`` is hand-editable, so an invalid stored value falls back
-    to the default instead of breaking delivery.
+    hub_config.json is hand-editable, so an invalid stored value falls back to
+    the default instead of breaking delivery.
     """
     try:
         return normalize_sender_name(stored) or HQ_DEFAULT_SENDER_NAME
@@ -161,11 +153,10 @@ def hq_push_title(stored: object) -> str:
 class HqNotificationVerifier:
     """Verifies HQ requests and keeps the replay, delivery and audit records.
 
-    Rows in its table: ``nonce:<nonce>`` (dropped after 5 minutes, at most
-    1000 kept), ``event:<event_id>`` (the latest 1000 delivered events) and
-    ``audit:<time>`` (the latest 500 outcomes). ``verify`` changes nothing;
-    the view runs ``reserve_nonce`` through ``record_delivery`` under one
-    lock, which is what makes the nonce and duplicate checks atomic.
+    Table rows: nonce:<nonce> (5 minutes, at most 1000), event:<event_id> (the
+    latest 1000 deliveries) and audit:<time> (the latest 500 outcomes). verify
+    changes nothing; the view makes the nonce and duplicate checks atomic by
+    running reserve_nonce through record_delivery under one lock.
     """
 
     def __init__(
@@ -183,7 +174,6 @@ class HqNotificationVerifier:
         self, headers: Mapping[str, str], raw_body: bytes, now: float | None = None
     ) -> VerifiedHqNotification:
         """Authenticate and strictly decode a request without changing state."""
-
         if self._public_key is None:
             raise HqNotificationError("not_configured")
         if not raw_body or len(raw_body) > HQ_NOTIFICATION_MAX_BODY_BYTES:
@@ -237,11 +227,10 @@ class HqNotificationVerifier:
         return VerifiedHqNotification(event_id=event_id, nonce=nonce)
 
     def reserve_nonce(self, nonce: str, now: float | None = None) -> None:
-        """Record ``nonce`` as used, or raise ``replayed_request`` if it was.
+        """Record nonce as used, or raise replayed_request if it was.
 
         Expired nonces are pruned first. The caller holds the delivery lock.
         """
-
         current = int(time.time() if now is None else now)
         self._prune_nonces(current)
         key = f"nonce:{nonce}"
@@ -251,7 +240,7 @@ class HqNotificationVerifier:
         self._prune_nonces(current)
 
     def previous(self, event_id: str) -> dict[str, Any] | None:
-        """The recorded delivery of ``event_id``, or None if not delivered."""
+        """The recorded delivery of event_id, or None if not delivered."""
         value = self._table.get(f"event:{event_id}")
         return value if isinstance(value, dict) else None
 
@@ -268,7 +257,6 @@ class HqNotificationVerifier:
         again rather than answered as a duplicate. Outcome and reason are
         reduced to known, log-safe values.
         """
-
         current = int(time.time() if now is None else now)
         safe_outcome = (
             outcome
@@ -297,15 +285,13 @@ class HqNotificationVerifier:
         )
 
     def record_rejection(self, code: str, now: float | None = None) -> None:
-        """Retain a bounded, privacy-safe rejection audit without request content."""
-
+        """Audit a rejection by its code alone."""
         current = int(time.time() if now is None else now)
         safe_code = code if re.fullmatch(r"[a-z0-9_]{1,80}", code) else "rejected"
         self._append_audit({"outcome": "rejected", "reason": safe_code}, current)
 
     def record_duplicate(self, event_id: str, now: float | None = None) -> None:
-        """Audit a successfully deduplicated retry without changing first acceptance."""
-
+        """Audit a retry answered as a duplicate."""
         current = int(time.time() if now is None else now)
         self._append_audit(
             {"event_id": event_id, "outcome": "duplicate", "reason": None},
@@ -320,10 +306,10 @@ class HqNotificationVerifier:
             del self._table[key]
 
     def _prune_events(self, keep: str) -> None:
-        """Drop the oldest delivered events beyond the cap, never ``keep``.
+        """Drop the oldest delivered events beyond the cap.
 
-        ``keep`` is the event just recorded: dropping it would let its own
-        retry through as a second push.
+        keep, the event just recorded, sorts last among rows from the same
+        second: dropping it would let its own retry through as a second push.
         """
         rows: list[tuple[int, bool, str]] = []
         for key, value in self._table.items():
