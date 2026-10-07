@@ -10,7 +10,7 @@ The version-one response contains `status`, `suggestions`, the first item as `su
 
 ## Room selection and timing
 
-NOW and the generator use one hub ranking: descending active count, then room ID. Only imported control entities participate; hidden gangs, configuration entities and unimported HA entities are excluded from both ranking and generated actions. Counts retain NOW's safe light/fan/classified-switch activity semantics, including legacy per-device suffix types; the scene action allowlist is narrower. Explicit configured room policies constrain ranking; otherwise visible room activity is used. Scope is applied before ranking.
+NOW and the generator use one hub ranking: descending active count, then room ID. Only imported control entities participate; hidden gangs, configuration entities and unimported HA entities are excluded from both ranking and generated actions. Counts use NOW's safe light/fan/classified-switch activity rules, including gang types that older device records key by channel suffix; the scene action allowlist is narrower. Explicit configured room policies constrain ranking; otherwise visible room activity is used. Scope is applied before ranking.
 
 The selected two rooms persist for fixed two-hour UTC windows, including hub restarts. Vacant slots can fill when device states arrive after startup. Existing selections do not jump between rooms on every state update. NOW's live big-card ranking may subsequently change within the window. Action previews always use current states and room assignments; irrelevant scenes disappear. Fewer than three suggestions is valid.
 
@@ -29,4 +29,4 @@ Dismissal and snooze are member-scoped and survive plan changes within the same 
 
 ## Compatibility
 
-This contract requires both the hub capability and an app that supports it. Without the capability, the app keeps the manual-rule behavior.
+This contract requires both the hub capability and an app that supports it. Without the capability, the app shows only rule-based suggestions.
