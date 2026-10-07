@@ -197,41 +197,19 @@ class CasaSmartNowView(_NowView):
         rooms = [room for room in rooms if scope is None or room["room_id"] in scope]
         room_ids = {room["room_id"] for room in rooms}
 
-        recent_items = []
-        for item in recents:
-            entity_id = item["entity_id"]
-            state = self._hass.states.get(entity_id)
-            if (
-                state is None
-                or not is_served(self._hass, entity_id)
-                or not in_scope(self._hass, entity_id, scope)
-            ):
-                continue
-            recent_items.append(
-                {
-                    "entity_id": entity_id,
-                    "at": item["at"],
-                    "device": serialize_device(self._hass, state),
-                }
-            )
+        recent_items = [
+            entry
+            for item in recents
+            if (entry := self._recent_entry(item["entity_id"], item["at"], scope))
+        ]
         recent_source = "recency"
         if not recent_items:
             recent_source = "favorites_seed"
-            for entity_id in favorites:
-                state = self._hass.states.get(entity_id)
-                if (
-                    state is None
-                    or not is_served(self._hass, entity_id)
-                    or not in_scope(self._hass, entity_id, scope)
-                ):
-                    continue
-                recent_items.append(
-                    {
-                        "entity_id": entity_id,
-                        "at": None,
-                        "device": serialize_device(self._hass, state),
-                    }
-                )
+            recent_items = [
+                entry
+                for entity_id in favorites
+                if (entry := self._recent_entry(entity_id, None, scope))
+            ]
 
         active_rooms: list[dict[str, Any]] = []
         for room in rooms:
@@ -358,6 +336,23 @@ class CasaSmartNowView(_NowView):
                 "doors_windows": contacts,
             }
         )
+
+    def _recent_entry(
+        self, entity_id: str, at: str | None, scope: list[str] | None
+    ) -> dict[str, Any] | None:
+        """A recently used device for the page, or None if the caller can't see it."""
+        state = self._hass.states.get(entity_id)
+        if (
+            state is None
+            or not is_served(self._hass, entity_id)
+            or not in_scope(self._hass, entity_id, scope)
+        ):
+            return None
+        return {
+            "entity_id": entity_id,
+            "at": at,
+            "device": serialize_device(self._hass, state),
+        }
 
     def _weather_payload(self, entity_id: str | None) -> dict[str, Any]:
         """The configured weather entity's reading, or why there is none."""
