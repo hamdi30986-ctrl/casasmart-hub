@@ -14,7 +14,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import quote
 
 from aiohttp import web
@@ -50,13 +50,11 @@ from .pairing import (
 )
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
+from .runtime_lookup import loaded_entry, loaded_runtime_data
 from .storage import ConfigError
 from .throttle import ThrottledError
 from .tls import TLS_LISTENER_TRUSTED_LAN
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,45 +73,33 @@ PAIRING_PAYLOAD_VERSION = 2
 _DEEP_LINK_BASE = "casasmart://family"
 
 
-def _get_loaded_entry(hass: HomeAssistant):
-    """The loaded CasaSmart config entry, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0] if entries else None
-
-
-def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """The loaded entry's runtime data, or None when not set up."""
-    entry = _get_loaded_entry(hass)
-    return entry.runtime_data if entry is not None else None
-
-
-def _get_push_store(hass: HomeAssistant):
+def get_push_store(hass: HomeAssistant):
     """The loaded entry's push-token store, or None when not set up."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.push if runtime_data is not None else None
 
 
 def _get_push_dispatcher(hass: HomeAssistant):
     """The loaded entry's push dispatcher, or None when push isn't running."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.push_dispatcher if runtime_data is not None else None
 
 
 def get_engine(hass: HomeAssistant) -> AuthEngine | None:
     """The loaded entry's auth engine, or None when not set up."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.auth if runtime_data is not None else None
 
 
 def get_pairing(hass: HomeAssistant) -> PairingManager | None:
     """The loaded entry's pairing manager, or None when not set up."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.pairing if runtime_data is not None else None
 
 
 def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
     """The loaded entry's recovery manager, or None when not set up."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.recovery if runtime_data is not None else None
 
 
@@ -123,7 +109,7 @@ def get_provision_secret(hass: HomeAssistant) -> str | None:
     A speaker sends it in the X-CasaSmart-Provision-Key header on
     GET /audio/provision to fetch its broker settings from any address.
     """
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     if runtime_data is None:
         return None
     return runtime_data.hub_config.get(PROVISION_SECRET_CONFIG_KEY)
@@ -135,7 +121,7 @@ def is_keyless_speaker_provisioning_enabled(hass: HomeAssistant) -> bool:
     When on, GET /audio/provision also serves a LAN client without the
     provisioning key. Only a literal true turns it on.
     """
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return (
         runtime_data is not None
         and runtime_data.hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True
@@ -226,7 +212,7 @@ def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
     which still keeps the bootstrap owner claim LAN-only. Only a literal true
     turns it on.
     """
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return (
         runtime_data is not None
         and runtime_data.hub_config.get(REMOTE_PAIRING_ENABLED_CONFIG_KEY) is True
@@ -304,7 +290,7 @@ def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
     # percent-encoding: codes are alphanumeric and the fingerprint is hex.
     params = [("code", code), ("v", str(PAIRING_PAYLOAD_VERSION))]
 
-    entry = _get_loaded_entry(hass)
+    entry = loaded_entry(hass)
     if entry is not None:
         runtime_data = entry.runtime_data
         tls = getattr(runtime_data, "tls", None)
@@ -349,7 +335,7 @@ class CasaSmartEnrollView(HomeAssistantView):
         It still identifies this hub's own code after the live code is
         dropped on claim, so the owner can re-run onboarding on their hub.
         """
-        runtime_data = _runtime_data(self._hass)
+        runtime_data = loaded_runtime_data(self._hass)
         if runtime_data is None:
             return None
         stored = runtime_data.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
@@ -553,7 +539,7 @@ class CasaSmartRecoverView(HomeAssistantView):
 
         # Drop the replaced phone's push token, as any unpair does, or it keeps
         # getting the alerts sent to every device (alarms included).
-        push = _get_push_store(self._hass)
+        push = get_push_store(self._hass)
         if push is not None:
             for old_device_id in replaced:
                 await self._hass.async_add_executor_job(push.unregister, old_device_id)
@@ -767,11 +753,11 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
             # failure.
             return self.json({"unpaired": device_id, "hub_unclaimed": False})
 
-        push = _get_push_store(self._hass)
+        push = get_push_store(self._hass)
         if push is not None:
             await self._hass.async_add_executor_job(push.unregister, device_id)
 
-        runtime = _runtime_data(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         unclaimed = False
         if runtime is not None:
 
@@ -995,13 +981,13 @@ class CasaSmartUserView(HomeAssistantView):
         except UserManagementError as err:
             return self.json_message(str(err), HTTPStatus.FORBIDDEN)
 
-        push = _get_push_store(self._hass)
+        push = get_push_store(self._hass)
         if push is not None:
             await self._hass.async_add_executor_job(push.unregister, device_id)
 
         # A member's favorites and settings go with their last device; a
         # member with another paired device keeps them.
-        runtime = _runtime_data(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         if runtime is not None:
 
             def _prune_orphaned_member() -> None:

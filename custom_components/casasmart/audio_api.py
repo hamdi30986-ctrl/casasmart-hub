@@ -32,7 +32,7 @@ import re
 import secrets
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aiohttp import web
 from aiohttp.http_exceptions import BadHttpMessage
@@ -58,9 +58,7 @@ from .auth_api import (
     json_body,
 )
 from .const import DOMAIN, EVENT_AUDIO_CHANGED
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
+from .runtime_lookup import loaded_runtime_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,29 +79,20 @@ _NO_SPEAKERS_IN_SCOPE = "No speakers in your rooms"
 
 def get_audio(hass: HomeAssistant) -> AudioEngine | None:
     """The loaded entry's audio engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.audio
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.audio if runtime_data is not None else None
 
 
 def get_audio_adapter(hass: HomeAssistant) -> AudioAdapter | None:
     """The loaded entry's audio MQTT adapter (None until/unless started)."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.audio_adapter
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.audio_adapter if runtime_data is not None else None
 
 
 def get_athan_scheduler(hass: HomeAssistant):
     """The loaded entry's hub-native athan scheduler (None until started)."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.athan_scheduler
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.athan_scheduler if runtime_data is not None else None
 
 
 # -- room scope ---------------------------------------------------------------

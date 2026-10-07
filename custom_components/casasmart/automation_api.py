@@ -56,6 +56,7 @@ from .automations import (
 )
 from .const import DOMAIN
 from .entity_bridge import CommandError, light_data_in_kelvin, light_data_with_mireds
+from .runtime_lookup import loaded_runtime_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -209,10 +210,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
 
     def _energy_flags(self):
         """The Energy Saving flag store, or None while the hub isn't loaded."""
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
-            return None
-        return getattr(entries[0].runtime_data, "energy_flags", None)
+        return getattr(loaded_runtime_data(self._hass), "energy_flags", None)
 
     async def _energy_flag(self, config_key: str, value: Any = _UNSET) -> bool:
         """Store the flag if one is given, then return the stored flag.

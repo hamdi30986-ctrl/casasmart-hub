@@ -130,6 +130,7 @@ from .relay_config import (
     without_relay_activation,
 )
 from .relay_registration import RelayRegistrar, is_activation_code_format
+from .runtime_lookup import loaded_entry
 from .storage import ConfigError, HubStorage, JsonConfigStore, StorageError
 from .suggestion_runtime import SuggestionRuntime
 from .suggestion_store import SuggestionStore
@@ -1301,20 +1302,24 @@ def _async_register_services(hass: HomeAssistant) -> None:
     changes where phones connect.
     """
 
+    def _loaded_entry() -> ConfigEntry:
+        """The loaded entry; a service called before setup fails cleanly."""
+        entry = loaded_entry(hass)
+        if entry is None:
+            raise HomeAssistantError("CasaSmart hub is not loaded")
+        return entry
+
     async def _handle_activate_scene(call) -> None:
         """Run a registry scene, as the app does (Energy Saving rules apply)."""
-        entries = hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
-            raise HomeAssistantError("CasaSmart hub is not loaded")
+        runtime_data: CasaSmartRuntimeData = _loaded_entry().runtime_data
         scene_id = call.data.get("scene_id")
         if not isinstance(scene_id, str) or not scene_id:
             raise HomeAssistantError("scene_id is required")
-        registry = entries[0].runtime_data.registry
+        registry = runtime_data.registry
         try:
             scene = await hass.async_add_executor_job(registry.get_scene, scene_id)
         except RegistryError as err:
             raise HomeAssistantError(str(err)) from err
-        runtime_data = entries[0].runtime_data
         energy = getattr(runtime_data, "energy", None)
         if (
             energy is not None
@@ -1331,10 +1336,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def _handle_set_tunnel_url(call) -> None:
         """Store the advertised tunnel URL; a bare origin also sets the domain."""
-        entries = hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
-            raise HomeAssistantError("CasaSmart hub is not loaded")
-        entry = entries[0]
+        entry = _loaded_entry()
         runtime_data: CasaSmartRuntimeData = entry.runtime_data
 
         url = normalize_tunnel_url(call.data.get("url"))
@@ -1382,9 +1384,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError(
                 "CasaSmart HQ notification trust requires a Home Assistant admin"
             )
-        entries = hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
-            raise HomeAssistantError("CasaSmart hub is not loaded")
+        entry = _loaded_entry()
         try:
             public_key, fingerprint = normalize_public_key(call.data.get("public_key"))
         except HqNotificationError as err:
@@ -1396,7 +1396,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 "The sender name must be a single line of at most "
                 f"{HQ_SENDER_NAME_MAX_LENGTH} characters"
             ) from err
-        runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+        runtime_data: CasaSmartRuntimeData = entry.runtime_data
 
         def _install_key() -> None:
             runtime_data.hub_config.set(
@@ -1432,10 +1432,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         so the reload mints a new pairing code and recovery card; if that
         fails, the reload still runs, and running the reset again finishes it.
         """
-        entries = hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
-            raise HomeAssistantError("CasaSmart hub is not loaded")
-        runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+        entry = _loaded_entry()
+        runtime_data: CasaSmartRuntimeData = entry.runtime_data
 
         if runtime_data.energy_controller is not None:
             await runtime_data.energy_controller.async_deactivate(actor="factory_reset")
@@ -1471,7 +1469,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             await hass.async_add_executor_job(_forget_codes)
         except ConfigError as err:
             # The in-memory caches no longer match the wiped tables.
-            await hass.config_entries.async_reload(entries[0].entry_id)
+            await hass.config_entries.async_reload(entry.entry_id)
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
         _LOGGER.warning(
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
@@ -1482,7 +1480,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "codes rotated"
         )
 
-        await hass.config_entries.async_reload(entries[0].entry_id)
+        await hass.config_entries.async_reload(entry.entry_id)
 
     admin_handlers = {
         "factory_reset": (_handle_factory_reset, vol.Schema({})),

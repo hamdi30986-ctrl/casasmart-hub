@@ -43,6 +43,7 @@ from .installer import (
     serialize_flow_result,
     serialize_progress_flow,
 )
+from .runtime_lookup import loaded_runtime_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,10 +156,10 @@ class CasaSmartAdminPermitJoinView(_AdminView):
 
     def _zigbee_base_topics(self) -> Any:
         """The hub's configured zigbee2mqtt base topics (None when unset)."""
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
+        runtime_data = loaded_runtime_data(self._hass)
+        if runtime_data is None:
             return None
-        return entries[0].runtime_data.hub_config.get(ZIGBEE_BASE_TOPICS_CONFIG_KEY)
+        return runtime_data.hub_config.get(ZIGBEE_BASE_TOPICS_CONFIG_KEY)
 
 
 class CasaSmartAdminRegistryView(_AdminView):

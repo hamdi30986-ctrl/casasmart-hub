@@ -19,7 +19,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -41,10 +41,8 @@ from .now_data import (
     summarize_openings,
 )
 from .registry import RegistryEngine
+from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,16 +70,8 @@ _CONTACT_DEVICE_CLASSES = frozenset({"door", "window", "opening"})
 
 def get_now_data(hass: HomeAssistant) -> NowDataEngine | None:
     """The Now store of the loaded entry, or None while the hub isn't loaded."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.now_data
-
-
-def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0].runtime_data if entries else None
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.now_data if runtime_data is not None else None
 
 
 async def _async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
@@ -143,7 +133,7 @@ class _NowView(HomeAssistantView):
         return now_data, None
 
     def _registry(self) -> RegistryEngine | None:
-        data = _runtime_data(self._hass)
+        data = loaded_runtime_data(self._hass)
         return data.registry if data is not None else None
 
     def _storage_failure(self, err: Exception) -> web.Response:
@@ -278,7 +268,7 @@ class CasaSmartNowView(_NowView):
         weather = self._weather_payload(config.get("outdoor_weather_entity_id"))
         air_quality = self._air_quality_payload(config.get("air_quality_entity_id"))
         contacts = self._contacts_payload(config.get("contact_entity_ids") or [], scope)
-        suggestions = getattr(_runtime_data(self._hass), "suggestions", None)
+        suggestions = getattr(loaded_runtime_data(self._hass), "suggestions", None)
         generated = getattr(suggestions, "generated", None)
         if generated is not None:
             # Rank rooms as the generated suggestions do, so both agree on
@@ -646,7 +636,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         now_data, not_ready = self._now_or_503()
         if not_ready is not None:
             return not_ready
-        runtime_data = _runtime_data(self._hass)
+        runtime_data = loaded_runtime_data(self._hass)
         if (
             runtime_data is not None
             and runtime_data.energy is not None

@@ -77,6 +77,15 @@ def _load_now_api():
     storage = _module("casasmart.storage")
     storage.StorageError = type("StorageError", (Exception,), {})
 
+    lookup_spec = importlib.util.spec_from_file_location(
+        "casasmart.runtime_lookup",
+        ROOT / "custom_components" / "casasmart" / "runtime_lookup.py",
+    )
+    assert lookup_spec and lookup_spec.loader
+    lookup = importlib.util.module_from_spec(lookup_spec)
+    sys.modules[lookup_spec.name] = lookup
+    lookup_spec.loader.exec_module(lookup)
+
     now_spec = importlib.util.spec_from_file_location(
         "casasmart.now_data", ROOT / "custom_components" / "casasmart" / "now_data.py"
     )

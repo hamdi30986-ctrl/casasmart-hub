@@ -26,6 +26,7 @@ from .camera_streams import (
 )
 from .const import DOMAIN
 from .filtering import in_scope, is_served
+from .runtime_lookup import loaded_entry, loaded_runtime_data
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ def _ticket_store(hass: HomeAssistant) -> StreamTicketStore | None:
     ticket minted on one must work on the other, so the store is in
     hass.data. Unloading the entry drops it with every ticket.
     """
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
+    entry = loaded_entry(hass)
+    if entry is None:
         return None
     domain_data = hass.data.setdefault(DOMAIN, {})
     store = domain_data.get(_TICKETS_KEY)
@@ -58,7 +59,7 @@ def _ticket_store(hass: HomeAssistant) -> StreamTicketStore | None:
         def _drop_tickets() -> None:
             domain_data.pop(_TICKETS_KEY, None)
 
-        entries[0].async_on_unload(_drop_tickets)
+        entry.async_on_unload(_drop_tickets)
     return store
 
 
@@ -159,10 +160,10 @@ class CasaSmartCameraStreamView(HomeAssistantView):
 
     def _tunnel_url(self) -> str | None:
         """The configured tunnel's https base URL, or None."""
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        if not entries:
+        runtime_data = loaded_runtime_data(self._hass)
+        if runtime_data is None:
             return None
-        raw = entries[0].runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
+        raw = runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
         return normalize_tunnel_url(raw)
 
 

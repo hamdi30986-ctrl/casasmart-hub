@@ -14,13 +14,13 @@ import logging
 import time
 from collections import defaultdict, deque
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .auth_api import authenticate_request
+from .auth_api import authenticate_request, get_push_store
 from .const import DOMAIN
 from .hq_notifications import (
     HQ_NOTIFICATION_MAX_BODY_BYTES,
@@ -32,9 +32,7 @@ from .hq_notifications import (
 )
 from .push import MAX_TOKEN_LENGTH, VALID_PLATFORMS
 from .push_dispatcher import PRIORITY_NORMAL, PUSH_TYPE_HQ_REMINDER
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
+from .runtime_lookup import loaded_runtime_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,18 +41,6 @@ _LOGGER = logging.getLogger(__name__)
 _HQ_RATE_LIMIT = 30
 _HQ_RATE_WINDOW_SECONDS = 60
 _HQ_RATE_MAX_PEERS = 512
-
-
-def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """The loaded entry's runtime data, or None while the hub isn't set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0].runtime_data if entries else None
-
-
-def _get_push_store(hass: HomeAssistant):
-    """The push-token store, or None while the hub isn't set up."""
-    runtime = _get_runtime_data(hass)
-    return runtime.push if runtime is not None else None
 
 
 def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
@@ -133,7 +119,7 @@ class CasaSmartPushTokenView(HomeAssistantView):
                 status=HTTPStatus.BAD_REQUEST,
             )
 
-        store = _get_push_store(self._hass)
+        store = get_push_store(self._hass)
         if store is None:
             return web.json_response(
                 {"message": "Hub not ready"},
@@ -157,7 +143,7 @@ class CasaSmartPushTokenView(HomeAssistantView):
         if err is not None:
             return err
 
-        store = _get_push_store(self._hass)
+        store = get_push_store(self._hass)
         if store is None:
             return web.json_response(
                 {"message": "Hub not ready"},
@@ -214,7 +200,7 @@ class CasaSmartHqNotificationView(HomeAssistantView):
         return False
 
     async def post(self, request: web.Request) -> web.Response:
-        runtime = _get_runtime_data(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         if runtime is None or runtime.push_dispatcher is None:
             return web.json_response(
                 {"accepted": False, "code": "PUSH_UNAVAILABLE"},

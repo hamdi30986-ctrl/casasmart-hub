@@ -15,7 +15,7 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import voluptuous as vol
 from aiohttp import web
@@ -39,10 +39,8 @@ from .registry import (
     RoomMoveDenied,
     UnknownItemError,
 )
+from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,14 +51,8 @@ _SCENE_CALL_TIMEOUT = 10.0
 
 def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
     """The loaded entry's registry engine, or None when not set up."""
-    runtime_data = _runtime_data(hass)
+    runtime_data = loaded_runtime_data(hass)
     return runtime_data.registry if runtime_data is not None else None
-
-
-def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """The loaded entry's runtime data, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0].runtime_data if entries else None
 
 
 def _scene_entity_ids(entities: Any) -> list[str]:
@@ -704,7 +696,7 @@ class CasaSmartRoomMoveView(_RegistryView):
             if isinstance(key, str) and IDEMPOTENCY_KEY.fullmatch(key)
             else "invalid"
         )
-        runtime = _runtime_data(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         if runtime is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
         # HA's registries are read here on the event loop; the engine checks
@@ -1131,7 +1123,7 @@ class CasaSmartSceneActivateView(_RegistryView):
         ):
             return self.json_message("Unknown scene", HTTPStatus.NOT_FOUND)
 
-        runtime = _runtime_data(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         energy = getattr(runtime, "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
             return self.json(
