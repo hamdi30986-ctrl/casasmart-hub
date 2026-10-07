@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -483,6 +484,22 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         result = await self.action("run", oid, scope="widget")
         self.assertEqual(result.status, 200)
         self.assertEqual(len(self.calls), 1)
+
+    async def test_member_lookup_runs_off_the_event_loop(self):
+        # Resolving the person behind the token reads SQLite: it belongs in
+        # the executor, for the list and the actions alike.
+        on_loop = []
+
+        def member_id_for(sub):
+            on_loop.append(threading.current_thread() is threading.main_thread())
+            return sub.split(":")[0]
+
+        engine = NS(member_id_for=member_id_for)
+        with patch.object(API, "get_engine", lambda hass: engine):
+            oid = (await self.selected())["occurrence_id"]
+            self.assertEqual((await self.action("run", oid)).status, 200)
+        self.assertEqual(len(on_loop), 3)  # list, action, re-check before running
+        self.assertFalse(any(on_loop), on_loop)
 
     async def test_success_suppresses_globally_and_replay_does_not_execute(self):
         oid = (await self.selected())["occurrence_id"]
