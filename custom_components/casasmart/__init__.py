@@ -1413,6 +1413,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "codes rotated"
         )
 
+        # Every phone was just unpaired; don't leave that to the reload.
+        await async_close_connections(hass)
         await hass.config_entries.async_reload(entries[0].entry_id)
 
     handlers = {
