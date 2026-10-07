@@ -38,8 +38,12 @@ class RecoveryManagerTests(unittest.TestCase):
         self.storage = HubStorage(db_path=Path(self._tmp.name) / "hub.db")
         self.storage.open()
         self._admin = True
+        # What hub_config holds; boot reinstalls the card from the last one.
+        self.saved_hashes = []
         self.manager = RecoveryManager(
-            self.storage.table("recovery_codes"), lambda: self._admin
+            self.storage.table("recovery_codes"),
+            lambda: self._admin,
+            save_hash=self.saved_hashes.append,
         )
 
     def tearDown(self):
@@ -162,9 +166,25 @@ class RecoveryManagerTests(unittest.TestCase):
 
     def test_code_survives_restart(self):
         code = self.manager.ensure_armed()
-        reopened = RecoveryManager(self.storage.table("recovery_codes"), lambda: True)
+        reopened = RecoveryManager(
+            self.storage.table("recovery_codes"),
+            lambda: True,
+            save_hash=self.saved_hashes.append,
+        )
         self.assertIsNone(reopened.ensure_armed())  # still armed, no re-mint
         reopened.redeem(code, "ip-1")
+
+    def test_a_minted_code_is_saved_before_it_is_shown(self):
+        code = self.manager.ensure_armed()
+        self.assertEqual(self.saved_hashes, [hash_code(code)])
+        self.assertIsNone(self.manager.ensure_armed())
+        self.assertEqual(len(self.saved_hashes), 1)
+
+    def test_a_code_that_cannot_be_saved_is_neither_shown_nor_armed(self):
+        self.manager._save_hash = mock.Mock(side_effect=OSError("read-only"))
+        with self.assertRaises(OSError):
+            self.manager.ensure_armed()
+        self.assertFalse(self.manager.is_armed())
 
 
 class ReplaceAdminTests(unittest.TestCase):

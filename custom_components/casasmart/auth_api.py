@@ -50,6 +50,7 @@ from .pairing import (
 )
 from .recovery import CodeInvalidError as RecoveryCodeInvalidError
 from .recovery import RecoveryManager
+from .storage import ConfigError
 from .throttle import ThrottledError
 from .tls import TLS_LISTENER_TRUSTED_LAN
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
@@ -169,7 +170,12 @@ def arm_recovery(hass: HomeAssistant) -> None:
     recovery = get_recovery(hass)
     if recovery is None:
         return
-    code = recovery.ensure_armed()
+    try:
+        code = recovery.ensure_armed()
+    except ConfigError as err:
+        # The device is already paired; this only leaves the card unarmed.
+        _LOGGER.warning("Recovery code not armed: could not save it (%s)", err)
+        return
     if code is not None:
         hass.loop.call_soon_threadsafe(notify_recovery_code, hass, code)
 

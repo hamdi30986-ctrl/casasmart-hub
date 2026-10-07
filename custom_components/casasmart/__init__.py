@@ -260,7 +260,13 @@ def _build_runtime_data(
     auth = AuthEngine(storage.table("auth_devices"), hub_config)
     auth.warm_up()
     pairing = PairingManager(storage.table("pairing_codes"), auth.has_admin)
-    recovery = RecoveryManager(storage.table("recovery_codes"), auth.has_admin)
+    recovery = RecoveryManager(
+        storage.table("recovery_codes"),
+        auth.has_admin,
+        save_hash=lambda code_hash: hub_config.set(
+            RECOVERY_CODE_HASH_CONFIG_KEY, code_hash
+        ),
+    )
 
     bootstrap_hash = hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
     if bootstrap_hash:
