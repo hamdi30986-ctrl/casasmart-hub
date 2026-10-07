@@ -175,10 +175,6 @@ class HqNotificationVerifier:
             key = None
         self._public_key = key if isinstance(key, Ed25519PublicKey) else None
 
-    @property
-    def configured(self) -> bool:
-        return self._public_key is not None
-
     def verify(
         self, headers: Mapping[str, str], raw_body: bytes, now: float | None = None
     ) -> VerifiedHqNotification:
