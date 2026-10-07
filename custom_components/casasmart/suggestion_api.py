@@ -79,10 +79,16 @@ class _SuggestionView(HomeAssistantView):
         except (StorageError, sqlite3.Error):
             return self.json({"error": "suggestion_storage_unavailable"}, 503)
 
-    def member(self, claims):
-        """The person behind the token; suppressions follow the person."""
+    async def member(self, claims):
+        """The person behind the token; suppressions follow the person.
+
+        A storage read, so it runs in the executor; ``handle`` maps its storage
+        errors like any other.
+        """
         auth = get_engine(self.hass)
-        return auth.member_id_for(claims["sub"]) if auth else claims["sub"]
+        if auth is None:
+            return claims["sub"]
+        return await self.hass.async_add_executor_job(auth.member_id_for, claims["sub"])
 
     async def body(self, request, allowed):
         """The JSON object body, refusing any field outside ``allowed``."""
@@ -101,7 +107,7 @@ class CasaSmartSuggestionsView(_SuggestionView):
     async def get(self, request):
         async def operation(service, claims):
             return self.json(
-                await service.payload(self.member(claims), claims.get("rooms"))
+                await service.payload(await self.member(claims), claims.get("rooms"))
             )
 
         return await self.handle(request, "devices.read", operation)
@@ -231,7 +237,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
             )
             if error is not None:
                 return error
-            member, scope = self.member(claims), claims.get("rooms")
+            member, scope = await self.member(claims), claims.get("rooms")
             context = (
                 await service.context(scope)
                 if self.generated
@@ -322,7 +328,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
                 suppressed = fresh[0]["suppressions"].get(
                     service.store.suppression_key(
-                        self.member(fresh_claims),
+                        await self.member(fresh_claims),
                         candidate.get("suppression_id", occurrence),
                     )
                 )
