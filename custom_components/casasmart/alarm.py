@@ -390,24 +390,20 @@ class AlarmEngine:
         if record is None:
             return None  # not an alarm sensor
         zone = record["zone"]
+        if not active:
+            return None
 
         # Life safety comes before any mode rule.
         if zone == ZONE_LIFE_SAFETY:
-            if not active:
-                return None
             with self._lock:
                 return self._enter_triggered(
                     entity_id, zone, now=now, life_safety=True, persist=True
                 )
 
-        if not active:
-            return None
-
         with self._lock:
             mode = self._state["mode"]
-            if mode in (MODE_DISARMED, MODE_TRIGGERED):
-                return None
-            if mode == MODE_PENDING:
+            # Disarmed, or an entry delay or alarm is already running.
+            if mode not in ARMABLE_MODES:
                 return None
             # Exit delay still running.
             if now < self._state["active_at"]:
