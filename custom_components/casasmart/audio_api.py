@@ -979,7 +979,7 @@ class CasaSmartAudioAthanView(_AudioView):
         # the new config now.
         scheduler = get_athan_scheduler(self._hass)
         if scheduler is not None:
-            scheduler.reschedule()
+            await scheduler.async_reschedule()
         return self.json({"athan": stored, "relayed": relayed})
 
 
