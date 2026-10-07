@@ -53,6 +53,7 @@ from the adapter's ingest path.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -104,62 +105,7 @@ _PA_STORE_KEY = f"{DOMAIN}_pa_clips"
 _NO_SPEAKERS_IN_SCOPE = "No speakers in your rooms"
 
 
-class PaClipStore:
-    """Ephemeral in-memory store of PA clips the hub hosts for its speakers.
-
-    The app uploads a recorded clip; the hub keeps the bytes here under a random
-    token and hands the speakers a token URL to fetch (presigned-URL pattern —
-    the token + short TTL are the access control, so the fetch endpoint needs no
-    JWT and no LAN check, which behind Docker's NAT would reject the speakers).
-    One event loop → no locking; expired entries are evicted lazily on access,
-    so there is no background task.
-    """
-
-    def __init__(
-        self, ttl: float = _PA_CLIP_TTL, max_count: int = _PA_CLIP_MAX_COUNT
-    ) -> None:
-        self._ttl = ttl
-        self._max_count = max_count
-        # token -> (data, content_type, expires_at_monotonic)
-        self._clips: dict[str, tuple[bytes, str, float]] = {}
-
-    @property
-    def ttl(self) -> float:
-        """Seconds a stored clip stays fetchable."""
-        return self._ttl
-
-    def _evict_expired(self) -> None:
-        """Drop every clip whose TTL has passed."""
-        now = time.monotonic()
-        for token in [t for t, (_d, _c, exp) in self._clips.items() if exp <= now]:
-            del self._clips[token]
-
-    def put(self, data: bytes, content_type: str) -> str:
-        """Store a clip and return its token; drops the oldest if at capacity."""
-        self._evict_expired()
-        while len(self._clips) >= self._max_count:
-            oldest = min(self._clips, key=lambda t: self._clips[t][2])
-            del self._clips[oldest]
-        token = secrets.token_urlsafe(24)  # ~192 bits of entropy
-        self._clips[token] = (data, content_type, time.monotonic() + self._ttl)
-        return token
-
-    def get(self, token: str) -> tuple[bytes, str] | None:
-        """Return ``(data, content_type)`` for a live token, else None."""
-        self._evict_expired()
-        item = self._clips.get(token)
-        if item is None:
-            return None
-        return item[0], item[1]
-
-
-def _pa_store(hass: HomeAssistant) -> PaClipStore:
-    """The per-hass PA clip store, created on first use."""
-    store = hass.data.get(_PA_STORE_KEY)
-    if store is None:
-        store = PaClipStore()
-        hass.data[_PA_STORE_KEY] = store
-    return store
+# -- runtime accessors --------------------------------------------------------
 
 
 def get_audio(hass: HomeAssistant) -> AudioEngine | None:
@@ -189,48 +135,7 @@ def get_athan_scheduler(hass: HomeAssistant):
     return runtime_data.athan_scheduler
 
 
-class _AudioView(HomeAssistantView):
-    """Shared plumbing for the audio views."""
-
-    requires_auth = False  # each handler gates in-band (see module docstring)
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        self._hass = hass
-
-    def _audio_or_503(self) -> tuple[AudioEngine | None, web.Response | None]:
-        """``(engine, None)``, or ``(None, 503)`` while the hub is loading."""
-        audio = get_audio(self._hass)
-        if audio is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return audio, None
-
-    def _adapter_or_503(self) -> tuple[AudioAdapter | None, web.Response | None]:
-        """``(adapter, None)``, or ``(None, 503)`` before the adapter exists."""
-        adapter = get_audio_adapter(self._hass)
-        if adapter is None:
-            return None, self.json_message(
-                "Audio bus not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return adapter, None
-
-    def _notify_change(self) -> None:
-        """Tell connected apps the hub's speaker view moved."""
-        self._hass.bus.async_fire(EVENT_AUDIO_CHANGED, None)
-
-    def _publish_or_503(
-        self, adapter: AudioAdapter, topic: str, payload: Any, *, retain: bool = False
-    ) -> web.Response | None:
-        """Publish through the adapter; a client that isn't running is a 503."""
-        try:
-            adapter.publish(topic, payload, qos=1, retain=retain)
-        except AudioAdapterNotReady as err:
-            return self.json_message(str(err), HTTPStatus.SERVICE_UNAVAILABLE)
-        return None
-
-
-# -- speaker registry + live status -------------------------------------------
+# -- room scope ---------------------------------------------------------------
 
 
 def _scoped_area_names(hass: HomeAssistant, scope: list[str]) -> set[str]:
@@ -297,6 +202,191 @@ def _require_controllable(mac: Any, allowed: set[str] | None) -> None:
     mac6 = normalize_mac6(mac)
     if mac6 not in allowed:
         raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+
+
+# -- helpers ------------------------------------------------------------------
+
+
+def _parse_targets(raw: Any) -> list[str]:
+    """Normalise a PA ``targets`` field to a de-duped list of canonical mac6s.
+
+    Accepts a JSON array (``["aabbcc", ...]``) or a comma/space-separated
+    string. Invalid ids are dropped silently — a bad selection must never block
+    the announcement, it just falls back toward broadcast. Order preserved.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    items: list[Any]
+    text = raw.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            parsed = []
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        items = re.split(r"[,\s]+", text)
+    result: list[str] = []
+    for item in items:
+        try:
+            mac6 = normalize_mac6(item)
+        except AudioError:
+            continue
+        if mac6 not in result:
+            result.append(mac6)
+    return result
+
+
+def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
+    """Copy ``config`` with ``field`` reduced to a bool ``<field>_set``.
+
+    Config GETs are admin-only, but the broker password / PA key still never
+    need to round-trip to the app — the app only needs to know whether one is
+    set. The plaintext stays hub-side (and goes to the Pi only over the
+    key-gated provision endpoint).
+    """
+    redacted = dict(config)
+    redacted[f"{field}_set"] = bool(redacted.pop(field, None))
+    return redacted
+
+
+# -- executor jobs (storage-touching engine calls) ----------------------------
+# Plain module-level callables so async_add_executor_job gets a function, not a
+# closure capturing request state; they only map positional args to keywords.
+
+
+def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):
+    return audio.enroll_speaker(mac, name, room, icon=icon, area_id=area_id)
+
+
+def _update_job(audio: AudioEngine, mac6, name, room, icon, area_id):
+    return audio.update_speaker(mac6, name=name, room=room, icon=icon, area_id=area_id)
+
+
+def _set_broker_job(audio: AudioEngine, payload: dict[str, Any]):
+    return audio.set_broker(
+        host=payload.get("host"),
+        port=payload.get("port"),
+        tls=payload.get("tls"),
+        username=payload.get("username"),
+        password=payload.get("password"),
+    )
+
+
+def _set_pa_job(audio: AudioEngine, payload: dict[str, Any]):
+    return audio.set_pa(
+        host=payload.get("host"),
+        port=payload.get("port"),
+        api_key=payload.get("api_key"),
+    )
+
+
+# -- PA clip hosting ----------------------------------------------------------
+
+
+class PaClipStore:
+    """Ephemeral in-memory store of PA clips the hub hosts for its speakers.
+
+    The app uploads a recorded clip; the hub keeps the bytes here under a random
+    token and hands the speakers a token URL to fetch (presigned-URL pattern —
+    the token + short TTL are the access control, so the fetch endpoint needs no
+    JWT and no LAN check, which behind Docker's NAT would reject the speakers).
+    One event loop → no locking; expired entries are evicted lazily on access,
+    so there is no background task.
+    """
+
+    def __init__(
+        self, ttl: float = _PA_CLIP_TTL, max_count: int = _PA_CLIP_MAX_COUNT
+    ) -> None:
+        self._ttl = ttl
+        self._max_count = max_count
+        # token -> (data, content_type, expires_at_monotonic)
+        self._clips: dict[str, tuple[bytes, str, float]] = {}
+
+    @property
+    def ttl(self) -> float:
+        """Seconds a stored clip stays fetchable."""
+        return self._ttl
+
+    def _evict_expired(self) -> None:
+        """Drop every clip whose TTL has passed."""
+        now = time.monotonic()
+        for token in [t for t, (_d, _c, exp) in self._clips.items() if exp <= now]:
+            del self._clips[token]
+
+    def put(self, data: bytes, content_type: str) -> str:
+        """Store a clip and return its token; drops the oldest if at capacity."""
+        self._evict_expired()
+        while len(self._clips) >= self._max_count:
+            oldest = min(self._clips, key=lambda t: self._clips[t][2])
+            del self._clips[oldest]
+        token = secrets.token_urlsafe(24)  # ~192 bits of entropy
+        self._clips[token] = (data, content_type, time.monotonic() + self._ttl)
+        return token
+
+    def get(self, token: str) -> tuple[bytes, str] | None:
+        """Return ``(data, content_type)`` for a live token, else None."""
+        self._evict_expired()
+        item = self._clips.get(token)
+        if item is None:
+            return None
+        return item[0], item[1]
+
+
+def _pa_store(hass: HomeAssistant) -> PaClipStore:
+    """The per-hass PA clip store, created on first use."""
+    store = hass.data.get(_PA_STORE_KEY)
+    if store is None:
+        store = PaClipStore()
+        hass.data[_PA_STORE_KEY] = store
+    return store
+
+
+# -- views --------------------------------------------------------------------
+
+
+class _AudioView(HomeAssistantView):
+    """Shared plumbing for the audio views."""
+
+    requires_auth = False  # each handler gates in-band (see module docstring)
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    def _audio_or_503(self) -> tuple[AudioEngine | None, web.Response | None]:
+        """``(engine, None)``, or ``(None, 503)`` while the hub is loading."""
+        audio = get_audio(self._hass)
+        if audio is None:
+            return None, self.json_message(
+                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        return audio, None
+
+    def _adapter_or_503(self) -> tuple[AudioAdapter | None, web.Response | None]:
+        """``(adapter, None)``, or ``(None, 503)`` before the adapter exists."""
+        adapter = get_audio_adapter(self._hass)
+        if adapter is None:
+            return None, self.json_message(
+                "Audio bus not ready", HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        return adapter, None
+
+    def _notify_change(self) -> None:
+        """Tell connected apps the hub's speaker view moved."""
+        self._hass.bus.async_fire(EVENT_AUDIO_CHANGED, None)
+
+    def _publish_or_503(
+        self, adapter: AudioAdapter, topic: str, payload: Any, *, retain: bool = False
+    ) -> web.Response | None:
+        """Publish through the adapter; a client that isn't running is a 503."""
+        try:
+            adapter.publish(topic, payload, qos=1, retain=retain)
+        except AudioAdapterNotReady as err:
+            return self.json_message(str(err), HTTPStatus.SERVICE_UNAVAILABLE)
+        return None
+
+
+# -- speaker registry + live status -------------------------------------------
 
 
 class CasaSmartAudioSpeakersView(_AudioView):
@@ -1034,82 +1124,3 @@ class CasaSmartAudioProvisionView(_AudioView):
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
         return self.json({"broker": broker})
-
-
-# -- helpers ------------------------------------------------------------------
-
-
-def _parse_targets(raw: Any) -> list[str]:
-    """Normalise a PA ``targets`` field to a de-duped list of canonical mac6s.
-
-    Accepts a JSON array (``["aabbcc", ...]``) or a comma/space-separated
-    string. Invalid ids are dropped silently — a bad selection must never block
-    the announcement, it just falls back toward broadcast. Order preserved.
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return []
-    items: list[Any]
-    text = raw.strip()
-    if text.startswith("["):
-        import json
-
-        try:
-            parsed = json.loads(text)
-        except (TypeError, ValueError):
-            parsed = []
-        items = parsed if isinstance(parsed, list) else []
-    else:
-        items = re.split(r"[,\s]+", text)
-    result: list[str] = []
-    for item in items:
-        try:
-            mac6 = normalize_mac6(item)
-        except AudioError:
-            continue
-        if mac6 not in result:
-            result.append(mac6)
-    return result
-
-
-def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
-    """Copy ``config`` with ``field`` reduced to a bool ``<field>_set``.
-
-    Config GETs are admin-only, but the broker password / PA key still never
-    need to round-trip to the app — the app only needs to know whether one is
-    set. The plaintext stays hub-side (and goes to the Pi only over the
-    key-gated provision endpoint).
-    """
-    redacted = dict(config)
-    redacted[f"{field}_set"] = bool(redacted.pop(field, None))
-    return redacted
-
-
-# -- executor jobs (storage-touching engine calls) ----------------------------
-# Plain module-level callables so async_add_executor_job gets a function, not a
-# closure capturing request state; they only map positional args to keywords.
-
-
-def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):
-    return audio.enroll_speaker(mac, name, room, icon=icon, area_id=area_id)
-
-
-def _update_job(audio: AudioEngine, mac6, name, room, icon, area_id):
-    return audio.update_speaker(mac6, name=name, room=room, icon=icon, area_id=area_id)
-
-
-def _set_broker_job(audio: AudioEngine, payload: dict[str, Any]):
-    return audio.set_broker(
-        host=payload.get("host"),
-        port=payload.get("port"),
-        tls=payload.get("tls"),
-        username=payload.get("username"),
-        password=payload.get("password"),
-    )
-
-
-def _set_pa_job(audio: AudioEngine, payload: dict[str, Any]):
-    return audio.set_pa(
-        host=payload.get("host"),
-        port=payload.get("port"),
-        api_key=payload.get("api_key"),
-    )

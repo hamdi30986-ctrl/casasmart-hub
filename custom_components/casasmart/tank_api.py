@@ -68,9 +68,20 @@ _FIRST_READING_POLL = 0.5
 # Escalating lockouts for bad ingest tokens, keyed by client address.
 _INGEST_THROTTLE = FailureThrottle("tank-ingest")
 
+# Body fields PATCH .../calibration accepts; each is optional.
+_CALIBRATION_FIELDS = (
+    "calibration_voltage",
+    "calibration_depth",
+    "max_height",
+    "low_percent",
+)
+
 
 class ShellyRpcError(Exception):
     """The device refused or broke the RPC conversation."""
+
+
+# -- helpers ------------------------------------------------------------------
 
 
 def get_tanks(hass: HomeAssistant) -> TankEngine | None:
@@ -100,6 +111,21 @@ def _is_lan_target(ip: str) -> bool:
         and not parsed.is_loopback
         and not parsed.is_unspecified
     )
+
+
+def _client_ip(request: web.Request) -> str:
+    """Client address for throttle keying + logging.
+
+    Home Assistant has already resolved ``request.remote`` from
+    ``X-Forwarded-For`` for its trusted proxies, so behind the tunnel it is the
+    real client. Raw ``CF-Connecting-IP`` / ``X-Forwarded-For`` headers are not
+    read here: any peer can send them, so they would let a client pick a fresh
+    throttle bucket on every request.
+    """
+    return request.remote or "unknown"
+
+
+# -- Shelly Gen2 RPC ----------------------------------------------------------
 
 
 async def _shelly_rpc(
@@ -203,6 +229,9 @@ async def _push_script(session: aiohttp.ClientSession, ip: str, code: str) -> in
     )
     await _shelly_rpc(session, ip, "Script.Start", {"id": script_id})
     return script_id
+
+
+# -- views --------------------------------------------------------------------
 
 
 class _TankView(HomeAssistantView):
@@ -392,18 +421,6 @@ class CasaSmartTankProvisionView(_TankView):
         )
 
 
-def _client_ip(request: web.Request) -> str:
-    """Client address for throttle keying + logging.
-
-    Home Assistant has already resolved ``request.remote`` from
-    ``X-Forwarded-For`` for its trusted proxies, so behind the tunnel it is the
-    real client. Raw ``CF-Connecting-IP`` / ``X-Forwarded-For`` headers are not
-    read here: any peer can send them, so they would let a client pick a fresh
-    throttle bucket on every request.
-    """
-    return request.remote or "unknown"
-
-
 class CasaSmartTankReadingView(_TankView):
     """POST /api/casasmart/tank/reading — the Shelly script's ingest.
 
@@ -561,14 +578,6 @@ class CasaSmartTankReadingsView(_TankView):
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         return self.json({"device_id": device_id, "readings": readings})
-
-
-_CALIBRATION_FIELDS = (
-    "calibration_voltage",
-    "calibration_depth",
-    "max_height",
-    "low_percent",
-)
 
 
 class CasaSmartTankCalibrationView(_TankView):

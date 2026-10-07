@@ -62,15 +62,6 @@ from .const import EVENT_AUDIO_CHANGED
 _LOGGER = logging.getLogger(__name__)
 
 
-class AudioAdapterNotReady(RuntimeError):
-    """Raised when a publish is attempted while the MQTT client isn't running.
-
-    That is: no broker configured yet, a start that failed, or after stop.
-    The REST API maps this to a 503 — the control was rejected, not silently
-    dropped, so the app can tell the user the speaker bus is unreachable.
-    """
-
-
 # The hub is one client; a stable id keeps the broker's session bookkeeping sane
 # across reconnects.
 _CLIENT_ID = "casasmart-hub"
@@ -83,9 +74,18 @@ _SUB_STATE = "speakers/+/state"
 # Pull mac6 out of ``speakers/<mac6>/status|state``.
 _TOPIC_RE = re.compile(r"^speakers/([0-9a-fA-F]+)/(status|state)$")
 
-# paho auto-reconnect backoff once a connection has been established once.
+# paho's auto-reconnect backoff, in seconds.
 _RECONNECT_MIN_DELAY = 1
 _RECONNECT_MAX_DELAY = 60
+
+
+class AudioAdapterNotReady(RuntimeError):
+    """Raised when a publish is attempted while the MQTT client isn't running.
+
+    That is: no broker configured yet, a start that failed, or after stop.
+    The REST API maps this to a 503 — the control was rejected, not silently
+    dropped, so the app can tell the user the speaker bus is unreachable.
+    """
 
 
 def _build_paho_client(client_id: str) -> Any:
