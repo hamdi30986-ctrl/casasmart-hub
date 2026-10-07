@@ -24,6 +24,8 @@ from camera_streams import (
 
 NOW = 1_000_000.0
 CAM = "camera.front_door"
+# Who minted the ticket: the device, its auth version and its room scope.
+OWNER = {"device_id": "dev-1", "ver": 1, "rooms": None}
 
 
 class TestHlsFilenameGate(unittest.TestCase):
@@ -57,7 +59,7 @@ class TestTicketStore(unittest.TestCase):
         self.store = StreamTicketStore()
 
     def test_mint_then_validate(self):
-        ticket = self.store.mint(CAM, now=NOW)
+        ticket = self.store.mint(CAM, now=NOW, **OWNER)
         # No raise = valid.
         self.store.validate(ticket.ticket_id, CAM, now=NOW + 1)
 
@@ -66,7 +68,7 @@ class TestTicketStore(unittest.TestCase):
             self.store.validate("nope", CAM, now=NOW)
 
     def test_wrong_entity_same_rejection_as_unknown(self):
-        ticket = self.store.mint(CAM, now=NOW)
+        ticket = self.store.mint(CAM, now=NOW, **OWNER)
         with self.assertRaises(TicketError) as wrong:
             self.store.validate(ticket.ticket_id, "camera.other", now=NOW)
         with self.assertRaises(TicketError) as unknown:
@@ -75,34 +77,49 @@ class TestTicketStore(unittest.TestCase):
         self.assertEqual(str(wrong.exception), str(unknown.exception))
 
     def test_expired_ticket_rejected_and_evicted(self):
-        ticket = self.store.mint(CAM, now=NOW)
+        ticket = self.store.mint(CAM, now=NOW, **OWNER)
         with self.assertRaises(TicketError):
             self.store.validate(ticket.ticket_id, CAM, now=NOW + TICKET_TTL)
         self.assertEqual(len(self.store), 0)
 
     def test_ticket_valid_until_the_last_second(self):
-        ticket = self.store.mint(CAM, now=NOW)
+        ticket = self.store.mint(CAM, now=NOW, **OWNER)
         self.store.validate(ticket.ticket_id, CAM, now=NOW + TICKET_TTL - 1)
 
     def test_mint_purges_expired(self):
-        self.store.mint(CAM, now=NOW)
-        self.store.mint(CAM, now=NOW + TICKET_TTL + 1)
+        self.store.mint(CAM, now=NOW, **OWNER)
+        self.store.mint(CAM, now=NOW + TICKET_TTL + 1, **OWNER)
         self.assertEqual(len(self.store), 1)
 
     def test_cap_evicts_soonest_to_expire(self):
-        first = self.store.mint(CAM, now=NOW)
+        first = self.store.mint(CAM, now=NOW, **OWNER)
         for i in range(MAX_TICKETS - 1):
-            self.store.mint(CAM, now=NOW + 1 + i * 0.001)
+            self.store.mint(CAM, now=NOW + 1 + i * 0.001, **OWNER)
         self.assertEqual(len(self.store), MAX_TICKETS)
-        newest = self.store.mint(CAM, now=NOW + 2)
+        newest = self.store.mint(CAM, now=NOW + 2, **OWNER)
         self.assertEqual(len(self.store), MAX_TICKETS)
         with self.assertRaises(TicketError):
             self.store.validate(first.ticket_id, CAM, now=NOW + 3)
         self.store.validate(newest.ticket_id, CAM, now=NOW + 3)
 
+    def test_validate_returns_who_minted_the_ticket(self):
+        minted = self.store.mint(
+            CAM, now=NOW, device_id="dev-2", ver=3, rooms=["room-a"]
+        )
+        ticket = self.store.validate(minted.ticket_id, CAM, now=NOW + 1)
+        self.assertEqual(
+            (ticket.device_id, ticket.ver, ticket.rooms), ("dev-2", 3, ("room-a",))
+        )
+
+    def test_discarded_ticket_is_unknown(self):
+        ticket = self.store.mint(CAM, now=NOW, **OWNER)
+        self.store.discard(ticket.ticket_id)
+        with self.assertRaises(TicketError):
+            self.store.validate(ticket.ticket_id, CAM, now=NOW + 1)
+
     def test_ticket_ids_unique_and_opaque(self):
-        a = self.store.mint(CAM, now=NOW)
-        b = self.store.mint(CAM, now=NOW)
+        a = self.store.mint(CAM, now=NOW, **OWNER)
+        b = self.store.mint(CAM, now=NOW, **OWNER)
         self.assertNotEqual(a.ticket_id, b.ticket_id)
         self.assertGreaterEqual(len(a.ticket_id), 24)
 

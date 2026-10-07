@@ -163,6 +163,12 @@ class _Entry:
         self.entry_id = "test-entry"
         # Mirrors ConfigEntry.options (read by the payload-v2 tunnel gate).
         self.options: dict[str, Any] = {}
+        # What views registered with async_on_unload; a test calls them to
+        # unload the entry.
+        self.on_unload: list[Any] = []
+
+    def async_on_unload(self, func) -> None:
+        self.on_unload.append(func)
 
 
 class FakeConfigEntries:
