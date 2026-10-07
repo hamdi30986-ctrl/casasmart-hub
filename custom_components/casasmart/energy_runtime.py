@@ -160,9 +160,16 @@ class EnergyAutomationManager:
             if str(state.state) != "on" or state.entity_id in remembered:
                 continue
             config_key = self._config_key(state)
-            allowed = await self._hass.async_add_executor_job(
-                self._flags.works_during_energy_saving, config_key
-            )
+            try:
+                allowed = await self._hass.async_add_executor_job(
+                    self._flags.works_during_energy_saving, config_key
+                )
+            except ValueError as err:
+                # HA allows a longer id than a flag key; leave it running.
+                _LOGGER.warning(
+                    "Energy Saving skips automation %s: %s", state.entity_id, err
+                )
+                continue
             if allowed:
                 continue
             if still_wanted is not None and not still_wanted():

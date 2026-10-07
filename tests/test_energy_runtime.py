@@ -254,6 +254,23 @@ class EnergyRuntimeTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.flags.disabled_automations(), [])
 
+    async def test_automation_with_an_overlong_id_is_skipped(self):
+        # HA accepts any id length; the flag store caps keys at 255 characters.
+        states = [
+            State("automation.long", "on", {"id": "x" * 256}),
+            State("automation.short", "on", {"id": "short_key"}),
+        ]
+        hass = _Hass(states)
+        manager = EnergyAutomationManager(hass, self.engine, self.flags)
+
+        with self.assertLogs("casasmart.energy_runtime", level="WARNING"):
+            await manager.async_enforce_active()
+        self.assertEqual(
+            hass.services.calls,
+            [("automation", "turn_off", "automation.short", True)],
+        )
+        self.assertEqual(self.flags.disabled_automations(), ["automation.short"])
+
     async def test_restore_failure_stays_durable_for_startup_retry(self):
         hass = _Hass()
         self.flags.set_disabled_automations(["automation.retry_me"])
