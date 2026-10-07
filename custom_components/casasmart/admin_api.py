@@ -74,6 +74,17 @@ _SERVICE_CALL_TIMEOUT = 10.0
 _PERMISSION = "installer.manage"
 
 
+def _device_entries(dev_reg: Any) -> list[Any]:
+    """Every device entry, without the registry access HA 2026.9 deprecates.
+
+    From 2026.9, iterating ``devices`` yields the entries and mapping access
+    (``.values()``, ``[device_id]``) logs a deprecation; before that, iterating
+    yields device ids, which are looked up the then-supported way.
+    """
+    devices = dev_reg.devices
+    return [devices[item] if isinstance(item, str) else item for item in devices]
+
+
 class _AdminView(HomeAssistantView):
     """Shared plumbing for the installer admin views."""
 
@@ -171,17 +182,6 @@ class CasaSmartAdminPermitJoinView(_AdminView):
         if not entries:
             return None
         return entries[0].runtime_data.hub_config.get(ZIGBEE_BASE_TOPICS_CONFIG_KEY)
-
-
-def _device_entries(dev_reg: Any) -> list[Any]:
-    """Every device entry, without the registry access HA 2026.9 deprecates.
-
-    From 2026.9, iterating ``devices`` yields the entries and mapping access
-    (``.values()``, ``[device_id]``) logs a deprecation; before that, iterating
-    yields device ids, which are looked up the then-supported way.
-    """
-    devices = dev_reg.devices
-    return [devices[item] if isinstance(item, str) else item for item in devices]
 
 
 class CasaSmartAdminRegistryView(_AdminView):

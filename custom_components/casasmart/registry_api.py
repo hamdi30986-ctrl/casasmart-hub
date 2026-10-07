@@ -35,12 +35,12 @@ from .registry import (
 )
 from .storage import StorageError
 
-_SCENE_CALL_TIMEOUT = 10.0
-
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
+
+_SCENE_CALL_TIMEOUT = 10.0
 
 
 def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
@@ -55,6 +55,128 @@ def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
 def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
+
+
+def _scene_entity_ids(entities: Any) -> list[str]:
+    """The entity_ids referenced by a scene's entities payload (str ids only)."""
+    if not isinstance(entities, list):
+        return []
+    return [
+        e["entity_id"]
+        for e in entities
+        if isinstance(e, dict) and isinstance(e.get("entity_id"), str)
+    ]
+
+
+async def async_execute_registry_scene(
+    hass: HomeAssistant, scene: dict[str, Any]
+) -> dict[str, Any]:
+    scene_id = scene["scene_id"]
+
+    _climate_with_state = {
+        item["entity_id"]
+        for item in scene["entities"]
+        if item["entity_id"].split(".", 1)[0] == "climate"
+        and item.get("action") in ("set_temperature", "set_hvac_mode")
+    }
+    entities_to_run = [
+        item
+        for item in scene["entities"]
+        if not (
+            item["entity_id"].split(".", 1)[0] == "climate"
+            and item.get("action") == "set_fan_mode"
+            and item["entity_id"] in _climate_with_state
+            and not scene.get("generated_room_v1", False)
+        )
+    ]
+
+    results = []
+    for item in entities_to_run:
+        entity_id = item["entity_id"]
+
+        if scene.get("generated_room_v1"):
+            # Each service call yields: a room move or another scene can occur
+            # between commands. Never brighten/re-enable an interveningly off
+            # light, cool harder, or continue controlling a moved device.
+            from .generated_suggestions import room_actions
+
+            state = hass.states.get(entity_id)
+            valid = (
+                state is not None and area_id_of(hass, entity_id) == scene["room_id"]
+            )
+            if valid and entity_id.startswith("light."):
+                valid = (
+                    state.state == "on"
+                    and state.attributes.get("casasmart_room_activity_exclude")
+                    is not True
+                )
+                if valid and item["action"] == "turn_on":
+                    valid = any(
+                        a["action"] == item["action"]
+                        and a["data"] == item.get("data", {})
+                        for a in room_actions([state], "room_eco")
+                    )
+            elif valid:
+                unit = getattr(
+                    getattr(hass.config, "units", None), "temperature_unit", "°C"
+                )
+                valid = any(
+                    a["action"] == item["action"] and a["data"] == item.get("data", {})
+                    for a in room_actions([state], scene["kind"], temperature_unit=unit)
+                )
+            if not valid:
+                results.append(
+                    {
+                        "entity_id": entity_id,
+                        "ok": False,
+                        "error": "Device changed since preview",
+                    }
+                )
+                continue
+
+        if hass.states.get(entity_id) is None or not is_served(hass, entity_id):
+            results.append(
+                {
+                    "entity_id": entity_id,
+                    "ok": False,
+                    "error": "Device not available",
+                }
+            )
+            continue
+        try:
+            domain, service, service_data = validate_command(
+                entity_id, item["action"], item.get("data")
+            )
+            await asyncio.wait_for(
+                hass.services.async_call(
+                    domain,
+                    service,
+                    {**service_data, "entity_id": entity_id},
+                    blocking=True,
+                ),
+                timeout=_SCENE_CALL_TIMEOUT,
+            )
+            results.append({"entity_id": entity_id, "ok": True})
+        except TimeoutError:
+            _LOGGER.warning(
+                "Scene %s: %s on %s timed out", scene_id, item["action"], entity_id
+            )
+            results.append({"entity_id": entity_id, "ok": False, "error": "Timed out"})
+        except (CommandError, HomeAssistantError, vol.Invalid) as err:
+            _LOGGER.warning(
+                "Scene %s: %s on %s failed: %s",
+                scene_id,
+                item["action"],
+                entity_id,
+                err,
+            )
+            results.append({"entity_id": entity_id, "ok": False, "error": str(err)})
+
+    return {
+        "scene_id": scene_id,
+        "ok": all(result["ok"] for result in results),
+        "results": results,
+    }
 
 
 class _RegistryView(HomeAssistantView):
@@ -903,17 +1025,6 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         return self.json(device)
 
 
-def _scene_entity_ids(entities: Any) -> list[str]:
-    """The entity_ids referenced by a scene's entities payload (str ids only)."""
-    if not isinstance(entities, list):
-        return []
-    return [
-        e["entity_id"]
-        for e in entities
-        if isinstance(e, dict) and isinstance(e.get("entity_id"), str)
-    ]
-
-
 class CasaSmartScenesView(_RegistryView):
     """POST /api/casasmart/registry/scenes — create a scene."""
 
@@ -1082,117 +1193,6 @@ class CasaSmartSceneActivateView(_RegistryView):
             )
 
         return self.json(await async_execute_registry_scene(self._hass, scene))
-
-
-async def async_execute_registry_scene(
-    hass: HomeAssistant, scene: dict[str, Any]
-) -> dict[str, Any]:
-    scene_id = scene["scene_id"]
-
-    _climate_with_state = {
-        item["entity_id"]
-        for item in scene["entities"]
-        if item["entity_id"].split(".", 1)[0] == "climate"
-        and item.get("action") in ("set_temperature", "set_hvac_mode")
-    }
-    entities_to_run = [
-        item
-        for item in scene["entities"]
-        if not (
-            item["entity_id"].split(".", 1)[0] == "climate"
-            and item.get("action") == "set_fan_mode"
-            and item["entity_id"] in _climate_with_state
-            and not scene.get("generated_room_v1", False)
-        )
-    ]
-
-    results = []
-    for item in entities_to_run:
-        entity_id = item["entity_id"]
-
-        if scene.get("generated_room_v1"):
-            # Each service call yields: a room move or another scene can occur
-            # between commands. Never brighten/re-enable an interveningly off
-            # light, cool harder, or continue controlling a moved device.
-            from .generated_suggestions import room_actions
-
-            state = hass.states.get(entity_id)
-            valid = (
-                state is not None and area_id_of(hass, entity_id) == scene["room_id"]
-            )
-            if valid and entity_id.startswith("light."):
-                valid = (
-                    state.state == "on"
-                    and state.attributes.get("casasmart_room_activity_exclude")
-                    is not True
-                )
-                if valid and item["action"] == "turn_on":
-                    valid = any(
-                        a["action"] == item["action"]
-                        and a["data"] == item.get("data", {})
-                        for a in room_actions([state], "room_eco")
-                    )
-            elif valid:
-                unit = getattr(
-                    getattr(hass.config, "units", None), "temperature_unit", "°C"
-                )
-                valid = any(
-                    a["action"] == item["action"] and a["data"] == item.get("data", {})
-                    for a in room_actions([state], scene["kind"], temperature_unit=unit)
-                )
-            if not valid:
-                results.append(
-                    {
-                        "entity_id": entity_id,
-                        "ok": False,
-                        "error": "Device changed since preview",
-                    }
-                )
-                continue
-
-        if hass.states.get(entity_id) is None or not is_served(hass, entity_id):
-            results.append(
-                {
-                    "entity_id": entity_id,
-                    "ok": False,
-                    "error": "Device not available",
-                }
-            )
-            continue
-        try:
-            domain, service, service_data = validate_command(
-                entity_id, item["action"], item.get("data")
-            )
-            await asyncio.wait_for(
-                hass.services.async_call(
-                    domain,
-                    service,
-                    {**service_data, "entity_id": entity_id},
-                    blocking=True,
-                ),
-                timeout=_SCENE_CALL_TIMEOUT,
-            )
-            results.append({"entity_id": entity_id, "ok": True})
-        except TimeoutError:
-            _LOGGER.warning(
-                "Scene %s: %s on %s timed out", scene_id, item["action"], entity_id
-            )
-            results.append({"entity_id": entity_id, "ok": False, "error": "Timed out"})
-        except (CommandError, HomeAssistantError, vol.Invalid) as err:
-            _LOGGER.warning(
-                "Scene %s: %s on %s failed: %s",
-                scene_id,
-                item["action"],
-                entity_id,
-                err,
-            )
-            results.append({"entity_id": entity_id, "ok": False, "error": str(err)})
-
-    return {
-        "scene_id": scene_id,
-        "ok": all(result["ok"] for result in results),
-        "results": results,
-    }
 
 
 class CasaSmartFavoritesView(_RegistryView):

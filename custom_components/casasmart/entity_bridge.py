@@ -176,20 +176,6 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
 READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor", "camera"})
 
 
-class CommandError(Exception):
-    """An app command failed validation (maps to HTTP 400)."""
-
-
-def entity_domain(entity_id: str) -> str:
-    """Return the domain part of an entity_id ('light.living1' -> 'light')."""
-    return entity_id.partition(".")[0]
-
-
-def is_exposed(entity_id: str) -> bool:
-    """True when the entity's domain is part of the CasaSmart surface."""
-    return entity_domain(entity_id) in EXPOSED_DOMAINS
-
-
 DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
     {
         "power",
@@ -212,6 +198,20 @@ DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
         "running",
     }
 )
+
+
+class CommandError(Exception):
+    """An app command failed validation (maps to HTTP 400)."""
+
+
+def entity_domain(entity_id: str) -> str:
+    """Return the domain part of an entity_id ('light.living1' -> 'light')."""
+    return entity_id.partition(".")[0]
+
+
+def is_exposed(entity_id: str) -> bool:
+    """True when the entity's domain is part of the CasaSmart surface."""
+    return entity_domain(entity_id) in EXPOSED_DOMAINS
 
 
 def is_filter_life_entity(entity_id: str) -> bool:

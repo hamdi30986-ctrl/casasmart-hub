@@ -153,6 +153,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
+    """Return the loaded entry's runtime data, or None if not loaded."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    return entries[0].runtime_data
+
+
 def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView]:
     return [
         CasaSmartHandshakeView(hass, hub_version),
@@ -262,14 +270,6 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
         hass.http.register_view(view)
     domain_data["views_registered"] = True
     _LOGGER.debug("CasaSmart REST + WS views registered")
-
-
-def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """Return the loaded entry's runtime data, or None if not loaded."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    return entries[0].runtime_data
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
