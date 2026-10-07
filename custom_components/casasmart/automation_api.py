@@ -10,6 +10,8 @@ the registry entry and does not reload.
 
 The apps work in mireds and HA 2026 runs light actions in kelvin only, so a
 save stores color_temp as color_temp_kelvin and a read gives it back in both.
+A read also gives the plural keys HA's editor saves (triggers, conditions,
+actions) under the singular names the apps parse.
 
 works_during_energy_saving is kept in the hub's EnergyFlags store, not in
 automations.yaml, and setting it needs energy.manage. Automation state and
@@ -50,6 +52,7 @@ from .automations import (
     is_casa_automation_key,
     is_valid_casa_automation_key,
     upsert_automation,
+    with_singular_keys,
 )
 from .const import DOMAIN
 from .entity_bridge import CommandError, light_data_in_kelvin, light_data_with_mireds
@@ -278,8 +281,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return self.json_message(
                 f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
             )
-        # The apps' editor reads a light's colour temperature in mireds.
-        value = _map_actions(value, light_data_with_mireds)
+        # The apps' editor reads singular keys and a light's colour
+        # temperature in mireds.
+        value = _map_actions(with_singular_keys(value), light_data_with_mireds)
         enabled = await self._energy_flag(config_key)
         return self.json({**value, "works_during_energy_saving": enabled})
 

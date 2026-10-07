@@ -323,5 +323,68 @@ class LightColourTemperatureTests(_AutomationViewCase):
         )
 
 
+_HA_EDITOR_YAML = """\
+- id: casa_automation_e
+  alias: Evening
+  description: ''
+  triggers:
+  - trigger: sun
+    event: sunset
+    offset: 0
+  conditions:
+  - condition: state
+    entity_id: binary_sensor.door
+    state: 'off'
+  actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.lamp
+    data:
+      color_temp_kelvin: 2700
+  mode: single
+"""
+
+
+@unittest.skipIf(_SKIP, f"casasmart views unimportable: {_SKIP}")
+class HaEditorConfigTests(_AutomationViewCase):
+    """HA 2024.10+ saves plural keys; the apps parse the singular ones."""
+
+    async def test_plural_keys_read_as_singular_and_the_file_is_untouched(self):
+        with open(self.path, "w", encoding="utf-8") as file:
+            file.write(_HA_EDITOR_YAML)
+        response = await self._view().get(
+            H.FakeRequest(), config_key="casa_automation_e"
+        )
+        status, body = H.read_response(response)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            body,
+            {
+                "id": "casa_automation_e",
+                "alias": "Evening",
+                "description": "",
+                "trigger": [{"trigger": "sun", "event": "sunset", "offset": 0}],
+                "condition": [
+                    {
+                        "condition": "state",
+                        "entity_id": "binary_sensor.door",
+                        "state": "off",
+                    }
+                ],
+                "action": [
+                    {
+                        "action": "light.turn_on",
+                        "target": {"entity_id": "light.lamp"},
+                        "data": {"color_temp_kelvin": 2700, "color_temp": 370},
+                    }
+                ],
+                "mode": "single",
+                "works_during_energy_saving": False,
+            },
+        )
+        with open(self.path, encoding="utf-8") as file:
+            self.assertEqual(file.read(), _HA_EDITOR_YAML)
+
+
 if __name__ == "__main__":
     unittest.main()

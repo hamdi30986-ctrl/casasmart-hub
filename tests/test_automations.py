@@ -20,6 +20,7 @@ from automations import (
     is_casa_automation_key,
     is_valid_casa_automation_key,
     upsert_automation,
+    with_singular_keys,
 )
 
 CASA_ID = "casa_automation_20260303_143022015"
@@ -156,6 +157,40 @@ class TestDeleteAutomation(unittest.TestCase):
         data = sample_yaml()
         self.assertFalse(delete_automation(data, "casa_automation_nope"))
         self.assertEqual(len(data), 2)
+
+
+class TestWithSingularKeys(unittest.TestCase):
+    """HA's editor saves triggers/conditions/actions; the apps read the
+    singular keys."""
+
+    def test_plural_keys_are_renamed_in_place_order(self):
+        config = {
+            "id": CASA_ID,
+            "alias": "Evening",
+            "triggers": [{"trigger": "sun", "event": "sunset"}],
+            "conditions": [{"condition": "state", "entity_id": "binary_sensor.door"}],
+            "actions": [{"action": "light.turn_on"}],
+            "mode": "single",
+        }
+        self.assertEqual(
+            list(with_singular_keys(config).items()),
+            [
+                ("id", CASA_ID),
+                ("alias", "Evening"),
+                ("trigger", [{"trigger": "sun", "event": "sunset"}]),
+                (
+                    "condition",
+                    [{"condition": "state", "entity_id": "binary_sensor.door"}],
+                ),
+                ("action", [{"action": "light.turn_on"}]),
+                ("mode", "single"),
+            ],
+        )
+        self.assertIn("triggers", config)  # the stored config is left alone
+
+    def test_singular_keys_and_a_clashing_plural_are_kept(self):
+        config = {"trigger": [], "triggers": [{"trigger": "time"}], "action": []}
+        self.assertEqual(with_singular_keys(config), config)
 
 
 if __name__ == "__main__":
