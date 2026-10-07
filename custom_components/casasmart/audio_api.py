@@ -26,6 +26,10 @@ App-facing — control:
 - ``POST   /audio/broadcast``              — play a URL/file to all speakers (``audio.control``)
 - ``POST   /audio/pa``                     — proxy a PA audio upload to the PA service (``audio.control``)
 
+Control honours the caller's room scope exactly as the speaker list does
+(``_controllable_speakers``): a room-scoped token reaches only the speakers it
+can see, and "all speakers" means all of those.
+
 App-facing — athan config:
 - ``GET    /audio/athan``                  — the stored athan config (``audio.read``)
 - ``PUT    /audio/athan``                  — replace it + relay retained (``audio.manage``)
@@ -65,6 +69,7 @@ from .audio import (
     AudioError,
     UnknownSpeakerError,
     normalize_mac6,
+    speaker_command_topic,
 )
 from .audio_adapter import AudioAdapter, AudioAdapterNotReady
 from .auth_api import (
@@ -90,6 +95,8 @@ _PA_CLIP_TTL = 120.0
 # Cap on concurrently-hosted clips (defence against an upload flood).
 _PA_CLIP_MAX_COUNT = 16
 _PA_STORE_KEY = f"{DOMAIN}_pa_clips"
+# A room-scoped caller's whole-home play when none of its rooms has a speaker.
+_NO_SPEAKERS_IN_SCOPE = "No speakers in your rooms"
 
 
 class PaClipStore:
@@ -246,6 +253,41 @@ def _speaker_in_scope(
     if room:
         return room.strip().casefold() in allowed_names
     return True
+
+
+def _controllable_speakers(
+    hass: HomeAssistant, audio: AudioEngine, claims: dict[str, Any]
+) -> set[str] | None:
+    """The mac6s a caller may control, or None when it isn't room-scoped.
+
+    Exactly the speakers ``GET /audio/speakers`` shows it (``_speaker_in_scope``)
+    — its rooms' speakers plus the unassigned house-wide ones — so nothing it
+    can't see can be driven by id.
+    """
+    scope = claims.get("rooms")
+    if scope is None:
+        return None
+    allowed_ids = set(scope)
+    allowed_names = _scoped_area_names(hass, scope)
+    return {
+        speaker["mac6"]
+        for speaker in audio.speakers()
+        if _speaker_in_scope(speaker, allowed_ids, allowed_names)
+    }
+
+
+def _require_controllable(mac: Any, allowed: set[str] | None) -> None:
+    """Refuse a speaker outside the caller's scope as if it weren't enrolled.
+
+    Same error (and so the same 404) as an unknown id: a room-scoped token
+    must not learn which speakers exist elsewhere. A malformed id still raises
+    the engine's ``AudioError``.
+    """
+    if allowed is None:
+        return
+    mac6 = normalize_mac6(mac)
+    if mac6 not in allowed:
+        raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
 
 
 class CasaSmartAudioSpeakersView(_AudioView):
@@ -428,7 +470,7 @@ class CasaSmartAudioCommandView(_AudioView):
     name = f"api:{DOMAIN}:audio:command"
 
     async def post(self, request: web.Request, mac6: str) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "audio.control")
+        claims, error = authenticate_request(self._hass, request, "audio.control")
         if error is not None:
             return error
         audio, not_ready = self._audio_or_503()
@@ -443,6 +485,9 @@ class CasaSmartAudioCommandView(_AudioView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         try:
+            _require_controllable(
+                mac6, _controllable_speakers(self._hass, audio, claims)
+            )
             topic, message = audio.build_command(
                 mac6, payload.get("cmd"), value=payload.get("value")
             )
@@ -471,7 +516,7 @@ class CasaSmartAudioAirplayView(_AudioView):
     name = f"api:{DOMAIN}:audio:airplay"
 
     async def post(self, request: web.Request, mac6: str) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "audio.control")
+        claims, error = authenticate_request(self._hass, request, "audio.control")
         if error is not None:
             return error
         audio, not_ready = self._audio_or_503()
@@ -486,6 +531,9 @@ class CasaSmartAudioAirplayView(_AudioView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         try:
+            _require_controllable(
+                mac6, _controllable_speakers(self._hass, audio, claims)
+            )
             topic, verb = audio.build_airplay_remote(mac6, payload.get("action"))
         except UnknownSpeakerError as err:
             return self.json_message(str(err), HTTPStatus.NOT_FOUND)
@@ -503,13 +551,16 @@ class CasaSmartAudioBroadcastView(_AudioView):
     Body: ``{"url": "..."}`` or ``{"file": "..."}`` (exactly one), optional
     ``volume`` / ``priority``. For an already-hosted source; uploading raw
     audio goes through ``POST /audio/pa`` instead.
+
+    A room-scoped caller has no whole-home topic: the same play goes to each
+    speaker it can see, one command topic at a time.
     """
 
     url = f"/api/{DOMAIN}/audio/broadcast"
     name = f"api:{DOMAIN}:audio:broadcast"
 
     async def post(self, request: web.Request) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "audio.control")
+        claims, error = authenticate_request(self._hass, request, "audio.control")
         if error is not None:
             return error
         audio, not_ready = self._audio_or_503()
@@ -532,6 +583,18 @@ class CasaSmartAudioBroadcastView(_AudioView):
             )
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        allowed = _controllable_speakers(self._hass, audio, claims)
+        if allowed is not None:
+            if not allowed:
+                return self.json_message(_NO_SPEAKERS_IN_SCOPE, HTTPStatus.NOT_FOUND)
+            played_on = sorted(allowed)
+            for mac6 in played_on:
+                published_error = self._publish_or_503(
+                    adapter, speaker_command_topic(mac6), message
+                )
+                if published_error is not None:
+                    return published_error
+            return self.json({"ok": True, "played_on": played_on, "command": message})
         published_error = self._publish_or_503(adapter, topic, message)
         if published_error is not None:
             return published_error
@@ -549,13 +612,17 @@ class CasaSmartAudioPaView(_AudioView):
     fetches the clip over the LAN. The audio never touches the cloud — when the
     app is remote only the upload rides the tunnel; the speakers still fetch
     locally. Served by ``CasaSmartAudioPaClipView``.
+
+    A room-scoped caller plays only on speakers it can see: no ``targets``
+    means each of those, and a target outside them refuses the whole upload
+    with the unknown-speaker 404.
     """
 
     url = f"/api/{DOMAIN}/audio/pa"
     name = f"api:{DOMAIN}:audio:pa"
 
     async def post(self, request: web.Request) -> web.Response:
-        _, error = authenticate_request(self._hass, request, "audio.control")
+        claims, error = authenticate_request(self._hass, request, "audio.control")
         if error is not None:
             return error
         audio, not_ready = self._audio_or_503()
@@ -570,6 +637,23 @@ class CasaSmartAudioPaView(_AudioView):
         )
         if read_error is not None:
             return read_error
+
+        allowed = _controllable_speakers(self._hass, audio, claims)
+        if allowed is not None:
+            # Checked before the clip is hosted or anything plays. An unknown
+            # target is refused here too, not skipped: otherwise a 404 would
+            # tell a scoped caller that a speaker it can't see exists.
+            try:
+                for mac6 in targets:
+                    _require_controllable(mac6, allowed)
+            except UnknownSpeakerError as err:
+                return self.json_message(str(err), HTTPStatus.NOT_FOUND)
+            if not targets:
+                if not allowed:
+                    return self.json_message(
+                        _NO_SPEAKERS_IN_SCOPE, HTTPStatus.NOT_FOUND
+                    )
+                targets = sorted(allowed)
 
         # Host the clip under an unguessable token and hand the speakers a
         # hub-relative path — each resolves it against the hub host it is live
