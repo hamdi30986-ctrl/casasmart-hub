@@ -35,7 +35,9 @@ from hastubs import install_casasmart_package, install_homeassistant_stubs  # no
 install_homeassistant_stubs()
 install_casasmart_package()
 
-from audio import AudioEngine  # noqa: E402
+# The package's engine, so it raises the same AudioError class the adapter
+# imports (a flat ``audio`` import would be a second copy of the module).
+from casasmart.audio import AudioEngine  # noqa: E402
 from casasmart.audio_adapter import AudioAdapter, AudioAdapterNotReady  # noqa: E402
 from const import EVENT_AUDIO_CHANGED  # noqa: E402
 from storage import HubStorage  # noqa: E402
@@ -324,6 +326,21 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_state_json_does_not_crash_or_nudge(self):
         await self._started()
         self.client.fire_message("speakers/a1b2c3/state", "{not json")
+        self.assertEqual(self.hass.bus.count(EVENT_AUDIO_CHANGED), 0)
+
+    async def test_a_malformed_speaker_id_logs_one_line_without_a_traceback(self):
+        # speakers/<id>/status with fewer than 6 hex digits, or an announce
+        # whose mac isn't hex, is bad data from the bus, not a hub fault: one
+        # debug line per message, no traceback, no nudge.
+        await self._started()
+        with self.assertLogs("casasmart.audio_adapter", level="DEBUG") as logs:
+            self.client.fire_message("speakers/abc/status", "online")
+            self.client.fire_message("speakers/announce", json.dumps({"mac": "zz"}))
+        self.assertEqual(len(logs.records), 2)
+        for record in logs.records:
+            self.assertEqual(record.levelname, "DEBUG")
+            self.assertIsNone(record.exc_info)
+            self.assertNotIn("\n", record.getMessage())
         self.assertEqual(self.hass.bus.count(EVENT_AUDIO_CHANGED), 0)
 
     # -- outbound --------------------------------------------------------------
