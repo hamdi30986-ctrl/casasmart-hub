@@ -1,15 +1,9 @@
-"""Forward-only schema migrations with automatic backup/restore.
+"""Forward-only schema migrations with backup and restore.
 
-Versioning uses SQLite's ``PRAGMA user_version``. Before any migration runs,
-the database is backed up via the SQLite online-backup API (WAL-safe). If a
-migration fails, the original file is restored over the database — a failed
-migration never leaves the schema half-applied.
-
-Rules:
-- Migrations are forward-only. A database whose version is HIGHER than the
-  code's latest known version is refused (downgrade = undefined behavior).
-- Each migration runs inside its own transaction and bumps ``user_version``
-  atomically with its DDL/DML.
+The schema version is SQLite's PRAGMA user_version. The database is backed up
+before any migration runs and restored if a step fails. Each step runs in one
+transaction together with its user_version bump. A database newer than this
+code is refused.
 """
 
 from __future__ import annotations
@@ -30,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Migration:
-    """One schema step: brings the database from ``version - 1`` to ``version``."""
+    """One schema step, from version - 1 to version."""
 
     version: int
     description: str
@@ -55,12 +49,10 @@ def _migration_v1(conn: sqlite3.Connection) -> None:
 def _migration_v2(conn: sqlite3.Connection) -> None:
     """Append-only tank readings.
 
-    Tank telemetry is a high-frequency time series; the v1 shape stored it as a
-    single per-device JSON blob in ``kv`` that was rewritten WHOLE on every
-    5-minute reading (~270 KB x 288/day = tens of MB/day/device of flash wear).
-    Move it to a real row-per-reading table so an ingest is one INSERT and
-    retention is a bounded DELETE. Carry any existing history forward, then drop
-    the old blob rows.
+    v1 kept each device's history as one JSON blob in kv, rewritten on every
+    5-minute reading (about 270 KB, 288 times a day). A row per reading makes
+    an ingest one INSERT and retention a bounded DELETE. Existing history is
+    copied over and the blob rows dropped.
     """
     conn.execute(
         """
@@ -97,13 +89,11 @@ def _migration_v2(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM kv WHERE namespace = 'tank_readings'")
 
 
-# The closed set of gang presentation types the app understands (mirrors
-# registry._KNOWN_GANG_TYPES). A folded type outside it falls back to 'switch'.
+# A copy of registry._KNOWN_GANG_TYPES; a folded type outside it becomes
+# "switch".
 _V3_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
-# The gang-suffix labels the app keyed legacy gang_types/gang_names by (the
-# same list the app uses). Used to map a suffix-keyed legacy map back to the
-# control entity_id that carries that suffix.
+# The gang suffixes the app used as keys in legacy gang_types/gang_names.
 _V3_GANG_SUFFIX_KEYS = (
     "left",
     "right",
@@ -121,8 +111,7 @@ _V3_GANG_SUFFIX_KEYS = (
 
 
 def _v3_suffix_token(entity_id: str) -> str | None:
-    """The gang suffix an entity_id ends with, by the app's rule
-    (``switch.kitchen_left`` -> ``left``), or None when it carries none."""
+    """The gang suffix entity_id ends with (switch.kitchen_left -> left), or None."""
     local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
     for key in _V3_GANG_SUFFIX_KEYS:
         if local.endswith(f"_{key}") or local == key:
@@ -131,18 +120,14 @@ def _v3_suffix_token(entity_id: str) -> str | None:
 
 
 def _migration_v3(conn: sqlite3.Connection) -> None:
-    """Fold the legacy flat ``gang_types``/``gang_names`` maps into the nested
-    ``gangs`` model so the app's presentation path drives cards from the hub.
+    """Fold the legacy flat gang_types/gang_names maps into nested gangs.
 
-    Each control entity_id of a TYPED relay record becomes a gang
-    ``{type, icon, name, presentation:'grouped'}``. A record with no
-    ``gang_types`` is a single-function device (climate/cover/sensor/native
-    light) — it keeps NO gangs and is still rendered by its real domain, so this
-    never mistypes a non-relay device. Legacy maps were keyed inconsistently
-    (full entity_id, gang suffix, or a positional ``gang_N``); the type for each
-    entity is resolved by, in order: its entity_id key, its gang-suffix key, the
-    sole value on a single-gang record, else 'switch' — then validated to the
-    known set. Idempotent: a record that already carries gangs is left alone.
+    Each control entity of a typed relay record becomes a grouped gang. A
+    record without gang_types (climate, cover, sensor, a native light) gets no
+    gangs and keeps rendering by its domain. Legacy maps were keyed by
+    entity_id, gang suffix or gang_N, so a gang's type comes from its entity_id
+    key, then its suffix key, then the only value on a single-gang record, else
+    "switch". Records that already have gangs are skipped.
     """
     rows = conn.execute(
         "SELECT key, value FROM kv WHERE namespace = 'registry_user_devices'"
@@ -156,10 +141,10 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
             continue
         existing = record.get("gangs")
         if isinstance(existing, dict) and existing:
-            continue  # already folded — idempotent
+            continue  # already folded
         gang_types = record.get("gang_types")
         if not isinstance(gang_types, dict) or not gang_types:
-            continue  # not a typed relay device — no gangs, domain-rendered
+            continue  # not a typed relay device
         entity_ids = [
             eid for eid in (record.get("entity_ids") or []) if isinstance(eid, str)
         ]
@@ -200,9 +185,8 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
 def _migration_v4(conn: sqlite3.Connection) -> None:
     """Append-only audit events for the Energy Saving engine.
 
-    Config and live state remain small JSON documents in ``kv``. Events are a
-    growing history, so they get a row-per-event table with indexed time/kind
-    queries instead of repeatedly rewriting one large JSON blob.
+    Energy config and state stay small JSON documents in kv. Events are a
+    growing history, so they get their own table with time and kind indexes.
     """
     conn.execute(
         """
@@ -223,7 +207,7 @@ def _migration_v4(conn: sqlite3.Connection) -> None:
     )
 
 
-#: Ordered list of all known migrations. Append-only — never edit a shipped one.
+#: Every migration, in order. Append new ones; never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
     Migration(2, "append-only tank_readings table", _migration_v2),
@@ -249,9 +233,8 @@ def backup_database(db_path: Path, backup_dir: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     backup_path = backup_dir / f"{db_path.stem}-v{{ver}}-{stamp}.db"
 
-    # NOTE: sqlite3 connections must be closed explicitly — `with conn:` only
-    # manages transactions, it does NOT close. An unclosed destination would
-    # leave the backup's WAL un-checkpointed and the .db file incomplete.
+    # `with conn:` only manages transactions, so close both connections
+    # explicitly; an unclosed destination can leave the backup incomplete.
     src = sqlite3.connect(db_path)
     try:
         version = get_user_version(src)
@@ -281,7 +264,7 @@ def run_migrations(
     backup_dir: Path,
     migrations: tuple[Migration, ...] = MIGRATIONS,
 ) -> int:
-    """Bring the database at ``db_path`` up to the latest schema version.
+    """Bring the database at db_path up to the latest schema version.
 
     Returns the resulting schema version. Raises MigrationError when the
     database is newer than this code (nothing is touched), or when a step
@@ -317,8 +300,8 @@ def run_migrations(
             )
             try:
                 with conn:  # one transaction per migration step
-                    # Explicit: sqlite3 opens a transaction on its own only
-                    # before DML, so DDL would otherwise commit as it runs.
+                    # sqlite3 only opens a transaction implicitly before DML;
+                    # without BEGIN, DDL would commit as it runs.
                     conn.execute("BEGIN")
                     migration.apply(conn)
                     conn.execute(f"PRAGMA user_version = {migration.version}")
