@@ -1,11 +1,12 @@
-"""Unloading the entry with a phone's WebSocket open on the hub's TLS port.
+"""Live WebSockets when the entry unloads or the hub is factory reset.
 
 aiohttp waits for running handlers when a listener shuts down, and a socket's
 handler runs until the socket closes, so an open socket used to hold a reload
-for over a minute. Unload now closes every socket with "going away" first.
+for over a minute. Unload now closes every socket with "going away" first. A
+factory reset closes them too, so a wiped phone can't keep streaming.
 
-Runs the real TLS listener, WebSocket view and unload over a real aiohttp
-client; only hass is faked. Needs a real Home Assistant.
+Runs the real TLS listener, WebSocket view, unload and reset service over a
+real aiohttp client; only hass is faked. Needs a real Home Assistant.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
@@ -119,6 +121,23 @@ class TlsSocketUnloadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_socket_awaiting_its_first_frame_is_closed_too(self) -> None:
         await self._assert_unload_closes(await self._open_socket(authenticated=False))
+
+    async def test_factory_reset_closes_sockets_whatever_the_reload_does(
+        self,
+    ) -> None:
+        self.rt.energy_controller = None
+        self.rt.energy_flags = types.SimpleNamespace(disabled_automations=lambda: [])
+        # A reload that never unloads (it failed, or is still waiting).
+        self.hass.config_entries.async_reload = mock.AsyncMock(return_value=False)
+        integration._async_register_services(self.hass)
+        reset = self.hass.services.handlers[("casasmart", "factory_reset")]
+
+        client = await self._open_socket(authenticated=True)
+        reader = asyncio.create_task(client.receive())
+        await reset(types.SimpleNamespace(data={}, context=types.SimpleNamespace()))
+        msg = await asyncio.wait_for(reader, 2)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, aiohttp.WSCloseCode.GOING_AWAY)
 
 
 if __name__ == "__main__":
