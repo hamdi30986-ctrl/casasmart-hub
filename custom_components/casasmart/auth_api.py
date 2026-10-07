@@ -540,10 +540,9 @@ class CasaSmartRecoverView(HomeAssistantView):
                 )
             )
         except EnrollError as err:
-            # The old admin is untouched — replace_admin validates before
-            # swapping — and the permanent code is still armed. arm_recovery
-            # is a safety net: it only mints a code when none is armed.
-            await self._hass.async_add_executor_job(arm_recovery, self._hass)
+            # Nothing changed: replace_admin validates before swapping, and the
+            # card just matched, so it is still armed. No arm_recovery here: on
+            # a hub with no admin it would drop the card.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         # Safety net: mint (and surface to the HA admin) a code only when
