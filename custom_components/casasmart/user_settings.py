@@ -1,15 +1,8 @@
-"""Per-user settings store — the pure half.
+"""Per-member settings that roam across a member's phones.
 
-Holds, hub-side, the two pieces of personal state that roam across a
-user's phones: the display name (the greeting/profile name) and the
-home-screen widget layout. Keyed by ``member_id`` (the PERSON, resolved
-from the request's device ``sub``) so a member's devices share one row —
-exactly like registry favorites; one table, partial updates, schema
-deliberately open for whatever rides along later.
-
-Flat-importable engine like ``registry.py``: no HA imports, dict-like
-storage table in, unit-tests on a temp SQLite file. Storage-touching
-methods are synchronous (call via executor).
+Stores the display name and the home-screen widget layout, keyed by
+member_id like registry favorites. No HA imports; the storage methods block,
+so call them through the executor.
 """
 
 from __future__ import annotations
@@ -21,14 +14,11 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 _NAME_MAX = 64
-# A widget grid is 4x4-ish today; 64 leaves generous headroom while
-# keeping a runaway client from growing the row unbounded.
+# Well above a 4x4 widget grid, but keeps the row bounded.
 _MAX_TILES = 64
 _TILE_FIELD_MAX = 128
 
-# The complete settable surface today. PUT bodies naming anything else
-# are rejected — additions extend this map (with their own validator),
-# they never get stored unvalidated.
+# Every settable field; an update naming anything else is rejected.
 _KNOWN_FIELDS = ("display_name", "widget_tiles")
 
 
@@ -37,7 +27,7 @@ class SettingsError(Exception):
 
 
 def _clean_display_name(value: Any) -> str | None:
-    """None/empty clears; anything else must be a sane short string."""
+    """None or blank clears the name; anything else must be a short string."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -51,11 +41,7 @@ def _clean_display_name(value: Any) -> str | None:
 
 
 def _clean_widget_tiles(value: Any) -> list[dict[str, str]] | None:
-    """None clears; otherwise a list of ``{type, entityId, name}`` tiles.
-
-    The hub stores the layout opaquely for the app to mirror back — but
-    shape-validated and size-capped, never raw client JSON.
-    """
+    """None clears the layout; otherwise a list of {type, entityId, name} tiles."""
     if value is None:
         return None
     if not isinstance(value, list):
@@ -95,14 +81,16 @@ class UserSettingsEngine:
         self._lock = threading.RLock()
 
     def get(self, member_id: str) -> dict[str, Any]:
-        """A member's full settings doc — every known field, None when unset."""
+        """A member's settings, with None for each unset field."""
         record = self._table.get(member_id) or {}
         return {field: record.get(field) for field in _KNOWN_FIELDS}
 
     def update(self, member_id: str, changes: Any) -> dict[str, Any]:
-        """Partial update: only the fields present in ``changes`` move;
-        an explicit null clears. Unknown fields are rejected so a typo'd
-        key can't silently store garbage forever. Returns the full doc."""
+        """Apply a partial update and return the member's full settings.
+
+        Only the fields in changes are touched and null clears one. An
+        unknown field raises SettingsError.
+        """
         if not isinstance(changes, dict):
             raise SettingsError("Body must be a JSON object")
         unknown = [key for key in changes if key not in _VALIDATORS]
@@ -118,7 +106,7 @@ class UserSettingsEngine:
         with self._lock:
             record = self._table.get(member_id) or {}
             record.update(validated)
-            # Fully cleared rows are deleted, not kept as tombstones.
+            # A row with every field cleared is deleted.
             if all(record.get(field) is None for field in record):
                 self._table.pop(member_id, None)
             else:
@@ -126,7 +114,6 @@ class UserSettingsEngine:
         return {field: record.get(field) for field in _KNOWN_FIELDS}
 
     def delete(self, member_id: str) -> None:
-        """Drop a member's settings row — called when their last device is
-        unpaired so the row can't orphan. No-op when the row is absent."""
+        """Drop a member's settings, if any (when their last device unpairs)."""
         with self._lock:
             self._table.pop(member_id, None)

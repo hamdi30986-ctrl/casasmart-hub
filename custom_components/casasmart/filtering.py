@@ -1,6 +1,6 @@
 """HA-aware entity filtering: what is served, which room it is in, and scope.
 
-Combines the pure ``entity_bridge`` rules with HA's registries and the CasaSmart
+Combines the entity_bridge rules with HA's registries and the CasaSmart
 registry to resolve rooms, check room scope and serialize devices.
 """
 
@@ -48,13 +48,10 @@ def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve an entity's room (registry first, HA area fallback).
+    """An entity's room: its registry assignment, else its HA area.
 
-    A registry assignment is the installer's word and wins outright —
-    including an explicit ``None`` ("Unassigned"), which must NOT snap
-    back to the HA area. Only entities with no registry record at all
-    fall through to HA's own area registry. Pure in-memory on both
-    paths — this runs on the event loop for every pushed state change.
+    An assignment to None (Unassigned) still wins over the HA area. Both paths
+    are in memory, since this runs on the event loop for every push.
     """
     registry = get_registry_engine(hass)
     if registry is not None:
@@ -79,12 +76,10 @@ def area_name(hass: HomeAssistant, entity_id: str) -> str | None:
 
 
 def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bool:
-    """Room-scope check: is this entity inside the token's scope?
+    """True when the entity is in one of the token's rooms.
 
-    ``rooms`` is the JWT's ``rooms`` claim — a list of area ids, or None
-    for an unrestricted token (admin/sub-admin and unscoped users).
-    Entities with NO area are invisible to room-scoped tokens: scoping is
-    a restriction, and "unassigned" is not a room anyone was granted.
+    rooms is the token's rooms claim, None for an unrestricted token. An
+    entity with no room is outside every scope.
     """
     if rooms is None:
         return True
@@ -93,16 +88,15 @@ def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bo
 
 
 def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
-    """Registry visibility: hidden entities stay private, and an entity with
-    an entity_category is served only as ``is_category_served`` allows.
-    Entities with no registry entry are visible."""
+    """False for a hidden entity or a config/diagnostic entity the app skips.
+
+    An entity with no registry entry is visible.
+    """
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return True
-    # OpenWeatherMap creates diagnostic child sensors that Home Assistant may
-    # hide from normal dashboards. The tablet still needs its real outdoor
-    # temperature/humidity readings, so admit only those semantically verified
-    # measurements. Other registry-hidden entities remain private.
+    # HA may hide OpenWeatherMap's temperature and humidity sensors, but the
+    # tablet shows them, so they are the one exception to hidden_by.
     if entry.hidden_by is not None and not is_openweathermap_measurement(
         hass, entity_id
     ):
@@ -117,11 +111,11 @@ def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
-    """True when a sensor/binary_sensor belongs to a weather SERVICE rather
-    than a physical device — its device also hosts a ``weather.*`` entity
-    (OpenWeatherMap, met.no, AccuWeather…). Forecast sensors are not home
-    devices and must never become device cards. Gated to sensor domains so the
-    per-entity device lookup stays off the hot path for everything else."""
+    """True for a sensor whose device also has a weather entity.
+
+    Such sensors belong to a weather service (OpenWeatherMap, Met.no) rather
+    than a device in the home.
+    """
     if not (entity_id.startswith("sensor.") or entity_id.startswith("binary_sensor.")):
         return False
     registry = er.async_get(hass)
@@ -137,11 +131,10 @@ def is_weather_service_entity(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_openweathermap_measurement(hass: HomeAssistant, entity_id: str) -> bool:
-    """Return true for live OWM temperature/humidity child sensors only.
+    """True for a live OpenWeatherMap temperature or humidity sensor.
 
-    This deliberately uses registry semantics rather than installation-specific
-    entity ids. Disabled or missing entities have no state and therefore fail
-    closed until Home Assistant makes a real reading available.
+    Matched on registry data. An entity without a state (disabled or missing)
+    never matches.
     """
     if not entity_id.startswith("sensor."):
         return False
@@ -167,12 +160,11 @@ def is_openweathermap_measurement(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
-    """The one read gate: may the app see this entity at all?
+    """True when the app may see this entity at all.
 
-    Exposed domain, visible, and not a weather service's forecast sensor
-    (OpenWeatherMap's live temperature/humidity excepted). Device lists, the
-    WebSocket pushes, commands, history and scene writes all use it, so they
-    can never disagree about what exists.
+    It needs an exposed domain and registry visibility, and weather-service
+    sensors are left out except OpenWeatherMap's live readings. Device lists,
+    pushes, commands, history and scene writes all use it.
     """
     weather_measurement = is_openweathermap_measurement(hass, entity_id)
     return (
@@ -183,17 +175,12 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
-    """True when an entity may be a registry ORGANIZE target — assigned to a
-    room, renamed, reordered, or cleared. Deliberately WEAKER than
-    ``is_served``: the read/feed surface hides ``hidden_by`` entities and
-    uncurated diagnostics, but organizing is a different surface. A device
-    the integration has HIDDEN (e.g. a secondary gang switch with
-    ``hidden_by='integration'``), or a diagnostic row, can still legitimately
-    hold a room assignment and have it edited or cleared; gating these writes
-    on ``is_served`` would 404 a device the integration hid after it was
-    imported, leaving the app unable to move or clear it. Requires only that
-    the entity is REAL (a registry entry or a live state) and that its domain
-    is exposed. Reads/feeds keep using ``is_served``."""
+    """True when the registry may assign, rename, reorder or clear an entity.
+
+    Looser than is_served: an entity the integration hid after import (a
+    secondary gang switch) must stay movable. It only has to exist and have
+    an exposed domain.
+    """
     if not is_exposed(entity_id):
         return False
     if er.async_get(hass).async_get(entity_id) is not None:
@@ -202,21 +189,13 @@ def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def device_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
-    """HA device-registry id for an entity, or None when it has no
-    registry entry / no parent device (template/MQTT-yaml entities).
-
-    The app groups multi-entity hardware into one tile by this id —
-    it is an opaque grouping key on the wire, never an HA handle the
-    app can act on (commands stay entity_id + whitelisted action)."""
+    """The entity's HA device id, or None (the app groups tiles by it)."""
     entry = er.async_get(hass).async_get(entity_id)
     return entry.device_id if entry is not None else None
 
 
 def serialize_device(hass: HomeAssistant, state: State) -> dict[str, Any]:
-    """Serialize a state into the wire device dict — area resolved,
-    the installer's registry display name overriding the HA
-    friendly name when one is set, and the HA device-registry id as
-    the app's tile-grouping key."""
+    """A state as the app's device dict, with room name and display name."""
     entry = er.async_get(hass).async_get(state.entity_id)
     device = serialize_state(
         state,

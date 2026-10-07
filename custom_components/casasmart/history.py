@@ -1,14 +1,7 @@
-"""History query contract: parse + serialize, no HA imports.
+"""History query parsing and serialization, free of HA imports.
 
-The history endpoint gives the app recorder history (its energy screens)
-without a Home Assistant token. This module is the pure half — query-string
-validation and point serialization — kept HA-import-free so the unit tests
-exercise every rejection branch without an HA install, same split as
-``entity_bridge``.
-
-The recorder call itself lives in the view (``api.py``): it needs the
-running recorder instance and the executor, neither of which belongs in
-a translation layer.
+The history endpoint serves recorder history to the app's energy screens.
+The recorder call itself is in the view in api.py.
 """
 
 from __future__ import annotations
@@ -17,9 +10,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-# Hard caps — the recorder query runs on Home Assistant's own database; an
-# unbounded range or entity list is a self-inflicted DoS, not a feature. The
-# app's energy screens ask for a handful of sensors at a time.
+# The query runs on HA's own database, so it is bounded. The app asks for a
+# handful of sensors at a time.
 MAX_HISTORY_ENTITIES = 50
 MAX_HISTORY_RANGE = timedelta(days=35)
 
@@ -29,11 +21,7 @@ class HistoryQueryError(Exception):
 
 
 def _parse_timestamp(raw: str, param: str) -> datetime:
-    """Parse one ISO-8601 timestamp; must be timezone-aware.
-
-    A naive timestamp is ambiguous (phone-local? hub-local? UTC?) and the
-    recorder stores UTC — reject instead of guessing.
-    """
+    """Parse an ISO-8601 timestamp, which must carry a UTC offset."""
     try:
         value = datetime.fromisoformat(raw)
     except ValueError as err:
@@ -50,11 +38,9 @@ def _parse_timestamp(raw: str, param: str) -> datetime:
 def parse_history_query(
     params: Mapping[str, str], *, now: datetime
 ) -> tuple[list[str], datetime, datetime, bool]:
-    """Validate the query string into ``(entity_ids, start, end, significant)``.
+    """Validate the query string into (entity_ids, start, end, significant).
 
-    Raises [HistoryQueryError] with a caller-facing message on any
-    rejection. ``now`` is injected (not read from the clock) so the
-    bounds logic is deterministic under test.
+    Raises HistoryQueryError with a message for the caller.
     """
     raw_entities = params.get("entities", "")
     entity_ids = [e.strip() for e in raw_entities.split(",") if e.strip()]
@@ -64,8 +50,7 @@ def parse_history_query(
         raise HistoryQueryError(
             f"Too many entities: {len(entity_ids)} > {MAX_HISTORY_ENTITIES}"
         )
-    # Malformed ids never reach the recorder query — every served id is
-    # "domain.object", anything else is noise or probing.
+    # Every served id is domain.object; anything else never reaches the query.
     for entity_id in entity_ids:
         domain, sep, obj = entity_id.partition(".")
         if not sep or not domain or not obj:
@@ -79,8 +64,7 @@ def parse_history_query(
     raw_end = params.get("end")
     end = _parse_timestamp(raw_end, "end") if raw_end is not None else now
     if end > now:
-        # The future holds no history; clamp so a phone with clock skew
-        # gets the same answer as an honest one.
+        # Clamp so a phone with a skewed clock gets the same answer.
         end = now
     if start >= end:
         raise HistoryQueryError("'start' must be before 'end'")
@@ -94,12 +78,9 @@ def parse_history_query(
 
 
 def serialize_history_point(point: Any) -> dict[str, str] | None:
-    """One recorder row → ``{"state", "last_changed"}`` wire dict.
+    """One recorder row as {"state", "last_changed"}, or None if it lacks either.
 
-    Accepts a State-like object (what the view's full-row query returns)
-    or a plain mapping (the shape of HA's minimal rows), so the serializer
-    does not depend on the query mode. Rows that can't yield a state string
-    and a timestamp are dropped, never half-serialized.
+    Accepts a State-like object or a mapping (HA's minimal row shape).
     """
     if isinstance(point, Mapping):
         state = point.get("state")
@@ -119,12 +100,10 @@ def serialize_history_point(point: Any) -> dict[str, str] | None:
 def serialize_history(
     entity_ids: list[str], states: Mapping[str, list[Any]]
 ) -> dict[str, list[dict[str, str]]]:
-    """Recorder result → wire map, one key per ALLOWED requested entity.
+    """Map each allowed entity to its serialized points.
 
-    Entities with no recorded rows get an explicit ``[]`` — the app must
-    be able to tell "no data in this window" from "the hub dropped my
-    entity" (the latter never has a key: unknown/out-of-scope ids are
-    omitted by the view before the query, indistinguishable on purpose).
+    An entity with no rows gets [], so the app can tell "no data" from an id
+    the view dropped as unknown or out of scope (which gets no key).
     """
     history: dict[str, list[dict[str, str]]] = {}
     for entity_id in entity_ids:

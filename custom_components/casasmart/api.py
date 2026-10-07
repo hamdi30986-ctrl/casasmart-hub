@@ -1,11 +1,10 @@
 """Core CasaSmart REST views and the list of every view the hub serves.
 
 Handshake, health, devices, device commands and history live here;
-``build_views`` collects them together with the other ``*_api`` modules' views.
+build_views collects them with the other *_api modules' views.
 
-Views set ``requires_auth = False`` because they don't use Home Assistant's
-own tokens: each handler checks the CasaSmart JWT itself
-(``authenticate_request``) against the permission it needs.
+Views set requires_auth = False because they don't use HA's own tokens: each
+handler checks the CasaSmart JWT itself with authenticate_request.
 """
 
 from __future__ import annotations
@@ -166,11 +165,10 @@ def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView]:
-    """Every view the hub serves, freshly built.
+    """A fresh instance of every view the hub serves.
 
-    Called for Home Assistant's HTTP server and again for the hub's TLS
-    listener (at start and on each refresh), so anything the listeners must
-    share lives in ``hass.data``, never on a view instance.
+    Called for HA's HTTP server and again for the hub's TLS listener, so state
+    the listeners share lives in hass.data, never on a view.
     """
     return [
         CasaSmartHandshakeView(hass, hub_version),
@@ -268,11 +266,7 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
 
 
 def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
-    """Register the CasaSmart REST views (idempotent across entry reloads).
-
-    HA's router can't unregister views, so a config-entry reload would
-    register duplicates — guard with a domain-scoped flag.
-    """
+    """Register the views once; HA's router can't unregister them on reload."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("views_registered"):
         return
@@ -283,7 +277,7 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
-    """GET /api/casasmart/handshake — unauthenticated discovery probe.
+    """GET /api/casasmart/handshake: the unauthenticated discovery probe.
 
     Reports the API and hub versions and the capabilities, plus the TLS
     identity the app pins and the tunnel URL when configured. With the API
@@ -297,8 +291,7 @@ class CasaSmartHandshakeView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
         self._hass = hass
         self._hub_version = hub_version
-        # The handshake doubles as the app's reachability probe, so a
-        # misconfigured tunnel_url would otherwise warn on every probe.
+        # The app also polls the handshake for reachability, so warn once.
         self._tunnel_warned = False
 
     async def get(self, request: web.Request) -> web.Response:
@@ -307,9 +300,8 @@ class CasaSmartHandshakeView(HomeAssistantView):
             "min_app_version": MIN_APP_VERSION,
             "hub_version": self._hub_version,
             "supported_api_versions": list(SUPPORTED_API_VERSIONS),
-            # Additive capability negotiation.  Existing API-v1 clients ignore
-            # this key; new clients fail closed when a protected feature is
-            # absent or unavailable instead of guessing from ``api_version``.
+            # Apps check features here instead of inferring them from
+            # api_version; older apps ignore the key.
             "capabilities": handshake_capabilities(),
         }
 
@@ -352,7 +344,7 @@ class CasaSmartHandshakeView(HomeAssistantView):
 
 
 class CasaSmartHealthView(HomeAssistantView):
-    """GET /api/casasmart/health — liveness probe for external monitoring."""
+    """GET /api/casasmart/health: liveness probe for external monitoring."""
 
     url = f"/api/{DOMAIN}/health"
     name = f"api:{DOMAIN}:health"
@@ -363,12 +355,7 @@ class CasaSmartHealthView(HomeAssistantView):
         self._hub_version = hub_version
 
     async def get(self, request: web.Request) -> web.Response:
-        """Report integration + storage health.
-
-        200 with status "ok" only when the entry is loaded AND the storage
-        layer answers a real read (schema_version hits SQLite). Anything
-        else is 503 so dumb HTTP monitors can alert on status code alone.
-        """
+        """200 when the entry is loaded and storage answers a read, else 503."""
         body: dict[str, Any] = {
             "status": "ok",
             "hub_version": self._hub_version,
@@ -382,9 +369,7 @@ class CasaSmartHealthView(HomeAssistantView):
             return self.json(body, HTTPStatus.SERVICE_UNAVAILABLE)
 
         try:
-            # schema_version is a property that executes a real PRAGMA read —
-            # proves the DB is open and answering, not just that the object
-            # exists. Wrapped in a lambda so the read runs in the executor.
+            # schema_version runs a real PRAGMA read.
             schema_version = await self._hass.async_add_executor_job(
                 lambda: runtime_data.storage.schema_version
             )
@@ -400,18 +385,17 @@ class CasaSmartHealthView(HomeAssistantView):
 
 
 class CasaSmartDevicesView(HomeAssistantView):
-    """GET /api/casasmart/devices — the curated device list."""
+    """GET /api/casasmart/devices: every device the caller may see."""
 
     url = f"/api/{DOMAIN}/devices"
     name = f"api:{DOMAIN}:devices"
-    # CasaSmart JWT gate — validated in-handler, not by HA's middleware.
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """Return every exposed, visible, in-scope entity as a device."""
+        """Every served, in-scope entity as a device."""
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
@@ -427,21 +411,17 @@ class CasaSmartDevicesView(HomeAssistantView):
 
 
 class CasaSmartDeviceView(HomeAssistantView):
-    """GET /api/casasmart/devices/{entity_id} — one device."""
+    """GET /api/casasmart/devices/{entity_id}: one device."""
 
     url = f"/api/{DOMAIN}/devices/{{entity_id}}"
     name = f"api:{DOMAIN}:device"
-    requires_auth = False  # CasaSmart JWT gate
+    requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def get(self, request: web.Request, entity_id: str) -> web.Response:
-        """Return a single device, 404 if unknown, unserved, or out of scope.
-
-        Out-of-scope is the SAME 404 as nonexistent — a room-scoped token
-        must not be able to enumerate what exists outside its rooms.
-        """
+        """One device; out of scope gets the same 404 as unknown."""
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
@@ -458,7 +438,7 @@ class CasaSmartDeviceView(HomeAssistantView):
 
 
 class CasaSmartCommandView(HomeAssistantView):
-    """POST /api/casasmart/devices/{entity_id}/command — one whitelisted action.
+    """POST /api/casasmart/devices/{entity_id}/command: one whitelisted action.
 
     The reply carries the device's state after the command, and a successful
     command is recorded in the member's recently used devices.
@@ -514,9 +494,8 @@ class CasaSmartCommandView(HomeAssistantView):
         except CommandError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        # Listen before calling, so a state change that lands during the
-        # blocking call isn't missed; then give the device up to 2 s to report
-        # its new state so the reply can carry it.
+        # Listen before the call so a change during it isn't missed, then wait
+        # up to 2 s for the new state to include in the reply.
         changed = asyncio.Event()
 
         @callback
@@ -556,8 +535,7 @@ class CasaSmartCommandView(HomeAssistantView):
             try:
                 await self._hass.async_add_executor_job(_record)
             except Exception:
-                # A control already succeeded; keep that result truthful even if
-                # optional recency persistence is temporarily unavailable.
+                # The command succeeded; don't fail it over the recents list.
                 _LOGGER.exception("Now recency recording failed for %s", entity_id)
         return self.json(
             {
@@ -572,7 +550,7 @@ class CasaSmartCommandView(HomeAssistantView):
 
 
 class CasaSmartHistoryView(HomeAssistantView):
-    """GET /api/casasmart/history — recorder history for served entities.
+    """GET /api/casasmart/history: recorder history for served entities.
 
     Ids that are unknown, not served or outside the caller's rooms are left
     out of the query and the reply alike, so they can't be told apart.
@@ -626,10 +604,8 @@ class CasaSmartHistoryView(HomeAssistantView):
                 allowed,
                 include_start_time_state=True,
                 significant_changes_only=significant,
-                # The history contract returns a full state/last_changed row
-                # for every recorded sample. HA's minimal form thins and
-                # reshapes the rows after the first, which would drop real
-                # samples (meter counters, for one) from the timeline.
+                # HA's minimal form drops samples after the first (meter
+                # counters, for one), and the app needs every row.
                 minimal_response=False,
                 no_attributes=True,
             )

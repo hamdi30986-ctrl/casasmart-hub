@@ -1,12 +1,11 @@
 """Registry engine: the hub's floors, rooms, room tags, devices and scenes.
 
-Also stores per-member favorites. No Home Assistant imports; storage-touching
-methods are synchronous (call via executor).
+Also stores per-member favorites. No HA imports; the storage methods block, so
+call them through the executor.
 
-Event-loop code (room scope checks, device serialization) needs an entity's
-room and display name on every state push, so the engine keeps an in-memory
-mirror of the entity assignments and room names, loaded by ``warm_up`` and
-updated after each write. Those reads never touch SQLite.
+Scope checks and device serialization run on the event loop for every push,
+so the engine mirrors entity assignments and room names in memory (loaded by
+warm_up, updated after each write) and those reads never touch SQLite.
 """
 
 from __future__ import annotations
@@ -41,9 +40,8 @@ _MAX_ROOM_TAGS = 64
 _MAX_TAG_ROOMS = 128
 _TAG_COLORS = frozenset(
     {
-        # The tablet's bright palette (first four), then the earlier presets.
-        # Those stay valid so stored tags and older clients keep their colors:
-        # changing the UI must never recolor existing data.
+        # The tablet's palette (first four), then earlier presets that stay
+        # valid so stored tags keep their colors.
         "#FFD45C",  # yellow
         "#85E0A3",  # green
         "#F5F3ED",  # white
@@ -84,7 +82,7 @@ class RoomMoveDenied(RegistryError):
 
 
 def _clean_name(name: Any, what: str) -> str:
-    """A required display name, stripped and length-capped; ``what`` names it."""
+    """A required display name, stripped and length-checked; what names it."""
     if not isinstance(name, str) or not name.strip():
         raise RegistryError(f"{what} name is required")
     cleaned = name.strip()
@@ -94,17 +92,17 @@ def _clean_name(name: Any, what: str) -> str:
 
 
 def _lenient_name(name: Any, fallback: str) -> str:
-    """Import-only name cleaning: HA area/floor names are free user text
-    we don't control — truncate instead of rejecting, never raise. A
-    rejection here would abort integration setup (and keep aborting it
-    on every restart) over a name the user typed into HA years ago."""
+    """Clean an imported HA name, truncating rather than raising.
+
+    A rejection here would abort integration setup on every restart.
+    """
     if not isinstance(name, str) or not name.strip():
         return fallback
     return name.strip()[:_NAME_MAX]
 
 
 def _lenient_sort_order(sort_order: Any) -> int:
-    """Import-only: anything that isn't a plain int becomes 0."""
+    """An imported sort order; anything but a plain int becomes 0."""
     if isinstance(sort_order, bool) or not isinstance(sort_order, int):
         return 0
     return sort_order
@@ -123,7 +121,7 @@ def _clean_sort_order(sort_order: Any) -> int:
     """An integer sort position; None means 0."""
     if sort_order is None:
         return 0
-    # bool is an int subclass — reject it explicitly.
+    # bool is an int subclass.
     if isinstance(sort_order, bool) or not isinstance(sort_order, int):
         raise RegistryError("sort_order must be an integer")
     return sort_order
@@ -137,7 +135,7 @@ def _clean_tag_color(color: Any) -> str:
 
 
 def _clean_favorite(favorite: Any) -> bool:
-    """House-wide scene-favorite flag. Must be a real bool when present."""
+    """A scene's house-wide favorite flag, which must be a bool."""
     if not isinstance(favorite, bool):
         raise RegistryError("favorite must be a boolean")
     return favorite
@@ -153,7 +151,7 @@ def _clean_energy_flag(value: Any) -> bool:
 def _clean_entity_ids(
     value: Any, what: str = "entity_ids", max_count: int = _MAX_DEVICE_ENTITIES
 ) -> list[str]:
-    """A list of entity_id strings — deduped, order preserved, capped."""
+    """A capped list of entity_ids, deduplicated in order."""
     if not isinstance(value, list) or any(
         not isinstance(eid, str) or "." not in eid for eid in value
     ):
@@ -164,8 +162,7 @@ def _clean_entity_ids(
 
 
 def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
-    """A legacy flat gang map (gang_types / gang_names), string to string,
-    keyed by entity_id or gang suffix; None -> {}."""
+    """A legacy flat gang map (gang_types or gang_names); None gives {}."""
     if value is None:
         return {}
     if not isinstance(value, dict) or any(
@@ -185,13 +182,10 @@ def _clean_gang_type(value: Any) -> str:
 
 
 def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
-    """Validate the nested gangs map; None -> {}.
+    """Validate the nested gangs map, keyed by control entity_id; None gives {}.
 
-    Keys are control entity_ids; each gang gets type (default "switch"),
-    icon, name, presentation (default "grouped") and room_id. room_override
-    is kept only when it is literally True: it marks the gang's room_id as its
-    own even when that is None (explicitly Unassigned), rather than inherited
-    from its device.
+    room_override is kept only when True: it marks the gang's room_id as its
+    own, even when None (Unassigned), rather than inherited from its device.
     """
     if value is None:
         return {}
@@ -229,9 +223,7 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
 def _gangs_backed_by(
     gangs: dict[str, dict[str, Any]], entity_ids: list[str]
 ) -> dict[str, dict[str, Any]]:
-    """Keep only gangs whose control entity_id is a grabbed relay — a gang must
-    map to a real entity in the record, never a phantom (so the gangs= write
-    path can't invent one)."""
+    """Keep only the gangs whose entity_id is one of the record's entities."""
     allowed = set(entity_ids)
     return {key: gang for key, gang in gangs.items() if key in allowed}
 
@@ -246,7 +238,7 @@ def _clean_optional_room(value: Any) -> str | None:
 
 
 def _clean_optional_name(name: Any) -> str | None:
-    """A nullable display name — None passes through, else validated."""
+    """An optional display name."""
     return None if name is None else _clean_name(name, "Device")
 
 
@@ -276,8 +268,7 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
             validate_command(entity_id, item.get("action"), item.get("data"))
         except CommandError as err:
             raise RegistryError(f"{entity_id}: {err}") from err
-        # The request parser accepts NaN and Infinity, which storage refuses to
-        # write: reject them here as input, with a 400.
+        # The request parser accepts NaN and Infinity, which storage refuses.
         try:
             json.dumps(item.get("data") or {}, allow_nan=False)
         except (TypeError, ValueError) as err:
@@ -295,9 +286,8 @@ def _clean_scene_entities(entities: Any) -> list[dict[str, Any]]:
 class RegistryEngine:
     """The registry over its storage tables (one KeyValueTable each).
 
-    ``_lock`` serializes every read-modify-write, so concurrent executor jobs
-    can't interleave edits of the same records. ``_mirror_lock`` guards only
-    the in-memory mirrors, so event-loop readers never wait behind a write.
+    _lock serializes every read-modify-write. _mirror_lock guards only the
+    in-memory mirrors, so event-loop readers never wait behind a write.
     """
 
     def __init__(
@@ -352,14 +342,13 @@ class RegistryEngine:
             )
 
     def room_of(self, entity_id: str) -> Any:
-        """The entity's registry room: room_id, None (explicit Unassigned),
-        or the UNSET sentinel when no record exists (fall back to HA)."""
+        """The entity's room_id, None for Unassigned, or UNSET with no record."""
         with self._mirror_lock:
             cached = self._assignment_cache.get(entity_id)
         return UNSET if cached is None else cached[0]
 
     def display_name_of(self, entity_id: str) -> str | None:
-        """The installer-set display name, or None (use HA friendly name)."""
+        """The display name set in the app, or None."""
         with self._mirror_lock:
             cached = self._assignment_cache.get(entity_id)
         return None if cached is None else cached[1]
@@ -393,8 +382,7 @@ class RegistryEngine:
     def update_floor(
         self, floor_id: str, name: Any = ..., sort_order: Any = ...
     ) -> dict[str, Any]:
-        """Edit a floor. ``...`` sentinels mean "leave unchanged" — an
-        explicit null is validated (and rejected) like any other value."""
+        """Edit a floor; ... leaves a field unchanged."""
         with self._lock:
             record = self._floors.get(floor_id)
             if record is None:
@@ -407,8 +395,7 @@ class RegistryEngine:
         return {"floor_id": floor_id, **record}
 
     def delete_floor(self, floor_id: str) -> None:
-        """Refuse while rooms still reference the floor — explicit beats
-        a silent cascade for something the installer did by hand."""
+        """Delete a floor; InUseError while rooms are still on it."""
         with self._lock:
             if floor_id not in self._floors:
                 raise UnknownItemError("Unknown floor")
@@ -464,8 +451,7 @@ class RegistryEngine:
         icon: Any = ...,
         sort_order: Any = ...,
     ) -> dict[str, Any]:
-        """Edit a room. ``...`` sentinels mean "leave unchanged" — for
-        the nullable fields an explicit None clears them."""
+        """Edit a room; ... leaves a field unchanged and None clears floor or icon."""
         with self._lock:
             record = self._rooms.get(room_id)
             if record is None:
@@ -500,9 +486,8 @@ class RegistryEngine:
 
                     self._mirror_assignment(entity_id, record)
                     cleared += 1
-            # Solo cards carry their room on the gang, not the entity
-            # assignment. Keep them explicitly Unassigned when that room is
-            # removed; leaving a dangling id hides them from every room.
+            # Solo gangs carry their own room; a dangling id would hide them
+            # from every room, so make them Unassigned.
             for device_id, device in list(self._user_devices.items()):
                 gangs = device.get("gangs", {})
                 if any(gang.get("room_id") == room_id for gang in gangs.values()):
@@ -529,8 +514,6 @@ class RegistryEngine:
                 if remaining:
                     tag["room_ids"] = remaining
                 else:
-                    # A tag cannot be created without a room, so deleting its
-                    # last room removes the now-unusable tag as well.
                     del tags[tag_id]
                 tags_changed = True
             if tags_changed:
@@ -553,9 +536,7 @@ class RegistryEngine:
 
     # -- room tags -------------------------------------------------------------
 
-    # Room tags are stored as one small document so a multi-room edit is one
-    # SQLite write. That prevents an interrupted update from leaving different
-    # rooms with half of the requested tag assignment.
+    # All room tags are one document, so a multi-room edit is a single write.
     def _room_tags_doc(self) -> dict[str, dict[str, Any]]:
         raw = self._room_tags.get("all")
         if not isinstance(raw, dict):
@@ -567,8 +548,7 @@ class RegistryEngine:
         }
 
     def list_room_tags(self) -> list[dict[str, Any]]:
-        """Every tag, sanitized: unnamed tags are skipped, an unknown color
-        reads as slate, and room_ids keeps only rooms that still exist."""
+        """Every named tag, with its color checked and only existing rooms."""
         with self._lock:
             known_rooms = set(self._rooms)
             tags = self._room_tags_doc()
@@ -620,11 +600,10 @@ class RegistryEngine:
         tag_id: str,
         room_ids: list[str],
     ) -> None:
-        """A room belongs to at most one tag: take ``room_ids`` away from every
-        tag other than ``tag_id`` (in the ``tags`` document, not stored).
+        """Take room_ids away from every tag but tag_id, in the tags document.
 
-        A tag left with no rooms is deleted, as when its last room is: it
-        can't be shown, yet it would keep its name taken.
+        A room belongs to at most one tag, and a tag left with no rooms is
+        deleted.
         """
         selected = set(room_ids)
         for other_id, record in list(tags.items()):
@@ -641,8 +620,7 @@ class RegistryEngine:
                 del tags[other_id]
 
     def create_room_tag(self, name: Any, color: Any, room_ids: Any) -> dict[str, Any]:
-        """Create a tag; its rooms move to it from any other tag (a tag left
-        with no rooms is deleted)."""
+        """Create a tag; its rooms leave any other tag."""
         with self._lock:
             tags = self._room_tags_doc()
             if len(tags) >= _MAX_ROOM_TAGS:
@@ -672,8 +650,7 @@ class RegistryEngine:
         color: Any = ...,
         room_ids: Any = ...,
     ) -> dict[str, Any]:
-        """Edit a tag. ``...`` leaves a field unchanged; rooms move to this tag
-        from any other tag (a tag left with no rooms is deleted)."""
+        """Edit a tag; ... leaves a field unchanged and rooms leave other tags."""
         with self._lock:
             tags = self._room_tags_doc()
             record = tags.get(tag_id)
@@ -710,7 +687,7 @@ class RegistryEngine:
     # -- entity assignments ----------------------------------------------------
 
     def list_assignments(self) -> dict[str, dict[str, Any]]:
-        """entity_id -> {room_id, display_name, sort_order}."""
+        """Every assignment, keyed by entity_id."""
         return dict(self._devices.items())
 
     def assign_device(
@@ -720,9 +697,11 @@ class RegistryEngine:
         display_name: Any = ...,
         sort_order: Any = ...,
     ) -> dict[str, Any]:
-        """Create or edit an entity's assignment. ``...`` leaves a field
-        unchanged; room_id None pins the entity to Unassigned, and a blank
-        display_name clears it."""
+        """Create or edit an entity's assignment; ... leaves a field unchanged.
+
+        room_id None pins the entity to Unassigned, and a blank display_name
+        clears it.
+        """
         if not isinstance(entity_id, str) or "." not in entity_id:
             raise RegistryError("entity_id is required")
         with self._lock:
@@ -763,18 +742,14 @@ class RegistryEngine:
         fallback_rooms: dict[str, str | None],
         scope: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Move one saved device (or solo gang) in one durable transaction.
+        """Move a saved device, or a solo gang, to a room in one transaction.
 
-        expected_rooms is the client's reviewed entity membership AND source
-        room map. Compare it inside the registry lock, not against an earlier
-        snapshot. The idempotency receipt is committed with the assignments.
-        No HA control or entity-registry mutation is performed here.
-
-        A retry by the same member with the same idempotency_key and payload
-        within 24 hours returns the stored result marked ``replayed``; the same
-        key with a different payload is a conflict. ``assignable_ids`` and
-        ``fallback_rooms`` (HA's area per entity) are read on the event loop by
-        the caller; ``scope`` is the caller's room scope, None for all rooms.
+        expected_rooms is the entity-to-room map the client reviewed; it is
+        compared under the lock. A retry with the same idempotency_key and
+        payload within a day returns the stored result marked replayed, and the
+        same key with another payload is a conflict. The caller reads
+        assignable_ids and fallback_rooms (HA areas) on the event loop; scope
+        is the caller's rooms, None for all.
         """
         allowed = {
             "ha_device_id",
@@ -870,9 +845,8 @@ class RegistryEngine:
                 if gang.get("room_id") is not None or gang.get("room_override") is True:
                     current[gang_id] = gang.get("room_id")
                     permission_rooms[gang_id] = gang.get("room_id")
-                # The acknowledgment contains the owning record, so require
-                # access to its other primary members too (as registry GET
-                # does). Never leak another room's gang metadata in the echo.
+                # The reply includes the whole device, so the caller needs
+                # access to its other entities too, as for the registry GET.
                 for eid in primary_entities:
                     other = record.get("gangs", {}).get(eid, {})
                     assignment = self._devices.get(eid)
@@ -896,7 +870,6 @@ class RegistryEngine:
             if receipt and receipt.get("expires_at", 0) > now:
                 if receipt["fingerprint"] != fingerprint:
                     raise RoomMoveConflict("Idempotency key was used for another move")
-                # Do not replay a stale receipt over a later, unrelated move.
                 return {**receipt["result"], "replayed": True}
             if current != expected:
                 raise RoomMoveConflict("Room assignment changed; refresh and retry")
@@ -949,8 +922,8 @@ class RegistryEngine:
                     ),
                     "replayed": False,
                 }
-                # Bounded receipts. Pruning and receipt creation share the
-                # transaction, so disk failure cannot produce a false receipt.
+                # Pruning shares the transaction, so a failed write leaves no
+                # receipt behind.
                 entries = sorted(
                     receipts.items(), key=lambda item: item[1].get("expires_at", 0)
                 )
@@ -967,7 +940,7 @@ class RegistryEngine:
                     "expires_at": now + 86400,
                     "result": result,
                 }
-            # Publish the in-memory room mirror only after SQLite commits.
+            # Update the mirror only after the commit.
             with self._mirror_lock:
                 self._assignment_cache.update(
                     {
@@ -981,8 +954,7 @@ class RegistryEngine:
             return result
 
     def remove_assignment(self, entity_id: str) -> None:
-        """Drop the record entirely — the entity reverts to the HA-area
-        fallback (vs ``room_id=None`` which pins it to Unassigned)."""
+        """Drop an entity's assignment so it falls back to its HA area."""
         with self._lock:
             try:
                 del self._devices[entity_id]
@@ -995,8 +967,7 @@ class RegistryEngine:
 
     @staticmethod
     def _scene_out(scene_id: str, record: dict[str, Any]) -> dict[str, Any]:
-        """Public scene shape. ``favorite`` defaults False for legacy
-        records that predate the house-wide favorites flag."""
+        """A scene's wire shape, with defaults for older records."""
         return {
             "scene_id": scene_id,
             **record,
@@ -1052,7 +1023,7 @@ class RegistryEngine:
         favorite: Any = ...,
         works_during_energy_saving: Any = ...,
     ) -> dict[str, Any]:
-        """Edit a scene. ``...`` sentinels mean "leave unchanged"."""
+        """Edit a scene; ... leaves a field unchanged."""
         with self._lock:
             record = self._scenes.get(scene_id)
             if record is None:
@@ -1091,17 +1062,14 @@ class RegistryEngine:
         return list(record.get("entity_ids", []))
 
     def set_favorites(self, member_id: str, entity_ids: Any) -> list[str]:
-        """Replace a member's favorites list (order is meaningful). Keyed by
-        member_id so a person's devices share one list; the unpair path prunes
-        it when the member's last device leaves (see delete_favorites)."""
+        """Replace a member's favorites; the order is the display order."""
         deduped = _clean_entity_ids(entity_ids, "favorites", _MAX_FAVORITES)
         with self._lock:
             self._favorites[member_id] = {"entity_ids": deduped}
         return deduped
 
     def delete_favorites(self, member_id: str) -> None:
-        """Drop a member's favorites row — called when their last device is
-        unpaired so the row can't orphan. No-op when the row is absent."""
+        """Drop a member's favorites, if any (when their last device unpairs)."""
         with self._lock:
             self._favorites.pop(member_id, None)
 
@@ -1111,10 +1079,7 @@ class RegistryEngine:
     def _serve_user_device(device_id: str, record: dict[str, Any]) -> dict[str, Any]:
         """A user device's wire shape, with defaults for older records.
 
-        control_entity_ids is the stored entity_ids under the name the API
-        uses (records keep the ``entity_ids`` key; migration v3 did not rename
-        it). gangs defaults to {} (the app then derives its own) and room_id to
-        None. The record's own keys win when present.
+        control_entity_ids repeats the stored entity_ids under the API's name.
         """
         return {
             "ha_device_id": device_id,
@@ -1205,7 +1170,7 @@ class RegistryEngine:
         custom_icon: Any = ...,
         room_id: Any = ...,
     ) -> dict[str, Any]:
-        """Edit named fields of a user device; ``...`` leaves a field unchanged.
+        """Edit fields of a user device; ... leaves a field unchanged.
 
         The control entities may grow or be reordered but never drop one the
         device already has (hide the gang or delete the device instead), and an
@@ -1256,9 +1221,10 @@ class RegistryEngine:
     def _reject_grabbed_elsewhere(
         self, ha_device_id: str, record: dict[str, Any]
     ) -> None:
-        """One owner per entity: refuse ``record`` when another device already
-        grabbed one of its control or config entities. The device itself may
-        keep or reshuffle its own. Call under the lock, before storing."""
+        """Raise if another device already holds one of record's entities.
+
+        Call under the lock, before storing.
+        """
         taken: set[str] = set()
         for other_id, other in self._user_devices.items():
             if other_id == ha_device_id:
@@ -1276,10 +1242,11 @@ class RegistryEngine:
     def _mutate_gang(
         self, ha_device_id: str, gang_key: str, mutate: Any
     ) -> dict[str, Any]:
-        """Read-modify-write ONE gang under the lock. ``UnknownItemError`` for an
-        absent device or gang. ``mutate`` validates + sets fields on a COPY of the
-        gang dict, so a rejected value (its ``RegistryError`` -> 400) leaves the
-        stored record untouched."""
+        """Apply mutate to a copy of one gang and store it.
+
+        UnknownItemError for an unknown device or gang. mutate validates as it
+        goes, so a RegistryError leaves the stored record untouched.
+        """
         with self._lock:
             record = self._user_devices.get(ha_device_id)
             if record is None:
@@ -1288,7 +1255,7 @@ class RegistryEngine:
             if not isinstance(gangs, dict) or gang_key not in gangs:
                 raise UnknownItemError("Unknown gang")
             gang = dict(gangs[gang_key])
-            mutate(gang)  # validates; may raise RegistryError before we persist
+            mutate(gang)
             new_gangs = dict(gangs)
             new_gangs[gang_key] = gang
             record = {**record, "gangs": new_gangs}
@@ -1298,9 +1265,7 @@ class RegistryEngine:
     def set_gang_presentation(
         self, ha_device_id: str, gang_key: str, presentation: Any
     ) -> dict[str, Any]:
-        """Flip a gang's presentation — promote (grouped->solo), delete-the-solo
-        (solo->grouped), hide (any->hidden), un-hide (hidden->grouped). Every
-        operation is a validated assignment of the single presentation field."""
+        """Set a gang's presentation: grouped, solo or hidden."""
 
         def mutate(gang: dict[str, Any]) -> None:
             if (
@@ -1315,7 +1280,7 @@ class RegistryEngine:
     def set_gang_type(
         self, ha_device_id: str, gang_key: str, gang_type: Any
     ) -> dict[str, Any]:
-        """Re-type a gang against the known relay-presentation set."""
+        """Set a gang's type."""
 
         def mutate(gang: dict[str, Any]) -> None:
             gang["type"] = _clean_gang_type(gang_type)
@@ -1330,8 +1295,7 @@ class RegistryEngine:
         name: Any = ...,
         icon: Any = ...,
     ) -> dict[str, Any]:
-        """Relabel a gang. ``...`` leaves a field unchanged; an explicit None
-        clears the name or icon."""
+        """Set a gang's name or icon; ... leaves one unchanged and None clears it."""
 
         def mutate(gang: dict[str, Any]) -> None:
             if name is not ...:
@@ -1357,19 +1321,17 @@ class RegistryEngine:
 
     @staticmethod
     def _retain_room_overrides(gangs, previous):
-        """Carry room_override over from the stored gangs into ``gangs``.
+        """Carry room_override over from the stored gangs.
 
-        Older clients don't send the field, so a rename or whole-record PUT
-        from one must not turn an explicitly Unassigned gang back into one
-        that inherits its device's room.
+        Older apps don't send it, and losing it would make an Unassigned gang
+        inherit its device's room again.
         """
         for key, gang in gangs.items():
             if previous.get(key, {}).get("room_override") is True:
                 gang["room_override"] = True
 
     def delete_user_device(self, ha_device_id: str) -> None:
-        """Remove a grouped device — its entities become un-grabbed and
-        re-appear in the add-devices list."""
+        """Delete a user device; its entities return to the add-devices list."""
         with self._lock:
             if ha_device_id not in self._user_devices:
                 raise UnknownItemError("Unknown device")
@@ -1377,8 +1339,7 @@ class RegistryEngine:
         _LOGGER.info("Registry: user-device %s deleted", ha_device_id)
 
     def grabbed_entity_ids(self) -> set[str]:
-        """Every entity grabbed into a user-device — primary gangs AND config
-        entities. The add-devices list is the served set MINUS this."""
+        """Every control and config entity held by a user device."""
         grabbed: set[str] = set()
         for record in self._user_devices.values():
             grabbed.update(
@@ -1395,22 +1356,17 @@ class RegistryEngine:
         rooms: list[dict[str, Any]],
         assignments: list[dict[str, Any]],
     ) -> dict[str, int]:
-        """Seed the registry from HA's own registries on first setup.
+        """Seed the registry from HA's floors, areas and assignments.
 
-        Imported floors/rooms KEEP their HA ids — room-scope JWT claims
-        already use HA area ids, so imported layouts work with existing
-        scoped tokens unchanged. Existing records are never overwritten
-        (re-running an import can't clobber installer edits). Names are
-        cleaned LENIENTLY (truncate, fall back — never raise): a weird
-        HA name must not be able to abort integration setup.
+        Floors and rooms keep their HA ids, which room-scoped tokens already
+        use. Existing records are never overwritten. Bad names and icons are
+        cleaned up rather than rejected, so they can't abort setup.
         """
         counts = {"floors": 0, "rooms": 0, "assignments": 0}
         with self._lock:
             for floor in floors:
                 floor_id = floor.get("floor_id")
                 if not isinstance(floor_id, str) or not floor_id:
-                    # No usable id -> can't be stored; skip the record, never
-                    # abort the seed (same lenient posture as names).
                     continue
                 if floor_id in self._floors:
                     continue
@@ -1427,13 +1383,10 @@ class RegistryEngine:
                 icon = room.get("icon")
                 record = {
                     "name": _lenient_name(room.get("name"), room_id),
-                    # area.floor_id is None for any HA area not on a floor —
-                    # the NORMAL shape for apartments. A floorless room is
-                    # valid; only a dangling reference gets cleared.
+                    # A floorless area is normal; only a dangling floor_id goes.
                     "floor_id": floor_id
                     if isinstance(floor_id, str) and floor_id in self._floors
                     else None,
-                    # Same lenient posture: a bad HA icon is dropped, not fatal.
                     "icon": icon
                     if isinstance(icon, str) and 0 < len(icon) <= _ICON_MAX
                     else None,

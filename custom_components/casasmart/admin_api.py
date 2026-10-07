@@ -1,30 +1,10 @@
-"""Installer admin endpoints.
+"""Installer endpoints, so the app's installer screens need no HA token.
 
-The REST surface the app's installer screens use instead of raw-HA-token
-calls (pairing sheet, entity rename, IR wizard, tools, discovered
-devices). Every endpoint here is gated by
-``installer.manage`` (admin and sub-admin — see ``auth_engine.PERMISSIONS``;
-these reshape the home's hardware):
-
-- ``POST /api/casasmart/admin/zigbee/permit_join`` — open/close the
-  Zigbee network (a zigbee2mqtt permit-join publish to each instance).
-- ``GET /api/casasmart/admin/registry`` — the RAW HA entity + device
-  registries (incl. hidden/disabled): what the import flows group and
-  classify by.
-- ``GET /api/casasmart/admin/states`` — the raw state dump behind the
-  import/pairing diff (unfiltered except the token-bearing attributes —
-  see ``installer.STRIPPED_STATE_ATTRS``).
-- ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — entity
-  rename only, a scoped subset of HA's WS
-  ``config/entity_registry/update``.
-- ``GET/POST /api/casasmart/admin/config_flow`` and
-  ``POST .../config_flow/{flow_id}`` — the config-flow proxy,
-  whitelisted to the Broadlink + EasyIR handlers (``installer
-  .ALLOWED_FLOW_HANDLERS``); driving any other integration's flow is a
-  404 indistinguishable from nonexistence.
-- ``POST /api/casasmart/admin/remote/send_command`` — IR blast through
-  a ``remote.*`` entity (the remote domain is deliberately not on the
-  entity-bridge whitelist).
+Every endpoint needs installer.manage (admin and sub-admin). They open the
+Zigbee network for pairing, return HA's raw entity and device registries and
+states for the import flows, rename entities, drive the Broadlink and EasyIR
+config flows, and send IR commands through remote entities, a domain the
+entity bridge doesn't expose.
 """
 
 from __future__ import annotations
@@ -66,19 +46,17 @@ from .installer import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# A stuck MQTT broker / IR blaster must not hang the request forever —
-# same ceiling as scene activation.
+# A stuck MQTT broker or IR blaster must not hang the request.
 _SERVICE_CALL_TIMEOUT = 10.0
 
 _PERMISSION = "installer.manage"
 
 
 def _device_entries(dev_reg: Any) -> list[Any]:
-    """Every device entry, without the registry access HA 2026.9 deprecates.
+    """Every device entry, on HA releases before and after 2026.9.
 
-    From 2026.9, iterating ``devices`` yields the entries and mapping access
-    (``.values()``, ``[device_id]``) logs a deprecation; before that, iterating
-    yields device ids, which are looked up the then-supported way.
+    From 2026.9 iterating devices yields entries and mapping access is
+    deprecated; before, it yields ids to look up.
     """
     devices = dev_reg.devices
     return [devices[item] if isinstance(item, str) else item for item in devices]
@@ -95,7 +73,7 @@ class _AdminView(HomeAssistantView):
     async def _call_service(
         self, domain: str, service: str, data: dict[str, Any]
     ) -> web.Response | None:
-        """Run a service call with a timeout; an error response or None."""
+        """Call a service with a timeout; returns an error response or None."""
         try:
             await asyncio.wait_for(
                 self._hass.services.async_call(domain, service, data, blocking=True),
@@ -138,10 +116,8 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "MQTT is not available on this hub",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
-        # permit_join is PER zigbee2mqtt instance, and a large home may run one
-        # coordinator per floor: publishing only to the default base topic
-        # would leave the other floors unable to pair. Open every configured
-        # instance (or the one the caller asked for).
+        # permit_join is per zigbee2mqtt instance and a large home may run one
+        # per floor, so open every configured instance unless one is named.
         topics = resolve_zigbee_base_topics(
             self._zigbee_base_topics(), payload.get("base_topic")
         )
@@ -168,8 +144,6 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "ok": True,
                 "enable": enable,
                 "duration": duration if enable else None,
-                # Which coordinators actually got the message — an installer
-                # commissioning a multi-floor villa needs to see this.
                 "instances": topics,
             }
         )
@@ -183,7 +157,7 @@ class CasaSmartAdminPermitJoinView(_AdminView):
 
 
 class CasaSmartAdminRegistryView(_AdminView):
-    """GET /api/casasmart/admin/registry — raw HA registries."""
+    """GET /api/casasmart/admin/registry: HA's raw entity and device registries."""
 
     url = f"/api/{DOMAIN}/admin/registry"
     name = f"api:{DOMAIN}:admin:registry"
@@ -228,7 +202,7 @@ class CasaSmartAdminRegistryView(_AdminView):
 
 
 class CasaSmartAdminStatesView(_AdminView):
-    """GET /api/casasmart/admin/states — the raw state dump."""
+    """GET /api/casasmart/admin/states: every state, minus token attributes."""
 
     url = f"/api/{DOMAIN}/admin/states"
     name = f"api:{DOMAIN}:admin:states"
@@ -250,7 +224,7 @@ class CasaSmartAdminStatesView(_AdminView):
 
 
 class CasaSmartAdminEntityView(_AdminView):
-    """PATCH /api/casasmart/admin/registry/entities/{entity_id}."""
+    """PATCH /api/casasmart/admin/registry/entities/{entity_id}: rename."""
 
     url = f"/api/{DOMAIN}/admin/registry/entities/{{entity_id}}"
     name = f"api:{DOMAIN}:admin:registry:entity"
@@ -273,9 +247,7 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # parse_entity_patch allows a rename only, so changes is exactly
-        # {"name": ...}.
-        # async_update_entity raises ValueError on bad input -> the caller's 400.
+        # parse_entity_patch only allows a name.
         try:
             entry = registry.async_update_entity(entity_id, name=changes["name"])
         except ValueError as err:
@@ -297,14 +269,13 @@ class CasaSmartAdminEntityView(_AdminView):
 
 
 class CasaSmartAdminConfigFlowsView(_AdminView):
-    """GET/POST /api/casasmart/admin/config_flow — list + initiate."""
+    """GET/POST /api/casasmart/admin/config_flow: list or start a flow."""
 
     url = f"/api/{DOMAIN}/admin/config_flow"
     name = f"api:{DOMAIN}:admin:config-flow"
 
     async def get(self, request: web.Request) -> web.Response:
-        """In-progress flows for the whitelisted handlers only — the
-        discovered-devices screen (DHCP-found Broadlink remotes)."""
+        """In-progress flows of the allowed handlers (discovered devices)."""
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
@@ -316,7 +287,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
         return self.json({"flows": flows})
 
     async def post(self, request: web.Request) -> web.Response:
-        """Initiate a flow — whitelisted handlers only."""
+        """Start a flow for an allowed handler."""
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
@@ -344,7 +315,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
 
 
 class CasaSmartAdminConfigFlowView(_AdminView):
-    """POST /api/casasmart/admin/config_flow/{flow_id} — drive a step."""
+    """POST /api/casasmart/admin/config_flow/{flow_id}: submit a step."""
 
     url = f"/api/{DOMAIN}/admin/config_flow/{{flow_id}}"
     name = f"api:{DOMAIN}:admin:config-flow:step"
@@ -359,9 +330,7 @@ class CasaSmartAdminConfigFlowView(_AdminView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         flow_mgr = self._hass.config_entries.flow
-        # The handler gate applies to STEPS too — a flow_id minted by some
-        # other integration's discovery must not be drivable through this
-        # proxy. Out-of-whitelist is the same 404 as nonexistent.
+        # Another integration's flow gets the same 404 as an unknown one.
         try:
             progress = flow_mgr.async_get(flow_id)
         except data_entry_flow.UnknownFlow:
@@ -380,7 +349,7 @@ class CasaSmartAdminConfigFlowView(_AdminView):
 
 
 class CasaSmartAdminRemoteCommandView(_AdminView):
-    """POST /api/casasmart/admin/remote/send_command — IR blast."""
+    """POST /api/casasmart/admin/remote/send_command: send IR commands."""
 
     url = f"/api/{DOMAIN}/admin/remote/send_command"
     name = f"api:{DOMAIN}:admin:remote:send-command"
