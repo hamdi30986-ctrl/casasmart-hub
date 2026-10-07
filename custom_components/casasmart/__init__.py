@@ -231,7 +231,8 @@ def _open_storage(
     recovery codes from their hashes in hub_config, minting a code only when
     its hash is missing (first start, or after a factory reset). Returns the
     runtime data and those new plaintext pairing and recovery codes, or None;
-    this is the only time they exist in the clear.
+    this is the only time they exist in the clear. If anything after opening
+    the database fails, it is closed again before the error propagates.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
@@ -239,6 +240,17 @@ def _open_storage(
         backup_dir=data_dir / BACKUP_DIR_NAME,
     )
     storage.open()
+    try:
+        return _build_runtime_data(storage, data_dir)
+    except BaseException:
+        storage.close()
+        raise
+
+
+def _build_runtime_data(
+    storage: HubStorage, data_dir: Path
+) -> tuple[CasaSmartRuntimeData, str | None, str | None]:
+    """_open_storage's work once the database is open (blocking)."""
     hub_config = JsonConfigStore(data_dir / HUB_CONFIG_FILENAME)
     auth = AuthEngine(storage.table("auth_devices"), hub_config)
     auth.warm_up()
@@ -396,7 +408,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     and push, which both need its identity fingerprint. Optional parts (the
     TLS port, mDNS, push, the tunnel) log their failures and the rest of the
     hub keeps running. Storage that won't open is retried by Home Assistant;
-    a corrupt identity key stops setup until a person fixes it.
+    a corrupt identity key stops setup until a person fixes it. Any failure
+    once storage is open stops what already started and closes storage.
     """
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
     # Older self-updates left copies of the integration in custom_components,
@@ -412,6 +425,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     runtime_data.relay_config_applied = relay_config_snapshot(entry.options, entry.data)
     entry.runtime_data = runtime_data
 
+    try:
+        await _async_start_hub(hass, entry, data_dir, bootstrap_code, recovery_code)
+    except BaseException:
+        # A failed setup gets no async_unload_entry, so nothing else stops
+        # these, and a retry would run a second copy beside them.
+        try:
+            await _async_stop_hub(hass, runtime_data)
+        except Exception:
+            _LOGGER.exception("CasaSmart Hub did not stop cleanly after failing")
+        raise
+    _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
+    return True
+
+
+async def _async_start_hub(
+    hass: HomeAssistant,
+    entry: CasaSmartConfigEntry,
+    data_dir: Path,
+    bootstrap_code: str | None,
+    recovery_code: str | None,
+) -> None:
+    """Everything setup does once storage is open.
+
+    Each runtime goes on runtime_data before it starts, so _async_stop_hub
+    can stop one that fails part-way through starting.
+    """
+    runtime_data = entry.runtime_data
     suggestion_store = SuggestionStore(runtime_data.storage)
     # Marks suggestion runs a restart interrupted as unknown; never reruns them.
     await hass.async_add_executor_job(suggestion_store.recover)
@@ -467,8 +507,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     await _async_start_push(hass, entry, data_dir)
 
     alarm_adapter = AlarmAdapter(hass, runtime_data.alarm)
-    alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
+    alarm_adapter.async_start()
 
     energy = runtime_data.energy
     energy_adapter = EnergyAdapter(
@@ -488,12 +528,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     await energy_controller.async_start()
 
     audio_adapter = AudioAdapter(hass, runtime_data.audio)
-    await audio_adapter.async_start()
     entry.runtime_data.audio_adapter = audio_adapter
+    await audio_adapter.async_start()
 
     athan_scheduler = AthanScheduler(hass, runtime_data.audio, audio_adapter)
-    await athan_scheduler.async_start()
     entry.runtime_data.athan_scheduler = athan_scheduler
+    await athan_scheduler.async_start()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -515,9 +555,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
             timedelta(minutes=TUNNEL_WATCHDOG_INTERVAL_MINUTES),
         )
     )
-
-    _LOGGER.info("CasaSmart Hub storage ready at %s", data_dir)
-    return True
 
 
 async def _async_import_registry(
@@ -795,8 +832,8 @@ async def _async_start_mdns(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
         api_version=API_VERSION,
         port=runtime_data.tls.port,
     )
-    await advertiser.async_start()
     runtime_data.mdns = advertiser
+    await advertiser.async_start()
 
     entry.async_on_unload(
         async_track_time_interval(
@@ -843,6 +880,14 @@ async def _async_start_push(
     except PushIdentityError:
         _LOGGER.exception("Push dispatcher skipped — push-identity key unusable")
         return
+    except (OSError, ConfigError) as err:
+        # A read-only or full data directory; push is optional.
+        _LOGGER.warning(
+            "Push dispatcher skipped: the push-identity key could not be "
+            "loaded or saved (%s)",
+            err,
+        )
+        return
 
     endpoints = relay_endpoints(relay_config.base_url)
     activation_code_raw = entry.data.get(CONF_RELAY_ACTIVATION_CODE)
@@ -861,8 +906,8 @@ async def _async_start_push(
         relay_url=endpoints.push_url,
         session=async_get_clientsession(hass),
     )
-    dispatcher.async_start()
     runtime_data.push_dispatcher = dispatcher
+    dispatcher.async_start()
 
     async def _async_registration_ready() -> None:
         if (
@@ -896,12 +941,12 @@ async def _async_start_push(
         on_success=_async_registration_ready,
         on_permanent_failure=_async_registration_failed,
     )
-    registrar.start(hass, entry)
     runtime_data.relay_registrar = registrar
+    registrar.start(hass, entry)
 
     tank_monitor = TankPushMonitor(hass, tanks=runtime_data.tanks, notifier=dispatcher)
-    tank_monitor.async_start()
     runtime_data.tank_push_monitor = tank_monitor
+    tank_monitor.async_start()
 
 
 def _tunnel_options_snapshot(entry: CasaSmartConfigEntry) -> dict[str, Any]:
@@ -1433,36 +1478,46 @@ async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -
 
     If a platform fails to unload, its entities still use the engines, so
     nothing is stopped and False is returned; the stop listener still closes
-    storage at shutdown. WebSockets close first, so the TLS listener doesn't
-    wait on them, and storage closes last.
+    storage at shutdown.
     """
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         _LOGGER.error("CasaSmart Hub platforms failed to unload; hub left running")
         return False
-    await async_close_connections(hass)
-    if entry.runtime_data.suggestions is not None:
-        entry.runtime_data.suggestions.stop()
-    if entry.runtime_data.energy_controller is not None:
-        await entry.runtime_data.energy_controller.async_stop()
-    if entry.runtime_data.alarm_adapter is not None:
-        entry.runtime_data.alarm_adapter.async_stop()
-    if entry.runtime_data.tank_push_monitor is not None:
-        entry.runtime_data.tank_push_monitor.async_stop()
-    if entry.runtime_data.relay_registrar is not None:
-        entry.runtime_data.relay_registrar.stop()
-    if entry.runtime_data.push_dispatcher is not None:
-        entry.runtime_data.push_dispatcher.async_stop()
-    if entry.runtime_data.athan_scheduler is not None:
-        await entry.runtime_data.athan_scheduler.async_stop()
-    if entry.runtime_data.audio_adapter is not None:
-        await entry.runtime_data.audio_adapter.async_stop()
-    if entry.runtime_data.mdns is not None:
-        await entry.runtime_data.mdns.async_stop()
-    if entry.runtime_data.tls is not None:
-        await entry.runtime_data.tls.async_stop()
-    await hass.async_add_executor_job(entry.runtime_data.storage.close)
+    await _async_stop_hub(hass, entry.runtime_data)
     _LOGGER.info("CasaSmart Hub storage closed")
     return True
+
+
+async def _async_stop_hub(
+    hass: HomeAssistant, runtime_data: CasaSmartRuntimeData
+) -> None:
+    """Stop every runtime that started, then close storage.
+
+    Shared by unload and a failed setup. WebSockets close first, so the TLS
+    listener doesn't wait on them, and storage closes last.
+    """
+    await async_close_connections(hass)
+    if runtime_data.suggestions is not None:
+        runtime_data.suggestions.stop()
+    if runtime_data.energy_controller is not None:
+        await runtime_data.energy_controller.async_stop()
+    if runtime_data.alarm_adapter is not None:
+        runtime_data.alarm_adapter.async_stop()
+    if runtime_data.tank_push_monitor is not None:
+        runtime_data.tank_push_monitor.async_stop()
+    if runtime_data.relay_registrar is not None:
+        runtime_data.relay_registrar.stop()
+    if runtime_data.push_dispatcher is not None:
+        runtime_data.push_dispatcher.async_stop()
+    if runtime_data.athan_scheduler is not None:
+        await runtime_data.athan_scheduler.async_stop()
+    if runtime_data.audio_adapter is not None:
+        await runtime_data.audio_adapter.async_stop()
+    if runtime_data.mdns is not None:
+        await runtime_data.mdns.async_stop()
+    if runtime_data.tls is not None:
+        await runtime_data.tls.async_stop()
+    await hass.async_add_executor_job(runtime_data.storage.close)
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
