@@ -97,6 +97,7 @@ class SuggestionRuntime:
     def candidates(self, context, scope, *, policy_checks=True):
         """Yield (rule, suggestion or None, reason) by priority, then id."""
         data, scenes, states, now, zone = context
+        visible = self.visible(scope)
         for rule in sorted(data["rules"], key=lambda r: (-r["priority"], r["rule_id"])):
             suggestion, reason = evaluate(
                 rule,
@@ -105,7 +106,7 @@ class SuggestionRuntime:
                 now,
                 zone,
                 self.sunset,
-                self.visible(scope),
+                visible,
                 policy_checks=policy_checks,
             )
             yield rule, suggestion, reason
@@ -334,10 +335,11 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                     (s for s in suffixes if local == s or local.endswith("_" + s)), eid
                 )
                 gang_types[eid] = gang.get("type", legacy_types.get(key))
+        visible = self.visible(scope)
         states = {
             s.entity_id: s
             for s in self.hass.states.async_all()
-            if s.entity_id in control_ids and self.visible(scope)(s.entity_id)
+            if s.entity_id in control_ids and visible(s.entity_id)
         }
         grouped = {r["room_id"]: [] for r in rooms}
         for state in states.values():
@@ -437,8 +439,9 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
 
     def candidates(self, context, scope, *, policy_checks=True):
         """Yield each plan whose every device the caller can see."""
+        visible = self.visible(scope)
         for plan in context[0]["_generated_plans"]:
-            if all(self.visible(scope)(a["entity_id"]) for a in plan["actions"]):
+            if all(visible(a["entity_id"]) for a in plan["actions"]):
                 yield {}, dict(plan), "eligible"
 
     def payload_from(self, context, member, scope):
