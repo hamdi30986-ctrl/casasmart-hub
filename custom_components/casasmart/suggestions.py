@@ -1,4 +1,17 @@
-"""Pure, bounded contextual recommendation policy. Never executes a command."""
+"""Pure, bounded contextual recommendation policy. Never executes a command.
+
+An admin's rule names a saved scene, the weekdays and time window it is
+offered in (fixed clock times, or relative to sunset) and optional state
+conditions. This module validates rules and decides, for a moment in time
+and a set of entity states, whether a rule's scene should be suggested.
+It has no Home Assistant imports: the caller passes in the states, the home
+time zone and a sunset lookup. The wire contract is in
+``docs/api/CONTEXTUAL_SUGGESTIONS_V1.md``.
+
+Each offer has an occurrence id: a hash of the rule, the scene and the
+window start. Editing either changes it, so a card the user still sees
+can never run changed content.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +24,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 MAX_RULES = 64
+# The condition states a rule may test, per domain.
 STATES = {
     "light": {"on", "off"},
     "switch": {"on", "off"},
@@ -24,16 +38,23 @@ STATES = {
 
 
 class SuggestionError(Exception):
+    """A refused suggestion request: a machine ``code`` and an HTTP status."""
+
     def __init__(self, code: str, status: int = 400):
         super().__init__(code)
         self.code, self.status = code, status
 
 
 def integer(value, low, high):
+    """True for a real int (not a bool) between ``low`` and ``high``."""
     return type(value) is int and low <= value <= high
 
 
 def validate_rule(raw: Any) -> dict:
+    """Validate one rule and return it with every field filled in.
+
+    Raises ``SuggestionError`` with a code naming the bad part.
+    """
     if not isinstance(raw, dict) or set(raw) - {
         "rule_id",
         "scene_id",
@@ -120,6 +141,11 @@ def validate_rule(raw: Any) -> dict:
 
 
 def _wall(day: date, value: str, zone: ZoneInfo, end: bool = False):
+    """The UTC instant of a home-local "HH:MM" on ``day``.
+
+    A repeated local time (clocks going back) gives its first instant, or
+    its last for an ``end``; a time that does not exist gives None.
+    """
     naive = datetime.combine(day, time.fromisoformat(value))
     choices = [naive.replace(tzinfo=zone, fold=fold).astimezone(UTC) for fold in (0, 1)]
     valid = [v for v in choices if v.astimezone(zone).replace(tzinfo=None) == naive]
@@ -128,6 +154,11 @@ def _wall(day: date, value: str, zone: ZoneInfo, end: bool = False):
 
 
 def interval(rule: dict, day: date, zone: ZoneInfo, sunset: Callable):
+    """The rule's UTC ``(start, end)`` for the window that opens on ``day``.
+
+    None when the rule is not offered that weekday or the window cannot be
+    placed (no sunset, a skipped clock time).
+    """
     if day.weekday() not in rule["weekdays"]:
         return None
     window = rule["window"]
@@ -149,12 +180,14 @@ def interval(rule: dict, day: date, zone: ZoneInfo, sunset: Callable):
 
 
 def state_value(state):
+    """The state string of an HA ``State`` or a plain dict."""
     return (
         state.get("state") if isinstance(state, dict) else getattr(state, "state", None)
     )
 
 
 def attributes(state):
+    """The attributes of an HA ``State`` or a plain dict."""
     return (
         state.get("attributes", {})
         if isinstance(state, dict)
@@ -203,6 +236,13 @@ def evaluate(
     *,
     policy_checks=True,
 ) -> tuple[dict | None, str]:
+    """Decide whether ``rule`` offers its scene at ``now``.
+
+    Returns ``(suggestion, "eligible")`` or ``(None, reason)``. With
+    ``policy_checks=False`` the state checks (conditions, unavailable
+    devices, a scene already in effect) are skipped, so an action can still
+    find the occurrence whose receipt or suppression it should replay.
+    """
     if not rule["enabled"]:
         return None, "disabled"
     if scene is None or not scene.get("entities"):
@@ -262,6 +302,7 @@ def evaluate(
 
 
 def next_boundary(rules, now, zone, sunset):
+    """The next window start or end of any enabled rule, at most a minute away."""
     candidates = [now.astimezone(UTC) + timedelta(minutes=1)]
     day = now.astimezone(zone).date()
     for rule in rules:

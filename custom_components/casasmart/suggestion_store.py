@@ -1,4 +1,12 @@
-"""Additive single-document SQLite state with atomic revision/claim updates."""
+"""Additive single-document SQLite state with atomic revision/claim updates.
+
+All suggestion state is one JSON document in the ``suggestions_v1`` table:
+the rules and their revision, per-member suppressions (dismiss/snooze),
+execution receipts, and the generated suggestions' room choices. Every
+change reads, edits and writes the document inside one storage
+transaction, so two requests can never both claim one occurrence.
+Methods are synchronous; callers run them in the executor.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +17,14 @@ from .suggestions import MAX_RULES, SuggestionError, integer, validate_rule
 
 
 class SuggestionStore:
+    """The suggestion document over a ``HubStorage``."""
+
     def __init__(self, storage):
         self.storage = storage
         self.table = storage.table("suggestions_v1")
 
     def snapshot(self):
+        """A copy of the document; a fresh one when nothing is stored yet."""
         result = self.table.get("state") or {
             "version": 1,
             "revision": 0,
@@ -26,6 +37,7 @@ class SuggestionStore:
         return deepcopy(result)
 
     def recover(self):
+        """At startup, mark claims still "executing" as "unknown"."""
         # A process restart cannot tell whether a motor command was accepted.
         # Retain the claim as unknown; NEVER automatically rerun it.
         with self.storage.transaction():
@@ -39,6 +51,7 @@ class SuggestionStore:
                 self.table["state"] = data
 
     def replace_rules(self, revision, raw_rules):
+        """Replace every rule if ``revision`` is still current (else 409)."""
         if (
             not integer(revision, 0, 2**53)
             or not isinstance(raw_rules, list)
@@ -58,10 +71,12 @@ class SuggestionStore:
 
     @staticmethod
     def suppression_key(member, occurrence):
+        """Key one member's suppression; the length prefix keeps it unambiguous."""
         return f"{len(member)}:{member}:{occurrence}"
 
     @staticmethod
     def _prune(data, now):
+        """Drop receipts and suppressions more than a day past their expiry."""
         for field in ("executions", "suppressions"):
             data[field] = {
                 key: value
@@ -70,6 +85,7 @@ class SuggestionStore:
             }
 
     def suppress(self, member, suggestion, action, now):
+        """Dismiss (until the offer ends) or snooze (30 minutes at most)."""
         with self.storage.transaction():
             data = self.snapshot()
             self._prune(data, now)
@@ -96,6 +112,12 @@ class SuggestionStore:
         }
 
     def claim(self, suggestion, now):
+        """Claim the right to run an occurrence.
+
+        Returns ``(True, receipt)`` for the one caller that may run it, or
+        ``(False, receipt)`` with the receipt of the earlier attempt. A full
+        receipt store refuses (429) instead of evicting a live receipt.
+        """
         occurrence = suggestion["occurrence_id"]
         with self.storage.transaction():
             data = self.snapshot()
@@ -155,6 +177,7 @@ class SuggestionStore:
             return selections[scope_key]["room_ids"]
 
     def finish(self, occurrence, result):
+        """Record a run's result on its receipt and return the receipt."""
         with self.storage.transaction():
             data = self.snapshot()
             receipt = data["executions"][occurrence]
@@ -171,6 +194,7 @@ class SuggestionStore:
             return receipt
 
     def unknown(self, occurrence):
+        """Mark a run that may have started but did not report as unknown."""
         with self.storage.transaction():
             data = self.snapshot()
             data["executions"][occurrence]["status"] = "unknown"

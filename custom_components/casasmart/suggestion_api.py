@@ -1,4 +1,20 @@
-"""Version-one suggestion contract. Evaluation is read-only; run is explicit."""
+"""Version-one suggestion contract. Evaluation is read-only; run is explicit.
+
+Under ``/api/casasmart/now/suggestions``:
+
+- ``GET`` (``devices.read``) — the caller's current suggestion.
+- ``GET/PUT /rules`` (``suggestions.manage``, unscoped admins only) — read
+  or replace the whole rule set, with an optimistic revision.
+- ``POST /preview`` (``suggestions.manage``) — evaluate a proposed rule.
+- ``POST /actions`` — dismiss or snooze (``session.manage``) or run
+  (``devices.control``) the occurrence the caller was shown.
+- ``GET /generated`` and ``POST /generated/actions`` — the same for the
+  generated room scenes.
+
+Errors carry an ``error`` code (and a readable ``message``); the full
+contract is in ``docs/api/CONTEXTUAL_SUGGESTIONS_V1.md`` and
+``docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md``.
+"""
 
 from __future__ import annotations
 
@@ -17,12 +33,18 @@ from .suggestions import MAX_RULES, SuggestionError, evaluate, validate_rule
 
 
 def runtime_for(hass):
+    """The loaded entry's runtime data, or None while the hub isn't loaded."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
 
 
 class _SuggestionView(HomeAssistantView):
-    requires_auth = False
+    """Shared auth, error mapping and body parsing for the suggestion views.
+
+    ``generated`` selects the generated-room runtime instead of the rules.
+    """
+
+    requires_auth = False  # CasaSmart JWT gate
     generated = False
 
     def __init__(self, hass):
@@ -36,6 +58,7 @@ class _SuggestionView(HomeAssistantView):
         return super().json(result, status)
 
     async def handle(self, request, permission, operation):
+        """Authenticate, pick the runtime, run ``operation``, map its errors."""
         claims, error = authenticate_request(self.hass, request, permission)
         if error is not None:
             return error
@@ -57,10 +80,12 @@ class _SuggestionView(HomeAssistantView):
             return self.json({"error": "suggestion_storage_unavailable"}, 503)
 
     def member(self, claims):
+        """The person behind the token; suppressions follow the person."""
         auth = get_engine(self.hass)
         return auth.member_id_for(claims["sub"]) if auth else claims["sub"]
 
     async def body(self, request, allowed):
+        """The JSON object body, refusing any field outside ``allowed``."""
         body = await json_body(request)
         if not isinstance(body, dict) or set(body) - allowed:
             raise SuggestionError("invalid_request")
@@ -68,6 +93,8 @@ class _SuggestionView(HomeAssistantView):
 
 
 class CasaSmartSuggestionsView(_SuggestionView):
+    """GET /api/casasmart/now/suggestions."""
+
     url = f"/api/{DOMAIN}/now/suggestions"
     name = f"api:{DOMAIN}:now:suggestions"
 
@@ -81,6 +108,8 @@ class CasaSmartSuggestionsView(_SuggestionView):
 
 
 class CasaSmartSuggestionRulesView(_SuggestionView):
+    """GET/PUT /api/casasmart/now/suggestions/rules."""
+
     url = f"/api/{DOMAIN}/now/suggestions/rules"
     name = f"api:{DOMAIN}:now:suggestions:rules"
 
@@ -113,6 +142,7 @@ class CasaSmartSuggestionRulesView(_SuggestionView):
 
     @staticmethod
     def references(service, context, rule, claims):
+        """The rule's scene, once every entity it names exists and is visible."""
         scene = context[1].get(rule["scene_id"])
         if not scene or not scene.get("entities"):
             raise SuggestionError("invalid_scene_reference")
@@ -129,6 +159,8 @@ class CasaSmartSuggestionRulesView(_SuggestionView):
 
 
 class CasaSmartSuggestionPreviewView(_SuggestionView):
+    """POST /api/casasmart/now/suggestions/preview."""
+
     url = f"/api/{DOMAIN}/now/suggestions/preview"
     name = f"api:{DOMAIN}:now:suggestions:preview"
 
@@ -166,6 +198,14 @@ class CasaSmartSuggestionPreviewView(_SuggestionView):
 
 
 class CasaSmartSuggestionActionView(_SuggestionView):
+    """POST /api/casasmart/now/suggestions/actions.
+
+    A run is claimed durably before anything is sent, then every check is
+    repeated, so two taps (or two devices) can never run one occurrence
+    twice. Once the scene may have started, a failure marks the receipt
+    "unknown" instead of releasing it.
+    """
+
     url = f"/api/{DOMAIN}/now/suggestions/actions"
     name = f"api:{DOMAIN}:now:suggestions:actions"
 
@@ -315,6 +355,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
         return await self.handle(request, "devices.read", operation)
 
     def energy_check(self, claims, scene):
+        """Refuse a run the active Energy Saving level does not allow."""
         energy = getattr(runtime_for(self.hass), "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
             raise SuggestionError("energy_lockout", 403)
@@ -327,12 +368,16 @@ class CasaSmartSuggestionActionView(_SuggestionView):
 
 
 class CasaSmartGeneratedSuggestionsView(CasaSmartSuggestionsView):
+    """GET /api/casasmart/now/suggestions/generated."""
+
     generated = True
     url = f"/api/{DOMAIN}/now/suggestions/generated"
     name = f"api:{DOMAIN}:now:suggestions:generated"
 
 
 class CasaSmartGeneratedSuggestionActionView(CasaSmartSuggestionActionView):
+    """POST /api/casasmart/now/suggestions/generated/actions."""
+
     generated = True
     url = f"/api/{DOMAIN}/now/suggestions/generated/actions"
     name = f"api:{DOMAIN}:now:suggestions:generated:actions"

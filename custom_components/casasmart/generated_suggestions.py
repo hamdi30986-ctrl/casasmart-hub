@@ -1,4 +1,12 @@
-"""Deterministic, temporary room scenes. Never dispatches or saves a scene."""
+"""Deterministic, temporary room scenes. Never dispatches or saves a scene.
+
+Pure functions behind ``GeneratedSuggestionRuntime``: given a room's
+current device states, build the action list for "turn the room off" or
+"save energy in the room", and wrap it as a suggestion for the current
+two-hour window. Running one goes through ``async_execute_registry_scene``,
+which re-checks each action against live state just before sending it.
+The wire contract is in ``docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md``.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +17,18 @@ from datetime import UTC, datetime
 
 
 def digest(value):
+    """A stable SHA-256 of a JSON-serializable value."""
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def window(now):
+    """The two-hour UTC window holding ``now``: (start epoch, end datetime)."""
     start = int(now.timestamp()) // 7200 * 7200
     return start, datetime.fromtimestamp(start + 7200, UTC)
 
 
 def number(value):
+    """True for a finite int or float (not a bool)."""
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -114,6 +125,12 @@ def room_actions(states, kind, *, temperature_unit="°C"):
 
 
 def make_suggestion(room, kind, states, now, *, temperature_unit="°C"):
+    """A suggestion for the room, or None when there is nothing to do.
+
+    ``suppression_id`` names the room, kind and window, so a dismissal
+    survives the plan changing; ``occurrence_id`` also covers the actions,
+    so running a plan that changed since it was shown is refused.
+    """
     actions = room_actions(states, kind, temperature_unit=temperature_unit)
     if not actions:
         return None
