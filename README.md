@@ -120,8 +120,8 @@ by hand leave it showing the wrong version. The built-in updater
 | Kind | Name | Purpose |
 |---|---|---|
 | Alarm panel | `alarm_control_panel.casasmart_hub_security` | The hub's alarm, armed and disarmed from the app or Home Assistant |
-| Button | `button.casasmart_regenerate_pairing_code` | Unpairs every phone, drops their push tokens, favorites and per-person settings, and issues a new owner code (the old printed code stops working) |
-| Button | `button.casasmart_factory_reset` | Wipes the app layer (see [Factory reset](#factory-reset)) and issues new owner and recovery codes |
+| Button | `button.casasmart_regenerate_pairing_code` | Unpairs every phone, drops their push tokens, favorites and per-person settings, and issues a new owner code (the old printed code stops working). Home Assistant admins only |
+| Button | `button.casasmart_factory_reset` | Wipes the app layer (see [Factory reset](#factory-reset)) and issues new owner and recovery codes. Home Assistant admins only |
 | Sensor | `sensor.casasmart_energy_savings` | The active Energy Saving level: `off`, `low`, `medium` or `smart` |
 | Sensors | `sensor.casasmart_user_*` | One per paired phone |
 | Service | `casasmart.factory_reset` | The same reset as the button (Home Assistant admins only) |
