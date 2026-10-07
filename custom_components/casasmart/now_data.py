@@ -216,11 +216,11 @@ class NowDataEngine:
         return {"room_id": room_id, **policy}
 
     def room_policy(self, room_id: str) -> dict[str, Any]:
-        """The room's policy; a room without one does not take part."""
-        record = self._policies.get(room_id) or {}
-        entity_ids = (
-            record.get("eligible_entity_ids") if isinstance(record, dict) else []
-        )
+        """The room's policy; a room without a valid one does not take part."""
+        record = self._policies.get(room_id)
+        if not isinstance(record, dict):
+            record = {}
+        entity_ids = record.get("eligible_entity_ids")
         return {
             "participates": bool(record.get("participates") is True),
             "eligible_entity_ids": [
