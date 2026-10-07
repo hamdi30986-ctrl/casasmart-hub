@@ -139,6 +139,18 @@ def dns_sd_command(advertisement: Advertisement, executable: str) -> list[str]:
     ]
 
 
+def _stop_dns_sd(process: subprocess.Popen[bytes]) -> None:
+    """Stop dns-sd if it is still running, killing it if SIGTERM isn't enough."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -177,13 +189,8 @@ def main() -> None:
                 hub_name=args.name,
             )
             if candidate != current or process is None or process.poll() is not None:
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                if process is not None:
+                    _stop_dns_sd(process)
                 process = subprocess.Popen(
                     dns_sd_command(candidate, args.dns_sd),
                     stdout=subprocess.DEVNULL,
@@ -201,12 +208,8 @@ def main() -> None:
         deadline = time.monotonic() + max(1.0, args.refresh)
         while not stopping and time.monotonic() < deadline:
             time.sleep(min(0.5, deadline - time.monotonic()))
-    if process is not None and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+    if process is not None:
+        _stop_dns_sd(process)
 
 
 if __name__ == "__main__":
