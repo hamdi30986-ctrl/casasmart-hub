@@ -103,6 +103,18 @@ def _write_yaml(path: str, data: list[dict[str, Any]]) -> None:
     write_utf8_file_atomic(path, contents)
 
 
+def _shared_mutation_lock(hass: HomeAssistant) -> asyncio.Lock:
+    """The ONE automations.yaml writer lock, shared across view instances.
+
+    ``build_views`` constructs fresh view objects for HA's own HTTP app and
+    the TLS listener (and again on each daily TLS refresh), all writing the
+    same file — so the lock lives in ``hass.data``, never on a view.
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault(
+        "automation_mutation_lock", asyncio.Lock()
+    )
+
+
 # -- The view -------------------------------------------------------------------
 
 
@@ -117,8 +129,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         self._hass = hass
         # One writer at a time — concurrent saves must not interleave the
         # read-modify-write on automations.yaml (same lock discipline as
-        # HA's own config view).
-        self._mutation_lock = asyncio.Lock()
+        # HA's own config view), whichever listener they arrive on.
+        self._mutation_lock = _shared_mutation_lock(hass)
 
     def _gate(
         self, request: web.Request
