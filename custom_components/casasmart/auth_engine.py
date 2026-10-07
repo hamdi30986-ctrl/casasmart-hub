@@ -179,7 +179,8 @@ class AuthEngine:
         self.throttle = FailureThrottle("login")
         self._secret: bytes | None = None
         # device_id -> {role, rooms, ver, last_seen}. validate_token reads only
-        # this, never storage; every write keeps it in sync.
+        # this, never storage. Writes replace an entry, never edit it, and only
+        # after their commit, so the loop-side readers can skip the lock.
         self._device_cache: dict[str, dict[str, Any]] = {}
 
     def warm_up(self) -> None:
@@ -202,6 +203,10 @@ class AuthEngine:
 
     def _signing_secret(self) -> bytes:
         """The hub's JWT secret, generated once and kept in hub config."""
+        secret = self._secret
+        if secret is not None:
+            # Never changes once loaded, so token checks skip the lock.
+            return secret
         with self._lock:
             if self._secret is None:
                 stored = self._hub_config.get("jwt_secret")
@@ -516,11 +521,10 @@ class AuthEngine:
     def last_seen(self, device_id: str) -> float | None:
         """When the device last presented a valid token; None since a restart.
 
-        An in-memory read, cheap enough for the user sensors on the event loop.
+        An in-memory read without the lock, for the user sensors on the loop.
         """
-        with self._lock:
-            cached = self._device_cache.get(device_id)
-            return cached.get("last_seen") if cached else None
+        cached = self._device_cache.get(device_id)
+        return cached.get("last_seen") if cached else None
 
     def device_version(self, device_id: str) -> int | None:
         """The device's auth version, or None when it isn't enrolled.
@@ -745,32 +749,34 @@ class AuthEngine:
 
         The device must still be enrolled with the token's auth version, so an
         unpair or edit kills outstanding tokens on their next use. Raises
-        TokenError. No I/O, so it is safe on the event loop.
+        TokenError. No I/O and no lock, so a write committing on a slow disk
+        can't stall the event loop; it sees the device as it was until then.
         """
         claims = auth_tokens.validate_token(self._signing_secret(), token)
-        with self._lock:
-            cached = self._device_cache.get(claims["sub"])
-            if cached is None:
-                # The cache mirrors every enrolled device, so a miss means it
-                # is gone: the one case where the app should pair again.
-                raise TokenError("Token revoked", code="unenrolled")
-            if cached["ver"] != claims.get("ver"):
-                # Edited since the token was minted. Logging in again fixes
-                # it, so the app must not re-pair.
-                raise TokenError("Token revoked", code="token_stale")
-            # For the per-user sensors; kept in memory, so no write per request.
-            cached["last_seen"] = time.time()
-            # authorize() uses the stored role and rooms. The ver check means
-            # they match the claims; this keeps authorize() tied to the record.
-            claims["role"] = cached["role"]
-            claims["rooms"] = cached.get("rooms")
+        cached = self._device_cache.get(claims["sub"])
+        if cached is None:
+            # The cache mirrors every enrolled device, so a miss means it is
+            # gone: the one case where the app should pair again.
+            raise TokenError("Token revoked", code="unenrolled")
+        if cached["ver"] != claims.get("ver"):
+            # Edited since the token was minted. Logging in again fixes it,
+            # so the app must not re-pair.
+            raise TokenError("Token revoked", code="token_stale")
+        # For the per-user sensors; kept in memory, so no write per request.
+        cached["last_seen"] = time.time()
+        # authorize() uses the stored role and rooms. The ver check means they
+        # match the claims; this keeps authorize() tied to the record.
+        claims["role"] = cached["role"]
+        claims["rooms"] = cached.get("rooms")
         return claims
 
     def is_owner_device(self, device_id: str) -> bool:
-        """True when device_id is the admin (owner), who gets owner-only pushes."""
-        with self._lock:
-            cached = self._device_cache.get(device_id)
-            return bool(cached and cached.get("role") == ROLE_ADMIN)
+        """True when device_id is the admin (owner), who gets owner-only pushes.
+
+        Read without the lock, as validate_token does: it runs on the loop.
+        """
+        cached = self._device_cache.get(device_id)
+        return bool(cached and cached.get("role") == ROLE_ADMIN)
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:

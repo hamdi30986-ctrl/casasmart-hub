@@ -11,8 +11,11 @@ nonces) — the full challenge-response round-trip without HTTP.
 
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
@@ -728,6 +731,69 @@ class EngineTests(unittest.TestCase):
                 )
         # Unknown permission fails closed even for admin.
         self.assertFalse(AuthEngine.authorize({"role": "admin"}, "nuke.hub"))
+
+
+class LoopSideReadTests(unittest.TestCase):
+    """Token checks run on the event loop, so they never wait for a write.
+
+    Writes hold the engine lock across their SQLite commit, which a slow
+    disk can stretch to hundreds of milliseconds.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.storage = HubStorage(db_path=tmp / "hub.db")
+        self.storage.open()
+        self.engine = AuthEngine(
+            self.storage.table("auth_devices"), JsonConfigStore(tmp / "cfg.json")
+        )
+        self.engine.warm_up()
+        self.owner = self.engine.enroll_device("Owner", "admin", make_keypair()[1])
+        self.kid = self.engine.enroll_device("Kid", "user", make_keypair()[1])
+
+    def tearDown(self):
+        self.storage.close()
+        self._tmp.cleanup()
+
+    def _token(self, device_id, role):
+        return auth_tokens.issue_token(
+            self.engine._signing_secret(), device_id, role, None, ttl=600, ver=1
+        )
+
+    def test_reads_do_not_wait_for_a_commit_in_progress(self):
+        owner_token = self._token(self.owner, "admin")
+        kid_token = self._token(self.kid, "user")
+        committing = threading.Event()
+        finish = threading.Event()
+        real_write = HubStorage._execute_write
+
+        def _slow_write(storage, sql, params=()):
+            committing.set()
+            finish.wait(2)
+            return real_write(storage, sql, params)
+
+        with mock.patch.object(HubStorage, "_execute_write", _slow_write):
+            writer = threading.Thread(
+                target=self.engine.update_device,
+                args=(self.kid,),
+                kwargs={"rooms": ["bedroom"]},
+            )
+            writer.start()
+            self.assertTrue(committing.wait(2))
+            started = time.monotonic()
+            self.assertEqual(self.engine.validate_token(owner_token)["sub"], self.owner)
+            # The edit hasn't committed, so the kid's token still holds.
+            self.assertEqual(self.engine.validate_token(kid_token)["rooms"], None)
+            self.assertTrue(self.engine.is_owner_device(self.owner))
+            self.assertIsNotNone(self.engine.last_seen(self.owner))
+            elapsed = time.monotonic() - started
+            finish.set()
+            writer.join(5)
+
+        self.assertLess(elapsed, 0.5)
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(kid_token)  # stale once committed
 
 
 if __name__ == "__main__":
