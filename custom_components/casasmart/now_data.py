@@ -4,6 +4,19 @@ The client never derives this product state from Home Assistant history.  In
 particular, recent controls are recorded only after a CasaSmart command has
 succeeded, and room restore sets are written by the Hub, not reconstructed by
 the client after a restart.
+
+``NowDataEngine`` keeps, each in its own storage table:
+
+* each member's recently controlled devices;
+* each room's activity policy — whether it takes part in the room OFF/ON
+  command, and the admin-approved devices it may switch;
+* the Now configuration (weather, air quality, door/window contacts and
+  featured scenes);
+* the stored answers of recent room commands, for idempotent retries;
+* each room's restore set — what its last OFF switched off, for ON.
+
+The pure helpers decide which devices may ever join a room command.
+Storage methods are synchronous; ``now_api`` runs them in the executor.
 """
 
 from __future__ import annotations
@@ -17,9 +30,11 @@ from typing import Any
 _MAX_RECENTS = 48
 _MAX_PINNED_MOMENTS = 12
 _MAX_CONTACTS = 64
+# Stored room-command answers per member; the oldest is dropped first.
 _MAX_IDEMPOTENCY_ENTRIES = 64
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
+# Domains a room OFF/ON command may ever switch.
 _ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
 # Home Assistant permits a switch to have no device class.  That generic value
 # is not a safety classification, so it must never be admitted to a room bulk
@@ -32,6 +47,7 @@ class NowDataError(Exception):
 
 
 def _optional_entity_id(value: Any, field: str) -> str | None:
+    """An entity-id-shaped string, or None."""
     if value is None:
         return None
     if not isinstance(value, str) or "." not in value or len(value) > 255:
@@ -40,10 +56,12 @@ def _optional_entity_id(value: Any, field: str) -> str | None:
 
 
 def _timestamp(value: datetime | None = None) -> str:
+    """ISO 8601 in UTC, for ``value`` or now."""
     return (value or datetime.now(UTC)).astimezone(UTC).isoformat()
 
 
 def _state_value(state: Any, field: str, default: Any = None) -> Any:
+    """Read a field from an HA ``State`` or from a plain dict."""
     if isinstance(state, dict):
         return state.get(field, default)
     return getattr(state, field, default)
@@ -143,7 +161,11 @@ def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class NowDataEngine:
-    """Small persistent store for Now-only user and room state."""
+    """Small persistent store for Now-only user and room state.
+
+    Each argument is a key-value storage table. An ``RLock`` keeps each
+    read-modify-write whole.
+    """
 
     def __init__(
         self,
@@ -179,6 +201,7 @@ class NowDataEngine:
             self._recents[member_id] = {"items": cleaned[:_MAX_RECENTS]}
 
     def recents_for(self, member_id: str) -> list[dict[str, str]]:
+        """The member's recent controls, newest first."""
         record = self._recents.get(member_id) or {}
         items = record.get("items", []) if isinstance(record, dict) else []
         return [
@@ -192,6 +215,11 @@ class NowDataEngine:
     def set_room_policy(
         self, room_id: str, participates: Any, eligible_entity_ids: Any
     ) -> dict[str, Any]:
+        """Store a room's activity policy and return it.
+
+        ``now_api`` has already checked that every entity is a candidate in
+        this room.
+        """
         if not isinstance(participates, bool):
             raise NowDataError("participates must be a boolean")
         if not isinstance(eligible_entity_ids, list) or any(
@@ -208,6 +236,7 @@ class NowDataEngine:
         return {"room_id": room_id, **policy}
 
     def room_policy(self, room_id: str) -> dict[str, Any]:
+        """The room's policy; a room without one does not take part."""
         record = self._policies.get(room_id) or {}
         entity_ids = (
             record.get("eligible_entity_ids") if isinstance(record, dict) else []
@@ -222,9 +251,15 @@ class NowDataEngine:
         }
 
     def room_participates(self, room_id: str) -> bool:
+        """True when the room takes part in room commands."""
         return self.room_policy(room_id)["participates"]
 
     def configure(self, payload: Any) -> dict[str, Any]:
+        """Merge the fields present in ``payload`` into the Now config.
+
+        Checks shapes only; ``now_api`` checks that the entities and scenes
+        exist and are of the right kind. Returns the whole config.
+        """
         if not isinstance(payload, dict):
             raise NowDataError("Body must be a JSON object")
         allowed = {
@@ -282,6 +317,7 @@ class NowDataEngine:
         return self.config()
 
     def config(self) -> dict[str, Any]:
+        """The Now config, with every field present."""
         raw = self._config.get("global") or {}
         return {
             "outdoor_weather_entity_id": raw.get("outdoor_weather_entity_id"),
@@ -293,6 +329,7 @@ class NowDataEngine:
 
     @staticmethod
     def validate_idempotency_key(value: Any) -> str:
+        """Return the client's idempotency key, or raise if it is malformed."""
         if not isinstance(value, str) or not _IDEMPOTENCY_KEY.fullmatch(value):
             raise NowDataError("idempotency_key must be 8-128 URL-safe characters")
         return value
@@ -300,6 +337,7 @@ class NowDataEngine:
     def idempotent_result(
         self, member_id: str, room_id: str, action: str, key: str
     ) -> dict[str, Any] | None:
+        """The stored answer for this member's (room, action, key), if any."""
         record = self._idempotency.get(member_id) or {}
         result = (record.get("results") or {}).get(f"{room_id}:{action}:{key}")
         return dict(result) if isinstance(result, dict) else None
@@ -312,6 +350,7 @@ class NowDataEngine:
         key: str,
         result: dict[str, Any],
     ) -> None:
+        """Store a room command's answer so a retry replays it."""
         with self._lock:
             record = self._idempotency.get(member_id) or {}
             results = (
@@ -324,11 +363,13 @@ class NowDataEngine:
             self._idempotency[member_id] = {"results": results}
 
     def restore_set(self, room_id: str) -> list[str]:
+        """What the room's OFF switched off and ON has not yet restored."""
         record = self._restores.get(room_id) or {}
         entities = (record.get("entity_ids") or []) if isinstance(record, dict) else []
         return [item for item in entities if isinstance(item, str)]
 
     def save_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> None:
+        """Replace the room's restore set; an empty set removes it."""
         ids = list(dict.fromkeys(entity_ids))
         with self._lock:
             if ids:
@@ -351,6 +392,7 @@ class NowDataEngine:
             return self.restore_set(room_id)
 
     def consume_restore_set(self, room_id: str) -> list[str]:
+        """Return the room's restore set and clear it."""
         with self._lock:
             ids = self.restore_set(room_id)
             self._restores.pop(room_id, None)
