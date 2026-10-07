@@ -69,6 +69,7 @@ from .auth_api import (
     CasaSmartWidgetTokenView,
     authenticate_request,
     get_engine,
+    is_lan_request,
 )
 from .automation_api import CasaSmartAutomationConfigView
 from .camera_api import (
@@ -81,9 +82,11 @@ from .const import (
     API_VERSION,
     API_VERSION_HEADER,
     DOMAIN,
+    HUB_NAME_CONFIG_KEY,
     MIN_APP_VERSION,
     SUPPORTED_API_VERSIONS,
 )
+from .discovery import DEFAULT_HUB_NAME
 from .energy_api import (
     CasaSmartEnergyActivateView,
     CasaSmartEnergyConfigView,
@@ -294,8 +297,9 @@ class CasaSmartHandshakeView(HomeAssistantView):
     """GET /api/casasmart/handshake: the unauthenticated discovery probe.
 
     Reports the API and hub versions and the capabilities, plus the TLS
-    identity the app pins and the tunnel URL when configured. With the API
-    version header it also says whether that version is supported.
+    identity the app pins and the tunnel URL when configured. A LAN caller
+    also gets the hub's name. With the API version header it also says
+    whether that version is supported.
     """
 
     url = f"/api/{DOMAIN}/handshake"
@@ -320,6 +324,19 @@ class CasaSmartHandshakeView(HomeAssistantView):
         }
 
         runtime_data = _get_runtime_data(self._hass)
+        # A phone that finds the hub by scanning the LAN shows this name. The
+        # handshake is public through the tunnel, so the name stays on the LAN.
+        if is_lan_request(request):
+            hub_name = (
+                runtime_data.hub_config.get(HUB_NAME_CONFIG_KEY)
+                if runtime_data
+                else None
+            )
+            if isinstance(hub_name, str) and hub_name.strip():
+                body["hub_name"] = hub_name.strip()
+            else:
+                body["hub_name"] = DEFAULT_HUB_NAME
+
         if runtime_data is not None and runtime_data.tls is not None:
             body["tls"] = {
                 "port": runtime_data.tls.port,
