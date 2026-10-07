@@ -5,7 +5,7 @@ Cloudflare tunnel domain; options edit the same settings plus the tunnel toggle.
 
 The relay URL lives in the entry options and the one-time activation code in
 the entry data, which the hub clears once the relay accepts its registration.
-Applying a change is the update listener's job (``__init__.py``).
+Applying a change is the update listener's job (__init__.py).
 """
 
 from __future__ import annotations
@@ -242,8 +242,11 @@ class CasaSmartOptionsFlow(OptionsFlow):
         )
 
     def _current_relay_base(self) -> str | None:
-        """The relay in use: the options, else the running config, else the
-        relay URL that config entries before version 3 kept in hub_config."""
+        """The relay in use, or None.
+
+        Taken from the options, else the running config, else the hub_config
+        key where config entries before version 3 kept it.
+        """
         normalized = normalize_relay_base_url(
             self.config_entry.options.get(CONF_PUSH_RELAY_URL)
         )
@@ -266,10 +269,10 @@ class CasaSmartOptionsFlow(OptionsFlow):
         return None
 
     async def _async_tunnel_status(self) -> str:
-        """Live add-on state line for the form description (best effort).
+        """A line on the add-on's live state for the form description.
 
-        Never raises — a wedged Supervisor must degrade to a message, not
-        error the options form.
+        Never raises: a Supervisor error becomes the message instead of
+        breaking the options form.
         """
         controller = CloudflaredController(self.hass)
         if not controller.available():

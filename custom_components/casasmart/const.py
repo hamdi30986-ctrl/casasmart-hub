@@ -9,7 +9,7 @@ from __future__ import annotations
 
 DOMAIN = "casasmart"
 
-# Config entry schema version; ``async_migrate_entry`` upgrades older entries.
+# Config entry schema version; async_migrate_entry upgrades older entries.
 CONFIG_ENTRY_VERSION = 3
 
 # -- Storage (all under /config/casasmart) ------------------------------------
@@ -53,8 +53,8 @@ BOOTSTRAP_CODE_HASH_CONFIG_KEY = "bootstrap_code_hash"
 RECOVERY_CODE_HASH_CONFIG_KEY = "recovery_code_hash"
 # The shared key speakers present to fetch their broker settings.
 PROVISION_SECRET_CONFIG_KEY = "provision_secret"
-# True (exactly) lets GET /audio/provision serve LAN clients without the
-# provisioning key. Off by default: the response carries the broker password.
+# Only the JSON value true lets GET /audio/provision serve LAN clients without
+# the provisioning key. Off by default: the response carries the broker password.
 KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY = "keyless_speaker_provisioning"
 REMOTE_PAIRING_ENABLED_CONFIG_KEY = "remote_pairing_enabled"
 ZIGBEE_BASE_TOPICS_CONFIG_KEY = "zigbee_base_topics"
@@ -78,7 +78,7 @@ EVENT_TANK_OFFLINE = "casasmart_tank_offline"
 
 # -- Factory reset ------------------------------------------------------------
 
-# Storage tables ``casasmart.factory_reset`` clears: the app layer plus the
+# Storage tables casasmart.factory_reset clears: the app layer plus the
 # registry organization layer (floors, rooms, tags, assignments, grouping and
 # the room-move receipts), which re-seeds from Home Assistant on reload.
 FACTORY_RESET_TABLES = (
@@ -110,8 +110,8 @@ FACTORY_RESET_TABLES = (
     "registry_devices",
     "registry_user_devices",
 )
-# Tables a factory reset deliberately keeps: house configuration rather than
-# owner data — the alarm's sensor zones and settings, and the tanks.
+# Tables a factory reset keeps, because they describe the house rather than
+# its owner: the alarm's sensor zones and settings, and the tanks.
 FACTORY_RESET_KEPT_TABLES = ("alarm_settings", "alarm_zones", "tank_devices")
 
 # -- Built-in updater ---------------------------------------------------------
@@ -135,7 +135,7 @@ PUSH_TYPE_UPDATE_WIDGETS = "update_widgets"
 
 # -- WebSocket (seconds, frames and close codes) ------------------------------
 
-# Time a new socket has to send its ``auth`` frame.
+# Time a new socket has to send its auth frame.
 WS_AUTH_TIMEOUT = 30.0
 # Time a socket whose token went stale has to re-authenticate.
 WS_REAUTH_GRACE = 30.0
