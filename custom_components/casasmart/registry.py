@@ -1077,21 +1077,7 @@ class RegistryEngine:
             previous = self._user_devices.get(ha_device_id) or {}
             self._retain_room_overrides(record["gangs"], previous.get("gangs", {}))
 
-            taken: set[str] = set()
-            for other_id, other in self._user_devices.items():
-                if other_id == ha_device_id:
-                    continue
-                taken.update(other.get("entity_ids", ()))
-                taken.update(other.get("config_entity_ids", ()))
-            clash = [
-                e
-                for e in (*record["entity_ids"], *record["config_entity_ids"])
-                if e in taken
-            ]
-            if clash:
-                raise RegistryError(
-                    f"entities already grabbed by another device: {clash}"
-                )
+            self._reject_grabbed_elsewhere(ha_device_id, record)
             self._user_devices[ha_device_id] = record
         _LOGGER.info(
             "Registry: user-device %s upserted (%d entities)",
@@ -1152,8 +1138,30 @@ class RegistryEngine:
                 record["room_id"] = _clean_optional_room(room_id)
 
             record["gangs"] = _gangs_backed_by(record["gangs"], record["entity_ids"])
+            if controls is not ... or config_entity_ids is not ...:
+                self._reject_grabbed_elsewhere(ha_device_id, record)
             self._user_devices[ha_device_id] = record
         return self._serve_user_device(ha_device_id, record)
+
+    def _reject_grabbed_elsewhere(
+        self, ha_device_id: str, record: dict[str, Any]
+    ) -> None:
+        """One owner per entity: refuse ``record`` when another device already
+        grabbed one of its control or config entities. The device itself may
+        keep or reshuffle its own. Call under the lock, before storing."""
+        taken: set[str] = set()
+        for other_id, other in self._user_devices.items():
+            if other_id == ha_device_id:
+                continue
+            taken.update(other.get("entity_ids", ()))
+            taken.update(other.get("config_entity_ids", ()))
+        clash = [
+            e
+            for e in (*record["entity_ids"], *record.get("config_entity_ids", ()))
+            if e in taken
+        ]
+        if clash:
+            raise RegistryError(f"entities already grabbed by another device: {clash}")
 
     def _mutate_gang(
         self, ha_device_id: str, gang_key: str, mutate: Any
