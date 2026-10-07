@@ -97,6 +97,15 @@ class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(RELAY.is_lan_peer(("8.8.8.8", 12345)))
         self.assertFalse(RELAY.is_lan_peer(None))
 
+    def test_ipv4_mapped_addresses_are_judged_as_ipv4(self) -> None:
+        # A dual-stack listener (--listen-host ::) sees IPv4 clients as
+        # ::ffff:a.b.c.d, and before Python 3.13 ipaddress calls every such
+        # address private. macOS's own python3 is 3.9.
+        self.assertFalse(RELAY.is_lan_peer(("::ffff:8.8.8.8", 12345, 0, 0)))
+        self.assertFalse(RELAY.is_lan_peer(("::ffff:1.1.1.1", 12345, 0, 0)))
+        self.assertTrue(RELAY.is_lan_peer(("::ffff:192.168.1.25", 12345, 0, 0)))
+        self.assertTrue(RELAY.is_lan_peer(("::ffff:127.0.0.1", 12345, 0, 0)))
+
     async def test_upstream_timeout_closes_the_client_on_older_pythons(self) -> None:
         client = _ClientWriter(("192.168.1.25", 50000))
         with mock.patch.object(RELAY, "asyncio", _Pre311Asyncio()):

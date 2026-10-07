@@ -36,6 +36,11 @@ def is_lan_peer(peer: object) -> bool:
         address = ipaddress.ip_address(peer[0].split("%", 1)[0])
     except ValueError:
         return False
+    # A dual-stack listener sees IPv4 clients as ::ffff:a.b.c.d. Judge the IPv4
+    # address itself: before Python 3.13 every mapped address counts as private.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
     return address.is_private or address.is_link_local or address.is_loopback
 
 
