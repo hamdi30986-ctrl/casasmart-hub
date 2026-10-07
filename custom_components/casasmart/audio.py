@@ -500,17 +500,17 @@ class AudioEngine:
         clean_icon = _clean_optional_icon(icon)
         clean_area = _clean_optional_area_id(area_id)
         with self._lock:
-            existing = self._speakers.get(mac6)
+            existing = self._speakers.get(mac6) or {}
+            if icon is None:
+                clean_icon = existing.get("custom_icon")
+            if area_id is None:
+                clean_area = existing.get("area_id")
             record = {
                 "mac6": mac6,
                 "name": clean_name,
                 "room": clean_room,
-                "custom_icon": clean_icon
-                if icon is not None
-                else (existing.get("custom_icon") if existing else None),
-                "area_id": clean_area
-                if area_id is not None
-                else (existing.get("area_id") if existing else None),
+                "custom_icon": clean_icon,
+                "area_id": clean_area,
                 "enrolled_at": existing["enrolled_at"] if existing else self._clock(),
             }
             self._speakers_table[mac6] = record
