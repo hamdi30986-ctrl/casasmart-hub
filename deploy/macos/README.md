@@ -107,8 +107,8 @@ because the hub can't check them itself:
    sensors on the LAN can't reach.
 4. Start Home Assistant.
 
-The hub then logs a WARNING that starts with "LAN relay ingress on". Until you
-set it, the hub logs a WARNING that starts with "Docker Desktop detected" at
+The hub then logs a warning that starts with "LAN relay ingress on". Until you
+set it, the hub logs a warning that starts with "Docker Desktop detected" at
 every start. See [Hub settings](../../README.md#hub-settings).
 
 Requests that crossed Cloudflare are never LAN, whatever this says. Home
