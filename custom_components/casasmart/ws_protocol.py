@@ -219,6 +219,14 @@ _COALESCEABLE_TYPES = frozenset(
 )
 
 
+# Frames that carry no home data: the auth dialogue, keep-alive and frame-level
+# errors. A connection whose token failed revalidation gets ONLY these until it
+# re-authenticates — an allow-list, so a new data frame type is held back too.
+CONTROL_FRAME_TYPES = frozenset(
+    {"auth_ok", "auth_failed", "auth_required", "pong", "error"}
+)
+
+
 def coalesce_key(frame: dict[str, Any]) -> tuple[Any, ...] | None:
     """Identity under which two frames are redundant, or None to never drop.
 
@@ -307,6 +315,16 @@ class CoalescingSendQueue:
         # Nothing droppable — the whole backlog is protocol frames the consumer
         # isn't draining. That IS a dead/hopeless link; let the caller close.
         return False
+
+    def drop_data(self) -> None:
+        """Discard every queued frame but the control frames, order kept.
+
+        For a token that just failed revalidation: what is still queued was
+        built under claims that no longer hold, so none of it may be written.
+        """
+        self._items = deque(
+            frame for frame in self._items if frame.get("type") in CONTROL_FRAME_TYPES
+        )
 
     async def get(self) -> dict[str, Any]:
         """Pop the oldest frame, waiting until one is available."""

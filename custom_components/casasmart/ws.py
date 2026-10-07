@@ -230,13 +230,23 @@ class WsConnection:
             # deadline. A fresh valid `auth` frame in the receive loop
             # disarms it; don't re-announce while a grace window is open.
             if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
-                self._token = None
-                await self._enqueue(
-                    ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE))
-                )
-                self._reauth_deadline_task = asyncio.create_task(
-                    self._reauth_deadline()
-                )
+                await self._require_reauth()
+
+    async def _require_reauth(self) -> None:
+        """The token failed revalidation: no more data until a fresh one lands.
+
+        The old claims go with the token, and everything still queued under
+        them is dropped. Until ``_handle_reauth`` accepts a new token the
+        connection gets only control frames (``auth_*``, ``pong``, ``error``)
+        and, at the deadline, the close. The subscription is kept, so a
+        successful re-auth resumes it — fresh snapshot first — under the NEW
+        claims.
+        """
+        self._token = None
+        self._claims = None
+        self._send_queue.drop_data()
+        await self._enqueue(ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE)))
+        self._reauth_deadline_task = asyncio.create_task(self._reauth_deadline())
 
     async def _reauth_deadline(self) -> None:
         """Close the connection unless re-auth lands within the grace window."""
@@ -258,9 +268,7 @@ class WsConnection:
         if await self._async_validate_token(self._token):
             return  # still valid — our device wasn't the one that changed
         if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
-            self._token = None
-            await self._enqueue(ws_protocol.frame_auth_required(int(WS_REAUTH_GRACE)))
-            self._reauth_deadline_task = asyncio.create_task(self._reauth_deadline())
+            await self._require_reauth()
 
     async def _receive_loop(self) -> None:
         """Handle client frames until the socket closes."""
@@ -295,7 +303,10 @@ class WsConnection:
     async def _emit_snapshot(self) -> None:
         """Send the `subscribed` frame: the current scoped + served snapshot of
         the subscribed set. Re-emitted after a scope-changing re-auth so the
-        live view reflects the new rooms at once."""
+        live view reflects the new rooms at once. Nothing while awaiting
+        re-auth (no claims): the re-auth sends it instead."""
+        if self._claims is None:
+            return
         rooms = (self._claims or {}).get("rooms")
         devices = [
             serialize_device(self._hass, state)
@@ -426,7 +437,12 @@ class WsConnection:
     def _offer_or_close(self, frame: dict[str, Any]) -> None:
         """Queue a push frame, coalescing/dropping under backpressure. Only a
         queue full of undrained protocol frames — a genuinely dead consumer —
-        closes the socket (a burst never kills a healthy app)."""
+        closes the socket (a burst never kills a healthy app).
+
+        Every push carries home data, so none is queued while the connection
+        awaits re-auth (``_require_reauth`` cleared the claims)."""
+        if self._claims is None:
+            return
         if self._send_queue.offer(frame):
             return
         _LOGGER.warning("WS client not draining (protocol backlog), disconnecting")
