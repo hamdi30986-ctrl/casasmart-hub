@@ -360,6 +360,31 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
         self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_TRIGGERED), 1)
 
+    async def test_timer_firing_before_the_deadline_rearms(self):
+        # The timer runs on the event loop's monotonic clock while the engine
+        # compares wall-clock time, so it can fire a little early (HA's own
+        # point-in-time tracker re-arms for this). An early tick is a no-op;
+        # the countdown must still end in a trigger, not stay pending.
+        self.adapter.async_start()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self._state_changed("binary_sensor.front_door", "on")
+        await self._drain()
+        self._emit(EVENT_ALARM_CHANGED, {"mode": MODE_PENDING})
+        self.assertEqual(len(self.timer.scheduled), 1)
+
+        self.clock.advance(DEFAULT_ENTRY_DELAY_SECONDS - 0.01)
+        self.timer.last_action(None)
+        await self._drain()
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_PENDING)
+        self.assertEqual(len(self.timer.scheduled), 2)
+        self.assertAlmostEqual(self.timer.last_delay, 0.01)
+
+        self.clock.advance(0.01)
+        self.timer.last_action(None)
+        await self._drain()
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
+        self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_TRIGGERED), 1)
+
     async def test_alarm_changed_resync_cancels_timer_on_disarm(self):
         self.adapter.async_start()
         self.engine.arm(MODE_AWAY, exit_delay=0)
