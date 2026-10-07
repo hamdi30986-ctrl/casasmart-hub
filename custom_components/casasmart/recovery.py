@@ -41,11 +41,6 @@ class CodeInvalidError(RecoveryError):
     """Wrong code or no code armed; callers can't tell which."""
 
 
-def _hash_code(code: str) -> str:
-    """SHA-256 hex of an already normalized code."""
-    return hashlib.sha256(code.encode("ascii")).hexdigest()
-
-
 def _new_code() -> str:
     """A fresh random code from CODE_ALPHABET, grouped for engraving."""
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
@@ -63,7 +58,7 @@ def normalize_code(code: str) -> str:
 
 def hash_code(code: str) -> str:
     """SHA-256 hex of the normalized code; mint, redeem and hub_config use it."""
-    return _hash_code(normalize_code(code))
+    return hashlib.sha256(normalize_code(code).encode("ascii")).hexdigest()
 
 
 class RecoveryManager:
@@ -99,7 +94,7 @@ class RecoveryManager:
                 return None
             code = _new_code()
             self._codes[RECOVERY_CODE_ID] = {
-                "code_hash": _hash_code(normalize_code(code)),
+                "code_hash": hash_code(code),
                 "created_at": time.time(),
             }
         _LOGGER.info("Owner recovery code armed")
