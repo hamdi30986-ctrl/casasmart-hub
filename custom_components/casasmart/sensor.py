@@ -1,22 +1,14 @@
 """CasaSmart sensors: the Energy Saving status and one sensor per paired device.
 
-``sensor.casasmart_energy_savings`` mirrors the hub-authoritative Energy
-Saving state: the active level (or ``off``) as its state, the rest of the
-engine snapshot as attributes. It repaints on ``EVENT_ENERGY_CHANGED``.
+sensor.casasmart_energy_savings shows the active Energy Saving level (or
+"off"), with the rest of the engine snapshot as attributes.
 
-Each enrolled device surfaces as ``sensor.casasmart_user_<name>`` whose STATE
-is the device's role (``admin`` / ``sub-admin`` / ``user``) and whose
-attributes carry ``device_id``, ``enrolled_at`` and ``last_seen`` (plus the
-room scope + display name). They are the household roster as first-class HA
-entities — visible on a dashboard, usable in automations ("notify me when a
-new sub-admin pairs").
-
-The user set is dynamic: the platform seeds from the auth engine at setup,
-then reconciles on every ``EVENT_AUTH_CHANGED`` (pair / role-or-room edit /
-unpair / admin recovery / pairing-code regeneration) — adding sensors for new
-devices, removing them for gone ones, repainting the rest. ``last_seen`` is
-the engine's in-memory liveness clock (see ``AuthEngine.list_devices``): None
-until the device makes its first authenticated call this boot.
+Each paired device gets a sensor.casasmart_user_<name> whose state is the
+device's role (admin, sub-admin or user) and whose attributes hold its id,
+name, rooms, pairing time and last-seen time. The sensors follow
+EVENT_AUTH_CHANGED: they are added, updated and removed as devices pair,
+change and unpair. last_seen is the auth engine's in-memory clock, so it is
+None until the device's first authenticated call since the hub started.
 """
 
 from __future__ import annotations
@@ -40,14 +32,13 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Role/name/enrollment changes repaint instantly off EVENT_AUTH_CHANGED; this
-# slow poll only refreshes the live `last_seen` clock (an in-memory read), so a
-# couple of minutes of granularity is plenty and costs nothing.
+# Polling only refreshes last_seen (an in-memory read); roster changes repaint
+# at once through EVENT_AUTH_CHANGED.
 SCAN_INTERVAL = timedelta(minutes=2)
 
 
 def _iso(unix_seconds: float | int | None) -> str | None:
-    """Unix seconds -> ISO-8601 UTC string, or None for falsy/absent."""
+    """Unix seconds -> ISO-8601 UTC string; None for a missing or zero value."""
     if not unix_seconds:
         return None
     return datetime.fromtimestamp(float(unix_seconds), tz=UTC).isoformat()
@@ -58,14 +49,14 @@ async def async_setup_entry(
     entry: CasaSmartConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Seed the Energy Saving status plus per-user roster sensors."""
+    """Add the Energy Saving sensor and the per-device sensors."""
     async_add_entities([CasaSmartEnergySavingsSensor(entry)])
     manager = _UserSensorManager(hass, entry, async_add_entities)
     await manager.async_start()
 
 
 class CasaSmartEnergySavingsSensor(SensorEntity):
-    """Native HA summary of the hub-authoritative Energy Saving state."""
+    """The Energy Saving state as an HA sensor."""
 
     _attr_name = "Energy savings"
     _attr_icon = "mdi:leaf"
@@ -95,7 +86,7 @@ class CasaSmartEnergySavingsSensor(SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """The active Energy Saving level, or ``off``."""
+        """The active Energy Saving level, or "off"."""
         return self._entry.runtime_data.energy.active_level or "off"
 
     @property
@@ -114,7 +105,7 @@ class CasaSmartEnergySavingsSensor(SensorEntity):
 
 
 class _UserSensorManager:
-    """Owns the live mapping of device id -> sensor entity for one hub entry."""
+    """Keeps one user sensor per paired device for a hub entry."""
 
     def __init__(
         self,
@@ -126,21 +117,17 @@ class _UserSensorManager:
         self._entry = entry
         self._add = async_add_entities
         self._entities: dict[str, CasaSmartUserSensor] = {}
-        # Entity ids handed out so far — seeds the uniqueness check so a batch
-        # of same-named devices doesn't collide before any are in the state
-        # machine.
+        # Ids handed out so far, so same-named devices added together don't
+        # collide before they reach the state machine.
         self._entity_ids: set[str] = set()
-        # EVENT_AUTH_CHANGED can fire in bursts (a regeneration revokes then
-        # mints); serialize reconciles so two of them can't both create the
-        # same new entity.
+        # EVENT_AUTH_CHANGED comes in bursts; one reconcile at a time, so two
+        # can't both create the same entity.
         self._lock = asyncio.Lock()
 
     def _next_entity_id(self, record: dict[str, Any]) -> str:
-        """A unique ``sensor.casasmart_user_<name>`` id for a new device.
+        """A unique sensor.casasmart_user_<name> id for a new device.
 
-        Pinned (not device-name-prefixed); deduped across the live state
-        machine AND the ids already handed out, so same-named devices get
-        ``…_2`` / ``…_3`` rather than colliding.
+        Same-named devices get _2, _3 and so on.
         """
         name = record.get("name") or record["device_id"]
         object_id = f"casasmart_user_{slugify(name)}"
@@ -160,14 +147,14 @@ class _UserSensorManager:
 
     @callback
     def _on_auth_changed(self, _event: Event) -> None:
-        """Reconcile in a task (listeners must not block the bus)."""
+        """Reconcile in a task, off the bus listener."""
         self._entry.async_create_task(self._hass, self._reconcile())
 
     async def _reconcile(self) -> None:
-        """Add, repaint and remove sensors to match the enrolled devices.
+        """Add, update and remove sensors to match the paired devices.
 
-        A removed device's sensor is also dropped from the entity registry,
-        so its entity id is free for a device paired later.
+        A removed device's sensor also leaves the entity registry, so its
+        entity id is free for a device paired later.
         """
         async with self._lock:
             auth = self._entry.runtime_data.auth
@@ -208,12 +195,11 @@ class _UserSensorManager:
 
 
 class CasaSmartUserSensor(SensorEntity):
-    """One enrolled device: role as state, enrollment detail as attributes."""
+    """One paired device: its role as state, its details as attributes."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:account-key"
-    # Polled (SCAN_INTERVAL) ONLY to refresh the live `last_seen` clock; role /
-    # name / enrollment changes still repaint instantly via update_record.
+    # Polled only to refresh last_seen (see SCAN_INTERVAL).
     _attr_should_poll = True
 
     def __init__(
@@ -229,9 +215,8 @@ class CasaSmartUserSensor(SensorEntity):
         self._attr_unique_id = f"{entry_id}_user_{self._device_id}"
         name = record.get("name") or self._device_id
         self._attr_name = f"User {name}"
-        # Pin the exact ``sensor.casasmart_user_<name>`` id (a
-        # device-named entity would become ``sensor.casasmart_hub_…``). Set on
-        # first registration only; still groups under the hub device below.
+        # Pinned, or has_entity_name would prefix the hub's device name. Only
+        # applies on first registration.
         self.entity_id = entity_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry_id)},
@@ -241,7 +226,7 @@ class CasaSmartUserSensor(SensorEntity):
 
     @callback
     def update_record(self, record: dict[str, Any]) -> None:
-        """Adopt a fresh roster record and repaint (no-op before added)."""
+        """Take a new device record and repaint (once added to HA)."""
         self._record = record
         if self.hass is not None:
             self.async_write_ha_state()
@@ -253,13 +238,11 @@ class CasaSmartUserSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Identity, room scope, enrolment time and live last-seen."""
+        """Device id, name, rooms, pairing time and last-seen time."""
         return {
             "device_id": self._device_id,
             "name": self._record.get("name"),
             "rooms": self._record.get("rooms"),
             "enrolled_at": _iso(self._record.get("paired_at")),
-            # Read live from the engine's in-memory clock (cheap), so the slow
-            # poll keeps it current without waiting for a roster change.
             "last_seen": _iso(self._engine.last_seen(self._device_id)),
         }

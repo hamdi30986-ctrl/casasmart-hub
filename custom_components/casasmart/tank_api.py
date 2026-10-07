@@ -1,20 +1,18 @@
 """CasaSmart water-tank REST endpoints.
 
-Shelly provisioning, the token-authenticated reading ingest the Shelly posts
-to, and the app's device, readings, calibration and status views, over the
-pure ``TankEngine`` (``tank.py``). Endpoints, under ``/api/casasmart``:
+Shelly provisioning, the reading ingest the Shelly posts to, and the app's
+views, over TankEngine (tank.py). Endpoints under /api/casasmart:
 
-- ``POST   /tank/provision``                     — set up a Shelly (``registry.manage``)
-- ``POST   /tank/reading``                       — the Shelly's ingest (device token)
-- ``GET    /tank/devices``                       — every tank (``devices.read``)
-- ``DELETE /tank/devices/{device_id}``           — remove a tank (``registry.manage``)
-- ``GET    /tank/devices/{device_id}/readings``  — reading history (``devices.read``)
-- ``PATCH  /tank/{device_id}/calibration``       — calibration + low-water level (``registry.manage``)
-- ``GET    /tank/{device_id}/status``            — computed live status (``devices.read``)
+- POST   /tank/provision                     set up a Shelly (registry.manage)
+- POST   /tank/reading                       the Shelly's readings (device token)
+- GET    /tank/devices                       every tank (devices.read)
+- DELETE /tank/devices/{device_id}           remove a tank (registry.manage)
+- GET    /tank/devices/{device_id}/readings  reading history (devices.read)
+- PATCH  /tank/{device_id}/calibration       calibration (registry.manage)
+- GET    /tank/{device_id}/status            live status (devices.read)
 
-Provisioning talks to the Shelly's Gen2 RPC API over plain HTTP on the LAN,
-and only to private LAN addresses. Ingest fires ``EVENT_TANK_CHANGED`` so
-connected apps re-fetch.
+Provisioning uses the Shelly's Gen2 RPC API over plain HTTP, and only dials
+private LAN addresses. Each reading fires EVENT_TANK_CHANGED.
 """
 
 from __future__ import annotations
@@ -59,9 +57,8 @@ _LOGGER = logging.getLogger(__name__)
 # Per-request budget for one call to the Shelly.
 _SHELLY_RPC_TIMEOUT = aiohttp.ClientTimeout(total=8)
 
-# After uploading the script, provisioning waits this long (polling at this
-# interval) for the first reading, to report whether the Shelly reaches the
-# hub. Not getting one is reported as ``verified: false``, not an error.
+# After the upload, poll this long for a first reading to see whether the
+# Shelly reaches the hub; none arriving is reported as verified: false.
 _FIRST_READING_WAIT = 12.0
 _FIRST_READING_POLL = 0.5
 
@@ -94,13 +91,11 @@ def get_tanks(hass: HomeAssistant) -> TankEngine | None:
 
 
 def _is_lan_target(ip: str) -> bool:
-    """True when ``ip`` is a private LAN address the hub may dial.
+    """True for a private or link-local address the hub may dial.
 
-    The provisioner makes server-side HTTP requests to a caller-supplied
-    address — restrict it to RFC1918/link-local space so the endpoint
-    can't be aimed at loopback services or the public internet. The
-    unspecified address (0.0.0.0, ::) counts as private but connects to the
-    hub itself, so it is refused like loopback.
+    Provisioning sends requests to a caller-supplied address, so loopback, the
+    public internet and the unspecified address (0.0.0.0 or ::, which reaches
+    the hub itself) are refused.
     """
     try:
         parsed = ipaddress.ip_address(ip)
@@ -114,13 +109,12 @@ def _is_lan_target(ip: str) -> bool:
 
 
 def _client_ip(request: web.Request) -> str:
-    """Client address for throttle keying + logging.
+    """Client address for throttling and logs.
 
-    Home Assistant has already resolved ``request.remote`` from
-    ``X-Forwarded-For`` for its trusted proxies, so behind the tunnel it is the
-    real client. Raw ``CF-Connecting-IP`` / ``X-Forwarded-For`` headers are not
-    read here: any peer can send them, so they would let a client pick a fresh
-    throttle bucket on every request.
+    HA has already resolved request.remote from X-Forwarded-For for its
+    trusted proxies, so behind the tunnel it is the real client. The raw
+    headers aren't read: any peer can send them, and they would let a client
+    pick a new throttle bucket for every request.
     """
     return request.remote or "unknown"
 
@@ -158,7 +152,7 @@ async def _shelly_rpc(
 
 
 async def _fetch_device_info(session: aiohttp.ClientSession, ip: str) -> dict[str, Any]:
-    """``GET /shelly`` — generation + stable device id, pre-credentials."""
+    """GET /shelly: the device's generation and id (no auth needed)."""
     try:
         async with session.get(
             f"http://{ip}/shelly", timeout=_SHELLY_RPC_TIMEOUT
@@ -178,7 +172,7 @@ async def _fetch_device_info(session: aiohttp.ClientSession, ip: str) -> dict[st
 async def _find_script_id(
     session: aiohttp.ClientSession, ip: str, name: str
 ) -> int | None:
-    """The id of the Shelly script called ``name``, or None."""
+    """The id of the Shelly script with this name, or None."""
     listing = await _shelly_rpc(session, ip, "Script.List")
     scripts = listing.get("scripts") or []
     if not isinstance(scripts, list):
@@ -198,16 +192,16 @@ async def _remove_script(session: aiohttp.ClientSession, ip: str, name: str) -> 
     try:
         await _shelly_rpc(session, ip, "Script.Stop", {"id": script_id})
     except ShellyRpcError:
-        pass  # already stopped is fine — delete is what matters
+        pass  # not running; the delete is what matters
     await _shelly_rpc(session, ip, "Script.Delete", {"id": script_id})
     return True
 
 
 async def _push_script(session: aiohttp.ClientSession, ip: str, code: str) -> int:
-    """Create/replace + upload + autostart + start the monitoring script.
+    """Install and start the monitoring script and return its id.
 
-    Any script already called ``TANK_SCRIPT_NAME`` is removed first, so a
-    retry replaces whatever an earlier attempt left. Returns the script id.
+    A script already called TANK_SCRIPT_NAME is removed first, so a retry
+    replaces whatever an earlier attempt left.
     """
     await _remove_script(session, ip, TANK_SCRIPT_NAME)
     created = await _shelly_rpc(
@@ -223,7 +217,7 @@ async def _push_script(session: aiohttp.ClientSession, ip: str, code: str) -> in
             "Script.PutCode",
             {"id": script_id, "code": chunk, "append": index > 0},
         )
-    # enable=true -> the script survives a device reboot (autostart).
+    # enable: start the script again after a device reboot.
     await _shelly_rpc(
         session,
         ip,
@@ -246,7 +240,7 @@ class _TankView(HomeAssistantView):
         self._hass = hass
 
     def _tanks_or_503(self) -> tuple[TankEngine | None, web.Response | None]:
-        """``(engine, None)``, or ``(None, 503)`` while the hub is loading."""
+        """(engine, None), or (None, 503) while the hub is loading."""
         tanks = get_tanks(self._hass)
         if tanks is None:
             return None, self.json_message(
@@ -255,11 +249,10 @@ class _TankView(HomeAssistantView):
         return tanks, None
 
     def _ingest_url(self) -> str | None:
-        """The ``tank_ingest_url`` override from hub config, or None.
+        """The tank_ingest_url override from hub config, or None.
 
-        For deployments whose LAN-visible address differs from the hub's own
-        view of it (Docker Desktop, bridge networking); without it,
-        ``_default_ingest_url`` applies.
+        For setups where the hub's LAN address differs from what it sees
+        itself (Docker Desktop, bridge networking).
         """
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if entries:
@@ -274,9 +267,9 @@ class _TankView(HomeAssistantView):
     async def _default_ingest_url(self) -> str | None:
         """The hub's LAN IP + HA's own HTTP port, or None if unknown.
 
-        Plain HTTP by design: the Gen2 HTTP client can't validate the hub's
-        self-signed LAN cert, the POST never leaves the LAN, and the token it
-        carries can do exactly one thing — record a tank reading.
+        Plain HTTP, because the Shelly can't validate the hub's self-signed
+        certificate. The request stays on the LAN, and its token can only
+        record readings.
         """
         try:
             from homeassistant.components import network
@@ -292,16 +285,15 @@ class _TankView(HomeAssistantView):
 
 
 class CasaSmartTankProvisionView(_TankView):
-    """POST /api/casasmart/tank/provision — set up a Shelly as a tank.
+    """POST /api/casasmart/tank/provision: set up a Shelly as a tank.
 
-    Body: ``{"ip": "<LAN address>", "name"?}``. The hub reads the Shelly's
+    Body: {"ip": "<LAN address>", "name"?}. The hub reads the Shelly's
     identity (Gen2+, device authentication off), mints the tank record and
-    its ingest token, uploads and starts the monitoring script, then waits
-    briefly for the first reading. 201 with the record, ``script_id``,
-    ``verified`` and ``first_reading``; 409 if the tank is already
-    registered; 502 if the Shelly can't be reached or the upload fails (the
-    record minted by this request is dropped again, so a retry works).
-    ``registry.manage``.
+    its token, uploads and starts the script, then waits briefly for a first
+    reading. Answers 201 with the record, script_id, verified and
+    first_reading; 409 if the tank is already registered; 502 if the Shelly
+    can't be reached or the upload fails (the new record is deleted again, so
+    a retry works). Needs registry.manage.
     """
 
     url = f"/api/{DOMAIN}/tank/provision"
@@ -383,8 +375,7 @@ class CasaSmartTankProvisionView(_TankView):
                 f"Provisioning failed: {err}", HTTPStatus.BAD_GATEWAY
             )
         except Exception:
-            # Something the RPC helpers don't model: still undo the mint so a
-            # retry works, then let the error surface as what it is.
+            # Unexpected: still undo the mint so a retry works, then re-raise.
             await self._undo_mint(tanks, record["device_id"], token)
             raise
 
@@ -419,12 +410,10 @@ class CasaSmartTankProvisionView(_TankView):
         )
 
     async def _undo_mint(self, tanks: TankEngine, device_id: str, token: str) -> None:
-        """Drop the record this request minted after a failed upload.
+        """Delete the record this request minted, so a retry isn't a 409.
 
-        So the user can simply retry: a leftover record would refuse the
-        retry as a duplicate (409). The retry's _push_script replaces whatever
-        this attempt left on the device. A record minted since by another
-        request (a different token) is left alone.
+        A record minted since by another request (with a different token) is
+        left alone.
         """
         try:
             await self._hass.async_add_executor_job(
@@ -435,16 +424,12 @@ class CasaSmartTankProvisionView(_TankView):
 
 
 class CasaSmartTankReadingView(_TankView):
-    """POST /api/casasmart/tank/reading — the Shelly script's ingest.
+    """POST /api/casasmart/tank/reading: readings from the Shelly script.
 
-    The minted device token is the credential (``{"device_token": ...,
-    "voltage": ...}``). Accepted from ANY source — the Shelly may reach the hub
-    directly on the LAN or via the Cloudflare tunnel, and a tank reading is
-    low-stakes (a water-level number). Bad tokens are throttled per real client
-    (HA's resolved ``request.remote`` — the trusted-proxy X-Forwarded-For behind
-    the tunnel) with the shared escalating walls. Pairing/recovery stay
-    LAN-locked (see ``is_lan_request``) — this relaxation is scoped to tank
-    ingest only.
+    Body: {"device_token": ..., "voltage": ...}. The device token is the
+    credential, so any source is accepted: the Shelly may reach the hub on the
+    LAN or through the Cloudflare tunnel. Bad tokens are throttled per client
+    address.
     """
 
     url = f"/api/{DOMAIN}/tank/reading"
@@ -460,9 +445,6 @@ class CasaSmartTankReadingView(_TankView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
-        # Token-authenticated, accepted from ANY source — the Shelly may reach
-        # the hub on the LAN or via the Cloudflare tunnel. The per-source throttle
-        # below (keyed on the real client) walls token brute-force.
         source = _client_ip(request)
         try:
             _INGEST_THROTTLE.check(source)
@@ -479,21 +461,19 @@ class CasaSmartTankReadingView(_TankView):
             )
         except UnknownTokenError:
             _INGEST_THROTTLE.record_failure(source)
-            # One generic bucket — no hint whether the token is unknown,
-            # rotated or malformed.
+            # The same answer whether the token is unknown or malformed.
             return self.json_message("Invalid device token", HTTPStatus.UNAUTHORIZED)
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         _INGEST_THROTTLE.clear(source)
-        # Nudge connected apps to re-fetch this tank's calibrated level in real
-        # time — mirrors the registry/alarm/audio nudge pattern.
+        # Connected apps re-fetch the tank's level.
         self._hass.bus.async_fire(EVENT_TANK_CHANGED, {"device_id": device_id})
         return self.json({"ok": True, "device_id": device_id})
 
 
 class CasaSmartTankDevicesView(_TankView):
-    """GET /api/casasmart/tank/devices — every tank with its last reading."""
+    """GET /api/casasmart/tank/devices: every tank with its last reading."""
 
     url = f"/api/{DOMAIN}/tank/devices"
     name = f"api:{DOMAIN}:tank:devices"
@@ -510,11 +490,11 @@ class CasaSmartTankDevicesView(_TankView):
 
 
 class CasaSmartTankDeviceView(_TankView):
-    """DELETE /api/casasmart/tank/devices/{device_id} — remove a tank.
+    """DELETE /api/casasmart/tank/devices/{device_id}: remove a tank.
 
-    Best-effort removes the monitoring script from the Shelly first (an
-    unplugged device must not block the delete), then drops the record and
-    its readings — the token dies with it. ``registry.manage``.
+    Removes the script from the Shelly if it can be reached (an unplugged
+    device doesn't block the delete), then deletes the record and readings.
+    Needs registry.manage.
     """
 
     url = f"/api/{DOMAIN}/tank/devices/{{device_id}}"
@@ -558,11 +538,9 @@ class CasaSmartTankDeviceView(_TankView):
 class CasaSmartTankReadingsView(_TankView):
     """GET /api/casasmart/tank/devices/{device_id}/readings?days=N.
 
-    The 24/7 history the phone-local log can't have — newest first,
-    ``{"t": unix_seconds, "v": voltage, "p": percent}``, ``days`` defaulting
-    to 7. The hub computes ``p`` from the device's calibration (the app does
-    not do the math; ``p`` is null for an uncalibrated tank).
-    ``devices.read``.
+    Readings newest first as {"t": unix_seconds, "v": voltage, "p": percent},
+    for the last 7 days by default. p is null for an uncalibrated tank. Needs
+    devices.read.
     """
 
     url = f"/api/{DOMAIN}/tank/devices/{{device_id}}/readings"
@@ -596,14 +574,9 @@ class CasaSmartTankReadingsView(_TankView):
 class CasaSmartTankCalibrationView(_TankView):
     """PATCH /api/casasmart/tank/{device_id}/calibration.
 
-    The hub owns the voltage→percent calibration and the low-water threshold
-    (the app is pure UI). Body carries any subset of
-    ``{"calibration_voltage", "calibration_depth", "max_height",
-    "low_percent"}``; omitted fields are left unchanged, so the calibration
-    dialog (the three calibration inputs) and the notification slider
-    (``low_percent`` alone) share one endpoint. ``low_percent`` is validated to
-    the 1-30 range and the rest to be positive numbers — the engine is the one
-    that says no. ``registry.manage`` gated, like provision/delete.
+    Body: any of calibration_voltage, calibration_depth, max_height and
+    low_percent; omitted fields are unchanged. low_percent must be 1-30 and
+    the others positive numbers. Needs registry.manage.
     """
 
     url = f"/api/{DOMAIN}/tank/{{device_id}}/calibration"
@@ -638,13 +611,9 @@ class CasaSmartTankCalibrationView(_TankView):
 
 
 class CasaSmartTankStatusView(_TankView):
-    """GET /api/casasmart/tank/{device_id}/status.
+    """GET /api/casasmart/tank/{device_id}/status: the computed live status.
 
-    The computed live status the app displays instead of doing the math
-    itself: ``{device_id, voltage, percent, low_percent, is_low,
-    last_reading}``. ``voltage`` is null with no reading yet, ``percent`` also
-    for an uncalibrated tank. ``devices.read`` gated, like the device/readings
-    GETs.
+    See TankEngine.status. Needs devices.read.
     """
 
     url = f"/api/{DOMAIN}/tank/{{device_id}}/status"

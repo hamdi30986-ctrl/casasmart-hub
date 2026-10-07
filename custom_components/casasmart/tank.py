@@ -1,17 +1,15 @@
 """Water-tank engine: Shelly tank devices, readings and calibration.
 
 A tank is a Gen2+ Shelly with a voltmeter on a water-level sensor. When the
-hub provisions one (``tank_api``), it mints the device record with a random
-ingest token, stores only the token's SHA-256, and builds the small mJS
-script it uploads to the Shelly; the script then POSTs the voltmeter reading
-with that token every few minutes. This module stores the devices and their
-readings (one row each, kept ~31 days), converts a voltage to a water-level
-percent from the tank's calibration, and reports the status the app and the
-daily low-water check (``push_dispatcher``) read.
+hub provisions one (tank_api), it mints the device record with a random
+ingest token, stores only the token's SHA-256, and uploads a small mJS script
+that posts the voltmeter reading with that token every few minutes. This
+module stores the devices and their readings (kept for 31 days), converts a
+voltage to a water-level percent using the tank's calibration, and reports
+the status read by the app and by the daily low-water check.
 
-Like the other engines it is stdlib only, with no Home Assistant imports:
-storage-touching methods are synchronous (call via executor) and serialized
-by an ``RLock``.
+Like the other engines it is stdlib only. Storage-touching methods are
+synchronous (call them via the executor) and serialized by an RLock.
 """
 
 from __future__ import annotations
@@ -87,14 +85,11 @@ def _coerce_positive(value: Any, field: str) -> float:
 def _compute_percent(
     voltage: float, cal_v: float, cal_d: float, height: float
 ) -> float | None:
-    """The voltage→percent equation, isolated so the live path and the
-    per-reading history path share one implementation (no drift).
+    """Water level in percent, or None if the calibration is unusable.
 
-        slope = cal_v / cal_d ; max_voltage = height * slope ;
-        percent = clamp((voltage / max_voltage) * 100, 0, 100)
-
-    Returns ``None`` when the calibration can't define a positive full-tank
-    voltage (uncalibrated / nonsensical inputs)."""
+    The full-tank voltage is height * cal_v / cal_d, and the result is
+    clamped to 0-100. Shared by the live status and the reading history.
+    """
     if cal_v <= 0 or cal_d <= 0 or height <= 0:
         return None
     max_voltage = height * (cal_v / cal_d)
@@ -104,10 +99,9 @@ def _compute_percent(
 
 
 def _coerce_low_percent(value: Any) -> int:
-    """An int in [TANK_LOW_PERCENT_MIN, TANK_LOW_PERCENT_MAX], else TankError.
+    """A whole-number low-water threshold in the slider's range, else TankError.
 
-    A float that is exactly integral (e.g. the slider sends ``20.0``) is
-    accepted; a genuine fraction is not — a threshold of 20.5% is meaningless.
+    The slider may send 20.0, so integral floats are accepted.
     """
     if isinstance(value, bool):
         raise TankError("low_percent must be an integer")
@@ -149,12 +143,11 @@ def build_tank_script(
     voltmeter_id: int = TANK_VOLTMETER_ID,
     interval_seconds: int = TANK_PUSH_INTERVAL_SECONDS,
 ) -> str:
-    """The mJS monitoring script pushed to the Shelly.
+    """The mJS monitoring script for the Shelly.
 
-    Reads the Voltmeter and POSTs ``{device_token, voltage}`` to the hub,
-    once immediately on start and then every ``interval_seconds`` (5 min by
-    default). URL and token are emitted through ``json.dumps`` so arbitrary
-    config values can never escape the mJS string literal.
+    It posts {device_token, voltage} to the hub on start and then every
+    interval_seconds. The URL and token go through json.dumps, so they can't
+    break out of their string literals.
     """
     if not isinstance(ingest_url, str) or not ingest_url.startswith(
         ("http://", "https://")
@@ -184,11 +177,10 @@ def build_tank_script(
 
 
 def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[str]:
-    """Split script code into ``Script.PutCode``-sized pieces (>=1 chunk).
+    """Split script code into Script.PutCode chunks (at least one).
 
-    Splits on UTF-8 BYTE length (the device-side cap), never inside a
-    multi-byte sequence, so non-ASCII content can't corrupt the upload even
-    though the generated script is ASCII.
+    The size limit is in UTF-8 bytes, and no chunk ends inside a multi-byte
+    character.
     """
     if chunk_size <= 0:
         raise TankError("chunk_size must be positive")
@@ -199,7 +191,7 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
     start = 0
     while start < len(encoded):
         end = min(start + chunk_size, len(encoded))
-        # Back off a UTF-8 continuation byte boundary.
+        # Don't split a multi-byte character.
         while end > start and end < len(encoded) and (encoded[end] & 0xC0) == 0x80:
             end -= 1
         chunks.append(encoded[start:end].decode("utf-8"))
@@ -211,30 +203,27 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
 
 
 class TankEngine:
-    """Tank devices (``devices_table``) and their readings (``readings``).
+    """Tank devices (devices_table) and their readings (readings).
 
     A device record holds the name, IP, model, the ingest token's hash and
-    the calibration; ``_public`` is the shape the API serves (never the
-    hash).
+    the calibration; _public is the shape the API serves, without the hash.
     """
 
     def __init__(self, devices_table: Any, readings: Any) -> None:
         self._devices = devices_table
-        # readings: a storage TankReadingsTable (append/recent/last/prune) —
-        # one row per reading, NOT a rewritten-whole JSON blob.
+        # A TankReadingsTable: one row per reading.
         self._readings = readings
-        # Serializes device-record mutations (held across SQLite I/O), same
-        # posture as RegistryEngine.
+        # Held across storage I/O.
         self._lock = threading.RLock()
 
     def mint_device(
         self, device_id: Any, name: Any, ip: Any, model: Any = None
     ) -> tuple[dict[str, Any], str]:
-        """Register a new tank and return ``(public_record, token)``.
+        """Register a new tank and return (public_record, token).
 
-        The plaintext token is returned once, to be baked into the Shelly's
-        script; only its hash is stored. The id is lower-cased. Raises
-        ``DuplicateTankError`` if the tank is already registered.
+        The plaintext token is returned once, for the Shelly's script; only
+        its hash is stored. The id is lower-cased. Raises DuplicateTankError
+        if the tank is already registered.
         """
         if not isinstance(device_id, str) or not device_id.strip():
             raise TankError("device_id is required")
@@ -265,7 +254,7 @@ class TankEngine:
         return self._public(device_id, record), token
 
     def list_devices(self) -> list[dict[str, Any]]:
-        """Every tank device with its last reading — never the token hash."""
+        """Every tank with its last reading (never the token hash)."""
         with self._lock:
             return [
                 self._public(device_id, record)
@@ -273,17 +262,17 @@ class TankEngine:
             ]
 
     def get_device(self, device_id: str) -> dict[str, Any]:
-        """One tank's public record; ``UnknownTankError`` if there is none."""
+        """One tank's public record; UnknownTankError if there is none."""
         record = self._devices.get(device_id)
         if record is None:
             raise UnknownTankError("Unknown tank device")
         return self._public(device_id, record)
 
     def delete_device(self, device_id: str, *, token: str | None = None) -> None:
-        """Drop the device and its readings (token dies with the record).
+        """Delete a tank and its readings, which also invalidates its token.
 
-        With ``token``, only the record minted with that token is dropped — a
-        failed provision undoes its own mint, never a record minted since.
+        With token, only a record minted with that token is deleted, so a
+        failed provision can undo its own mint without touching a newer one.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -304,16 +293,11 @@ class TankEngine:
         max_height: Any = None,
         low_percent: Any = None,
     ) -> dict[str, Any]:
-        """Merge calibration / low-water settings onto a tank record.
+        """Update any of the calibration fields and the low-water threshold.
 
-        Every field is optional (a ``None`` leaves the stored value alone) so
-        the app's calibration dialog (voltage+depth+height together) and its
-        notification slider (``low_percent`` alone) both ride this one path.
-        Each supplied value is validated here — the hub is authoritative, the
-        app sends raw user numbers. The full calibration is only "complete"
-        once both calibration_voltage and calibration_depth are positive
-        (see ``voltage_to_percent``). Raises ``UnknownTankError`` for an
-        unknown device, ``TankError`` for a bad value.
+        None leaves a field unchanged, so the app's calibration dialog and its
+        low-water slider share this method. Raises UnknownTankError for an
+        unknown device and TankError for a bad value.
         """
         updates: dict[str, Any] = {}
         if calibration_voltage is not None:
@@ -336,8 +320,7 @@ class TankEngine:
             if record is None:
                 raise UnknownTankError("Unknown tank device")
             merged = {**record, **updates}
-            # The water column can't be deeper than the tank is tall — catch a
-            # transposed depth/height pair before it skews every percentage.
+            # Catches swapped depth and height values.
             depth = merged.get("calibration_depth", 0.0) or 0.0
             height = merged.get("max_height", 0.0) or 0.0
             if depth > 0 and height > 0 and depth > height:
@@ -347,19 +330,11 @@ class TankEngine:
         return self._public(device_id, merged)
 
     def voltage_to_percent(self, device_id: str, voltage: Any) -> float | None:
-        """A raw voltage → 0-100 water-level percent via stored calibration.
+        """Convert a voltage to a water-level percent with the stored calibration.
 
-        The equation::
-
-            slope       = calibration_voltage / calibration_depth
-            max_voltage = max_height * slope
-            percent     = clamp((voltage / max_voltage) * 100, 0, 100)
-
-        Returns ``None`` when the device isn't calibrated yet, or the stored
-        calibration can't define a positive full-tank voltage — the app then
-        shows "—", never a fabricated 0%. Raises ``UnknownTankError`` for an
-        unknown device and ``TankError`` for a non-numeric voltage. Edge cases
-        fall out of the clamp: 0 V → 0%, a voltage above full → 100%.
+        Returns None for an uncalibrated tank, so the app shows no value
+        instead of 0%. Raises UnknownTankError for an unknown device and
+        TankError for a non-numeric voltage.
         """
         if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
             raise TankError("voltage must be a number")
@@ -373,13 +348,11 @@ class TankEngine:
         return _compute_percent(float(voltage), cal_v, cal_d, height)
 
     def status(self, device_id: str) -> dict[str, Any]:
-        """Live status for the app's GET status endpoint + the push monitor.
+        """Live status for the app and the low-water check.
 
-        ``{device_id, voltage, percent, low_percent, is_low, last_reading}`` —
-        ``voltage`` is ``None`` with no reading, ``percent`` also when the tank
-        is uncalibrated, and ``is_low`` is true only when a real computed
-        percent sits below the threshold. Raises ``UnknownTankError`` for an
-        unknown device.
+        voltage is None without a reading, percent also when uncalibrated, and
+        is_low is true only for a computed percent below the threshold. Raises
+        UnknownTankError for an unknown device.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -401,11 +374,10 @@ class TankEngine:
         }
 
     def ingest(self, token: Any, voltage: Any) -> str:
-        """Record one reading for the device matching ``token``.
+        """Record one reading for the device that token belongs to.
 
-        Returns the device id. Raises ``UnknownTokenError`` on a token
-        that matches nothing (the view answers a generic 401) and
-        ``TankError`` on a malformed voltage.
+        Returns the device id. Raises UnknownTokenError for a token that
+        matches nothing and TankError for a malformed voltage.
         """
         if not isinstance(token, str) or not token:
             raise UnknownTokenError
@@ -413,8 +385,7 @@ class TankEngine:
             raise TankError("voltage must be a number")
         voltage = float(voltage)
         if voltage != voltage or voltage in (float("inf"), float("-inf")):
-            # Reject non-finite at the trust boundary — a NaN/Inf would
-            # serialize to invalid JSON and poison every later read.
+            # NaN or infinity would make every later read invalid JSON.
             raise TankError("voltage must be a finite number")
         token_hash = _hash_token(token)
         with self._lock:
@@ -425,9 +396,8 @@ class TankEngine:
                     break
             if device_id is None:
                 raise UnknownTokenError
-            # Keep t strictly increasing even across a clock step-back (an NTP
-            # correction right after a power-loss reboot), so history stays
-            # ordered and the (device_id, t) key never collides.
+            # Keep t increasing across a clock step-back (an NTP fix after a
+            # power cut), so history stays ordered and (device_id, t) unique.
             now = int(time.time())
             last_t = self._readings.latest_t(device_id)
             t = now if last_t is None or now > last_t else last_t + 1
@@ -436,14 +406,11 @@ class TankEngine:
         return device_id
 
     def recent_readings(self, device_id: str, days: Any = 7) -> list[dict[str, Any]]:
-        """Readings from the last ``days`` days, NEWEST first (the app's
-        ``fetchRecentReadings`` contract). Raises on an unknown device —
-        "no tank" and "no data yet" must stay distinguishable.
+        """The last ``days`` days of readings, newest first, as {t, v, p}.
 
-        Each entry is ``{"t": unix_seconds, "v": voltage, "p": percent}`` — the
-        hub computes the percent for every reading from the same calibration so
-        the app's history charts read it instead of doing the math. ``p`` is
-        ``None`` for an uncalibrated tank."""
+        p is the percent from the current calibration (None if uncalibrated).
+        An unknown tank raises, so "no tank" stays distinct from "no data yet".
+        """
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             raise TankError("days must be a positive integer")
         with self._lock:
@@ -453,11 +420,10 @@ class TankEngine:
             cal_v = record.get("calibration_voltage", 0.0) or 0.0
             cal_d = record.get("calibration_depth", 0.0) or 0.0
             height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
-            # Clamped at the epoch: no reading is older, and a huge ``days``
+            # Clamped at the epoch: no reading is older, and a huge days value
             # would otherwise overflow SQLite's 64-bit INTEGER.
             cutoff = max(0, int(time.time()) - days * 24 * 3600)
             entries = self._readings.recent(device_id, cutoff)
-        # recent() returns newest-first, already windowed at the cutoff.
         return [
             {
                 "t": entry["t"],
@@ -468,8 +434,7 @@ class TankEngine:
         ]
 
     def last_reading(self, device_id: str) -> dict[str, Any] | None:
-        """The newest reading, or None (also None for unknown devices —
-        the provision wait loop polls this before the record is hot)."""
+        """The newest reading, or None (also for an unknown device)."""
         return self._readings.last(device_id)
 
     def _public(self, device_id: str, record: dict[str, Any]) -> dict[str, Any]:
@@ -484,9 +449,7 @@ class TankEngine:
             "model": record.get("model"),
             "created_at": record.get("created_at", 0),
             "provisioned_at": record.get("provisioned_at", 0),
-            # Calibration is read back by the app so its inputs survive a
-            # reinstall (the hub is the memory). is_calibrated mirrors the
-            # voltage_to_percent precondition so the app needn't re-derive it.
+            # The app reads the calibration back to refill its form.
             "calibration_voltage": cal_v,
             "calibration_depth": cal_d,
             "max_height": record.get("max_height", TANK_MAX_HEIGHT_DEFAULT),
