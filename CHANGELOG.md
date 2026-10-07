@@ -78,6 +78,82 @@ published; everything it contained is in 2.3.0.
   wrong code instead of causing a server error.
 - A hub setting whose save fails no longer changes the live value.
 - A partial device edit can no longer assign one switch to two devices.
+- Colour temperature works on Home Assistant 2026, which takes and reports
+  kelvin only. The apps' mired `color_temp` in device commands and scene
+  steps is sent as kelvin, and lights that report only kelvin also get
+  `color_temp`, `min_mireds` and `max_mireds` for the apps. Before, every
+  colour-temperature command and scene step was refused on HA 2026.
+- Alarm entry delay: sensors the armed mode watches now follow a running
+  entry delay instead of triggering at once, so walking past a hallway motion
+  sensor on the way to the app no longer sets the alarm off. Sensors the mode
+  ignores (motion in Night) stay ignored, and life-safety sensors still
+  trigger at once.
+- A door or window left open while armed no longer sets the alarm off when
+  its sensor reports an unrelated attribute change, and an entry delay whose
+  timer fires a moment early no longer leaves the alarm pending for good.
+- Athan: a prayer is never played twice (the hourly re-arm could replay one
+  that had just played), and a malformed stored timezone no longer stops the
+  hub from loading.
+- Speakers: while the MQTT broker is unreachable, speaker commands,
+  announcements and PA answer 503 instead of being queued and played late,
+  and an athan that can't be delivered is skipped. Two broker changes at once
+  no longer leave two MQTT clients knocking each other off the broker.
+- Energy Saving works in Fahrenheit homes. Readings are converted to Celsius
+  and setpoints back to the home's unit; before, a Fahrenheit home boosted
+  every occupied room's AC. A rule part-way through when Energy Saving stops
+  sends no further commands, and a failed save leaves the live state as it
+  was.
+- Owner recovery: the recovered owner keeps their favorites and settings,
+  and the lost phone's push token is removed, so it stops receiving alarms.
+  Trying the recovery card on a hub that has no owner yet no longer
+  invalidates the card.
+- A pairing request with a bad name or key no longer uses up the code.
+- A scene keeps going when Home Assistant rejects one of its steps, instead
+  of stopping there, and a device command that worked is no longer reported
+  as failed when a storage read after it fails.
+- The WebSocket never sends an entity's removal after its newer state, which
+  made the apps drop the tile of a device that still exists.
+- A database upgrade step that is interrupted (a power cut) is rolled back
+  as a whole, so the next start can run it again instead of failing every
+  time.
+- A hub setting whose save fails because the data folder can't be written
+  gives a clean error, also from the `set_tunnel_url`,
+  `configure_hq_notifications` and `factory_reset` services, instead of a
+  raw permission error.
+- A tag whose last room moves to another tag is deleted, as when its last
+  room is deleted; before, it lingered invisibly and kept its name taken. A
+  room can no longer be created on a floor that is being deleted.
+- A sub-admin can't be limited to rooms by any path, including the developer
+  manifest; only the user role is room-scoped.
+- Self-update: the rollback copy and staging folders live under
+  `<config>/casasmart/update/` instead of `custom_components`, where Home
+  Assistant could load the old copy instead of the integration. Leftovers
+  from earlier versions are moved there at startup. The update no longer
+  blocks Home Assistant's event loop with file work, and a malformed reply
+  from GitHub no longer fails the update check.
+- HQ reminders: a retry arriving on the other port sends one push, not two,
+  and stored delivery records are capped at 1,000.
+- A long hub name in a non-Latin script no longer stops the hub from being
+  discovered on the network.
+- A `tls_port` that isn't a port number falls back to 8443 with a warning
+  instead of stopping setup.
+- A tank whose Shelly sent an unexpected reply during setup can be set up
+  again, and `0.0.0.0` is refused as a Shelly address.
+- Generated suggestions work with an AC that reports no fan modes, and a
+  failed read or write of `automations.yaml` answers with a JSON error.
+- The macOS TLS relay handles an upstream timeout on the system Python 3.9,
+  and judges IPv4-mapped IPv6 peers by their IPv4 address.
+- If Home Assistant can't unload the hub's entities, the hub reports it
+  instead of shutting down anyway.
+- Malformed input gets a 400 or 401 instead of a server error: non-ASCII
+  tokens, provisioning keys and HQ timestamps; a non-string `expires_in`,
+  speaker command field or Now scene field; malformed PA uploads and
+  push-token bodies; a non-string gang presentation, widget tile type or
+  config-flow handler; NaN or infinite numbers in scene data; and very large
+  tank reading windows. Tunnel URLs with a
+  bad port or whitespace are no longer accepted or advertised.
+- `PUT /now/rooms/{id}/activity` answers 405. It used to change the room's
+  activity policy, which belongs to `/activity-policy`.
 - Pairing a new phone and owner recovery can work on Docker Desktop again. Docker Desktop rewrites every source address
   reaching the container (after a restart it can even pick a public one), so
   these LAN-only requests were refused. With `lan_relay_ingress` on, the hub
@@ -141,7 +217,7 @@ published; everything it contained is in 2.3.0.
   the code is provably unchanged (AST-checked). Comments no longer carry
   internal plan references, and the ones that described old behaviour were
   corrected.
-- Restored the original test suite: 1,470 tests, about 200 of which need a real
+- Restored the original test suite: 1,591 tests, about 230 of which need a real
   Home Assistant. Test data no longer contains anyone's network, names or
   devices.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest with
