@@ -102,8 +102,12 @@ sensors.
 
 ### Pairing stays on the local network
 
-Pairing a phone, owner recovery and keyless speaker provisioning are only
-accepted from the hub's own network.
+Pairing a phone and owner recovery are only accepted from the hub's own
+network. A speaker fetches its broker settings with the hub's provisioning
+key (the `X-CasaSmart-Provision-Key` header, set to `provision_secret` from
+`hub_config.json`), which works from any address. Speakers that don't send the
+key are refused unless you turn on `keyless_speaker_provisioning`, and then
+only from the local network.
 
 - **Normally** the hub checks the client's address: private or link-local
   addresses count, loopback doesn't.
@@ -143,6 +147,7 @@ none of them.
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
 | `tank_ingest_url` | full URL | Where tank sensors post readings, e.g. `http://192.168.1.20:8123/api/casasmart/tank/reading`. The default uses the hub's own LAN address and HA's port; set this when that address isn't reachable from the LAN (Docker Desktop, bridge networking). |
+| `keyless_speaker_provisioning` | `true` / `false` | Let speakers on the local network fetch their broker settings without the provisioning key (default `false`). Only for speakers that don't send the key; the hub logs a warning while it is on. |
 | `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
 
 **`lan_relay_ingress` values:**

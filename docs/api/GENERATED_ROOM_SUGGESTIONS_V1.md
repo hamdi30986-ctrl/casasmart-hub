@@ -4,7 +4,7 @@ The hub generates up to three temporary scenes without saved routines: turn off 
 
 ## Contract
 
-The additive `generated_room_suggestions_v1` capability enables `GET /api/casasmart/now/suggestions/generated` and `POST /api/casasmart/now/suggestions/generated/actions`. Existing rule-based endpoints remain unchanged. Generated reads require `devices.read`; running additionally requires `devices.control`, with room scope and energy lockout enforced again before dispatch.
+The additive `generated_room_suggestions_v1` capability enables `GET /api/casasmart/now/suggestions/generated` and `POST /api/casasmart/now/suggestions/generated/actions`. Existing rule-based endpoints remain unchanged. Generated reads require `devices.read`; dismissing or snoozing additionally requires `session.manage` (every role's session, not a widget token), and running additionally requires `devices.control`, with room scope and energy lockout enforced again before dispatch.
 
 The version-one response contains `status`, `suggestions`, the first item as `suggestion` for the shared model, and `refresh_at`. Each item includes `source: generated_room_v1`, `kind: room_off|room_eco`, room ID/name, typed action previews, an opaque occurrence ID, and expiry. Actions accept only `action: run|dismiss|snooze` and `occurrence_id`; clients cannot submit arbitrary device commands or room IDs.
 

@@ -7,16 +7,23 @@ installs by tag. Earlier tags (v1.8, v2.0, v2.1) omitted the patch digit.
 
 A hardening release for hubs installed by anyone, not just one house. The REST
 API, WebSocket frames, handshake capabilities and storage schema (version 4)
-are unchanged, so existing apps keep working. A 2.2.0 was prepared but never
+are unchanged apart from the stricter checks listed under Fixed, so the
+current phone and tablet apps keep working. A 2.2.0 was prepared but never
 published; everything it contained is in 2.3.0.
 
 ### Upgrade notes
 - **Docker Desktop hubs:** add `"lan_relay_ingress": "on"` to
   `/config/casasmart/hub_config.json` (with Home Assistant stopped), as step 4
-  of [deploy/macos](deploy/macos/README.md) describes. Until then, pairing,
-  owner recovery and keyless speaker provisioning work or fail depending on
-  the address Docker Desktop shows after each restart, and the hub logs a
-  warning at every start. Other hubs need nothing.
+  of [deploy/macos](deploy/macos/README.md) describes. Until then, pairing and
+  owner recovery work or fail depending on the address Docker Desktop shows
+  after each restart, and the hub logs a warning at every start. Other hubs
+  need nothing.
+- **Speakers:** a speaker now needs the hub's provisioning key to fetch its
+  broker settings; keyless provisioning from the local network is off by
+  default. If your speakers don't send the key, set
+  `"keyless_speaker_provisioning": true` in `hub_config.json` before
+  upgrading, or they are refused the next time they fetch their settings. The
+  hub logs a warning while it is on.
 - Entity friendly names now read "CasaSmart Hub Factory reset", "CasaSmart Hub
   Energy savings" and so on, instead of repeating "CasaSmart". Entity IDs are
   unchanged.
@@ -32,6 +39,9 @@ published; everything it contained is in 2.3.0.
 ### Added
 - Brand icons (`brand/icon.png`, `brand/icon@2x.png`), which Home Assistant
   2026 shows for the integration.
+- `keyless_speaker_provisioning` hub setting (default `false`): lets speakers
+  on the local network fetch their broker settings without the provisioning
+  key.
 - `lan_relay_ingress` hub setting: `"on"` trusts the hub's TLS port as the LAN
   proof behind the Docker Desktop relay; `"off"` (the default) checks client
   addresses. Any other value logs a warning and counts as `"off"`.
@@ -39,8 +49,36 @@ published; everything it contained is in 2.3.0.
   40 characters, without control characters or bidi overrides.
 
 ### Fixed
-- Pairing a new phone, owner recovery and keyless speaker provisioning can work
-  on Docker Desktop again. Docker Desktop rewrites every source address
+- A home-screen widget's token can only read and control devices. It could
+  also change its device's push registration (so alarm and lock alerts went
+  elsewhere), unpair the device (leaving the hub unclaimed when that was the
+  owner), and write per-person settings, favourites and suggestions.
+- Energy Saving never controls a room the owner excluded. Motion or
+  temperature changes in an excluded room (the kitchen and bathroom by
+  default) still switched its AC, fans and lights.
+- Stopping Energy Saving while it was still starting could leave automations
+  switched off with nothing to restore them. Start, stop and re-apply now run
+  one at a time, and a stop cancels a start in progress.
+- A tank whose setup failed while uploading its script can be set up again;
+  before, every retry was refused as "already registered".
+- A second room OFF (another member, a retry) no longer erases what ON
+  restores, and a room's commands run one at a time whichever route they
+  arrive on.
+- Speaker controls respect a member's room limits: speakers outside their
+  rooms can't be controlled, and an announcement to all speakers reaches only
+  the member's own.
+- A WebSocket whose token fails its periodic re-check stops receiving home
+  data at once, instead of for up to 30 seconds while it re-authenticates.
+- Only one self-update runs at a time (a second gets "update already in
+  progress"), and the rollback copy survives a failed swap.
+- Automation edits arriving on the LAN port and through the tunnel at the
+  same moment no longer overwrite each other.
+- Clearing the Cloudflare domain gives cloudflared back its start-on-boot.
+- A pairing or recovery code containing non-ASCII characters counts as a
+  wrong code instead of causing a server error.
+- A hub setting whose save fails no longer changes the live value.
+- A partial device edit can no longer assign one switch to two devices.
+- Pairing a new phone and owner recovery can work on Docker Desktop again. Docker Desktop rewrites every source address
   reaching the container (after a restart it can even pick a public one), so
   these LAN-only requests were refused. With `lan_relay_ingress` on, the hub
   trusts its loopback-published TLS listener behind the LAN-only relay. The
@@ -64,8 +102,8 @@ published; everything it contained is in 2.3.0.
   roles can't be resolved. Since 1.8 they were dropped in that case. Tank,
   device-paired and HQ reminder pushes still fail closed.
 - Requests carrying Cloudflare's proxy headers are never treated as LAN, which
-  keeps pairing, owner recovery and speaker provisioning LAN-only even for a
-  tunnel pointed at the hub's own TLS listener. Remote pairing through the
+  keeps pairing, owner recovery and keyless speaker provisioning LAN-only even
+  for a tunnel pointed at the hub's own TLS listener. Remote pairing through the
   tunnel still works when `remote_pairing_enabled` is set.
 - Pairing-code hash lookups compare in constant time everywhere.
 - The tank ingest throttle keys on Home Assistant's resolved client address, so
@@ -103,7 +141,7 @@ published; everything it contained is in 2.3.0.
   the code is provably unchanged (AST-checked). Comments no longer carry
   internal plan references, and the ones that described old behaviour were
   corrected.
-- Restored the original test suite: 1,346 tests, about 155 of which need a real
+- Restored the original test suite: 1,470 tests, about 200 of which need a real
   Home Assistant. Test data no longer contains anyone's network, names or
   devices.
 - Removed dead code, applied ruff formatting, and added CI (ruff, pytest with
