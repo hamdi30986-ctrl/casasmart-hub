@@ -343,6 +343,41 @@ class TestMigrations(StorageTestCase):
             ).fetchone()[0]
             self.assertEqual(json.loads(value), {"name": "Alex"})
 
+    def test_interrupted_migration_step_reruns_cleanly(self):
+        """A step stopped part-way leaves none of its DDL behind.
+
+        The interrupt skips the restore-from-backup path, as a power cut
+        would. Had the CREATE TABLE committed on its own, the next start
+        would rerun the step into "table already exists" every time.
+        """
+        storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
+        storage.open()
+        storage.close()
+        step = LATEST_VERSION + 1
+
+        def interrupted(conn):
+            conn.execute("CREATE TABLE extra (x)")
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_migrations(
+                self.db_path,
+                self.backup_dir,
+                MIGRATIONS + (Migration(step, "extra table", interrupted),),
+            )
+
+        def complete(conn):
+            conn.execute("CREATE TABLE extra (x)")
+
+        self.assertEqual(
+            run_migrations(
+                self.db_path,
+                self.backup_dir,
+                MIGRATIONS + (Migration(step, "extra table", complete),),
+            ),
+            step,
+        )
+
     def test_downgrade_refused(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(f"PRAGMA user_version = {LATEST_VERSION + 99}")

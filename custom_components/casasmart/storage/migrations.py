@@ -317,6 +317,7 @@ def run_migrations(
             )
             try:
                 with conn:  # one transaction per migration step
+                    conn.execute("BEGIN")
                     migration.apply(conn)
                     conn.execute(f"PRAGMA user_version = {migration.version}")
             except Exception as err:
