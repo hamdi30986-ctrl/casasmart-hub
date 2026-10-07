@@ -10,8 +10,8 @@ Docker Desktop causes two problems for the CasaSmart app:
 - **The hub can't tell which phones are on the LAN.** Docker Desktop rewrites
   the source address of every connection that reaches the container: after
   some restarts it shows its own private gateway, after others an arbitrary
-  public address. Pairing, owner recovery and keyless speaker provisioning are
-  LAN-only, so without help they work one day and are refused the next.
+  public address. Pairing and owner recovery are LAN-only, so without help
+  they work one day and are refused the next.
 
 Two small helpers run on the Mac and fix both. They need only `python3` and
 its standard library.
@@ -92,9 +92,9 @@ To remove them, run `launchctl bootout gui/$(id -u)/com.casasmart.hub-tls-relay`
 ## 4. Tell the hub to trust its TLS port
 
 On Docker Desktop the hub can't use a client's address to decide "is this phone
-on the LAN?", so pairing, owner recovery and keyless speaker provisioning work
-or fail unpredictably until you tell it to trust its TLS port instead. Do this
-only after steps 2 and 3, because the hub can't check them itself:
+on the LAN?", so pairing and owner recovery work or fail unpredictably until
+you tell it to trust its TLS port instead. Do this only after steps 2 and 3,
+because the hub can't check them itself:
 
 1. Stop Home Assistant.
 2. Open `casasmart/hub_config.json` inside the Mac folder you mount as

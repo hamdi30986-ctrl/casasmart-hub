@@ -14,9 +14,9 @@ All paths below start with `/api/casasmart/now/suggestions`.
 | GET `/rules` | `suggestions.manage` | Read rules and collection revision |
 | PUT `/rules` | `suggestions.manage` | Replace rules with optimistic concurrency |
 | POST `/preview` | `suggestions.manage` | Evaluate one proposed rule without saving or running it |
-| POST `/actions` | `devices.read`; additionally `devices.control` for Run | Dismiss, Snooze or Run a current occurrence |
+| POST `/actions` | `devices.read`, plus `session.manage` for Dismiss and Snooze or `devices.control` for Run | Dismiss, Snooze or Run a current occurrence |
 
-`suggestions.manage` is admin-only, not sub-admin. Management rejects room-scoped administrators because replacing the whole document must not overwrite unseen rules. Standard authentication, room scope and energy restrictions remain in force.
+`session.manage` is held by every role's session but not by a home-screen widget's token, so a widget can run a suggestion but not dismiss or snooze one. `suggestions.manage` is admin-only, not sub-admin. Management rejects room-scoped administrators because replacing the whole document must not overwrite unseen rules. Standard authentication, room scope and energy restrictions remain in force.
 
 ## Rules
 
