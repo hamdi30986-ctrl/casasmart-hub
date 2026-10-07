@@ -27,6 +27,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hastubs import install_casasmart_package, install_homeassistant_stubs
@@ -308,6 +309,33 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
         await self._drain_tasks()
         self.assertEqual(len(recorder.sent), 1)
         self.assertEqual(recorder.sent[0]["role"], "admin")
+
+    async def test_owner_claim_keeps_the_owner_code_notifications(self) -> None:
+        # The owner code is dormant while the hub is claimed, not spent: it
+        # works again when the last admin leaves. The notification is the
+        # only plaintext copy, so an installer who claims the hub on site
+        # before writing the code down must not lose it.
+        import casasmart.auth_api as auth_api
+
+        code = self.pairing.ensure_bootstrap_code()
+        with mock.patch.object(
+            auth_api.persistent_notification, "async_dismiss", create=True
+        ) as dismiss:
+            status, _ = await self._enroll(code, LAN_IP, name="Owner phone")
+        self.assertEqual(status, 201)
+        dismiss.assert_not_called()
+
+    async def test_member_enroll_keeps_notifications(self) -> None:
+        import casasmart.auth_api as auth_api
+
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        with mock.patch.object(
+            auth_api.persistent_notification, "async_dismiss", create=True
+        ) as dismiss:
+            status, _ = await self._enroll(issued["code"], LAN_IP)
+        self.assertEqual(status, 201)
+        dismiss.assert_not_called()
 
     async def test_failed_enroll_does_not_notify(self) -> None:
         recorder = RecordingDispatcher()

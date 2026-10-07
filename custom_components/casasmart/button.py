@@ -25,7 +25,12 @@ from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import BOOTSTRAP_CODE_HASH_CONFIG_KEY, DOMAIN, EVENT_AUTH_CHANGED
+from .const import (
+    BOOTSTRAP_CODE_HASH_CONFIG_KEY,
+    DOMAIN,
+    EVENT_AUTH_CHANGED,
+    NOTIFY_REGENERATED_CODE,
+)
 from .pairing import hash_code as pairing_hash_code
 
 if TYPE_CHECKING:
@@ -149,7 +154,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
             self._hass,
             body,
             title="CasaSmart Hub: pairing reset",
-            notification_id=f"{DOMAIN}_regenerated_pairing",
+            notification_id=NOTIFY_REGENERATED_CODE,
         )
         # Updates the per-device sensors.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})

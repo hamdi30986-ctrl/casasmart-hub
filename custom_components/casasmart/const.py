@@ -9,6 +9,11 @@ from __future__ import annotations
 
 DOMAIN = "casasmart"
 
+# Notifications that show an owner (bootstrap) code; dismissed once the hub is
+# claimed, since the code is spent.
+NOTIFY_BOOTSTRAP_CODE = f"{DOMAIN}_bootstrap_pairing"
+NOTIFY_REGENERATED_CODE = f"{DOMAIN}_regenerated_pairing"
+
 # Config entry schema version; async_migrate_entry upgrades older entries.
 CONFIG_ENTRY_VERSION = 3
 
