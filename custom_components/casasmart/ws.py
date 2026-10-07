@@ -39,7 +39,6 @@ from .const import (
     WS_SEND_QUEUE_MAX,
     WS_TOKEN_RECHECK,
 )
-from .entity_bridge import is_exposed
 from .filtering import in_scope, is_served, serialize_device
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,6 +109,9 @@ class WsConnection:
         self._unsubs: list[Callable[[], None]] = []
 
         self._subscribed = False
+        # Entities this connection was sent, in its snapshot or a state change.
+        # Only these get an entity_removed: the id of any other would reveal it.
+        self._shown: set[str] = set()
         self._token: str | None = None
         # Claims of the current token. None while a re-auth is pending, which
         # holds back every frame that carries home data.
@@ -302,6 +304,7 @@ class WsConnection:
             and in_scope(self._hass, state.entity_id, rooms)
         ]
         devices.sort(key=lambda device: device["entity_id"])
+        self._shown = {device["entity_id"] for device in devices}
         await self._enqueue(ws_protocol.frame_subscribed(devices))
 
     async def _handle_reauth(self, frame: dict[str, Any]) -> None:
@@ -335,14 +338,11 @@ class WsConnection:
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         if new_state is None:
-            # Tell the app to drop the tile. Only exposed domains have tiles,
-            # and the id alone would reveal any other entity.
-            if (
-                entity_id
-                and is_exposed(entity_id)
-                and self._subscription.matches(entity_id)
+            # Tell the app to drop the tile, even when its area went first.
+            if entity_id in self._shown and self._offer_or_close(
+                ws_protocol.frame_entity_removed(entity_id)
             ):
-                self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
+                self._shown.discard(entity_id)
             return
         if (
             not self._subscription.matches(entity_id)
@@ -351,7 +351,8 @@ class WsConnection:
         ):
             return
         device = serialize_device(self._hass, new_state)
-        self._offer_or_close(ws_protocol.frame_state_changed(device))
+        if self._offer_or_close(ws_protocol.frame_state_changed(device)):
+            self._shown.add(entity_id)
 
     @callback
     def _on_registry_changed(self, event: Event) -> None:
@@ -400,19 +401,20 @@ class WsConnection:
         """Queue a protocol frame behind pending pushes, keeping send order."""
         self._send_queue.put_protocol(frame)
 
-    def _offer_or_close(self, frame: dict[str, Any]) -> None:
+    def _offer_or_close(self, frame: dict[str, Any]) -> bool:
         """Queue a push frame, or close the socket if the app stopped reading.
 
-        Nothing is queued while re-auth is pending.
+        Nothing is queued while re-auth is pending. True when queued.
         """
         if self._claims is None:
-            return
+            return False
         if self._send_queue.offer(frame):
-            return
+            return True
         _LOGGER.warning("WS client not draining (protocol backlog), disconnecting")
         self._hass.async_create_task(
             self._ws.close(code=WS_CLOSE_TOO_SLOW, message=b"too slow")
         )
+        return False
 
     async def _sender_loop(self) -> None:
         """The single socket writer: drains the queue in order."""
