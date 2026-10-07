@@ -72,10 +72,10 @@ from .automations import (
 )
 from .const import DOMAIN
 
+_LOGGER = logging.getLogger(__name__)
+
 # Tells "field absent" apart from any value the request body could carry.
 _UNSET = object()
-
-_LOGGER = logging.getLogger(__name__)
 
 
 # -- File I/O (executor-side) ----------------------------------------------------
