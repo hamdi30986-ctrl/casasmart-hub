@@ -245,13 +245,19 @@ class TankEngine:
             raise UnknownTankError("Unknown tank device")
         return self._public(device_id, record)
 
-    def delete_device(self, device_id: str) -> None:
-        """Drop the device and its readings (token dies with the record)."""
+    def delete_device(self, device_id: str, *, token: str | None = None) -> None:
+        """Drop the device and its readings (token dies with the record).
+
+        With ``token``, only the record minted with that token is dropped — a
+        failed provision undoes its own mint, never a record minted since.
+        """
         with self._lock:
-            try:
-                del self._devices[device_id]
-            except KeyError:
-                raise UnknownTankError("Unknown tank device") from None
+            record = self._devices.get(device_id)
+            if record is None or (
+                token is not None and record.get("token_sha256") != _hash_token(token)
+            ):
+                raise UnknownTankError("Unknown tank device")
+            del self._devices[device_id]
             self._readings.delete_device(device_id)
         _LOGGER.info("Tank %s deleted", device_id)
 

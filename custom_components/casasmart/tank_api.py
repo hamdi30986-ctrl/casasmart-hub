@@ -304,6 +304,17 @@ class CasaSmartTankProvisionView(_TankView):
             script_id = await _push_script(session, ip, script)
         except (ShellyRpcError, TankError) as err:
             _LOGGER.warning("Tank provision failed for %s: %s", ip, err)
+            # Undo this request's own mint so the user can simply retry: a
+            # leftover record would refuse the retry as a duplicate (409). The
+            # retry's _push_script replaces whatever this attempt left behind.
+            try:
+                await self._hass.async_add_executor_job(
+                    functools.partial(
+                        tanks.delete_device, record["device_id"], token=token
+                    )
+                )
+            except UnknownTankError:
+                pass  # already deleted, or re-minted by another request
             return self.json_message(
                 f"Provisioning failed: {err}", HTTPStatus.BAD_GATEWAY
             )
