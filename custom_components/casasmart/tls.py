@@ -118,6 +118,17 @@ class TlsMaterial:
     leaf_rotated: bool
 
 
+def create_key_file(path: Path, data: bytes) -> None:
+    """Write a new private key file, mode 0600 from the moment it exists.
+
+    O_EXCL refuses an existing file, so two concurrent first boots can't each
+    write a key.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
 def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
     """Load the permanent identity key, creating it on first start only.
 
@@ -152,10 +163,7 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    # Created with mode 0600 so the key is never readable by others, even briefly.
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(pem)
+    create_key_file(key_path, pem)
     _LOGGER.info("Generated permanent TLS identity key at %s", key_path)
     return key
 
