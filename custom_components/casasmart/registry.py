@@ -619,19 +619,28 @@ class RegistryEngine:
         room_ids: list[str],
     ) -> None:
         """A room belongs to at most one tag: take ``room_ids`` away from every
-        tag other than ``tag_id`` (in the ``tags`` document, not stored)."""
+        tag other than ``tag_id`` (in the ``tags`` document, not stored).
+
+        A tag left with no rooms is deleted, as when its last room is: it
+        can't be shown, yet it would keep its name taken.
+        """
         selected = set(room_ids)
-        for other_id, record in tags.items():
+        for other_id, record in list(tags.items()):
             if other_id == tag_id:
                 continue
-            record["room_ids"] = [
+            remaining = [
                 room_id
                 for room_id in record.get("room_ids", [])
                 if room_id not in selected
             ]
+            if remaining:
+                record["room_ids"] = remaining
+            else:
+                del tags[other_id]
 
     def create_room_tag(self, name: Any, color: Any, room_ids: Any) -> dict[str, Any]:
-        """Create a tag; its rooms move to it from any other tag."""
+        """Create a tag; its rooms move to it from any other tag (a tag left
+        with no rooms is deleted)."""
         with self._lock:
             tags = self._room_tags_doc()
             if len(tags) >= _MAX_ROOM_TAGS:
@@ -662,7 +671,7 @@ class RegistryEngine:
         room_ids: Any = ...,
     ) -> dict[str, Any]:
         """Edit a tag. ``...`` leaves a field unchanged; rooms move to this tag
-        from any other tag."""
+        from any other tag (a tag left with no rooms is deleted)."""
         with self._lock:
             tags = self._room_tags_doc()
             record = tags.get(tag_id)

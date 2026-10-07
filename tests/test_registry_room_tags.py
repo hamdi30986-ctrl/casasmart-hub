@@ -77,6 +77,25 @@ class RegistryRoomTagTest(unittest.TestCase):
             [family["tag_id"]],
         )
 
+    def test_a_tag_left_without_rooms_is_deleted(self) -> None:
+        # Moving a tag's last room to another tag empties it; like deleting its
+        # last room, that removes it, and its name is free again.
+        family = self.engine.create_room_tag("Family", "#2563EB", ["living"])
+        quiet = self.engine.create_room_tag("Quiet", "#7C3AED", ["living", "bedroom"])
+        self.assertEqual(
+            [tag["tag_id"] for tag in self.engine.list_room_tags()],
+            [quiet["tag_id"]],
+        )
+        self.assertNotIn(family["tag_id"], self.tags["all"])
+        again = self.engine.create_room_tag("Family", "#2563EB", ["bedroom"])
+        # The same through an update.
+        self.engine.update_room_tag(quiet["tag_id"], room_ids=["living", "bedroom"])
+        self.assertEqual(
+            [tag["tag_id"] for tag in self.engine.list_room_tags()],
+            [quiet["tag_id"]],
+        )
+        self.assertNotIn(again["tag_id"], self.tags["all"])
+
     def test_old_storage_without_tags_loads_as_empty(self) -> None:
         self.assertEqual(self.engine.list_room_tags(), [])
         self.assertEqual(self.tags, {})
