@@ -16,8 +16,9 @@ The request (``POST /api/casasmart/notifications/hq``, served by ``push_api``):
   ``canonical_request``, which covers the path, timestamp, nonce and a
   SHA-256 of the body.
 
-An event that was already delivered is answered as a duplicate, so HQ can
-retry safely. Only a bounded audit of outcomes is kept, never the request.
+An event that was already delivered (one of the latest 1000) is answered as
+a duplicate, so HQ can retry safely. Only a bounded audit of outcomes is kept,
+never the request.
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ HQ_NOTIFICATION_PATH = "/api/casasmart/notifications/hq"
 HQ_NOTIFICATION_MAX_SKEW_SECONDS = 60
 HQ_NOTIFICATION_NONCE_RETENTION_SECONDS = 5 * 60
 HQ_NOTIFICATION_MAX_NONCES = 1000
+# Delivered events remembered for the duplicate check, newest first. Far more
+# than HQ retries within: the rate limit allows 30 requests a minute.
+HQ_NOTIFICATION_MAX_EVENTS = 1000
 HQ_NOTIFICATION_MAX_AUDIT_ROWS = 500
 HQ_NOTIFICATION_MAX_BODY_BYTES = 2048
 
@@ -158,7 +162,7 @@ class HqNotificationVerifier:
     """Verifies HQ requests and keeps the replay, delivery and audit records.
 
     Rows in its table: ``nonce:<nonce>`` (dropped after 5 minutes, at most
-    1000 kept), ``event:<event_id>`` (one per delivered event) and
+    1000 kept), ``event:<event_id>`` (the latest 1000 delivered events) and
     ``audit:<time>`` (the latest 500 outcomes). ``verify`` changes nothing;
     the view runs ``reserve_nonce`` through ``record_delivery`` under one
     lock, which is what makes the nonce and duplicate checks atomic.
@@ -284,10 +288,9 @@ class HqNotificationVerifier:
             else None
         )
         if safe_outcome == "relay_accepted":
-            self._table[f"event:{event_id}"] = {
-                "outcome": safe_outcome,
-                "at": current,
-            }
+            key = f"event:{event_id}"
+            self._table[key] = {"outcome": safe_outcome, "at": current}
+            self._prune_events(keep=key)
         self._append_audit(
             {"event_id": event_id, "outcome": safe_outcome, "reason": safe_reason},
             current,
@@ -314,6 +317,22 @@ class HqNotificationVerifier:
         self._table[f"audit:{time.time_ns()}"] = {**value, "at": current}
         audit_keys = sorted(key for key in self._table if key.startswith("audit:"))
         for key in audit_keys[:-HQ_NOTIFICATION_MAX_AUDIT_ROWS]:
+            del self._table[key]
+
+    def _prune_events(self, keep: str) -> None:
+        """Drop the oldest delivered events beyond the cap, never ``keep``.
+
+        ``keep`` is the event just recorded: dropping it would let its own
+        retry through as a second push.
+        """
+        rows: list[tuple[int, bool, str]] = []
+        for key, value in self._table.items():
+            if not key.startswith("event:"):
+                continue
+            at = value.get("at", 0) if isinstance(value, dict) else 0
+            rows.append((at if isinstance(at, int) else 0, key == keep, key))
+        overflow = len(rows) - HQ_NOTIFICATION_MAX_EVENTS
+        for _at, _kept, key in sorted(rows)[: max(0, overflow)]:
             del self._table[key]
 
     def _prune_nonces(self, current: int) -> None:
