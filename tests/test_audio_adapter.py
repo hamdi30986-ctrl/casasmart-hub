@@ -37,9 +37,11 @@ install_casasmart_package()
 
 # The package's engine, so it raises the same AudioError class the adapter
 # imports (a flat ``audio`` import would be a second copy of the module).
+import casasmart.audio_adapter as audio_adapter  # noqa: E402
 from casasmart.audio import AudioEngine  # noqa: E402
 from casasmart.audio_adapter import AudioAdapter, AudioAdapterNotReady  # noqa: E402
 from const import EVENT_AUDIO_CHANGED  # noqa: E402
+from homeassistant.util.ssl import client_context  # noqa: E402
 from storage import HubStorage  # noqa: E402
 
 
@@ -103,7 +105,11 @@ class _FakePaho:
         self.username, self.password = username, password
 
     def tls_set(self, *a, **k):
-        self.tls = True
+        # Real paho loads the CA certificates from disk here, on the event loop.
+        raise AssertionError("tls_set() blocks the event loop")
+
+    def tls_set_context(self, context=None):
+        self.tls = context
 
     def reconnect_delay_set(self, **k):
         pass
@@ -199,7 +205,13 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.connected_to, ("192.168.1.10", 8883))
         self.assertTrue(self.client.loop_started)
         self.assertEqual(self.client.username, "mqtt-user")
-        self.assertTrue(self.client.tls)
+        # HA builds its client context once, off the event loop.
+        self.assertIs(self.client.tls, client_context())
+
+    def test_paho_is_imported_with_the_module(self):
+        # HA imports the integration in its import executor; a first import
+        # inside async_start would read paho's files on the event loop.
+        self.assertIs(audio_adapter.mqtt, sys.modules["paho.mqtt.client"])
 
     async def test_start_without_auth_skips_username(self):
         self.engine.set_broker(host="192.168.1.10", port=1883)
