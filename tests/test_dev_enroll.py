@@ -143,6 +143,24 @@ class EnsureEnrolledTests(_EngineFixture):
         )
         self.assertEqual(self.engine.get_device("dev-room")["rooms"], ["living_room"])
 
+    def test_room_scope_is_for_the_user_role_only(self):
+        # The product rule: only a user is room-scoped. Neither the stable-id
+        # provisioning path nor plain enrollment may mint a scoped sub-admin.
+        with self.assertRaises(EnrollError):
+            self.engine.ensure_enrolled(
+                "dev-x", "n", ROLE_SUB_ADMIN, self.public_pem, rooms=["living_room"]
+            )
+        with self.assertRaises(EnrollError):
+            self.engine.enroll_device(
+                "n", ROLE_SUB_ADMIN, self.public_pem, rooms=["living_room"]
+            )
+        self.assertEqual(self.engine.list_devices(), [])
+        # An empty list is still a scope (to no rooms at all).
+        with self.assertRaises(EnrollError):
+            self.engine.ensure_enrolled(
+                "dev-x", "n", ROLE_SUB_ADMIN, self.public_pem, rooms=[]
+            )
+
     def test_refuses_admin_role(self):
         with self.assertRaises(EnrollError):
             self.engine.ensure_enrolled("dev-x", "n", "admin", self.public_pem)
@@ -290,6 +308,27 @@ class DevEnrollManifestTests(_EngineFixture):
         )
         self._run()
         self.assertEqual(self.engine.get_device("dev-room")["rooms"], ["living_room"])
+
+    def test_room_scoped_sub_admin_entry_is_skipped(self):
+        good_private, good_pem = make_keypair()
+        self._write_manifest(
+            [
+                {
+                    "device_id": "dev-scoped",
+                    "role": "sub-admin",
+                    "rooms": ["living_room"],
+                    "public_key": self.public_pem,
+                },
+                # The default role is sub-admin, so rooms make this one bad too.
+                {"device_id": "dev-default", "rooms": ["x"], "public_key": good_pem},
+                {"device_id": "dev-ok", "public_key": good_pem},
+            ]
+        )
+        with self.assertLogs(dev_enroll._LOGGER, "ERROR") as logs:
+            self.assertEqual(self._run(), ["dev-ok"])
+        self.assertIsNone(self.engine.get_device("dev-scoped"))
+        self.assertIsNone(self.engine.get_device("dev-default"))
+        self.assertTrue(any("room scope" in line for line in logs.output), logs.output)
 
     def test_bad_entries_are_skipped_not_fatal(self):
         good_private, good_pem = make_keypair()

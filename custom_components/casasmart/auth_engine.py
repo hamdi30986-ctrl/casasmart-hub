@@ -204,6 +204,8 @@ class AuthEngine:
             or any(not isinstance(room, str) or not room for room in rooms)
         ):
             raise EnrollError("rooms must be a list of area ids")
+        if rooms is not None and role != ROLE_USER:
+            raise EnrollError("Room scope only applies to the user role")
         try:
             canonical_pem = auth_keys.validate_public_key(public_key_pem)
         except auth_keys.KeyError_ as err:
@@ -296,6 +298,8 @@ class AuthEngine:
             or any(not isinstance(room, str) or not room for room in rooms)
         ):
             raise EnrollError("rooms must be a list of area ids")
+        if rooms is not None and role != ROLE_USER:
+            raise EnrollError("Room scope only applies to the user role")
         try:
             canonical_pem = auth_keys.validate_public_key(public_key_pem)
         except auth_keys.KeyError_ as err:

@@ -17,7 +17,7 @@ The manifest is a JSON array. Each entry has a ``public_key`` (PEM, or
 ``public_key_pem``) and optionally a ``device_id`` (default: derived from the
 key, so it is still stable), a ``label`` or ``name``, a ``role`` (``sub-admin``
 by default or ``user``; ``admin`` is refused) and a ``rooms`` list for a
-room-scoped user. Every entry is enrolled under its fixed id
+room-scoped user (only a user; a sub-admin entry with rooms is skipped). Every entry is enrolled under its fixed id
 (:meth:`AuthEngine.ensure_enrolled`); already-correct entries are skipped, so
 running on every boot and after every reset is safe. Bad entries are logged
 and skipped, never fatal.
@@ -49,13 +49,14 @@ from typing import Any
 try:
     from . import auth_keys
     from .auth_engine import AuthEngine, EnrollError
-    from .auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, VALID_ROLES
+    from .auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER, VALID_ROLES
 except ImportError:  # flat import in the test env (no HA package init)
     import auth_keys  # type: ignore[no-redef]
     from auth_engine import AuthEngine, EnrollError  # type: ignore[no-redef]
     from auth_tokens import (  # type: ignore[no-redef]
         ROLE_ADMIN,
         ROLE_SUB_ADMIN,
+        ROLE_USER,
         VALID_ROLES,
     )
 
@@ -167,6 +168,15 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
     ):
         _LOGGER.error(
             "Dev enroll: entry %s has a malformed rooms list — skipped", device_id
+        )
+        return None
+    if rooms is not None and role != ROLE_USER:
+        # Product rule: only a user is room-scoped (sub-admins see every room).
+        _LOGGER.error(
+            "Dev enroll: entry %s gives a %s a room scope, which only a user "
+            "can have — skipped",
+            device_id,
+            role,
         )
         return None
 
