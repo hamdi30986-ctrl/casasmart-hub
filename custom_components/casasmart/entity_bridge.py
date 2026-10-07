@@ -294,6 +294,32 @@ def _mired_to_kelvin(mireds: Any) -> int:
     return round(1_000_000 / min(max(mireds, _MIRED_MIN), _MIRED_MAX))
 
 
+def light_data_in_kelvin(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of light service data with a mired color_temp as color_temp_kelvin.
+
+    Kelvin wins when both are given. Raises CommandError for a bad mired value.
+    """
+    converted = dict(data)
+    if "color_temp" in converted:
+        mireds = converted.pop("color_temp")
+        if "color_temp_kelvin" not in converted:
+            converted["color_temp_kelvin"] = _mired_to_kelvin(mireds)
+    return converted
+
+
+def light_data_with_mireds(data: dict[str, Any]) -> dict[str, Any]:
+    """Light service data with its color_temp_kelvin also given in mireds.
+
+    For the apps' automation editor, which reads color_temp. Returns data
+    itself when there is nothing to add.
+    """
+    kelvin = data.get("color_temp_kelvin")
+    if "color_temp" in data or not _positive_number(kelvin):
+        return data
+    mireds = min(max(round(1_000_000 / kelvin), _MIRED_MIN), _MIRED_MAX)
+    return {**data, "color_temp": mireds}
+
+
 def serialize_state(
     state: Any, area: str | None = None, entity_category: str | None = None
 ) -> dict[str, Any]:
@@ -360,9 +386,5 @@ def validate_command(
             f"Data keys not allowed for {action!r}: {', '.join(sorted(rejected))}"
         )
 
-    service_data = dict(data)
-    if domain == "light" and "color_temp" in service_data:
-        mireds = service_data.pop("color_temp")
-        if "color_temp_kelvin" not in service_data:  # kelvin wins when both
-            service_data["color_temp_kelvin"] = _mired_to_kelvin(mireds)
+    service_data = light_data_in_kelvin(data) if domain == "light" else dict(data)
     return domain, service, service_data
