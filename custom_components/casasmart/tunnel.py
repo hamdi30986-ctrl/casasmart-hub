@@ -22,7 +22,7 @@ _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # add-on repositories, so match the suffix.
 _CLOUDFLARED_SLUG_SUFFIX = "_cloudflared"
 # aiohasupervisor AddonState values that count as running, as plain strings.
-_RUNNING_ADDON_STATES = frozenset({"started", "startup"})
+RUNNING_ADDON_STATES = frozenset({"started", "startup"})
 
 
 def normalize_tunnel_url(value: object) -> str | None:
@@ -80,12 +80,8 @@ def normalize_cloudflare_domain(value: object) -> str | None:
         if url is None:
             return None
         parts = urlsplit(url)
-        if parts.path:
-            return None
-        try:
-            if parts.port is not None:
-                return None
-        except ValueError:
+        # normalize_tunnel_url has already read the port, so this can't raise.
+        if parts.path or parts.port is not None:
             return None
         host = parts.hostname or ""
     else:
@@ -123,6 +119,13 @@ def domain_to_tunnel_url(value: object) -> str | None:
     return normalize_tunnel_url(f"https://{host}")
 
 
+def is_cloudflared_slug(slug: object) -> bool:
+    """True for a cloudflared add-on slug, whichever repository it came from."""
+    return isinstance(slug, str) and (
+        slug == "cloudflared" or slug.endswith(_CLOUDFLARED_SLUG_SUFFIX)
+    )
+
+
 def pick_cloudflared_slug(addons: object) -> str | None:
     """The cloudflared slug from [(slug, name, state), ...], or None.
 
@@ -138,14 +141,12 @@ def pick_cloudflared_slug(addons: object) -> str | None:
             slug, _name, state = item
         except (TypeError, ValueError):
             continue
-        if not isinstance(slug, str) or not slug:
-            continue
-        if slug != "cloudflared" and not slug.endswith(_CLOUDFLARED_SLUG_SUFFIX):
+        if not is_cloudflared_slug(slug):
             continue
         matches.append((slug, state if isinstance(state, str) else ""))
     if not matches:
         return None
-    running = sorted(slug for slug, state in matches if state in _RUNNING_ADDON_STATES)
+    running = sorted(slug for slug, state in matches if state in RUNNING_ADDON_STATES)
     if running:
         return running[0]
     return min(slug for slug, _state in matches)
