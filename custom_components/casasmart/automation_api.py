@@ -155,6 +155,22 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return None
         return getattr(entries[0].runtime_data, "energy_flags", None)
 
+    async def _energy_flag(self, config_key: str, value: Any = _UNSET) -> bool:
+        """Store the flag if one is given, then return the stored flag.
+
+        False while the hub isn't loaded.
+        """
+        flags = self._energy_flags()
+        if flags is None:
+            return False
+        if value is not _UNSET:
+            await self._hass.async_add_executor_job(
+                flags.set_works_during_energy_saving, config_key, value
+            )
+        return await self._hass.async_add_executor_job(
+            flags.works_during_energy_saving, config_key
+        )
+
     @property
     def _config_path(self) -> str:
         return self._hass.config.path(AUTOMATION_CONFIG_PATH)
@@ -206,12 +222,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return self.json_message(
                 f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
             )
-        flags = self._energy_flags()
-        enabled = False
-        if flags is not None:
-            enabled = await self._hass.async_add_executor_job(
-                flags.works_during_energy_saving, config_key
-            )
+        enabled = await self._energy_flag(config_key)
         return self.json({**value, "works_during_energy_saving": enabled})
 
     async def post(self, request: web.Request, config_key: str) -> web.Response:
@@ -262,18 +273,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
 
         await self._reload(config_key)
         # Report the stored flag, even when this edit did not send one.
-        flags = self._energy_flags()
-        effective_flag = False
-        if flags is not None and energy_flag is not _UNSET:
-            await self._hass.async_add_executor_job(
-                flags.set_works_during_energy_saving,
-                config_key,
-                energy_flag,
-            )
-        if flags is not None:
-            effective_flag = await self._hass.async_add_executor_job(
-                flags.works_during_energy_saving, config_key
-            )
+        effective_flag = await self._energy_flag(config_key, energy_flag)
         return self.json(
             {
                 "result": "ok",
