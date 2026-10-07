@@ -521,11 +521,14 @@ class CasaSmartCommandView(HomeAssistantView):
         now_data = getattr(_get_runtime_data(self._hass), "now_data", None)
         if now_data is not None:
             engine = get_engine(self._hass)
-            member_id = engine.member_id_for(claims["sub"]) if engine else claims["sub"]
+            sub = claims["sub"]
+
+            def _record() -> None:
+                member_id = engine.member_id_for(sub) if engine else sub
+                now_data.record_successful_control(member_id, entity_id)
+
             try:
-                await self._hass.async_add_executor_job(
-                    now_data.record_successful_control, member_id, entity_id
-                )
+                await self._hass.async_add_executor_job(_record)
             except Exception:
                 # A control already succeeded; keep that result truthful even if
                 # optional recency persistence is temporarily unavailable.
