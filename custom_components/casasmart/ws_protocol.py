@@ -238,12 +238,15 @@ def coalesce_key(frame: dict[str, Any]) -> tuple[Any, ...] | None:
     ftype = frame.get("type")
     if ftype not in _COALESCEABLE_TYPES:
         return None
+    # A change and a removal of the same entity share one key: only the
+    # newest of them still describes the entity, and coalescing them keeps an
+    # older frame from reaching the app after it.
     if ftype == "state_changed":
         device = frame.get("device")
         entity_id = device.get("entity_id") if isinstance(device, dict) else None
-        return ("state_changed", entity_id)
+        return ("entity", entity_id)
     if ftype == "entity_removed":
-        return ("entity_removed", frame.get("entity_id"))
+        return ("entity", frame.get("entity_id"))
     if ftype == "registry_changed":
         return ("registry_changed", frame.get("kind"))
     if ftype == "tank_changed":
