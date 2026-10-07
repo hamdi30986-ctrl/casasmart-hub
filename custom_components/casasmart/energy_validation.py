@@ -105,12 +105,10 @@ def validate_config_against_discovery(
         if room["room_id"] not in excluded
         for item in room["heaters"]
     }
-    if not {item["entity_id"] for item in config["heaters"]}.issubset(heaters):
+    picked_heaters = {item["entity_id"] for item in config["heaters"]}
+    if not picked_heaters.issubset(heaters):
         raise EnergyConfigError("heaters contains a stale or non-heater entity")
-    if (
-        config["setup_complete"]
-        and {item["entity_id"] for item in config["heaters"]} != heaters
-    ):
+    if config["setup_complete"] and picked_heaters != heaters:
         raise EnergyConfigError("heater setup is incomplete or stale")
 
     # Medium asks which AC to keep in a room with several; Smart asks for
