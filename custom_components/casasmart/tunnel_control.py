@@ -1,30 +1,11 @@
-"""Cloudflare tunnel add-on control — the Supervisor-coupled half.
+"""Cloudflare Tunnel add-on control through the Supervisor.
 
-``tunnel.py`` owns the pure logic (domain validation, slug matching); this
-module is the thin HA/Supervisor glue that enforces the desired tunnel
-state recorded in the config entry's options (``__init__.py`` reconciler):
-
-    enabled  -> add-on started + boot=auto   (ON survives host reboots)
-    disabled -> add-on stopped + boot=manual (OFF survives host reboots)
-
-``boot=manual`` is the point of the disable leg: a HAOS host reboot must
-not resurrect a tunnel the owner turned off for pairing — the Supervisor
-itself keeps it down, not just our reconciler.
-
-Only the Supervisor backend exists, deliberately: the supported setup is
-HAOS (or Supervised) + the cloudflared add-on, and a Container/Core install
-cannot reach host systemd from inside HA anyway. On those installs
-``available()`` is False and every caller degrades gracefully — domain
-storage + handshake advertising keep working, the options toggle is inert
-with a clear message (same doctrine as mDNS/push: one feature degrades, the
-hub stays up).
-
-The add-on slug is prefixed with a hash of the add-on repository, so it
-differs between repositories (one is ``9074a9fa_cloudflared``). It is found
-at runtime in the live add-on listing, never hardcoded.
-
-The edge watchdog (``async_watchdog_check``) covers what the add-on's own
-state can't show: cloudflared running but disconnected from Cloudflare.
+The setup reconciler (__init__.py) uses this to apply the tunnel switch:
+enabled means started with boot=auto, disabled means stopped with
+boot=manual, so a host reboot can't bring back a tunnel the owner turned off.
+The edge watchdog restarts an add-on that runs but has lost Cloudflare.
+Container and Core installs have no Supervisor: available() is False there
+and the switch does nothing. The pure rules are in tunnel.py.
 """
 
 from __future__ import annotations
@@ -43,10 +24,8 @@ from .tunnel import (
     pick_cloudflared_slug,
 )
 
-# Supervisor plumbing is optional at runtime (Container/Core installs) —
-# guard the imports so merely importing this module can never fail there.
-# aiohasupervisor wraps its connection/timeout failures in SupervisorError
-# subclasses, so that one except-type covers the whole client surface.
+# Container and Core installs may lack these. SupervisorError covers every
+# client failure, connection errors and timeouts included.
 try:
     from aiohasupervisor import SupervisorError
     from aiohasupervisor.models import AddonBoot, AddonsOptions
@@ -54,18 +33,14 @@ try:
     from homeassistant.helpers.hassio import is_hassio
 
     _SUPERVISOR_AVAILABLE = True
-except ImportError:  # pragma: no cover — pip installs without hassio deps
+except ImportError:  # pragma: no cover - installs without the hassio packages
     _SUPERVISOR_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
 
-# Mirrors tunnel.py's running-state set; kept here too so the comparison the
-# reconciler makes (against .value strings) is explicit at the usage site.
+# The same running states as tunnel.py.
 _RUNNING_STATES = frozenset({"started", "startup"})
 
-# The edge watchdog's pure logic (which statuses mean origin-down, and the
-# restart decision) lives in tunnel.py so it's unit-testable without HA. Only
-# the HTTP-probe timeout is glue and stays here.
 _EDGE_PROBE_TIMEOUT_SECONDS = 10.0
 
 
@@ -83,17 +58,17 @@ class TunnelAddonState:
 
 
 def _enum_value(value: object) -> str:
-    """AddonState/AddonBoot enum -> its wire string (tolerant of plain str)."""
+    """The string value of an AddonState or AddonBoot, or of a plain string."""
     return str(getattr(value, "value", value))
 
 
 class CloudflaredController:
-    """Discover + start/stop the cloudflared add-on via the Supervisor."""
+    """Finds, starts, stops and restarts the cloudflared add-on."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         self._slug: str | None = None
-        # Monotonic timestamp of the last edge-driven restart (cooldown gate).
+        # Monotonic time of the last watchdog restart, for the cooldown.
         self._last_edge_restart: float | None = None
 
     def available(self) -> bool:
@@ -101,15 +76,14 @@ class CloudflaredController:
         return _SUPERVISOR_AVAILABLE and is_hassio(self._hass)
 
     def _addons(self):
-        """The Supervisor addons client (callers hold the available() gate)."""
+        """The Supervisor add-ons client; callers check available() first."""
         return get_supervisor_client(self._hass).addons
 
     async def async_discover(self) -> str | None:
-        """Return the cloudflared add-on slug, or None if none is installed.
+        """The cloudflared add-on slug, or None if none is installed.
 
-        The pick is cached, but re-verified against the live listing on
-        every call — an uninstalled add-on drops the cache, installing one
-        later "just works" on the next reconcile.
+        The pick is cached but checked against the live listing on every
+        call, so the next reconcile notices an add-on removed or installed.
         """
         try:
             addons = await self._addons().list()
@@ -141,7 +115,7 @@ class CloudflaredController:
         return picked
 
     async def async_state(self, slug: str) -> TunnelAddonState:
-        """The add-on's actual run state + boot mode."""
+        """The add-on's run state and boot mode."""
         try:
             info = await self._addons().addon_info(slug)
         except SupervisorError as err:
@@ -155,10 +129,10 @@ class CloudflaredController:
         )
 
     async def async_enable(self, slug: str, *, running: bool) -> None:
-        """Enact ON: boot=auto, then start if not already running.
+        """Set boot=auto, then start the add-on if it isn't running.
 
-        Boot mode first — if the start then fails, the add-on still comes
-        up on the next host reboot, which is the enabled contract.
+        Boot mode goes first, so if the start fails the add-on still comes
+        up at the next host boot.
         """
         try:
             await self._addons().set_addon_options(
@@ -171,11 +145,10 @@ class CloudflaredController:
         _LOGGER.info("Cloudflare tunnel add-on %s enabled (started, boot=auto)", slug)
 
     async def async_disable(self, slug: str, *, running: bool) -> None:
-        """Enact OFF: stop if running, then boot=manual.
+        """Stop the add-on if it is running, then set boot=manual.
 
-        Stop first — the immediate problem (tunnel routing pairing traffic)
-        ends now; if the boot-mode write then fails, the reconciler retries
-        it on the next run and logs meanwhile.
+        Stopping goes first so remote access ends at once; a failed boot-mode
+        write is retried on the next reconcile.
         """
         try:
             if running:
@@ -192,12 +165,10 @@ class CloudflaredController:
     async def async_edge_alive(self, tunnel_url: str) -> bool | None:
         """Probe the public tunnel URL through Cloudflare's edge.
 
-        The request loops hub -> Cloudflare edge -> tunnel -> hub, so it tests
-        the thing the add-on's ``running`` state can't: is cloudflared actually
-        connected to the edge? Returns True if a response came back through the
-        tunnel, False if Cloudflare reports the origin unreachable (restart), or
-        None if there was no response at all — which usually means the hub's own
-        internet/DNS is down, NOT the tunnel, so the caller must not restart.
+        The request goes out to Cloudflare and back through the tunnel, which
+        shows whether cloudflared is connected. True if the reply came through
+        the tunnel, False if Cloudflare reports the tunnel down, None if
+        nothing answered (usually the hub's own internet is down).
         """
         session = async_get_clientsession(self._hass)
         timeout = aiohttp.ClientTimeout(total=_EDGE_PROBE_TIMEOUT_SECONDS)
@@ -221,12 +192,10 @@ class CloudflaredController:
         _LOGGER.info("Cloudflare tunnel add-on %s restarted (edge reconnect)", slug)
 
     async def async_watchdog_check(self, slug: str, tunnel_url: str, now: float) -> str:
-        """One edge-liveness cycle: probe, decide, and restart if warranted.
+        """One watchdog cycle: probe, decide and restart if needed; return the verdict.
 
-        ``now`` is a monotonic timestamp (injected for testability). Returns
-        the ``edge_watchdog_decision`` verdict; on ``"restart"`` the add-on is
-        restarted and the cooldown clock is stamped. A failed restart raises
-        ``TunnelControlError`` without stamping it, so the next cycle retries.
+        now is a monotonic time. A failed restart raises TunnelControlError
+        without starting the cooldown, so the next cycle retries.
         """
         alive = await self.async_edge_alive(tunnel_url)
         decision = edge_watchdog_decision(alive, self._last_edge_restart, now)
@@ -239,10 +208,8 @@ class CloudflaredController:
         """Set boot=auto again when the hub stops managing the add-on.
 
         Called when the Cloudflare domain is cleared or the integration is
-        removed, so a tunnel-OFF's boot=manual doesn't outlive the hub's
-        control. Deliberately does NOT start the add-on — giving up control is
-        not consent to open remote access right now, only to stop pinning it
-        down.
+        removed. It doesn't start the add-on: giving up control isn't consent
+        to open remote access now.
         """
         try:
             await self._addons().set_addon_options(
