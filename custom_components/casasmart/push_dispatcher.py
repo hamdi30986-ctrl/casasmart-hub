@@ -83,7 +83,8 @@ STATE_UNLOCKED = "unlocked"
 
 _LOCK_PREFIX = "lock."
 _LOCK_SETTLED = frozenset({STATE_LOCKED, STATE_UNLOCKED})
-_LOCK_FLAP_STATES = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
+# States an entity flaps through; a change to or from one isn't an event.
+_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
 # Domains whose state a home-screen widget shows.
 _WIDGET_DOMAINS = frozenset(
@@ -93,8 +94,6 @@ _WIDGET_DOMAINS = frozenset(
 # The first widget change arms one refresh this many seconds later; changes
 # inside the window share it.
 _WIDGET_PUSH_COALESCE_SECONDS = 15.0
-
-_WIDGET_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
 # With the timestamp, the per-batch nonce lets the relay refuse a replay.
 _NONCE_BYTES = 32
@@ -210,10 +209,9 @@ class PushDispatcher:
         domain = entity_id.split(".", 1)[0]
         if domain not in _WIDGET_DOMAINS:
             return False
-        # Attribute-only updates and flaps through unavailable/unknown don't count.
-        if new_state is None or new_state.state in _WIDGET_UNSETTLED:
+        if new_state is None or new_state.state in _UNSETTLED:
             return False
-        if old_state is None or old_state.state in _WIDGET_UNSETTLED:
+        if old_state is None or old_state.state in _UNSETTLED:
             return False
         return old_state.state != new_state.state
 
@@ -237,12 +235,12 @@ class PushDispatcher:
     def _is_real_lock_transition(old_state: Any, new_state: Any) -> bool:
         """True when a lock settles in a new state from a known prior state.
 
-        An intermediate locking/unlocking state still counts as the prior
-        state; flaps through unavailable or unknown don't.
+        A change by way of locking or unlocking counts; one from unavailable
+        or unknown doesn't.
         """
         if new_state is None or new_state.state not in _LOCK_SETTLED:
             return False
-        if old_state is None or old_state.state in _LOCK_FLAP_STATES:
+        if old_state is None or old_state.state in _UNSETTLED:
             return False
         return old_state.state != new_state.state
 
