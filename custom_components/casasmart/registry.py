@@ -479,8 +479,9 @@ class RegistryEngine:
     def delete_room(self, room_id: str) -> int:
         """Delete a room; returns how many entity assignments it cleared.
 
-        Entities and gangs placed in the room become explicitly Unassigned,
-        and the room leaves every tag (a tag left with no rooms is deleted).
+        Entities, user devices and gangs placed in the room become explicitly
+        Unassigned, and the room leaves every tag (a tag left with no rooms is
+        deleted).
         """
         with self._lock:
             if room_id not in self._rooms:
@@ -493,12 +494,15 @@ class RegistryEngine:
 
                     self._mirror_assignment(entity_id, record)
                     cleared += 1
-            # Solo gangs carry their own room; a dangling id would hide them
-            # from every room, so make them Unassigned.
+            # User devices and solo gangs carry their own room; a dangling id
+            # would hide them from every room, so make them Unassigned.
             for device_id, device in list(self._user_devices.items()):
                 gangs = device.get("gangs", {})
-                if any(gang.get("room_id") == room_id for gang in gangs.values()):
-                    self._user_devices[device_id] = {
+                in_room = device.get("room_id") == room_id
+                if in_room or any(
+                    gang.get("room_id") == room_id for gang in gangs.values()
+                ):
+                    updated = {
                         **device,
                         "gangs": {
                             key: (
@@ -509,6 +513,9 @@ class RegistryEngine:
                             for key, gang in gangs.items()
                         },
                     }
+                    if in_room:
+                        updated["room_id"] = None
+                    self._user_devices[device_id] = updated
             tags = self._room_tags_doc()
             tags_changed = False
             for tag_id, tag in list(tags.items()):

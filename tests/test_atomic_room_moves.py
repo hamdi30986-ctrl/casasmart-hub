@@ -301,6 +301,16 @@ class AtomicRoomMoveTest(unittest.TestCase):
         self.assertEqual(gang["icon"], "lamp")
         self.assertEqual(self.engine.room_of("light.one"), "a")
 
+    def test_deleted_room_clears_a_user_devices_own_room(self):
+        self.engine.patch_user_device("device", room_id="b")
+        self.engine.upsert_user_device("other", entity_ids=["light.other"], room_id="a")
+        self.engine.delete_room("b")
+        self.assertIsNone(self.engine.get_user_device("device")["room_id"])
+        self.assertEqual(self.engine.get_user_device("other")["room_id"], "a")
+        self.assertEqual(
+            self.engine.get_user_device("device")["custom_name"], "Keep name"
+        )
+
     def test_receipts_are_bounded_and_expired_receipts_pruned(self):
         receipts = self.store.table("registry_room_moves")
         with self.store.transaction():
