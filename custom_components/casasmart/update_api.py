@@ -1,7 +1,10 @@
 """Self-update status and install endpoints.
 
-The status view compares the running version with the latest GitHub release
-(cached for ``UPDATE_CHECK_TTL_SECONDS``); install runs ``update_install``.
+The status view compares the running version with the latest release of the
+GitHub repository named by ``update_repo`` in ``hub_config.json``, cached for
+``UPDATE_CHECK_TTL_SECONDS``; the install view runs ``update_install``. With
+``update_repo`` unset (the default) the hub never contacts GitHub and reports
+no update: HACS installs and updates the hub instead.
 """
 
 from __future__ import annotations
@@ -40,12 +43,14 @@ _GITHUB_HEADERS = {
 
 
 _FETCH_TIMEOUT = aiohttp.ClientTimeout(total=10)
+# "owner/name": a GitHub account name (up to 39 characters) and a repository.
 _GITHUB_REPO_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 )
 
 
 def _resolve_repo(hass: HomeAssistant) -> str | None:
+    """The ``owner/repo`` from ``update_repo``, or None if unset or malformed."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if entries:
         runtime_data = entries[0].runtime_data
@@ -58,6 +63,14 @@ def _resolve_repo(hass: HomeAssistant) -> str | None:
 
 
 class UpdateChecker:
+    """The latest GitHub release compared with the running version, cached.
+
+    One per hub (``get_or_create_checker``). A refresh happens at most once
+    per TTL, and a failed one (network, GitHub error, bad reply) is logged
+    and caches nothing: the status keeps the last successful answer, or
+    "no update" before the first, and the next request tries again.
+    """
+
     def __init__(self, hass: HomeAssistant, current_version: str) -> None:
         self._hass = hass
         self._current_version = current_version
@@ -86,6 +99,7 @@ class UpdateChecker:
         return self._latest.download_url, self._latest.signature_url
 
     async def _async_refresh(self) -> None:
+        """Fetch the latest release, one request at a time."""
         async with self._lock:
             if self._is_fresh():
                 return
@@ -172,8 +186,12 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
         self._checker = checker
 
     async def get(self, request: web.Request) -> web.Response:
-        """Report the update status. Never 500s on a GitHub hiccup — a
-        failed check degrades to ``latest_version: null`` (no update)."""
+        """Report the update status.
+
+        A failed check never fails the request: the answer is the last
+        successful check, or ``latest_version: null`` (no update) before
+        the first.
+        """
         _, error = authenticate_request(self._hass, request, "update.read")
         if error is not None:
             return error
@@ -183,7 +201,7 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
 class CasaSmartUpdateInstallView(HomeAssistantView):
     """POST /api/casasmart/update/install — owner-only self-update.
 
-    Gated ``update.install`` (admin only). On success the integration tree
+    Gated by ``update.install`` (owner only). On success the integration tree
     is already swapped and an HA restart is scheduled; the app gets a 202
     "installing" before the connection drops, then reconnects on the new
     code. A "nothing newer", a bad payload, or an install already running

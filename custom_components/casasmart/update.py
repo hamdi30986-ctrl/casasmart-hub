@@ -227,6 +227,7 @@ def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
 
 
 def _manifest_domain(manifest: Path) -> str | None:
+    """The ``domain`` declared in a manifest file, or None if unreadable."""
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -274,8 +275,8 @@ def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
     the live dir. Only then is the previous backup deleted. A failure at any
     step undoes the renames before it, so the hub keeps its integration and
     the rollback it had, and is raised as InstallError — including an
-    overlapping swap that finds a dir already moved. The caller is
-    responsible for pruning the returned backup once the restart succeeds.
+    overlapping swap that finds a dir already moved. The returned backup is
+    left in place as the rollback.
     """
     current = Path(current_dir)
     new_source = Path(new_source_dir)
@@ -283,8 +284,7 @@ def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
         raise InstallError(f"replacement source is not a directory: {new_source}")
 
     backup = current.with_name(current.name + ".bak")
-    # Unique per swap, and dotted like ".bak" so Home Assistant never loads
-    # either as an integration.
+    # Unique per swap, so overlapping swaps never share a staging name.
     token = secrets.token_hex(4)
     staged = current.with_name(f"{current.name}.new-{token}")
     retired = current.with_name(f"{current.name}.bak-old-{token}")
