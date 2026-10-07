@@ -2,7 +2,8 @@
 
 The handshake remains API v1.  Clients must treat a missing capability block,
 an unknown capability, or ``available: false`` as unavailable.  This lets old
-Hubs and clients interoperate while later protected features can fail closed.
+Hubs and clients interoperate, and a feature whose server side isn't complete
+fails closed.
 """
 
 from __future__ import annotations
@@ -17,9 +18,8 @@ CAPABILITY_CONTRACT_VERSION: Final = 1
 _FOUNDATION_MINIMUM_API_VERSION: Final = 1
 
 # These names are part of the public, stable handshake contract.  A feature is
-# deliberately not enabled merely because a Hub advertises its name; later
-# phases must set ``available`` only when the complete server-side policy is
-# enforcing it.
+# deliberately not enabled merely because a Hub advertises its name: it is
+# ``available`` only once the complete server-side policy enforces it.
 ORBIT_CAPABILITIES: Final = (
     "admin_password_v1",
     "room_activity_bulk_v1",

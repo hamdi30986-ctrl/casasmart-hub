@@ -2,6 +2,10 @@
 
 Setup asks for the push relay URL, its activation code and an optional
 Cloudflare tunnel domain; options edit the same settings plus the tunnel toggle.
+
+The relay URL lives in the entry options and the one-time activation code in
+the entry data, which the hub clears once the relay accepts its registration.
+Applying a change is the update listener's job (``__init__.py``).
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ from .tunnel_control import CloudflaredController, TunnelControlError
 # Shown in the relay field's help text; hassfest wants URLs out of strings.json.
 _EXAMPLE_RELAY_URL = "https://relay.example.com"
 
+# The activation code is a password field and is never echoed back into a
+# re-shown form.
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_PUSH_RELAY_URL): str,
@@ -66,6 +72,8 @@ OPTIONS_SCHEMA = vol.Schema(
 
 
 class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Add the hub (one per Home Assistant; the manifest enforces it)."""
+
     VERSION = CONFIG_ENTRY_VERSION
 
     @staticmethod
@@ -73,12 +81,16 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: ConfigEntry,
     ) -> CasaSmartOptionsFlow:
-        """Gear icon: edit the Cloudflare domain / toggle the tunnel."""
+        """Gear icon: the relay, re-registration and the Cloudflare tunnel."""
         return CasaSmartOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """Validate the relay origin, activation code and optional domain.
+
+        A domain given here also switches the tunnel on.
+        """
         errors: dict[str, str] = {}
         if user_input is not None:
             relay_base = normalize_relay_base_url(user_input.get(CONF_PUSH_RELAY_URL))
@@ -128,9 +140,18 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class CasaSmartOptionsFlow(OptionsFlow):
+    """Change the relay, register again, or manage the Cloudflare tunnel."""
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """Show and validate the options form.
+
+        Moving to another relay needs a fresh activation code. A relay change
+        or a new code is written to the entry right away and the running
+        relay leg stopped, so nothing reaches the old relay before the update
+        listener reloads with the new settings.
+        """
         errors: dict[str, str] = {}
         current_relay = self._current_relay_base()
         if user_input is not None:
@@ -221,6 +242,8 @@ class CasaSmartOptionsFlow(OptionsFlow):
         )
 
     def _current_relay_base(self) -> str | None:
+        """The relay in use: the options, else the running config, else the
+        relay URL that config entries before version 3 kept in hub_config."""
         normalized = normalize_relay_base_url(
             self.config_entry.options.get(CONF_PUSH_RELAY_URL)
         )

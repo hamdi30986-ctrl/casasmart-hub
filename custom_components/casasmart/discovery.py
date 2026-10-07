@@ -109,8 +109,11 @@ def build_txt_records(
     hub_name: str | None,
     api_version: int,
 ) -> dict[str, bytes]:
-    """Encode the TXT contract. ``id`` is mandatory; ``name`` is dropped
-    when unset rather than published empty."""
+    """Encode the TXT contract.
+
+    ``id`` is mandatory; ``name`` is dropped when unset rather than published
+    empty.
+    """
     if not hub_id:
         raise ValueError("mDNS TXT 'id' (hub fingerprint) must be non-empty")
     records: dict[str, bytes] = {
@@ -165,13 +168,13 @@ def _server_hostname(fingerprint: str) -> str:
 
 
 class MdnsAdvertiser:
-    """Registers/refreshes/unregisters the hub's ``_casasmart._tcp``
+    """Registers, refreshes and unregisters the hub's ``_casasmart._tcp``
     record on HA's shared zeroconf instance.
 
-    Graceful degradation: mDNS is a *discovery
-    convenience*, never load-bearing — the app still reaches the hub via
-    the stored IP and the tunnel. So every failure here is
-    logged and swallowed; it must never take the integration down.
+    Graceful degradation: mDNS is a *discovery convenience*, never
+    load-bearing — the app still reaches the hub via the stored IP and the
+    tunnel. So every failure here is logged and swallowed; it must never take
+    the integration down.
     """
 
     def __init__(

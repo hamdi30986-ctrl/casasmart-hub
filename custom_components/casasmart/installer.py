@@ -1,6 +1,8 @@
-"""Installer-surface helpers: the pure logic
-behind the admin endpoints that replace the app's raw-HA-token installer
-calls (pairing sheet, entity rename, IR wizard, discovered devices).
+"""Installer-surface helpers: the pure logic behind the admin endpoints.
+
+Covers the installer screens in the app (Zigbee permit-join, entity rename,
+IR wizard, discovered devices). The app reaches these only through hub
+endpoints gated by ``installer.manage``, never with a Home Assistant token.
 
 No HA imports — unit-testable without an HA install, exactly like
 ``entity_bridge``, ``camera_streams`` and ``pairing``. The views in
@@ -13,9 +15,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-# zigbee2mqtt's permit-join request topic. The app used to publish here
-# itself through ``mqtt.publish`` with the raw HA token — the hub now
-# owns the publish behind ``installer.manage``.
+# zigbee2mqtt's default base topic and permit-join request topic. The hub
+# publishes permit-join itself, behind ``installer.manage``.
 DEFAULT_ZIGBEE_BASE_TOPIC = "zigbee2mqtt"
 PERMIT_JOIN_TOPIC = f"{DEFAULT_ZIGBEE_BASE_TOPIC}/bridge/request/permit_join"
 DEFAULT_PERMIT_JOIN_SECONDS = 120
@@ -78,7 +79,7 @@ def parse_permit_join(payload: Mapping[str, Any]) -> tuple[bool, int]:
 
 
 def permit_join_payload(enable: bool, duration: int) -> str:
-    """The exact MQTT payload zigbee2mqtt expects (what the app sent)."""
+    """The exact MQTT payload zigbee2mqtt's permit-join request expects."""
     if enable:
         return json.dumps({"value": True, "time": duration})
     return json.dumps({"value": False})
@@ -95,9 +96,10 @@ def _valid_base_topic(value: Any) -> str | None:
     Deliberately strict. The value ends up as an MQTT publish topic, and the
     caller is a phone (admin/sub-admin) or hub config — so wildcards (``+``,
     ``#``), empty segments and leading/trailing slashes are refused rather
-    than normalised, and nothing outside ``[A-Za-z0-9_-]`` per segment is
-    accepted. That keeps a typo (or a hostile value) from turning permit-join
-    into a publish to an arbitrary topic.
+    than normalised, and a segment may hold only letters, digits, ``_`` and
+    ``-`` (``str.isalnum``, so non-ASCII letters pass). That keeps a typo (or
+    a hostile value) from turning permit-join into a publish to an arbitrary
+    topic.
     """
     if not isinstance(value, str):
         return None
@@ -111,6 +113,7 @@ def _valid_base_topic(value: Any) -> str | None:
 
 
 def _SEGMENT_OK(segment: str) -> bool:
+    """True when a topic segment is only letters, digits, ``_`` and ``-``."""
     return all(ch.isalnum() or ch in "_-" for ch in segment)
 
 
@@ -119,21 +122,21 @@ def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[s
 
     A villa commonly runs two or three zigbee2mqtt instances (one coordinator
     per floor, sometimes per wing). permit_join is per-instance: publishing
-    only to the default ``zigbee2mqtt`` base topic opens floor 1's coordinator
-    and leaves every other one shut, so devices on the other floors can never
-    be paired from the app. That was the behaviour until this function existed.
+    only to the default ``zigbee2mqtt`` base topic would open floor 1's
+    coordinator and leave every other one shut, so devices on the other floors
+    could never be paired from the app.
 
     * ``configured`` — the hub's ``zigbee_base_topics`` list. With no request
-      target, EVERY configured instance is opened, so an unmodified app that
-      sends no target now reaches all the coordinators instead of one.
+      target, EVERY configured instance is opened, so an app that sends no
+      target reaches all the coordinators, not one.
     * ``requested`` — a single base topic from the request body, for a client
       that knows which instance it wants (floor -> instance mapping). It must
       name one of the hub's KNOWN instances: a client may pick among the
       coordinators the installer declared, never invent a topic. Anything
       else falls back to opening them all, because the safe failure for
       "add a device" is every coordinator listening, not none.
-    * Neither -> the single default topic, i.e. exactly the old behaviour on
-      a hub that was never configured for multi-instance.
+    * Neither -> the single default topic, for a hub that was never
+      configured for multi-instance.
 
     Order is preserved and duplicates collapse, so the caller publishes once
     per real instance.
@@ -156,14 +159,10 @@ def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[s
 def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Validate an entity-registry patch body — a name rename only.
 
-    The switch_as_x domain swap (``options_domain``/``options``) is gone:
-    the app never re-domains an entity, because a gang's type is
-    presentation metadata, never an HA rename. The only operation left is:
-
-    - ``name`` — rename (string, or null to clear back to the device name)
-
-    Anything else is rejected: this endpoint is a scoped proxy, not a
-    general registry editor.
+    The one accepted field is ``name``: a string, or null to clear it back to
+    the device name. The app never changes an entity's domain (a gang's type
+    is presentation metadata, not an HA rename), so anything else is
+    rejected: this endpoint is a scoped proxy, not a general registry editor.
     """
     unknown = set(payload) - {"name"}
     if unknown:
