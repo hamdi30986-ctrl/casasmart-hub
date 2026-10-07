@@ -208,6 +208,17 @@ class TestSerializeState(unittest.TestCase):
             },
         )
 
+    def test_thermostat_step_is_forwarded(self):
+        # The apps' climate sheet steps the setpoint by target_temp_step and
+        # falls back to 1.0, which skips the halves on a 0.5 thermostat.
+        state = FakeState(
+            "climate.bedroom",
+            "cool",
+            {"temperature": 22.5, "target_temp_step": 0.5, "preset_mode": "eco"},
+        )
+        attrs = serialize_state(state)["attributes"]
+        self.assertEqual(attrs, {"temperature": 22.5, "target_temp_step": 0.5})
+
     def test_name_falls_back_to_entity_id(self):
         device = serialize_state(FakeState("switch.plug", "off"))
         self.assertEqual(device["name"], "switch.plug")
