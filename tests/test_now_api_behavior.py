@@ -135,6 +135,7 @@ class _Hass:
     def __init__(self, states: _States, fail_domains=()) -> None:
         self.states = states
         self.services = _Services(states, fail_domains)
+        self.data: dict = {}
         self.config_entries = type(
             "ConfigEntries",
             (),
@@ -324,6 +325,113 @@ class RepeatedRoomOffTest(unittest.TestCase):
             self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "off"}
         )
         self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+
+class _SteppedServices(_Services):
+    async def async_call(self, domain, action, data, blocking=True):
+        await asyncio.sleep(0)
+        await super().async_call(domain, action, data, blocking)
+        await asyncio.sleep(0)
+
+
+class _SteppedHass(_Hass):
+    """Executor jobs and service calls yield to the loop around their work, as
+    HA's thread pool and blocking service calls do, so the interleaving is the
+    same on every run. ``trace`` names the command task behind each job."""
+
+    def __init__(self, states: _States) -> None:
+        super().__init__(states)
+        self.services = _SteppedServices(states)
+        self.trace: list[str] = []
+
+    async def async_add_executor_job(self, func, *args):
+        self.trace.append(asyncio.current_task().get_name())
+        await asyncio.sleep(0)
+        result = func(*args)
+        await asyncio.sleep(0)
+        return result
+
+
+def _turns(trace: list[str]) -> list[str]:
+    """Collapse consecutive jobs of one command: ["off", "on"] is serial."""
+    return [name for i, name in enumerate(trace) if i == 0 or trace[i - 1] != name]
+
+
+class RoomCommandLockTest(unittest.IsolatedAsyncioTestCase):
+    """Commands for one room wait for each other across view instances."""
+
+    async def asyncSetUp(self) -> None:
+        self.states = _States(
+            [
+                _State("light.a", "on", "room-k"),
+                _State("light.b", "on", "room-k"),
+                _State("light.c", "on", "room-l"),
+            ]
+        )
+        self.hass = _SteppedHass(self.states)
+        self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.engine.set_room_policy("room-k", True, ["light.a", "light.b"])
+        self.engine.set_room_policy("room-l", True, ["light.c"])
+
+        async def body(request):
+            return request  # the tests post the JSON payload itself
+
+        async def accessible(self, room_id, scope):
+            return True
+
+        for patcher in (
+            patch.multiple(
+                _API,
+                authenticate_request=lambda *args: ({"sub": "member-a"}, None),
+                json_body=body,
+                get_now_data=lambda hass: self.engine,
+            ),
+            patch.object(
+                _API.CasaSmartRoomActivityCommandView, "_room_accessible", accessible
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _view(self):
+        return _API.CasaSmartRoomActivityCommandView(self.hass)
+
+    async def _race(self, *commands) -> list[dict]:
+        tasks = [
+            asyncio.create_task(
+                view.post({"action": action, "idempotency_key": key}, room),
+                name=name,
+            )
+            for name, view, room, action, key in commands
+        ]
+        return await asyncio.gather(*tasks)
+
+    async def test_off_and_on_for_one_room_serialize_across_listeners(self) -> None:
+        # One instance per listener, as build_views creates them.
+        off, on = await self._race(
+            ("off", self._view(), "room-k", "turn_off", "off-key-0001"),
+            ("on", self._view(), "room-k", "turn_on", "on-key-0001"),
+        )
+        self.assertEqual(_turns(self.hass.trace), ["off", "on"])
+        # ON saw the capture OFF made, restored it, and only then cleared it.
+        self.assertEqual(off["restore_pending_count"], 2)
+        self.assertEqual(on["restored_from_capture_count"], 2)
+        self.assertEqual(self.states.get("light.a").state, "on")
+        self.assertEqual(self.states.get("light.b").state, "on")
+        self.assertEqual(self.engine.restore_set("room-k"), [])
+
+    async def test_different_rooms_run_independently(self) -> None:
+        # Even through one view, so through the one shared set of room locks.
+        view = self._view()
+        kitchen, lounge = await self._race(
+            ("kitchen", view, "room-k", "turn_off", "off-key-0001"),
+            ("lounge", view, "room-l", "turn_off", "off-key-0002"),
+        )
+        self.assertGreater(len(_turns(self.hass.trace)), 2)  # interleaved
+        self.assertEqual(kitchen["restore_pending_count"], 2)
+        self.assertEqual(lounge["restore_pending_count"], 1)
+        self.assertEqual(self.engine.restore_set("room-k"), ["light.a", "light.b"])
+        self.assertEqual(self.engine.restore_set("room-l"), ["light.c"])
 
 
 if __name__ == "__main__":

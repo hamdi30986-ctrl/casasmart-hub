@@ -68,6 +68,17 @@ def _member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
     return engine.member_id_for(claims["sub"]) if engine else claims["sub"]
 
 
+def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
+    """The per-room command locks, shared across view instances.
+
+    ``build_views`` constructs fresh view objects for HA's own HTTP app and
+    the TLS listener (and again on each daily TLS refresh); a room's commands
+    must queue behind each other whichever listener they arrive on — so the
+    locks live in ``hass.data``, never on a view.
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
+
+
 def _state_is_unavailable(state: Any) -> bool:
     return state is None or state.state in {"unknown", "unavailable"}
 
@@ -564,7 +575,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
 
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass)
-        self._room_locks: dict[str, asyncio.Lock] = {}
+        self._room_locks = _room_command_locks(hass)
 
     async def post(self, request: web.Request, room_id: str) -> web.Response:
         claims, error = authenticate_request(self._hass, request, "devices.control")
