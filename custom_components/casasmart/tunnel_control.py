@@ -102,7 +102,7 @@ class CloudflaredController:
         matches = sorted(slug for slug in slugs if is_cloudflared_slug(slug))
         if picked is not None and len(matches) > 1:
             _LOGGER.info(
-                "Multiple cloudflared add-ons installed %s — controlling %s",
+                "Multiple cloudflared add-ons installed %s; controlling %s",
                 matches,
                 picked,
             )

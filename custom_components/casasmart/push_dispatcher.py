@@ -342,14 +342,14 @@ class PushDispatcher:
             if engine is None:
                 if data.get("type") in _FAIL_OPEN_WITHOUT_ROLES:
                     _LOGGER.warning(
-                        "Push dispatch: device roles unavailable — sending the "
+                        "Push dispatch: device roles unavailable; sending the "
                         "%s alert to every registered device",
                         data.get("type"),
                     )
                     owner_only = False
                 else:
                     _LOGGER.warning(
-                        "Push dispatch: device roles unavailable — %s push "
+                        "Push dispatch: device roles unavailable; %s push "
                         "withheld (owner-only)",
                         data.get("type"),
                     )
@@ -365,7 +365,7 @@ class PushDispatcher:
         ]
         if not device_tokens:
             _LOGGER.debug(
-                "Push dispatch: no registered tokens — %s push dropped",
+                "Push dispatch: no registered tokens; %s push dropped",
                 data.get("type"),
             )
             return {"delivery": "no_registered_tokens"}

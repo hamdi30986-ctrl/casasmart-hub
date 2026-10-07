@@ -109,7 +109,7 @@ case "$cmd" in
     git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && die "tag $tag already exists on origin"
     build_and_verify
     git tag -a "$tag" -m "CasaSmart Hub $tag"
-    step "OK: dist/ built and $tag tagged locally — next: $0 publish $version"
+    step "OK: dist/ built and $tag tagged locally; next: $0 publish $version"
     ;;
   publish)
     need gh "GitHub CLI, authenticated (gh auth login)"
@@ -120,7 +120,7 @@ case "$cmd" in
     git push origin "$tag"
     gh release create "$tag" "$dist/casasmart.zip" "$dist/casasmart.zip.sig" \
       --verify-tag --prerelease --title "CasaSmart Hub $tag" --notes-file "$dist/notes.md"
-    step "OK: $tag published as a PRERELEASE — verify it, then: $0 promote $version"
+    step "OK: $tag published as a prerelease; verify it, then: $0 promote $version"
     ;;
   promote)
     need gh "GitHub CLI, authenticated (gh auth login)"
