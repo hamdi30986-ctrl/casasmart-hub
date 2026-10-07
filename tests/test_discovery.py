@@ -27,6 +27,11 @@ from discovery import (
     build_txt_records,
 )
 
+try:
+    from zeroconf import ServiceInfo
+except ImportError:  # the stub run; the Home Assistant runs have zeroconf
+    ServiceInfo = None
+
 FP = hashlib.sha256(b"casasmart-sample-identity").hexdigest()
 
 
@@ -56,6 +61,32 @@ class TxtRecordTests(unittest.TestCase):
     def test_overlong_name_truncated(self) -> None:
         txt = build_txt_records(hub_id=FP, hub_name="x" * 200, api_version=1)
         self.assertLessEqual(len(txt["name"]), 63)
+
+    def test_name_is_cut_by_bytes_on_a_character_boundary(self) -> None:
+        # A TXT entry holds 255 bytes, "name=" included. 63 characters of a
+        # four-byte script are 252 bytes, and zeroconf then refused the whole
+        # record, so the hub was never discovered. Scripts that fit before
+        # (Arabic, CJK) are left as they were.
+        for hub_name in ("🏠" * 63, "ع" * 63, "家" * 63):
+            with self.subTest(hub_name=hub_name[:4]):
+                txt = build_txt_records(hub_id=FP, hub_name=hub_name, api_version=1)
+                self.assertLessEqual(len(b"name=" + txt["name"]), 255)
+                txt["name"].decode("utf-8")  # cut on a character boundary
+        self.assertEqual(
+            build_txt_records(hub_id=FP, hub_name="ع" * 63, api_version=1)["name"],
+            ("ع" * 63).encode("utf-8"),
+        )
+
+    @unittest.skipIf(ServiceInfo is None, "zeroconf not installed")
+    def test_zeroconf_accepts_a_name_of_four_byte_characters(self) -> None:
+        txt = build_txt_records(hub_id=FP, hub_name="🏠" * 63, api_version=1)
+        ServiceInfo(
+            SERVICE_TYPE,
+            f"x.{SERVICE_TYPE}",
+            port=8443,
+            properties=txt,
+            server="h.local.",
+        )
 
 
 class InstanceNameTests(unittest.TestCase):

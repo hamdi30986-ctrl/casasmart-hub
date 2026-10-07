@@ -27,6 +27,9 @@ TXT_SCHEMA_VERSION = "1"
 
 # Used when hub_config has no hub_name.
 DEFAULT_HUB_NAME = "CasaSmart Hub"
+# A TXT entry holds 255 bytes, "name=" included; 63 characters of a
+# four-byte script would be 252.
+_TXT_NAME_MAX_BYTES = 200
 
 
 @dataclass(frozen=True)
@@ -57,9 +60,12 @@ def build_instance_name(hub_name: str | None, fingerprint: str) -> str:
     base = (hub_name or "").strip() or DEFAULT_HUB_NAME
     short = _short_fingerprint(fingerprint)
     suffix = f" ({short})" if short else ""
-    budget = 63 - len(suffix.encode("utf-8"))
-    base = base.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip()
-    return f"{base}{suffix}"
+    return f"{_cut_utf8(base, 63 - len(suffix.encode('utf-8')))}{suffix}"
+
+
+def _cut_utf8(text: str, max_bytes: int) -> str:
+    """Cut text to at most max_bytes of UTF-8, on a character boundary."""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", "ignore").rstrip()
 
 
 def build_txt_records(
@@ -79,7 +85,8 @@ def build_txt_records(
     cleaned_name = (hub_name or "").strip()
     if cleaned_name:
         # Keep the record small whatever the configured name.
-        records["name"] = cleaned_name[:63].encode("utf-8")
+        name = _cut_utf8(cleaned_name[:63], _TXT_NAME_MAX_BYTES)
+        records["name"] = name.encode("utf-8")
     return records
 
 
