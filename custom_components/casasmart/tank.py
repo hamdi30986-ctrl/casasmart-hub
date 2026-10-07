@@ -95,6 +95,15 @@ def _coerce_positive(value: Any, field: str) -> float:
     return number
 
 
+def _calibration(record: dict[str, Any]) -> tuple[float, float, float]:
+    """A record's (calibration_voltage, calibration_depth, max_height)."""
+    return (
+        record.get("calibration_voltage", 0.0) or 0.0,
+        record.get("calibration_depth", 0.0) or 0.0,
+        record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0,
+    )
+
+
 def _compute_percent(
     voltage: float, cal_v: float, cal_d: float, height: float
 ) -> float | None:
@@ -355,10 +364,8 @@ class TankEngine:
             record = self._devices.get(device_id)
             if record is None:
                 raise UnknownTankError("Unknown tank device")
-            cal_v = record.get("calibration_voltage", 0.0) or 0.0
-            cal_d = record.get("calibration_depth", 0.0) or 0.0
-            height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
-        return _compute_percent(float(voltage), cal_v, cal_d, height)
+            calibration = _calibration(record)
+        return _compute_percent(float(voltage), *calibration)
 
     def status(self, device_id: str) -> dict[str, Any]:
         """Live status for the app and the low-water check.
@@ -372,10 +379,11 @@ class TankEngine:
             if record is None:
                 raise UnknownTankError("Unknown tank device")
             low_percent = int(record.get("low_percent", TANK_LOW_PERCENT_DEFAULT))
+            calibration = _calibration(record)
             last = self._readings.last(device_id)
         voltage = float(last["v"]) if last else None
         percent = (
-            self.voltage_to_percent(device_id, voltage) if voltage is not None else None
+            _compute_percent(voltage, *calibration) if voltage is not None else None
         )
         return {
             "device_id": device_id,
@@ -425,9 +433,7 @@ class TankEngine:
             record = self._devices.get(device_id)
             if record is None:
                 raise UnknownTankError("Unknown tank device")
-            cal_v = record.get("calibration_voltage", 0.0) or 0.0
-            cal_d = record.get("calibration_depth", 0.0) or 0.0
-            height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
+            calibration = _calibration(record)
             # Clamped at the epoch: no reading is older, and a huge days value
             # would otherwise overflow SQLite's 64-bit INTEGER.
             cutoff = max(0, int(time.time()) - days * 24 * 3600)
@@ -436,7 +442,7 @@ class TankEngine:
             {
                 "t": entry["t"],
                 "v": entry["v"],
-                "p": _compute_percent(entry["v"], cal_v, cal_d, height),
+                "p": _compute_percent(entry["v"], *calibration),
             }
             for entry in entries
         ]
