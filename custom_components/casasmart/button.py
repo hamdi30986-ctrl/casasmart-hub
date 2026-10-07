@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.button import ENTITY_ID_FORMAT, ButtonEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -47,6 +48,19 @@ async def async_setup_entry(
     )
 
 
+async def _require_admin(hass: HomeAssistant, context: Context | None) -> None:
+    """Refuse a press by a Home Assistant user who isn't an admin.
+
+    Same rule as the admin-only services: a press without a user (an
+    automation or script) is allowed.
+    """
+    if context is None or context.user_id is None:
+        return
+    user = await hass.auth.async_get_user(context.user_id)
+    if user is None or not user.is_admin:
+        raise Unauthorized(context=context)
+
+
 class CasaSmartRegeneratePairingButton(ButtonEntity):
     """Resets pairing and mints a new admin code."""
 
@@ -69,6 +83,7 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
 
     async def async_press(self) -> None:
         """Unpair every device, delete all codes and mint a new admin code."""
+        await _require_admin(self._hass, self._context)
         data = self._entry.runtime_data
         auth = data.auth
         pairing = data.pairing
@@ -95,7 +110,17 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
                 "wiped_codes": wiped_codes,
             }
 
-        result = await self._hass.async_add_executor_job(_regenerate)
+        try:
+            result = await self._hass.async_add_executor_job(_regenerate)
+        except Exception as err:
+            # Each step is safe to repeat, so a reload (which rebuilds the
+            # caches from storage) and a second press finish the job.
+            _LOGGER.error("Pairing reset failed part-way: %s", err)
+            self._hass.config_entries.async_schedule_reload(self._entry.entry_id)
+            raise HomeAssistantError(
+                "Pairing reset failed part-way; the hub is reloading. "
+                "Press the button again to finish."
+            ) from err
         code = result["code"]
         device_count = len(result["wiped_devices"])
         code_count = result["wiped_codes"]
@@ -168,6 +193,7 @@ class CasaSmartFactoryResetButton(ButtonEntity):
         The service reloads this config entry, so waiting would mean waiting
         on this platform's own unload.
         """
+        await _require_admin(self._hass, self._context)
         _LOGGER.warning("CasaSmart factory reset requested via button")
         persistent_notification.async_create(
             self._hass,
@@ -181,4 +207,6 @@ class CasaSmartFactoryResetButton(ButtonEntity):
             title="CasaSmart Hub: factory reset",
             notification_id=f"{DOMAIN}_factory_reset",
         )
-        await self._hass.services.async_call(DOMAIN, "factory_reset", blocking=False)
+        await self._hass.services.async_call(
+            DOMAIN, "factory_reset", blocking=False, context=self._context
+        )
