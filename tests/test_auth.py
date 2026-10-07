@@ -553,9 +553,21 @@ class EngineTests(unittest.TestCase):
             "pairing.generate",
             "registry.manage",
             "widget.token",  # no self-renewal
+            "session.manage",  # no push re-registration, no self-unpair
         ):
             with self.subTest(permission=blocked):
                 self.assertFalse(AuthEngine.authorize(claims, blocked))
+
+    def test_session_manage_is_every_session_but_no_widget(self):
+        # Push registration and self-unpair act on the device's identity: every
+        # role's SESSION may do it, a widget token (whatever its role) may not.
+        for role in ("admin", "sub-admin", "user"):
+            with self.subTest(role=role):
+                session = {"sub": "dev-1", "role": role}
+                widget = {**session, "scope": "widget"}
+                self.assertTrue(AuthEngine.authorize(session, "session.manage"))
+                self.assertFalse(AuthEngine.authorize(widget, "session.manage"))
+        self.assertNotIn("session.manage", auth_engine.WIDGET_SCOPE_PERMISSIONS)
 
     def test_widget_token_admin_still_capped(self):
         # An ADMIN's widget token must not reach admin surfaces.
