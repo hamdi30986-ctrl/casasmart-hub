@@ -293,16 +293,15 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         count; otherwise every visible room does. Returns (ranked rooms,
         states by room, states by entity).
         """
-        rooms, policies, devices = await self.hass.async_add_executor_job(
-            lambda: (
-                self.registry.list_rooms(),
-                {
-                    r["room_id"]: self.now_data.room_policy(r["room_id"])
-                    for r in self.registry.list_rooms()
-                },
-                self.registry.list_user_devices(),
-            )
-        )
+
+        def read_stores():
+            rooms = self.registry.list_rooms()
+            policies = {
+                r["room_id"]: self.now_data.room_policy(r["room_id"]) for r in rooms
+            }
+            return rooms, policies, self.registry.list_user_devices()
+
+        rooms, policies, devices = await self.hass.async_add_executor_job(read_stores)
         rooms = [r for r in rooms if scope is None or r["room_id"] in scope]
         configured = any(
             policies.get(r["room_id"], {}).get("participates") for r in rooms
