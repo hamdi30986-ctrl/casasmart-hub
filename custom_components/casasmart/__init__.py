@@ -223,31 +223,14 @@ class CasaSmartRuntimeData:
 
 def _open_storage(
     data_dir: Path,
-) -> tuple[
-    HubStorage,
-    JsonConfigStore,
-    AuthEngine,
-    PairingManager,
-    RecoveryManager,
-    RegistryEngine,
-    TankEngine,
-    UserSettingsEngine,
-    NowDataEngine,
-    PushTokenStore,
-    AlarmEngine,
-    AudioEngine,
-    EnergyEngine,
-    EnergyFlags,
-    str | None,
-    str | None,
-]:
+) -> tuple[CasaSmartRuntimeData, str | None, str | None]:
     """Open the database and hub config and build every storage-backed engine.
 
     Blocking: run it in the executor. Also reinstalls the owner's pairing and
     recovery codes from their hashes in hub_config, minting a code only when
-    its hash is missing (first start, or after a factory reset). The last two
-    items returned are those new plaintext codes, or None; this is the only
-    time they exist in the clear.
+    its hash is missing (first start, or after a factory reset). Returns the
+    runtime data and those new plaintext pairing and recovery codes, or None;
+    this is the only time they exist in the clear.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
@@ -326,24 +309,23 @@ def _open_storage(
     )
     energy.warm_up()
     energy_flags = EnergyFlags(storage.table("energy_flags"))
-    return (
-        storage,
-        hub_config,
-        auth,
-        pairing,
-        recovery,
-        registry,
-        tanks,
-        user_settings,
-        now_data,
-        push,
-        alarm,
-        audio,
-        energy,
-        energy_flags,
-        bootstrap_code,
-        recovery_code,
+    runtime_data = CasaSmartRuntimeData(
+        storage=storage,
+        hub_config=hub_config,
+        auth=auth,
+        pairing=pairing,
+        recovery=recovery,
+        registry=registry,
+        tanks=tanks,
+        user_settings=user_settings,
+        now_data=now_data,
+        push=push,
+        alarm=alarm,
+        audio=audio,
+        energy=energy,
+        energy_flags=energy_flags,
     )
+    return runtime_data, bootstrap_code, recovery_code
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
@@ -421,50 +403,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     await async_clear_legacy_update_dirs(hass)
 
     try:
-        (
-            storage,
-            hub_config,
-            auth,
-            pairing,
-            recovery,
-            registry,
-            tanks,
-            user_settings,
-            now_data,
-            push,
-            alarm,
-            audio,
-            energy,
-            energy_flags,
-            bootstrap_code,
-            recovery_code,
-        ) = await hass.async_add_executor_job(_open_storage, data_dir)
+        runtime_data, bootstrap_code, recovery_code = await hass.async_add_executor_job(
+            _open_storage, data_dir
+        )
     except StorageError as err:
         raise ConfigEntryNotReady(f"CasaSmart storage failed to open: {err}") from err
+    runtime_data.relay_config_applied = relay_config_snapshot(entry.options, entry.data)
+    entry.runtime_data = runtime_data
 
-    entry.runtime_data = CasaSmartRuntimeData(
-        storage=storage,
-        hub_config=hub_config,
-        auth=auth,
-        pairing=pairing,
-        recovery=recovery,
-        registry=registry,
-        tanks=tanks,
-        user_settings=user_settings,
-        now_data=now_data,
-        push=push,
-        alarm=alarm,
-        audio=audio,
-        energy=energy,
-        energy_flags=energy_flags,
-        relay_config_applied=relay_config_snapshot(entry.options, entry.data),
-    )
-
-    suggestion_store = SuggestionStore(storage)
+    suggestion_store = SuggestionStore(runtime_data.storage)
     # Marks suggestion runs a restart interrupted as unknown; never reruns them.
     await hass.async_add_executor_job(suggestion_store.recover)
     entry.runtime_data.suggestions = SuggestionRuntime(
-        hass, suggestion_store, registry, now_data=now_data
+        hass, suggestion_store, runtime_data.registry, now_data=runtime_data.now_data
     )
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
@@ -473,7 +424,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     # database is checkpointed and closed here instead.
     async def _async_close_storage_on_stop(_event: Event) -> None:
         entry.runtime_data.suggestions.stop()
-        await hass.async_add_executor_job(storage.close)
+        await hass.async_add_executor_job(runtime_data.storage.close)
         _LOGGER.info("CasaSmart Hub storage checkpointed and closed on HA stop")
 
     entry.async_on_unload(
@@ -485,7 +436,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
 
     await _async_sync_tunnel_url(hass, entry)
 
-    await _async_import_registry(hass, hub_config, registry)
+    await _async_import_registry(hass, runtime_data.hub_config, runtime_data.registry)
 
     await _async_setup_dev_enroll(hass, entry, data_dir)
 
@@ -502,7 +453,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     if recovery_code is not None:
         notify_recovery_code(hass, recovery_code)
 
-    _warn_keyless_speaker_provisioning(hub_config, data_dir)
+    _warn_keyless_speaker_provisioning(runtime_data.hub_config, data_dir)
 
     _async_register_services(hass)
 
@@ -514,17 +465,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     await _async_start_mdns(hass, entry)
     await _async_start_push(hass, entry, data_dir)
 
-    alarm_adapter = AlarmAdapter(hass, alarm)
+    alarm_adapter = AlarmAdapter(hass, runtime_data.alarm)
     alarm_adapter.async_start()
     entry.runtime_data.alarm_adapter = alarm_adapter
 
+    energy = runtime_data.energy
     energy_adapter = EnergyAdapter(
         hass,
         energy,
-        registry,
+        runtime_data.registry,
         change_callback=lambda: hass.bus.async_fire(EVENT_ENERGY_CHANGED),
     )
-    energy_automations = EnergyAutomationManager(hass, energy, energy_flags)
+    energy_automations = EnergyAutomationManager(
+        hass, energy, runtime_data.energy_flags
+    )
     energy_controller = EnergyController(
         hass, energy, energy_adapter, energy_automations
     )
@@ -532,11 +486,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     entry.runtime_data.energy_controller = energy_controller
     await energy_controller.async_start()
 
-    audio_adapter = AudioAdapter(hass, audio)
+    audio_adapter = AudioAdapter(hass, runtime_data.audio)
     await audio_adapter.async_start()
     entry.runtime_data.audio_adapter = audio_adapter
 
-    athan_scheduler = AthanScheduler(hass, audio, audio_adapter)
+    athan_scheduler = AthanScheduler(hass, runtime_data.audio, audio_adapter)
     await athan_scheduler.async_start()
     entry.runtime_data.athan_scheduler = athan_scheduler
 
