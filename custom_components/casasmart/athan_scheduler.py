@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 import homeassistant.util.dt as dt_util
@@ -34,6 +34,8 @@ PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 # A prayer up to this many seconds past still plays (say, after a restart);
 # anything older is skipped.
 _GRACE_SEC = 120
+# While the bus refuses the play, try again this often until the grace ends.
+_RETRY_SEC = 10
 
 # Calculation methods the library accepts. _METHOD_ALIASES maps other names
 # the app may send; anything unknown uses _DEFAULT_METHOD.
@@ -253,7 +255,7 @@ class AthanScheduler:
             if not upcoming:
                 continue  # already played, or past the grace period
             unsub = async_track_point_in_time(
-                self._hass, self._make_fire(prayer, day), fire_at
+                self._hass, self._make_fire(prayer, day, fire_at), fire_at
             )
             self._unsub_prayers.append(unsub)
             armed.append(f"{prayer} {local}")
@@ -329,28 +331,50 @@ class AthanScheduler:
                 targets.append(mac6)
         return True, targets
 
-    def _make_fire(self, prayer: str, day: str) -> Any:
-        """The timer callback for one prayer on day; records it as played."""
+    def _make_fire(self, prayer: str, day: str, fire_at: datetime) -> Any:
+        """The timer callback for one prayer on day.
+
+        The prayer counts as played once its play is published. While the
+        bus refuses it, the callback re-arms itself every _RETRY_SEC until
+        the grace window ends, so a short broker outage doesn't silence the
+        prayer and it still never plays late.
+        """
+        deadline = fire_at + timedelta(seconds=_GRACE_SEC)
 
         @callback
         def _fire(_now: datetime) -> None:
-            self._fired.add((day, prayer))
-            self._fire_athan(prayer)
+            if (day, prayer) in self._fired:
+                return
+            if self._fire_athan(prayer):
+                self._fired.add((day, prayer))
+                return
+            retry_at = dt_util.utcnow() + timedelta(seconds=_RETRY_SEC)
+            if retry_at > deadline:
+                _LOGGER.warning(
+                    "Athan: %s not delivered within %d s of its time; giving up",
+                    prayer,
+                    _GRACE_SEC,
+                )
+                return
+            self._unsub_prayers.append(
+                async_track_point_in_time(self._hass, _fire, retry_at)
+            )
 
         return _fire
 
-    def _fire_athan(self, prayer: str) -> None:
+    def _fire_athan(self, prayer: str) -> bool:
         """Publish the athan play for prayer to its target speakers.
 
-        A speaker the bus can't reach right now is logged and skipped: the
-        adapter refuses rather than queues, so an athan never plays late.
+        Returns False only when the bus refused every play (the adapter
+        refuses rather than queues, so an athan never plays late); the timer
+        then retries. Anything else settles the prayer.
         """
         # Athan may have been turned off since the timer was armed.
         if self._resolve_config() is None:
             _LOGGER.info(
                 "Athan: %s reached but athan is now disabled; skipping", prayer
             )
-            return
+            return True
         athan = self._engine.get_athan() or {}
         has_sel, targets = self._resolve_targets(athan)
         file_path = f"{ATHAN_DIR}/{prayer.lower()}.mp3"
@@ -360,11 +384,12 @@ class AthanScheduler:
                 "Athan: %s, selected speakers are all un-enrolled; firing nowhere",
                 prayer,
             )
-            return
+            return True
 
         # mac=None is a broadcast; a selection gets one play per speaker.
         macs: list[str | None] = targets if has_sel else [None]
         delivered = 0
+        refused = 0
         for mac in macs:
             try:
                 topic, payload = self._engine.build_play(
@@ -377,6 +402,7 @@ class AthanScheduler:
                 self._adapter.publish(topic, payload, qos=1)
                 delivered += 1
             except Exception:
+                refused += 1
                 _LOGGER.warning(
                     "Athan: %s not delivered to %s: MQTT bus unavailable",
                     prayer,
@@ -390,6 +416,7 @@ class AthanScheduler:
                 if not has_sel
                 else f"{delivered} speaker(s): {','.join(targets)}",
             )
+        return delivered > 0 or refused == 0
 
     def _resolve_config(
         self,
