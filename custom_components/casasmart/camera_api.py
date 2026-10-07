@@ -31,9 +31,10 @@ from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 _LOGGER = logging.getLogger(__name__)
 
 
+# Seconds to wait for a camera's still image before answering 502.
 SNAPSHOT_TIMEOUT = 10
 
-
+# Ceiling on one playlist or segment fetch from Home Assistant's HLS endpoint.
 PROXY_TIMEOUT = ClientTimeout(total=30)
 
 
@@ -134,6 +135,7 @@ class CasaSmartCameraStreamView(HomeAssistantView):
         return self.json(body)
 
     def _tunnel_url(self) -> str | None:
+        """The configured tunnel's https base URL, or None."""
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             return None
@@ -142,6 +144,14 @@ class CasaSmartCameraStreamView(HomeAssistantView):
 
 
 class CasaSmartCameraHlsProxyView(HomeAssistantView):
+    """GET /api/casasmart/camera/{entity_id}/hls/{ticket}/{filename}.
+
+    Serves one HLS playlist or segment to the app's player. The stream ticket
+    in the path is the credential; scope was checked when it was minted. Each
+    file is fetched from Home Assistant's own HLS endpoint over loopback, whose
+    stream token is looked up per fetch and never reaches the app.
+    """
+
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/hls/{{ticket}}/{{filename:[A-Za-z0-9_./]+}}"
     name = f"api:{DOMAIN}:camera:hls"
     requires_auth = False

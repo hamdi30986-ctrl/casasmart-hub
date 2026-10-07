@@ -7,8 +7,7 @@ devices). Every endpoint here is gated by
 these reshape the home's hardware):
 
 - ``POST /api/casasmart/admin/zigbee/permit_join`` — open/close the
-  Zigbee network (the z2m permit-join publish the pairing sheet sent
-  itself).
+  Zigbee network (a zigbee2mqtt permit-join publish to each instance).
 - ``GET /api/casasmart/admin/registry`` — the RAW HA entity + device
   registries (incl. hidden/disabled): what the import flows group and
   classify by.
@@ -16,8 +15,8 @@ these reshape the home's hardware):
   import/pairing diff (unfiltered except the token-bearing attributes —
   see ``installer.STRIPPED_STATE_ATTRS``).
 - ``PATCH /api/casasmart/admin/registry/entities/{entity_id}`` — entity
-  rename only (the switch_as_x domain swap was removed), a
-  scoped subset of HA's WS ``config/entity_registry/update``.
+  rename only, a scoped subset of HA's WS
+  ``config/entity_registry/update``.
 - ``GET/POST /api/casasmart/admin/config_flow`` and
   ``POST .../config_flow/{flow_id}`` — the config-flow proxy,
   whitelisted to the Broadlink + EasyIR handlers (``installer
@@ -139,11 +138,10 @@ class CasaSmartAdminPermitJoinView(_AdminView):
                 "MQTT is not available on this hub",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
-        # permit_join is PER zigbee2mqtt instance. A villa runs one
-        # coordinator per floor, so publishing only to the default base topic
-        # opened floor 1 and left the rest shut — devices upstairs simply
-        # could not be paired from the app. Open every configured instance
-        # (or the one the caller asked for).
+        # permit_join is PER zigbee2mqtt instance, and a large home may run one
+        # coordinator per floor: publishing only to the default base topic
+        # would leave the other floors unable to pair. Open every configured
+        # instance (or the one the caller asked for).
         topics = resolve_zigbee_base_topics(
             self._zigbee_base_topics(), payload.get("base_topic")
         )
@@ -275,8 +273,8 @@ class CasaSmartAdminEntityView(_AdminView):
             return self.json_message(
                 f"Entity {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # Name rename only — the switch_as_x options swap is gone, so
-        # parse_entity_patch yields exactly {"name": ...}.
+        # parse_entity_patch allows a rename only, so changes is exactly
+        # {"name": ...}.
         # async_update_entity raises ValueError on bad input -> the caller's 400.
         try:
             entry = registry.async_update_entity(entity_id, name=changes["name"])

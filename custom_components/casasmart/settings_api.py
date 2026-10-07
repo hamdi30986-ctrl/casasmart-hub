@@ -124,7 +124,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         # Write-guard (favorites parity): an ENTITY tile must point at a
         # served entity in the caller's scope, so a scoped member can't pin
         # another room's device into their widget. Pseudo-tiles pass; shape
-        # validation stays the engine's job (_clean_widget_tiles).
+        # validation (a non-string type included) stays the engine's job
+        # (_clean_widget_tiles).
         tiles = payload.get("widget_tiles")
         if isinstance(tiles, list):
             scope = claims.get("rooms")
