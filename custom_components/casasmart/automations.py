@@ -1,4 +1,4 @@
-"""Id checks and list edits behind automation_api, with no HA imports.
+"""Id checks, list edits and key renames behind automation_api, with no HA imports.
 
 automations.yaml is a list of dicts keyed by "id", as in HA's own config
 API. Keeping this logic import-free lets the unit tests run without Home
@@ -24,6 +24,10 @@ CASA_AUTOMATION_KEY_RE = re.compile(
 MAX_AUTOMATION_KEY_LENGTH = 255
 
 CONF_ID = "id"
+
+# HA's editor (2024.10+) saves these plural keys; the apps read the singular
+# ones, which HA still accepts.
+_SINGULAR_KEYS = {"triggers": "trigger", "conditions": "condition", "actions": "action"}
 
 
 def is_casa_automation_key(config_key: Any) -> bool:
@@ -79,3 +83,15 @@ def delete_automation(data: list[dict[str, Any]], config_key: str) -> bool:
             del data[index]
             return True
     return False
+
+
+def with_singular_keys(config: dict[str, Any]) -> dict[str, Any]:
+    """A copy of config with HA's plural top-level keys under the singular names.
+
+    A plural key stays as it is when the config also has the singular one.
+    """
+    renamed: dict[str, Any] = {}
+    for key, value in config.items():
+        singular = _SINGULAR_KEYS.get(key)
+        renamed[singular if singular and singular not in config else key] = value
+    return renamed
