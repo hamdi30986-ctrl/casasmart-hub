@@ -293,6 +293,51 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
     async def drain(self):
         await self.hass.drain()
 
+    def kitchen_and_suite(self, level, *, presence, temperature):
+        """Excluded kitchen beside a managed suite with the same AC/light/sensors."""
+        states = [_sun(self.now, day=False)]
+        rooms = {}
+        for room in ("kitchen", "suite"):
+            room_states = [
+                _State(
+                    f"climate.{room}_ac",
+                    "cool",
+                    {"temperature": 22, "fan_modes": ["low", "max"]},
+                ),
+                _State(f"light.{room}", "on", {"brightness": 200}),
+                _State(
+                    f"sensor.{room}_temp",
+                    temperature,
+                    {"device_class": "temperature"},
+                ),
+                _State(
+                    f"binary_sensor.{room}_presence",
+                    presence,
+                    {"device_class": "occupancy"},
+                ),
+            ]
+            states += room_states
+            rooms.update({state.entity_id: room for state in room_states})
+        adapter, _ = self.make_adapter(states, rooms)
+        self.activate(level, excluded_rooms=["kitchen"])
+        adapter.async_start()
+        return adapter
+
+    def edge(self, adapter, entity_id, value):
+        old = self.hass.states.get(entity_id)
+        self.emit_change(adapter, old, _State(entity_id, value, dict(old.attributes)))
+
+    def room_calls(self, room):
+        return [
+            call
+            for call in self.calls()
+            if call[2]["entity_id"].partition(".")[2].startswith(room)
+        ]
+
+    def exclude_suite(self):
+        """Exclude the managed suite mid-session, as the owner's wizard would."""
+        self.engine.patch_config(LEVEL_SMART, {"excluded_rooms": ["kitchen", "suite"]})
+
     # -- inventory ---------------------------------------------------------
 
     async def test_inventory_classifies_rooms_and_excludes_gang_lights(self):
@@ -552,6 +597,156 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.calls(), [])
         self.assertEqual(summary["issues"][0]["code"], "sensor_unavailable")
+
+    # -- excluded rooms stay untouched after activation -------------------
+
+    async def test_smart_arrival_never_controls_an_excluded_room(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="off", temperature="25")
+        await adapter.async_apply()
+        await self.drain()
+        for room in ("kitchen", "suite"):
+            self.edge(adapter, f"binary_sensor.{room}_presence", "on")
+        await self.drain()
+        self.assertEqual(self.room_calls("kitchen"), [])
+        self.assert_command("climate.suite_ac", "set_temperature", temperature=24.0)
+        self.assert_command("light.suite", "turn_on", brightness_pct=60)
+        occupancy = self.engine.snapshot()["room_occupancy"]
+        self.assertTrue(occupancy["suite"]["occupied"])
+        self.assertNotIn("kitchen", occupancy)
+
+    async def test_smart_exit_grace_never_controls_an_excluded_room(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="on", temperature="25")
+        await adapter.async_apply()
+        await self.drain()
+        for room in ("kitchen", "suite"):
+            self.edge(adapter, f"binary_sensor.{room}_presence", "off")
+        await self.drain()
+        for timer in list(self.timers.calls):
+            if timer["delay"] == EMPTY_GRACE_SECONDS and not timer["cancelled"]:
+                self.timers.fire(timer)
+        await self.drain()
+        self.assertEqual(self.room_calls("kitchen"), [])
+        self.assert_command("climate.suite_ac", "turn_off")
+        self.assert_command("light.suite", "turn_off")
+        self.assertNotIn("kitchen", self.engine.snapshot()["room_occupancy"])
+
+    async def test_medium_temperature_edge_never_controls_an_excluded_room(self):
+        adapter = self.kitchen_and_suite(LEVEL_MEDIUM, presence="on", temperature="25")
+        await adapter.async_apply()
+        await self.drain()
+        for room in ("kitchen", "suite"):
+            self.edge(adapter, f"sensor.{room}_temp", "21")
+        await self.drain()
+        self.assertEqual(self.room_calls("kitchen"), [])
+        self.assert_command("climate.suite_ac", "turn_off")
+
+    async def test_smart_boost_never_runs_in_an_excluded_room(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="off", temperature="31")
+        await adapter.async_apply()
+        await self.drain()
+        for room in ("kitchen", "suite"):
+            self.edge(adapter, f"binary_sensor.{room}_presence", "on")
+        await self.drain()
+        self.assertEqual(self.room_calls("kitchen"), [])
+        self.assert_command("climate.suite_ac", "set_fan_mode", fan_mode="max")
+        boost_timers = [
+            timer
+            for timer in self.timers.calls
+            if timer["delay"] == BOOST_FAILSAFE_SECONDS
+        ]
+        self.assertEqual(len(boost_timers), 1)
+
+        for room in ("kitchen", "suite"):
+            self.edge(adapter, f"sensor.{room}_temp", "27")
+        await self.drain()
+        self.assert_command("climate.suite_ac", "set_fan_mode", fan_mode="low")
+        self.assertTrue(boost_timers[0]["cancelled"])
+        self.assertEqual(self.room_calls("kitchen"), [])
+
+    async def test_excluded_room_with_a_dead_sensor_gets_no_occupancy_or_command(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="on", temperature="25")
+        self.hass.states.set(
+            _State(
+                "sensor.kitchen_temp", "unavailable", {"device_class": "temperature"}
+            )
+        )
+        await adapter.async_apply()
+        await self.drain()
+        self.edge(adapter, "sensor.kitchen_temp", "31")
+        await self.drain()
+        self.assertEqual(self.room_calls("kitchen"), [])
+        self.assertNotIn("kitchen", self.engine.snapshot()["room_occupancy"])
+
+    async def test_room_excluded_during_exit_grace_gets_no_late_command(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="on", temperature="25")
+        await adapter.async_apply()
+        await self.drain()
+        self.edge(adapter, "binary_sensor.suite_presence", "off")
+        await self.drain()
+        grace = self.timers.latest(EMPTY_GRACE_SECONDS)
+        before = len(self.calls())
+
+        self.exclude_suite()
+        self.timers.fire(grace)
+        await self.drain()
+        self.assertEqual(self.calls()[before:], [])
+
+    async def test_room_excluded_during_boost_gets_no_late_command(self):
+        adapter = self.kitchen_and_suite(LEVEL_SMART, presence="on", temperature="31")
+        await adapter.async_apply()
+        await self.drain()
+        failsafe = self.timers.latest(BOOST_FAILSAFE_SECONDS)
+        before = len(self.calls())
+
+        self.exclude_suite()
+        self.timers.fire(failsafe)
+        await self.drain()
+        self.edge(adapter, "sensor.suite_temp", "27")
+        self.edge(adapter, "binary_sensor.suite_presence", "off")
+        await self.drain()
+        for timer in list(self.timers.calls):
+            if timer["delay"] == EMPTY_GRACE_SECONDS and not timer["cancelled"]:
+                self.timers.fire(timer)
+        await self.drain()
+        self.assertEqual(self.calls()[before:], [])
+
+    async def test_room_excluded_before_heat_window_keeps_its_cover(self):
+        sun = _sun(self.now, day=True, since_sunrise_hours=0.5, until_sunset_hours=5)
+        adapter, _ = self.make_adapter(
+            [_State("cover.curtain", "open"), sun], {"cover.curtain": "suite"}
+        )
+        self.activate(LEVEL_MEDIUM)
+        await adapter.async_apply()
+        start_timer = self.timers.latest(30 * 60)
+
+        self.engine.patch_config(LEVEL_MEDIUM, {"excluded_rooms": ["suite"]})
+        self.wall.advance(30 * 60)
+        self.timers.fire(start_timer)
+        await self.drain()
+        self.assertEqual(self.calls(), [])
+
+    async def test_room_excluded_mid_session_ignores_the_sunset_edge(self):
+        sun = _sun(self.now, day=True)
+        states = [
+            _State("sensor.temp", "25", {"device_class": "temperature"}),
+            _State("binary_sensor.presence", "on", {"device_class": "occupancy"}),
+            _State("cover.curtain", "open"),
+            sun,
+        ]
+        rooms = {
+            state.entity_id: "suite" for state in states if state.entity_id != "sun.sun"
+        }
+        adapter, _ = self.make_adapter(states, rooms)
+        self.activate(LEVEL_SMART)
+        adapter.async_start()
+        await adapter.async_apply()
+        await self.drain()
+        before = len(self.calls())
+
+        self.engine.patch_config(LEVEL_SMART, {"excluded_rooms": ["suite"]})
+        self.emit_change(adapter, sun, _sun(self.now, day=False))
+        await self.drain()
+        self.assertEqual(self.calls()[before:], [])
 
     # -- Smart static and occupied posture --------------------------------
 

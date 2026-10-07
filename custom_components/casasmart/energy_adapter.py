@@ -559,15 +559,19 @@ class EnergyAdapter:
             entity_id: entity.room_id
             for entity_id, entity in inventory.entities.items()
         }
+        excluded = set(config["excluded_rooms"])
+        # An excluded room's sensors would only ever feed rules that must not
+        # touch that room, so they are not watched at all.
         self._sensor_rooms.clear()
         for room_id, room in inventory.rooms.items():
+            if room_id in excluded:
+                continue
             for entity in room.temperature_sensors:
                 self._sensor_rooms[entity.entity_id] = (room_id, "temperature")
             for entity in room.presence_sensors:
                 self._sensor_rooms[entity.entity_id] = (room_id, "presence")
 
         managed: set[str] = set()
-        excluded = set(config["excluded_rooms"])
         for group in inventory.gangs:
             if len(group.entity_ids) in {2, 3} and group.room_id not in excluded:
                 managed.update(group.entity_ids)
@@ -588,6 +592,7 @@ class EnergyAdapter:
     def _troubled_rooms(self, inventory: EnergyInventory) -> set[str]:
         troubled: set[str] = set()
         bad_keys: set[tuple[str | None, str, str | None]] = set()
+        excluded = set((self._config or {}).get("excluded_rooms", []))
         for room_id, room in inventory.rooms.items():
             bad = [
                 entity
@@ -608,7 +613,13 @@ class EnergyAdapter:
                     entity_id=entity.entity_id,
                     message="Room skipped because a sensor is unavailable.",
                 )
-            if self._engine.active_level == LEVEL_SMART and room.automatic:
+            # No occupancy chip for an excluded room: its sensors are not
+            # watched, so nothing would ever clear the "unavailable" state.
+            if (
+                self._engine.active_level == LEVEL_SMART
+                and room.automatic
+                and room_id not in excluded
+            ):
                 self._hass.async_create_task(
                     self._set_occupancy(room_id, None, sensors_available=False)
                 )
@@ -820,6 +831,10 @@ class EnergyAdapter:
     async def _async_presence_changed(self, room_id: str) -> None:
         if self._engine.active_level != LEVEL_SMART:
             return
+        if room_id in await self._excluded_rooms(LEVEL_SMART):
+            self._cancel_empty(room_id)
+            self._cancel_boost(room_id)
+            return
         inventory = await self._refresh_inventory()
         room = inventory.rooms.get(room_id)
         if room is None or not room.automatic:
@@ -858,6 +873,8 @@ class EnergyAdapter:
 
     async def _finish_empty(self, room_id: str) -> None:
         if self._engine.active_level != LEVEL_SMART:
+            return
+        if room_id in await self._excluded_rooms(LEVEL_SMART):
             return
         inventory = await self._refresh_inventory()
         room = inventory.rooms.get(room_id)
@@ -1035,6 +1052,10 @@ class EnergyAdapter:
         level = self._engine.active_level
         if level not in {LEVEL_MEDIUM, LEVEL_SMART}:
             return
+        if room_id in await self._excluded_rooms(level):
+            self._cancel_empty(room_id)
+            self._cancel_boost(room_id)
+            return
         inventory = await self._refresh_inventory()
         room = inventory.rooms.get(room_id)
         if room is None:
@@ -1098,6 +1119,8 @@ class EnergyAdapter:
         reason: str,
     ) -> None:
         if self._engine.active_level != LEVEL_SMART:
+            return
+        if room_id in await self._excluded_rooms(LEVEL_SMART):
             return
         inventory = await self._refresh_inventory()
         room = inventory.rooms.get(room_id)
@@ -1184,7 +1207,7 @@ class EnergyAdapter:
         if level not in {LEVEL_MEDIUM, LEVEL_SMART}:
             return
         inventory = await self._refresh_inventory()
-        excluded = set((self._config or {}).get("excluded_rooms", []))
+        excluded = await self._excluded_rooms(level)
         troubled = self._troubled_rooms(inventory)
         for room_id, room in inventory.rooms.items():
             if room_id in excluded or room_id in troubled:
@@ -1206,10 +1229,11 @@ class EnergyAdapter:
         if level != LEVEL_SMART:
             return
         inventory = await self._refresh_inventory()
+        excluded = await self._excluded_rooms(level)
         day = self._sun_context().day
         occupancy = self._engine.snapshot()["room_occupancy"]
         for room_id, room in inventory.rooms.items():
-            if not room.automatic:
+            if not room.automatic or room_id in excluded:
                 continue
             if occupancy.get(room_id, {}).get("occupied") is not True:
                 continue
@@ -1430,6 +1454,20 @@ class EnergyAdapter:
             self._set_context(inventory, self._config)
         self._troubled_rooms(inventory)
         return inventory
+
+    async def _excluded_rooms(self, level: str) -> set[str]:
+        """Rooms this level must not command, as applied or as configured now.
+
+        The owner can exclude a room while the level is active without a
+        re-apply, so dynamic handlers and delayed callbacks re-read the
+        engine's config instead of trusting only the applied snapshot.
+        """
+        current = await self._hass.async_add_executor_job(
+            self._engine.get_config, level
+        )
+        return set(current["excluded_rooms"]).union(
+            (self._config or {}).get("excluded_rooms", [])
+        )
 
     async def _set_occupancy(
         self,
