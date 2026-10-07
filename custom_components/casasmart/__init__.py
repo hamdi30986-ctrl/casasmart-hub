@@ -20,6 +20,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
@@ -33,6 +34,9 @@ from homeassistant.helpers import (
     area_registry as ar,
 )
 from homeassistant.helpers import (
+    config_validation as cv,
+)
+from homeassistant.helpers import (
     device_registry as dr,
 )
 from homeassistant.helpers import (
@@ -43,6 +47,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.loader import async_get_integration
 
 from .alarm import AlarmEngine
@@ -1285,7 +1290,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
     """Register the casasmart.* services, once per Home Assistant run.
 
     The handlers look up the loaded entry at call time, so they outlive entry
-    reloads and are never unregistered.
+    reloads and are never unregistered. factory_reset and set_tunnel_url go
+    through Home Assistant's admin check: one unpairs every phone, the other
+    changes where phones connect.
     """
 
     async def _handle_activate_scene(call) -> None:
@@ -1462,9 +1469,17 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await async_close_connections(hass)
         await hass.config_entries.async_reload(entries[0].entry_id)
 
+    admin_handlers = {
+        "factory_reset": (_handle_factory_reset, vol.Schema({})),
+        "set_tunnel_url": (
+            _handle_set_tunnel_url,
+            vol.Schema({vol.Required("url"): cv.string}),
+        ),
+    }
+    for service, (handler, schema) in admin_handlers.items():
+        if not hass.services.has_service(DOMAIN, service):
+            async_register_admin_service(hass, DOMAIN, service, handler, schema)
     handlers = {
-        "factory_reset": _handle_factory_reset,
-        "set_tunnel_url": _handle_set_tunnel_url,
         "activate_scene": _handle_activate_scene,
         "configure_hq_notifications": _handle_configure_hq_notifications,
     }
