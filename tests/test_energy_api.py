@@ -17,7 +17,12 @@ import view_harness as H
 
 try:
     from casasmart.api import CasaSmartCommandView
-    from casasmart.energy import LEVEL_LOW, EnergyEngine, default_level_config
+    from casasmart.energy import (
+        LEVEL_LOW,
+        EnergyEngine,
+        EnergyInactiveError,
+        default_level_config,
+    )
     from casasmart.energy_api import (
         CasaSmartEnergyActivateView,
         CasaSmartEnergyConfigView,
@@ -108,6 +113,20 @@ class EnergyApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 409)
         self.assertEqual(body, {"error": "setup_required", "level": LEVEL_LOW})
+
+    async def test_activation_overtaken_by_deactivate_is_machine_readable_409(self):
+        async def overtaken(level, *, smart_lockout_enabled=None, actor=None):
+            raise EnergyInactiveError("deactivated during activation")
+
+        self.runtime.energy_controller.async_activate = overtaken
+        view = CasaSmartEnergyActivateView(self.hass)
+        status, body = H.read_response(
+            await view.post(
+                H.FakeRequest(headers=self.admin, body={"level": LEVEL_LOW})
+            )
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"error": "energy_inactive"})
 
     async def test_member_device_command_is_blocked_before_payload_execution(self):
         config = default_level_config(LEVEL_LOW)
