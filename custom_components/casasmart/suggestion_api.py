@@ -22,7 +22,7 @@ from datetime import datetime
 
 from homeassistant.components.http import HomeAssistantView
 
-from .auth_api import authenticate_request, get_engine, json_body
+from .auth_api import async_member_id, authenticate_request, json_body
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .registry_api import async_execute_registry_scene
@@ -76,16 +76,6 @@ class _SuggestionView(HomeAssistantView):
         except (StorageError, sqlite3.Error):
             return self.json({"error": "suggestion_storage_unavailable"}, 503)
 
-    async def member(self, claims):
-        """The member behind the token; suppressions follow the member.
-
-        A storage read in the executor; handle maps its storage errors.
-        """
-        auth = get_engine(self.hass)
-        if auth is None:
-            return claims["sub"]
-        return await self.hass.async_add_executor_job(auth.member_id_for, claims["sub"])
-
     async def body(self, request, allowed):
         """The JSON object body, refusing any field not in allowed."""
         body = await json_body(request)
@@ -103,7 +93,9 @@ class CasaSmartSuggestionsView(_SuggestionView):
     async def get(self, request):
         async def operation(service, claims):
             return self.json(
-                await service.payload(await self.member(claims), claims.get("rooms"))
+                await service.payload(
+                    await async_member_id(self.hass, claims), claims.get("rooms")
+                )
             )
 
         return await self.handle(request, "devices.read", operation)
@@ -230,7 +222,8 @@ class CasaSmartSuggestionActionView(_SuggestionView):
             )
             if error is not None:
                 return error
-            member, scope = await self.member(claims), claims.get("rooms")
+            member = await async_member_id(self.hass, claims)
+            scope = claims.get("rooms")
             context = await self.context(service, scope)
             candidate = self.find(
                 service, context, scope, occurrence, policy_checks=False
@@ -293,7 +286,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
                 suppressed = fresh[0]["suppressions"].get(
                     service.store.suppression_key(
-                        await self.member(fresh_claims),
+                        await async_member_id(self.hass, fresh_claims),
                         candidate.get("suppression_id", occurrence),
                     )
                 )

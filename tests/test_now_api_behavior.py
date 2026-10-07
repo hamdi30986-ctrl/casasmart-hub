@@ -59,7 +59,11 @@ def _load_now_api():
     _module("casasmart", package=True)
     auth = _module("casasmart.auth_api")
     auth.authenticate_request = lambda *args: ({}, None)
-    auth.get_engine = lambda hass: None
+
+    async def async_member_id(hass, claims):
+        return claims["sub"]
+
+    auth.async_member_id = async_member_id
     auth.read_json_object = None
 
     def ready_or_503(view, engine):
@@ -368,8 +372,9 @@ class _ExecutorTrackingHass(_Hass):
 
 
 class MemberLookupTest(unittest.TestCase):
-    """Who sent a request is a storage read: it runs in the executor, and a
-    storage error there is a clean 500 before anything is switched."""
+    """Who sent a request is a storage read (auth_api.async_member_id runs it
+    in the executor); a storage error there is a clean 500 before anything is
+    switched."""
 
     ROOM = "room-kitchen"
 
@@ -399,12 +404,15 @@ class MemberLookupTest(unittest.TestCase):
         async def body(view, request):
             return {"action": "turn_off", "idempotency_key": "off-key-0001"}, None
 
+        async def member(hass, claims):
+            return await hass.async_add_executor_job(lookup, claims["sub"])
+
         return patch.multiple(
             _API,
             authenticate_request=lambda *args: ({"sub": "dev-1"}, None),
             read_json_object=body,
             get_now_data=lambda hass: self.engine,
-            get_engine=lambda hass: SimpleNamespace(member_id_for=lookup),
+            async_member_id=member,
         )
 
     def _room_command(self, lookup):

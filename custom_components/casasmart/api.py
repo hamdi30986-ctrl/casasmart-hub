@@ -67,8 +67,8 @@ from .auth_api import (
     CasaSmartUserView,
     CasaSmartWhoamiView,
     CasaSmartWidgetTokenView,
+    async_member_id,
     authenticate_request,
-    get_engine,
     is_lan_request,
 )
 from .automation_api import CasaSmartAutomationConfigView
@@ -539,15 +539,11 @@ class CasaSmartCommandView(HomeAssistantView):
         new_state = self._hass.states.get(entity_id)
         now_data = getattr(loaded_runtime_data(self._hass), "now_data", None)
         if now_data is not None:
-            engine = get_engine(self._hass)
-            sub = claims["sub"]
-
-            def _record() -> None:
-                member_id = engine.member_id_for(sub) if engine else sub
-                now_data.record_successful_control(member_id, entity_id)
-
             try:
-                await self._hass.async_add_executor_job(_record)
+                member_id = await async_member_id(self._hass, claims)
+                await self._hass.async_add_executor_job(
+                    now_data.record_successful_control, member_id, entity_id
+                )
             except Exception:
                 # The command succeeded; don't fail it over the recents list.
                 _LOGGER.exception("Now recency recording failed for %s", entity_id)
