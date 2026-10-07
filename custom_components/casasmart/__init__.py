@@ -1241,16 +1241,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
     The handlers look up the loaded entry at call time, so they outlive entry
     reloads and are never unregistered.
     """
-    if all(
-        hass.services.has_service(DOMAIN, service)
-        for service in (
-            "factory_reset",
-            "set_tunnel_url",
-            "activate_scene",
-            "configure_hq_notifications",
-        )
-    ):
-        return
 
     async def _handle_activate_scene(call) -> None:
         """Run a registry scene, as the app does (Energy Saving rules apply)."""
@@ -1424,18 +1414,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         await hass.config_entries.async_reload(entries[0].entry_id)
 
-    if not hass.services.has_service(DOMAIN, "factory_reset"):
-        hass.services.async_register(DOMAIN, "factory_reset", _handle_factory_reset)
-    if not hass.services.has_service(DOMAIN, "set_tunnel_url"):
-        hass.services.async_register(DOMAIN, "set_tunnel_url", _handle_set_tunnel_url)
-    if not hass.services.has_service(DOMAIN, "activate_scene"):
-        hass.services.async_register(DOMAIN, "activate_scene", _handle_activate_scene)
-    if not hass.services.has_service(DOMAIN, "configure_hq_notifications"):
-        hass.services.async_register(
-            DOMAIN,
-            "configure_hq_notifications",
-            _handle_configure_hq_notifications,
-        )
+    handlers = {
+        "factory_reset": _handle_factory_reset,
+        "set_tunnel_url": _handle_set_tunnel_url,
+        "activate_scene": _handle_activate_scene,
+        "configure_hq_notifications": _handle_configure_hq_notifications,
+    }
+    for service, handler in handlers.items():
+        if not hass.services.has_service(DOMAIN, service):
+            hass.services.async_register(DOMAIN, service, handler)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
