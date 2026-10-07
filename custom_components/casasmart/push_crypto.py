@@ -62,7 +62,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
             raise PushIdentityError(
                 f"Push identity key at {key_path} is {len(raw)} bytes, expected "
                 f"{_ED25519_KEY_BYTES}. Restore it from backup, or delete the file "
-                "to re-key — re-keying needs the hub re-registered with the relay."
+                "to re-key; re-keying needs the hub re-registered with the relay."
             )
         try:
             return Ed25519PrivateKey.from_private_bytes(raw)
@@ -70,7 +70,7 @@ def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
             # Don't replace it: the relay trusts only the registered public key.
             raise PushIdentityError(
                 f"Push identity key at {key_path} is unreadable ({err}). "
-                "Restore it from backup, or delete the file to re-key — "
+                "Restore it from backup, or delete the file to re-key; "
                 "re-keying needs the hub re-registered with the relay."
             ) from err
 
