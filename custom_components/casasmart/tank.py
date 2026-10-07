@@ -1,7 +1,17 @@
 """Water-tank engine: Shelly tank devices, readings and calibration.
 
-Stores devices with hashed ingest tokens and their voltage readings, converts
-voltage to a water-level percent, and builds the Shelly monitoring script.
+A tank is a Gen2+ Shelly with a voltmeter on a water-level sensor. When the
+hub provisions one (``tank_api``), it mints the device record with a random
+ingest token, stores only the token's SHA-256, and builds the small mJS
+script it uploads to the Shelly; the script then POSTs the voltmeter reading
+with that token every few minutes. This module stores the devices and their
+readings (one row each, kept ~31 days), converts a voltage to a water-level
+percent from the tank's calibration, and reports the status the app and the
+daily low-water check (``push_dispatcher``) read.
+
+Like the other engines it is stdlib only, with no Home Assistant imports:
+storage-touching methods are synchronous (call via executor) and serialized
+by an ``RLock``.
 """
 
 from __future__ import annotations
@@ -18,27 +28,27 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 
+# Name of the monitoring script on the Shelly; a re-provision replaces the
+# script by this name.
 TANK_SCRIPT_NAME = "CasaSmart"
-
+# Component id of the Shelly's voltmeter the script reads.
 TANK_VOLTMETER_ID = 100
-
+# How often the script posts a reading.
 TANK_PUSH_INTERVAL_SECONDS = 300
-
-
+# Bytes per Script.PutCode call when uploading the script.
 SCRIPT_CHUNK_SIZE = 1024
-
-
+# hub_config key that overrides the URL the Shelly posts readings to.
 TANK_INGEST_URL_CONFIG_KEY = "tank_ingest_url"
 
 _NAME_MAX = 64
-
+# Readings older than this are pruned on the device's next ingest.
 _RETENTION_SECONDS = 31 * 24 * 3600
 
-
+# Defaults for a newly provisioned tank: height in metres, low-water alert
+# threshold in percent.
 TANK_MAX_HEIGHT_DEFAULT = 3.0
 TANK_LOW_PERCENT_DEFAULT = 20
-
-
+# The range the app's low-water slider offers.
 TANK_LOW_PERCENT_MIN = 1
 TANK_LOW_PERCENT_MAX = 30
 
@@ -113,10 +123,12 @@ class UnknownTokenError(Exception):
 
 
 def _hash_token(token: str) -> str:
+    """The stored form of an ingest token (hex SHA-256)."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _clean_name(name: Any) -> str:
+    """A required, stripped, length-capped tank name."""
     if not isinstance(name, str) or not name.strip():
         raise TankError("Tank name is required")
     cleaned = name.strip()
@@ -135,9 +147,8 @@ def build_tank_script(
 
     Reads the Voltmeter and POSTs ``{device_token, voltage}`` to the hub,
     once immediately on start and then every ``interval_seconds`` (5 min by
-    default). URL and
-    token are emitted through ``json.dumps`` so arbitrary config values
-    can never escape the mJS string literal.
+    default). URL and token are emitted through ``json.dumps`` so arbitrary
+    config values can never escape the mJS string literal.
     """
     if not isinstance(ingest_url, str) or not ingest_url.startswith(
         ("http://", "https://")
@@ -170,8 +181,8 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
     """Split script code into ``Script.PutCode``-sized pieces (>=1 chunk).
 
     Splits on UTF-8 BYTE length (the device-side cap), never inside a
-    multi-byte sequence — the generated script is ASCII today, but a
-    future name/comment must not be able to corrupt the upload.
+    multi-byte sequence, so non-ASCII content can't corrupt the upload even
+    though the generated script is ASCII.
     """
     if chunk_size <= 0:
         raise TankError("chunk_size must be positive")
@@ -191,6 +202,13 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
 
 
 class TankEngine:
+    """Tank devices (``devices_table``) and their readings (``readings``).
+
+    A device record holds the name, IP, model, the ingest token's hash and
+    the calibration; ``_public`` is the shape the API serves (never the
+    hash).
+    """
+
     def __init__(self, devices_table: Any, readings: Any) -> None:
         self._devices = devices_table
         # readings: a storage TankReadingsTable (append/recent/last/prune) —
@@ -203,6 +221,12 @@ class TankEngine:
     def mint_device(
         self, device_id: Any, name: Any, ip: Any, model: Any = None
     ) -> tuple[dict[str, Any], str]:
+        """Register a new tank and return ``(public_record, token)``.
+
+        The plaintext token is returned once, to be baked into the Shelly's
+        script; only its hash is stored. The id is lower-cased. Raises
+        ``DuplicateTankError`` if the tank is already registered.
+        """
         if not isinstance(device_id, str) or not device_id.strip():
             raise TankError("device_id is required")
         device_id = device_id.strip().lower()
@@ -210,8 +234,8 @@ class TankEngine:
             raise TankError("ip is required")
         now = int(time.time())
         with self._lock:
-            # A second provision of the same tank is refused (HTTP 409, e92d82d):
-            # after a hub IP change the supported path is delete + re-add.
+            # A second provision of the same tank is refused (HTTP 409): after
+            # a hub IP change the supported path is delete + re-add.
             if self._devices.get(device_id) is not None:
                 raise DuplicateTankError("Tank is already registered")
             token = secrets.token_hex(16)
@@ -240,6 +264,7 @@ class TankEngine:
             ]
 
     def get_device(self, device_id: str) -> dict[str, Any]:
+        """One tank's public record; ``UnknownTankError`` if there is none."""
         record = self._devices.get(device_id)
         if record is None:
             raise UnknownTankError("Unknown tank device")
@@ -341,10 +366,11 @@ class TankEngine:
     def status(self, device_id: str) -> dict[str, Any]:
         """Live status for the app's GET status endpoint + the push monitor.
 
-        ``{voltage, percent, low_percent, is_low, last_reading}`` — ``voltage``
-        / ``percent`` are ``None`` with no reading (or uncalibrated), ``is_low``
-        is true only when a real computed percent sits below the threshold.
-        Raises ``UnknownTankError`` for an unknown device.
+        ``{device_id, voltage, percent, low_percent, is_low, last_reading}`` —
+        ``voltage`` is ``None`` with no reading, ``percent`` also when the tank
+        is uncalibrated, and ``is_low`` is true only when a real computed
+        percent sits below the threshold. Raises ``UnknownTankError`` for an
+        unknown device.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -438,6 +464,7 @@ class TankEngine:
         return self._readings.last(device_id)
 
     def _public(self, device_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """The served shape of a tank record, with its newest reading."""
         last = self._readings.last(device_id)
         cal_v = record.get("calibration_voltage", 0.0) or 0.0
         cal_d = record.get("calibration_depth", 0.0) or 0.0
