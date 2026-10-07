@@ -1,11 +1,10 @@
-"""Deterministic, temporary room scenes. Never dispatches or saves a scene.
+"""Generated room scenes: built here, never run or saved here.
 
-Pure functions behind ``GeneratedSuggestionRuntime``: given a room's
-current device states, build the action list for "turn the room off" or
-"save energy in the room", and wrap it as a suggestion for the current
-two-hour window. Running one goes through ``async_execute_registry_scene``,
-which re-checks each action against live state just before sending it.
-The wire contract is in ``docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md``.
+Pure functions behind GeneratedSuggestionRuntime. From a room's current
+device states they build the actions for "turn the room off" or "save energy
+in the room" and wrap them as a suggestion for the current two-hour window.
+A run goes through async_execute_registry_scene, which re-checks each action
+against live state. The contract is in docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ def digest(value):
 
 
 def window(now):
-    """The two-hour UTC window holding ``now``: (start epoch, end datetime)."""
+    """The two-hour UTC window holding now: (start epoch, end datetime)."""
     start = int(now.timestamp()) // 7200 * 7200
     return start, datetime.fromtimestamp(start + 7200, UTC)
 
@@ -37,7 +36,11 @@ def number(value):
 
 
 def room_actions(states, kind, *, temperature_unit="°C"):
-    """Strict domain allowlist, absolute commands, no inferred appliance names."""
+    """The actions of a room_off or room_eco plan for these states.
+
+    Only lights and cooling-capable ACs are touched, with absolute commands;
+    a device's name is never used to guess what it is.
+    """
     states = [
         s
         for s in states
@@ -77,8 +80,8 @@ def room_actions(states, kind, *, temperature_unit="°C"):
             add(state, "turn_off")
         return actions
 
-    # Leave at least one light on. Dimmable lights cap at 50%; already-dim
-    # lights are never brightened. Non-dimmable selection is stable by ID.
+    # Leave at least one light on. Dimmable lights are capped at 50% and never
+    # brightened; non-dimmable ones are switched off in entity id order.
     nondimmable = []
     for state in lights:
         attrs = state.attributes
@@ -93,7 +96,7 @@ def room_actions(states, kind, *, temperature_unit="°C"):
     for state in acs:
         attrs = state.attributes
         if state.state != "cool":
-            continue  # Do not change HVAC mode or heat/auto targets.
+            continue  # never change the mode, or a heat or auto target
         unit = attrs.get("temperature_unit", temperature_unit)
         target = 24 if unit in {"°C", "C"} else 75.2 if unit in {"°F", "F"} else None
         current = attrs.get("temperature")
@@ -127,9 +130,9 @@ def room_actions(states, kind, *, temperature_unit="°C"):
 def make_suggestion(room, kind, states, now, *, temperature_unit="°C"):
     """A suggestion for the room, or None when there is nothing to do.
 
-    ``suppression_id`` names the room, kind and window, so a dismissal
-    survives the plan changing; ``occurrence_id`` also covers the actions,
-    so running a plan that changed since it was shown is refused.
+    suppression_id names the room, kind and window, so a dismissal survives
+    the plan changing; occurrence_id also covers the actions, so running a
+    plan that changed since it was shown is refused.
     """
     actions = room_actions(states, kind, temperature_unit=temperature_unit)
     if not actions:

@@ -1,15 +1,12 @@
-"""HA boundary for suggestions: scoped reads and coalesced invalidation only.
+"""Suggestions over live Home Assistant state, and change notifications.
 
-``SuggestionRuntime`` feeds the pure policy in :mod:`suggestions` with live
-states, scenes, the home time zone and sunset, and answers the rule-based
-suggestion endpoints. It also watches the entities its rules depend on and
-fires ``EVENT_SUGGESTIONS_CHANGED`` when what it would offer changes, so
-WebSocket clients refetch. The event carries no rule, entity or user.
-Timers re-evaluate at the next window boundary and when a snooze ends.
-
-``GeneratedSuggestionRuntime`` reuses that machinery for the generated
-room scenes (:mod:`generated_suggestions`), which need no saved rules.
-Neither ever runs a scene; only an explicit Run request does.
+SuggestionRuntime feeds the rules in suggestions with live states, scenes,
+the home time zone and sunset, and answers the suggestion endpoints. It
+watches the entities its rules use and fires EVENT_SUGGESTIONS_CHANGED (with
+no payload) when the offer changes, so WebSocket clients refetch; timers
+re-evaluate at the next window boundary and when a snooze ends.
+GeneratedSuggestionRuntime does the same for the generated room scenes.
+Neither runs a scene; only an explicit run request does.
 """
 
 from __future__ import annotations
@@ -38,10 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class SuggestionRuntime:
-    """Rule-based suggestions over live Home Assistant state.
+    """Rule-based suggestions over live HA state.
 
-    ``clock`` and ``sunset`` are injectable for tests. With ``now_data``,
-    the runtime also builds its ``generated`` counterpart.
+    With now_data it also builds its generated counterpart.
     """
 
     def __init__(
@@ -64,7 +60,7 @@ class SuggestionRuntime:
         )
 
     def _sunset(self, day):
-        """Sunset at the home on ``day``, or None without a working ``sun.sun``."""
+        """Sunset at the home on the day, or None without a working sun.sun."""
         sun = self.hass.states.get("sun.sun")
         if state_value(sun) not in {"above_horizon", "below_horizon"}:
             return None
@@ -73,8 +69,8 @@ class SuggestionRuntime:
     async def context(self):
         """Everything one evaluation needs, read once.
 
-        Returns ``(document, scenes by id, states, now, zone)``. Only the
-        entities the enabled rules refer to are read.
+        Returns (document, scenes by id, states, now, zone). Only the entities
+        the enabled rules refer to are read.
         """
         data, scenes = await self.hass.async_add_executor_job(
             lambda: (self.store.snapshot(), self.registry.list_scenes())
@@ -95,11 +91,11 @@ class SuggestionRuntime:
         return data, scenes, states, self.clock(), ZoneInfo(self.hass.config.time_zone)
 
     def visible(self, scope):
-        """A predicate: is this entity served and inside ``scope``?"""
+        """A predicate: is this entity served and inside the scope?"""
         return lambda eid: is_served(self.hass, eid) and in_scope(self.hass, eid, scope)
 
     def candidates(self, context, scope, *, policy_checks=True):
-        """Yield ``(rule, suggestion or None, reason)`` by priority, then id."""
+        """Yield (rule, suggestion or None, reason) by priority, then id."""
         data, scenes, states, now, zone = context
         for rule in sorted(data["rules"], key=lambda r: (-r["priority"], r["rule_id"])):
             suggestion, reason = evaluate(
@@ -153,7 +149,7 @@ class SuggestionRuntime:
         }
 
     async def payload(self, member, scope):
-        """``payload_from`` on fresh context; "unavailable" if it can't be read."""
+        """payload_from on a fresh context; "unavailable" if it can't be read."""
         try:
             return self.payload_from(await self.context(), member, scope)
         except (StorageError, sqlite3.Error, SuggestionError, ZoneInfoNotFoundError):
@@ -217,8 +213,6 @@ class SuggestionRuntime:
                 eligible = [s for _, s, _ in self.candidates(context, None) if s]
                 for suggestion in eligible:
                     suggestion.pop("generated_at", None)
-                # Only an invalidation signal is broadcast. No rule, room,
-                # entity, scene, user, reason or occurrence appears in the frame.
                 active_data = {
                     **data,
                     "suppressions": {
@@ -243,7 +237,7 @@ class SuggestionRuntime:
                     delay = min(
                         delay, max(0.05, (window(now)[1] - now).total_seconds())
                     )
-                # Wake exactly at snooze expiry, even if the home is quiet.
+                # Wake when a snooze ends, even if nothing else changes.
                 for suppression in data["suppressions"].values():
                     seconds = (
                         datetime.fromisoformat(suppression["until"]) - now
@@ -275,10 +269,9 @@ class SuggestionRuntime:
 
 
 class GeneratedSuggestionRuntime(SuggestionRuntime):
-    """Generated room scenes, served on their own versioned endpoint.
+    """Generated room scenes, served on their own endpoint.
 
-    The rule-based endpoints are unchanged; a client opts into these with
-    the ``generated_room_suggestions_v1`` capability.
+    Clients opt in with the generated_room_suggestions_v1 capability.
     """
 
     def __init__(self, hass, store, registry, now_data, *, clock=None):
@@ -290,8 +283,8 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
 
         Only devices imported into the registry count. When any room has an
         activity policy, only participating rooms and their approved devices
-        count; otherwise every visible room does. Returns ``(ranked rooms,
-        states by room, states by entity)``.
+        count; otherwise every visible room does. Returns (ranked rooms,
+        states by room, states by entity).
         """
         from .now_data import is_room_activity_candidate
 
@@ -388,7 +381,7 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         return ranked, grouped, states
 
     async def context(self, scope=None):
-        """Plan this window's room scenes for ``scope``.
+        """Plan this window's room scenes for the scope.
 
         The two busiest rooms are fixed for the two-hour window (persisted,
         so a restart keeps them); the first gets an off and an eco plan,
@@ -480,7 +473,7 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         }
 
     async def payload(self, member, scope):
-        """``payload_from`` for the caller's scope; "unavailable" on failure."""
+        """payload_from for the caller's scope; "unavailable" on failure."""
         try:
             return self.payload_from(await self.context(scope), member, scope)
         except (StorageError, sqlite3.Error, SuggestionError, ZoneInfoNotFoundError):

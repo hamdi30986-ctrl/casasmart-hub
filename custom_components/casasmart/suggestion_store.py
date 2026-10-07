@@ -1,11 +1,10 @@
-"""Additive single-document SQLite state with atomic revision/claim updates.
+"""Suggestion state: one JSON document in the suggestions_v1 table.
 
-All suggestion state is one JSON document in the ``suggestions_v1`` table:
-the rules and their revision, per-member suppressions (dismiss/snooze),
-execution receipts, and the generated suggestions' room choices. Every
-change reads, edits and writes the document inside one storage
-transaction, so two requests can never both claim one occurrence.
-Methods are synchronous; callers run them in the executor.
+It holds the rules and their revision, per-member suppressions (dismiss and
+snooze), execution receipts and the generated suggestions' room choices.
+Each change reads, edits and writes the document in one storage
+transaction, so two requests cannot both claim one occurrence. Methods are
+synchronous; run them in the executor.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from .suggestions import MAX_RULES, SuggestionError, integer, validate_rule
 
 
 class SuggestionStore:
-    """The suggestion document over a ``HubStorage``."""
+    """The suggestion document in a HubStorage."""
 
     def __init__(self, storage):
         self.storage = storage
@@ -38,8 +37,8 @@ class SuggestionStore:
 
     def recover(self):
         """At startup, mark claims still "executing" as "unknown"."""
-        # A process restart cannot tell whether a motor command was accepted.
-        # Retain the claim as unknown; NEVER automatically rerun it.
+        # After a restart nobody knows whether the command was sent, so the
+        # claim is kept and never rerun.
         with self.storage.transaction():
             data = self.snapshot()
             changed = False
@@ -51,7 +50,7 @@ class SuggestionStore:
                 self.table["state"] = data
 
     def replace_rules(self, revision, raw_rules):
-        """Replace every rule if ``revision`` is still current (else 409)."""
+        """Replace every rule if the revision is still current (else 409)."""
         if (
             not integer(revision, 0, 2**53)
             or not isinstance(raw_rules, list)
@@ -114,8 +113,8 @@ class SuggestionStore:
     def claim(self, suggestion, now):
         """Claim the right to run an occurrence.
 
-        Returns ``(True, receipt)`` for the one caller that may run it, or
-        ``(False, receipt)`` with the receipt of the earlier attempt. A full
+        Returns (True, receipt) for the one caller that may run it, or
+        (False, receipt) with the receipt of the earlier attempt. A full
         receipt store refuses (429) instead of evicting a live receipt.
         """
         occurrence = suggestion["occurrence_id"]
@@ -149,7 +148,7 @@ class SuggestionStore:
             return True, receipt
 
     def select_generated_rooms(self, scope_key, start, ranked_ids):
-        """Freeze targets for two hours, including across a hub restart."""
+        """The rooms chosen for this two-hour window, kept across a restart."""
         with self.storage.transaction():
             data = self.snapshot()
             selections = {
@@ -162,8 +161,8 @@ class SuggestionStore:
                     raise SuggestionError("selection_capacity", 429)
                 selections[scope_key] = {"start": start, "room_ids": ranked_ids[:2]}
             elif len(selections[scope_key]["room_ids"]) < 2:
-                # Startup may precede the first device state. Fill vacant slots
-                # when activity arrives; never reshuffle already chosen rooms.
+                # States may arrive after startup: fill an empty slot, but keep
+                # the rooms already chosen.
                 chosen = selections[scope_key]["room_ids"]
                 selections[scope_key] = {
                     "start": start,
