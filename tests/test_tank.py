@@ -173,6 +173,21 @@ class IngestTests(TankTestCase):
         with self.assertRaises(TankError):
             self.engine.recent_readings("dev-1", days="7")
 
+    def test_a_huge_days_window_returns_everything(self):
+        # days * 86400 past 2**63 used to overflow SQLite's INTEGER (a 500 on
+        # GET .../readings?days=...); any window reaching before 1970 is "all".
+        self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        readings = self.storage.tank_readings()
+        now = int(time.time())
+        readings.append("dev-1", now - 400 * 24 * 3600, 1.5)
+        readings.append("dev-1", now, 1.7)
+        for days in (10**6, 10**15, 10**30):
+            with self.subTest(days=days):
+                self.assertEqual(
+                    [r["v"] for r in self.engine.recent_readings("dev-1", days)],
+                    [1.7, 1.5],
+                )
+
     def test_prune_ages_out_old_readings(self):
         _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
         readings = self.storage.tank_readings()
