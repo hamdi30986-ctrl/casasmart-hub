@@ -28,7 +28,6 @@ a running countdown rides this exact path).
 
 from __future__ import annotations
 
-import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -42,8 +41,6 @@ from .const import DOMAIN, EVENT_ALARM_CHANGED
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
-
-_LOGGER = logging.getLogger(__name__)
 
 
 def get_alarm(hass: HomeAssistant) -> AlarmEngine | None:

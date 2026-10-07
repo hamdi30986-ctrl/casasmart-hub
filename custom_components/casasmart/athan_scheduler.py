@@ -20,12 +20,7 @@ lookup.
 from __future__ import annotations
 
 import logging
-from datetime import (  # noqa: F401  (tzinfo used in hints)
-    UTC,
-    datetime,
-    timezone,
-    tzinfo,
-)
+from datetime import UTC, datetime
 from typing import Any
 
 import homeassistant.util.dt as dt_util
@@ -188,7 +183,7 @@ class AthanScheduler:
         self._unsub_prayers = []
 
     @callback
-    def reschedule(self, *_: Any) -> None:
+    def reschedule(self) -> None:
         """(Re)compute today's times and arm timers for the prayers still ahead.
 
         Safe to call any time — from setup, the hourly tick, or a config PUT.

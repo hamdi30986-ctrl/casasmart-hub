@@ -28,7 +28,6 @@ one-timer posture the adapter uses for the entry-delay countdown.
 
 from __future__ import annotations
 
-import logging
 import time
 from functools import partial
 from typing import Any
@@ -53,8 +52,6 @@ from .alarm import (
     AlarmEngine,
 )
 from .const import DOMAIN, EVENT_ALARM_CHANGED
-
-_LOGGER = logging.getLogger(__name__)
 
 # Arming through the HA panel/automations is recorded under this actor in the
 # engine's audit trail — it did not come from a CasaSmart app user.
