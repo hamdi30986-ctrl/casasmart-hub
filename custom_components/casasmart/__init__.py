@@ -144,6 +144,10 @@ _NOTIFY_TUNNEL_EDGE_DOWN = f"{DOMAIN}_tunnel_edge_down"
 _NOTIFY_RELAY_ACTIVATION = f"{DOMAIN}_relay_activation"
 _NOTIFY_RELAY_CONFIGURATION = f"{DOMAIN}_relay_configuration"
 
+_DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
+
+_RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"
+
 
 PLATFORMS: list[Platform] = [
     Platform.ALARM_CONTROL_PANEL,
@@ -586,9 +590,6 @@ async def _async_import_registry(
     )
 
 
-_DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
-
-
 def _dev_enroll_enabled() -> bool:
     """True only when the dev auto-enroll env flag is explicitly truthy."""
     return os.environ.get(_DEV_ENROLL_ENV, "").strip().lower() in (
@@ -672,9 +673,6 @@ def _warn_lan_relay_ingress_on(hub_config: JsonConfigStore, port: int) -> None:
         port,
         gated,
     )
-
-
-_RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"
 
 
 def _read_proc_version() -> str | None:

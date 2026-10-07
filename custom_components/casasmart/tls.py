@@ -41,6 +41,12 @@ _SAN_DNS = "casasmart-hub.local"
 _BACKDATE = timedelta(hours=1)
 
 
+# Set on the TLS listener's aiohttp app: True when this listener is trusted as
+# LAN ingress (see lan_ingress.py). auth_api.is_lan_request reads it from
+# request.app; requests served by HA's own HTTP server never carry it.
+TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
+
+
 class IdentityError(Exception):
     """The permanent identity key is unusable — never auto-recovered."""
 
@@ -254,12 +260,6 @@ def ensure_tls_material(
         cert_not_after=not_after,
         leaf_rotated=rotated,
     )
-
-
-# Set on the TLS listener's aiohttp app: True when this listener is trusted as
-# LAN ingress (see lan_ingress.py). auth_api.is_lan_request reads it from
-# request.app; requests served by HA's own HTTP server never carry it.
-TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
 
 
 class CasaSmartTlsServer:
