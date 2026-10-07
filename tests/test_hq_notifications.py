@@ -127,6 +127,19 @@ class HqNotificationVerifierTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(MODULE.HqNotificationError):
                 self.verifier.verify(headers, raw, now)
 
+    def test_non_ascii_digit_timestamp_is_an_ordinary_rejection(self) -> None:
+        # str.isdigit() also accepts superscripts, which int() can't parse, and
+        # other scripts' digits. The header is ASCII; anything else must be a
+        # plain invalid_timestamp, never a bare ValueError (an HTTP 500 on an
+        # unauthenticated route).
+        for raw in ("\u00b2", "1700000000\u00b2", "\u0661\u0667" + "\u0660" * 8):
+            headers = {**self.headers(), "X-CasaSmart-HQ-Timestamp": raw}
+            with (
+                self.subTest(raw=raw),
+                self.assertRaisesRegex(MODULE.HqNotificationError, "invalid_timestamp"),
+            ):
+                self.verifier.verify(headers, self.raw, self.now)
+
     def test_public_key_parser_refuses_private_and_non_ed25519_keys(self) -> None:
         private_pem = self.private.private_bytes(
             serialization.Encoding.PEM,
