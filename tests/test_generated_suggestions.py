@@ -5,7 +5,7 @@ from datetime import timedelta
 from types import SimpleNamespace as NS
 
 import test_suggestion_api as api_fixture
-from phase4_fixture.generated_suggestions import room_actions
+from phase4_fixture.generated_suggestions import number, room_actions
 
 API, RUNTIME = api_fixture.API, api_fixture.RUNTIME
 
@@ -300,3 +300,9 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         response = await self.run_plan(plan)
         self.assertEqual(response.data["status"], "partial_failure")
         self.assertFalse(any(c[0] == "climate" for c in self.calls))
+
+
+class NumberHelperTest(unittest.TestCase):
+    def test_integer_too_large_for_a_float_is_not_a_number(self):
+        self.assertFalse(number(10**400))
+        self.assertTrue(number(10**300))
