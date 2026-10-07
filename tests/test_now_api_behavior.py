@@ -232,5 +232,99 @@ class NowBulkBehaviorTest(unittest.TestCase):
         self.assertEqual(states.get("light.kitchen").state, "on")
 
 
+class RepeatedRoomOffTest(unittest.TestCase):
+    """Room commands through the real POST: idempotency, room lock and _run."""
+
+    ROOM = "room-kitchen"
+    ENTITIES = ("light.a", "light.b", "fan.c")
+
+    def setUp(self) -> None:
+        self.states = _States(
+            [
+                _State("light.a", "on", self.ROOM),
+                _State("light.b", "on", self.ROOM),
+                _State("fan.c", "off", self.ROOM),
+            ]
+        )
+        self.hass = _Hass(self.states)
+        self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.engine.set_room_policy(self.ROOM, True, list(self.ENTITIES))
+        self.view = _API.CasaSmartRoomActivityCommandView(self.hass)
+
+    def command(self, action: str, key: str, member: str = "member-a") -> dict:
+        async def body(request):
+            return {"action": action, "idempotency_key": key}
+
+        async def accessible(room_id, scope):
+            return True
+
+        with (
+            patch.multiple(
+                _API,
+                authenticate_request=lambda *args: ({"sub": member}, None),
+                json_body=body,
+                get_now_data=lambda hass: self.engine,
+            ),
+            patch.object(self.view, "_room_accessible", accessible),
+        ):
+            return asyncio.run(self.view.post(None, self.ROOM))
+
+    def state_of(self) -> dict[str, str]:
+        return {
+            entity_id: self.states.get(entity_id).state for entity_id in self.ENTITIES
+        }
+
+    def test_off_off_on_from_two_members_restores_everything(self) -> None:
+        self.command("turn_off", "off-member-a-1", member="member-a")
+        second = self.command("turn_off", "off-member-b-1", member="member-b")
+        self.assertEqual(second["outcomes"], [])
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["light.a", "light.b"])
+        self.assertEqual(second["restore_pending_count"], 2)
+
+        on = self.command("turn_on", "on-member-a-1", member="member-a")
+        self.assertEqual(on["restored_from_capture_count"], 2)
+        self.assertEqual(
+            self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "off"}
+        )
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+    def test_devices_switched_on_between_offs_join_the_capture(self) -> None:
+        self.command("turn_off", "off-key-0001")
+        # Someone switches a captured light and an uncaptured fan back on.
+        self.states.get("light.b").state = "on"
+        self.states.get("fan.c").state = "on"
+        second = self.command("turn_off", "off-key-0002")
+        self.assertEqual(
+            [item["entity_id"] for item in second["outcomes"]], ["light.b", "fan.c"]
+        )
+        # First-captured order, each entity once.
+        self.assertEqual(
+            self.engine.restore_set(self.ROOM), ["light.a", "light.b", "fan.c"]
+        )
+        self.assertEqual(second["restore_pending_count"], 3)
+
+        on = self.command("turn_on", "on-key-0001")
+        self.assertEqual(on["restored_from_capture_count"], 3)
+        self.assertEqual(
+            self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "on"}
+        )
+
+    def test_identical_key_retry_is_replayed_not_rerun(self) -> None:
+        first = self.command("turn_off", "off-key-0001")
+        calls = list(self.hass.services.calls)
+        self.assertEqual(self.command("turn_off", "off-key-0001"), first)
+        self.assertEqual(self.hass.services.calls, calls)
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["light.a", "light.b"])
+
+        self.command("turn_on", "on-key-0001")
+        # A delayed retry of the old OFF replays its stored answer: it neither
+        # switches the restored lights off again nor re-captures them.
+        self.assertEqual(self.command("turn_off", "off-key-0001"), first)
+        self.assertEqual(
+            self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "off"}
+        )
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+
 if __name__ == "__main__":
     unittest.main()

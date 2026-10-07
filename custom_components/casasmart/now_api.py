@@ -691,9 +691,13 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 changed_ids.append(entity_id)
             else:
                 outcome["outcome"] = "failed"
+        restore_pending: list[str] = []
         if action == "turn_off":
-            await self._hass.async_add_executor_job(
-                now_data.save_restore_set, room_id, changed_ids
+            # Add to the outstanding capture, never replace it: a repeated OFF
+            # (another member, a retry with a new key) finds little or nothing
+            # still on and must not forget what the earlier OFF switched off.
+            restore_pending = await self._hass.async_add_executor_job(
+                now_data.extend_restore_set, room_id, changed_ids
             )
         else:
             # An ON request consumes the captured set once, even when a device was
@@ -706,7 +710,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             "room_id": room_id,
             "action": action,
             "outcomes": outcomes,
-            "restore_pending_count": len(changed_ids) if action == "turn_off" else 0,
+            "restore_pending_count": len(restore_pending),
             "restored_from_capture_count": len(restore_ids)
             if action == "turn_on"
             else 0,
