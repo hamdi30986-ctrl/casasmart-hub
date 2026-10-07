@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -218,6 +219,21 @@ class _RegistryView(HomeAssistantView):
     def _notify_change(self, kind: str) -> None:
         """Tell connected apps the organization changed (they re-fetch)."""
         self._hass.bus.async_fire(EVENT_REGISTRY_CHANGED, {"kind": kind})
+
+    async def _call(
+        self, func: Callable[..., Any], *args: Any
+    ) -> tuple[Any, web.Response | None]:
+        """Run a registry call in the executor.
+
+        Returns (result, None), or (None, response) for a registry or storage
+        error.
+        """
+        try:
+            return await self._hass.async_add_executor_job(func, *args), None
+        except RegistryError as err:
+            return None, self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return None, self._storage_failure(err)
 
     def _error_response(self, err: RegistryError) -> web.Response:
         """Map a registry error to 404 (unknown item), 409 (in use) or 400."""
@@ -437,16 +453,13 @@ class CasaSmartFloorsView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            floor = await self._hass.async_add_executor_job(
-                lambda: registry.create_floor(
-                    payload.get("name"), payload.get("sort_order")
-                )
+        floor, failed = await self._call(
+            lambda: registry.create_floor(
+                payload.get("name"), payload.get("sort_order")
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("floors")
         return self.json(floor, HTTPStatus.CREATED)
 
@@ -469,18 +482,15 @@ class CasaSmartFloorView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            floor = await self._hass.async_add_executor_job(
-                lambda: registry.update_floor(
-                    floor_id,
-                    payload.get("name", ...),
-                    payload.get("sort_order", ...),
-                )
+        floor, failed = await self._call(
+            lambda: registry.update_floor(
+                floor_id,
+                payload.get("name", ...),
+                payload.get("sort_order", ...),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("floors")
         return self.json(floor)
 
@@ -491,12 +501,9 @@ class CasaSmartFloorView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        try:
-            await self._hass.async_add_executor_job(registry.delete_floor, floor_id)
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        _, failed = await self._call(registry.delete_floor, floor_id)
+        if failed is not None:
+            return failed
         self._notify_change("floors")
         return self.json({"deleted": floor_id})
 
@@ -519,19 +526,16 @@ class CasaSmartRoomsView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            room = await self._hass.async_add_executor_job(
-                lambda: registry.create_room(
-                    payload.get("name"),
-                    payload.get("floor_id"),
-                    payload.get("icon"),
-                    payload.get("sort_order"),
-                )
+        room, failed = await self._call(
+            lambda: registry.create_room(
+                payload.get("name"),
+                payload.get("floor_id"),
+                payload.get("icon"),
+                payload.get("sort_order"),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("rooms")
         return self.json(room, HTTPStatus.CREATED)
 
@@ -554,20 +558,17 @@ class CasaSmartRoomView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            room = await self._hass.async_add_executor_job(
-                lambda: registry.update_room(
-                    room_id,
-                    name=payload.get("name", ...),
-                    floor_id=payload.get("floor_id", ...),
-                    icon=payload.get("icon", ...),
-                    sort_order=payload.get("sort_order", ...),
-                )
+        room, failed = await self._call(
+            lambda: registry.update_room(
+                room_id,
+                name=payload.get("name", ...),
+                floor_id=payload.get("floor_id", ...),
+                icon=payload.get("icon", ...),
+                sort_order=payload.get("sort_order", ...),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("rooms")
         return self.json(room)
 
@@ -594,12 +595,9 @@ class CasaSmartRoomView(_RegistryView):
                 registry.assign_device(entity_id, room_id=None)
             return unassigned + len(ha_orphans)
 
-        try:
-            unassigned = await self._hass.async_add_executor_job(_delete)
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        unassigned, failed = await self._call(_delete)
+        if failed is not None:
+            return failed
         self._notify_change("rooms")
         return self.json({"deleted": room_id, "devices_unassigned": unassigned})
 
@@ -622,17 +620,14 @@ class CasaSmartRoomTagsView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            tag = await self._hass.async_add_executor_job(
-                registry.create_room_tag,
-                payload.get("name"),
-                payload.get("color"),
-                payload.get("room_ids"),
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        tag, failed = await self._call(
+            registry.create_room_tag,
+            payload.get("name"),
+            payload.get("color"),
+            payload.get("room_ids"),
+        )
+        if failed is not None:
+            return failed
         self._notify_change("room-tags")
         return self.json(tag, HTTPStatus.CREATED)
 
@@ -655,19 +650,16 @@ class CasaSmartRoomTagView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            tag = await self._hass.async_add_executor_job(
-                lambda: registry.update_room_tag(
-                    tag_id,
-                    name=payload.get("name", ...),
-                    color=payload.get("color", ...),
-                    room_ids=payload.get("room_ids", ...),
-                )
+        tag, failed = await self._call(
+            lambda: registry.update_room_tag(
+                tag_id,
+                name=payload.get("name", ...),
+                color=payload.get("color", ...),
+                room_ids=payload.get("room_ids", ...),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("room-tags")
         return self.json(tag)
 
@@ -678,12 +670,9 @@ class CasaSmartRoomTagView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        try:
-            await self._hass.async_add_executor_job(registry.delete_room_tag, tag_id)
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        _, failed = await self._call(registry.delete_room_tag, tag_id)
+        if failed is not None:
+            return failed
         self._notify_change("room-tags")
         return self.json({"deleted": tag_id})
 
@@ -797,19 +786,16 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        try:
-            assignment = await self._hass.async_add_executor_job(
-                lambda: registry.assign_device(
-                    entity_id,
-                    room_id=payload.get("room_id", ...),
-                    display_name=payload.get("display_name", ...),
-                    sort_order=payload.get("sort_order", ...),
-                )
+        assignment, failed = await self._call(
+            lambda: registry.assign_device(
+                entity_id,
+                room_id=payload.get("room_id", ...),
+                display_name=payload.get("display_name", ...),
+                sort_order=payload.get("sort_order", ...),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("devices")
         return self.json(assignment)
 
@@ -825,14 +811,9 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        try:
-            await self._hass.async_add_executor_job(
-                registry.remove_assignment, entity_id
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        _, failed = await self._call(registry.remove_assignment, entity_id)
+        if failed is not None:
+            return failed
         self._notify_change("devices")
         return self.json({"deleted": entity_id})
 
@@ -867,26 +848,23 @@ class CasaSmartUserDeviceView(_RegistryView):
         )
         if reject is not None:
             return reject
-        try:
-            device = await self._hass.async_add_executor_job(
-                lambda: registry.upsert_user_device(
-                    ha_device_id,
-                    entity_ids=payload.get("entity_ids"),
-                    control_entity_ids=payload.get("control_entity_ids"),
-                    gang_types=payload.get("gang_types"),
-                    gang_names=payload.get("gang_names"),
-                    gangs=payload.get("gangs"),
-                    config_entity_ids=payload.get("config_entity_ids"),
-                    device_type=payload.get("device_type"),
-                    custom_name=payload.get("custom_name"),
-                    custom_icon=payload.get("custom_icon"),
-                    room_id=payload.get("room_id"),
-                )
+        device, failed = await self._call(
+            lambda: registry.upsert_user_device(
+                ha_device_id,
+                entity_ids=payload.get("entity_ids"),
+                control_entity_ids=payload.get("control_entity_ids"),
+                gang_types=payload.get("gang_types"),
+                gang_names=payload.get("gang_names"),
+                gangs=payload.get("gangs"),
+                config_entity_ids=payload.get("config_entity_ids"),
+                device_type=payload.get("device_type"),
+                custom_name=payload.get("custom_name"),
+                custom_icon=payload.get("custom_icon"),
+                room_id=payload.get("room_id"),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("user-devices")
         return self.json(device)
 
@@ -909,26 +887,23 @@ class CasaSmartUserDeviceView(_RegistryView):
         )
         if reject is not None:
             return reject
-        try:
-            device = await self._hass.async_add_executor_job(
-                lambda: registry.patch_user_device(
-                    ha_device_id,
-                    entity_ids=payload.get("entity_ids", ...),
-                    control_entity_ids=payload.get("control_entity_ids", ...),
-                    gang_types=payload.get("gang_types", ...),
-                    gang_names=payload.get("gang_names", ...),
-                    gangs=payload.get("gangs", ...),
-                    config_entity_ids=payload.get("config_entity_ids", ...),
-                    device_type=payload.get("device_type", ...),
-                    custom_name=payload.get("custom_name", ...),
-                    custom_icon=payload.get("custom_icon", ...),
-                    room_id=payload.get("room_id", ...),
-                )
+        device, failed = await self._call(
+            lambda: registry.patch_user_device(
+                ha_device_id,
+                entity_ids=payload.get("entity_ids", ...),
+                control_entity_ids=payload.get("control_entity_ids", ...),
+                gang_types=payload.get("gang_types", ...),
+                gang_names=payload.get("gang_names", ...),
+                gangs=payload.get("gangs", ...),
+                config_entity_ids=payload.get("config_entity_ids", ...),
+                device_type=payload.get("device_type", ...),
+                custom_name=payload.get("custom_name", ...),
+                custom_icon=payload.get("custom_icon", ...),
+                room_id=payload.get("room_id", ...),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("user-devices")
         return self.json(device)
 
@@ -941,14 +916,9 @@ class CasaSmartUserDeviceView(_RegistryView):
             return not_ready
         # Load the record first: a scoped caller may only delete a device whose
         # entities are all in its rooms.
-        try:
-            existing = await self._hass.async_add_executor_job(
-                registry.get_user_device, ha_device_id
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        existing, failed = await self._call(registry.get_user_device, ha_device_id)
+        if failed is not None:
+            return failed
         reject = self._scope_reject(
             claims,
             existing.get("entity_ids"),
@@ -956,14 +926,9 @@ class CasaSmartUserDeviceView(_RegistryView):
         )
         if reject is not None:
             return reject
-        try:
-            await self._hass.async_add_executor_job(
-                registry.delete_user_device, ha_device_id
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        _, failed = await self._call(registry.delete_user_device, ha_device_id)
+        if failed is not None:
+            return failed
         self._notify_change("user-devices")
         return self.json({"deleted": ha_device_id})
 
@@ -1027,14 +992,11 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         reject = self._scope_reject(claims, [gang])
         if reject is not None:
             return reject
-        try:
-            device = await self._hass.async_add_executor_job(
-                lambda: self._apply(registry, ha_device_id, gang, payload)
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        device, failed = await self._call(
+            lambda: self._apply(registry, ha_device_id, gang, payload)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("user-devices")
         return self.json(device)
 
@@ -1067,19 +1029,16 @@ class CasaSmartScenesView(_RegistryView):
         reject = self._scope_reject(claims, _scene_entity_ids(payload.get("entities")))
         if reject is not None:
             return reject
-        try:
-            scene = await self._hass.async_add_executor_job(
-                lambda: registry.create_scene(
-                    payload.get("name"),
-                    payload.get("entities"),
-                    payload.get("icon"),
-                    payload.get("works_during_energy_saving", False),
-                )
+        scene, failed = await self._call(
+            lambda: registry.create_scene(
+                payload.get("name"),
+                payload.get("entities"),
+                payload.get("icon"),
+                payload.get("works_during_energy_saving", False),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("scenes")
         return self.json(scene, HTTPStatus.CREATED)
 
@@ -1111,23 +1070,20 @@ class CasaSmartSceneView(_RegistryView):
             reject = self._scope_reject(claims, _scene_entity_ids(payload["entities"]))
             if reject is not None:
                 return reject
-        try:
-            scene = await self._hass.async_add_executor_job(
-                lambda: registry.update_scene(
-                    scene_id,
-                    name=payload.get("name", ...),
-                    entities=payload.get("entities", ...),
-                    icon=payload.get("icon", ...),
-                    favorite=payload.get("favorite", ...),
-                    works_during_energy_saving=payload.get(
-                        "works_during_energy_saving", ...
-                    ),
-                )
+        scene, failed = await self._call(
+            lambda: registry.update_scene(
+                scene_id,
+                name=payload.get("name", ...),
+                entities=payload.get("entities", ...),
+                icon=payload.get("icon", ...),
+                favorite=payload.get("favorite", ...),
+                works_during_energy_saving=payload.get(
+                    "works_during_energy_saving", ...
+                ),
             )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        )
+        if failed is not None:
+            return failed
         self._notify_change("scenes")
         return self.json(scene)
 
@@ -1138,12 +1094,9 @@ class CasaSmartSceneView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        try:
-            await self._hass.async_add_executor_job(registry.delete_scene, scene_id)
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        _, failed = await self._call(registry.delete_scene, scene_id)
+        if failed is not None:
+            return failed
         self._notify_change("scenes")
         return self.json({"deleted": scene_id})
 
@@ -1290,14 +1243,11 @@ class CasaSmartFavoritesView(_RegistryView):
         # A scoped caller only sees its rooms' favorites, so keep the others,
         # after its new list.
         out_of_scope = [eid for eid in stored if not in_scope(self._hass, eid, scope)]
-        try:
-            saved = await self._hass.async_add_executor_job(
-                registry.set_favorites, member_id, entity_ids + out_of_scope
-            )
-        except RegistryError as err:
-            return self._error_response(err)
-        except (StorageError, sqlite3.Error) as err:
-            return self._storage_failure(err)
+        saved, failed = await self._call(
+            registry.set_favorites, member_id, entity_ids + out_of_scope
+        )
+        if failed is not None:
+            return failed
         # The member's other phones re-fetch favorites on registry_changed.
         self._notify_change("favorites")
         return self.json(
