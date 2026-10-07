@@ -1,13 +1,10 @@
 """Auth engine: device enrollment, challenge-response login and JWT checks.
 
-Owns the paired-device records and the role permission table. Every device
-has its own P-256 keypair; it logs in by signing a one-time nonce and gets a
-short-lived hub-signed JWT (``auth_tokens``). An in-memory mirror of each
-device's role, rooms and auth version lets token checks run on the event loop
-and makes unpairing or editing a device revoke its tokens instantly.
-
-No Home Assistant imports; storage-touching methods are synchronous (call via
-executor).
+Each paired device has its own P-256 key. It logs in by signing a one-time
+nonce and gets a short-lived hub-signed JWT (auth_tokens). An in-memory mirror
+of every device's role, rooms and auth version lets token checks run on the
+event loop, and makes unpairing or editing a device revoke its tokens at once.
+Methods that touch storage block, so call them in the executor.
 """
 
 from __future__ import annotations
@@ -18,8 +15,7 @@ import threading
 import time
 from typing import Any
 
-# ThrottledError is re-exported: callers (and the tests) catch the engine's
-# throttle refusal as ``auth_engine.ThrottledError``.
+# ThrottledError is re-exported; callers catch it as auth_engine.ThrottledError.
 try:
     from . import auth_keys, auth_tokens
     from .auth_tokens import (
@@ -40,7 +36,7 @@ except ImportError:  # top-level import in the test env (no HA package init)
         VALID_ROLES,
         TokenError,
     )
-    from throttle import FailureThrottle, ThrottledError  # noqa: F401 — re-exported
+    from throttle import FailureThrottle, ThrottledError  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,13 +52,12 @@ CHALLENGE_TTL = 60.0
 # Outstanding nonces per device; past it the oldest is dropped.
 MAX_CHALLENGES_PER_DEVICE = 8
 
-# A device's name arrives with its pairing request, before it has
-# authenticated, so the stored name is capped. Longer names are truncated,
-# never refused, so a long phone name can't fail a pairing.
+# Names arrive before the device has authenticated, so the stored name is
+# capped. Longer names are truncated so that pairing never fails on one.
 MAX_DEVICE_NAME_LENGTH = 64
 
-# Permission -> the roles that hold it. Every protected view names exactly one
-# permission (``auth_api.authenticate_request``); an unknown name is refused.
+# Permission -> roles that hold it. Each protected view checks one permission
+# through auth_api.authenticate_request; an unknown name is refused.
 PERMISSIONS: dict[str, tuple[str, ...]] = {
     "devices.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "devices.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
@@ -86,15 +81,12 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "update.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "update.install": (ROLE_ADMIN,),
     "widget.token": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
-    # The session's own writes that aren't device control: this device's push
-    # registration and leaving the hub, and its person's settings, favorites
-    # and suggestion dismiss/snooze. Every role's session holds it;
-    # deliberately outside WIDGET_SCOPE_PERMISSIONS, so a widget token reads
-    # and controls devices and nothing else.
+    # A session's own writes (push registration, leaving the hub, its member's
+    # settings, favorites and suggestions). Widget tokens don't get it.
     "session.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
 
-# The only permissions a ``scope: widget`` token can use, whatever its role.
+# Everything a widget-scoped token may do, whatever its role.
 WIDGET_SCOPE_PERMISSIONS: frozenset[str] = frozenset(
     {"devices.read", "devices.control"}
 )
@@ -105,11 +97,11 @@ class AuthError(Exception):
 
 
 class EnrollError(AuthError):
-    """Enrollment input rejected (bad key, bad role...)."""
+    """Enrollment input rejected, such as a bad key or role."""
 
 
 class AdminExistsError(EnrollError):
-    """A second admin enrollment was attempted (exactly one admin per hub)."""
+    """A second admin was refused; a hub has one admin."""
 
 
 class UnknownDeviceError(AuthError):
@@ -121,11 +113,11 @@ class ChallengeError(AuthError):
 
 
 class UserManagementError(AuthError):
-    """A user-management edit was refused (unknown id, admin protected...)."""
+    """A user-management edit was refused, for example on the admin."""
 
 
 class AuthEngine:
-    """Device enrollment, challenge-response login, JWT mint/validate."""
+    """Enrolls devices, runs the login challenge, and mints and checks JWTs."""
 
     def __init__(self, devices_table: Any, hub_config: Any) -> None:
         self._devices = devices_table
@@ -135,17 +127,14 @@ class AuthEngine:
         self._challenges: dict[str, dict[str, Any]] = {}
         self.throttle = FailureThrottle("login")
         self._secret: bytes | None = None
-        # In-memory mirror of every device's auth-relevant state:
-        # device_id -> {role, rooms, ver}. validate_token reads ONLY this
-        # (no DB hop on the event loop); enroll/update/delete keep it in
-        # sync, which is what makes revocation instant.
+        # device_id -> {role, rooms, ver, last_seen}. validate_token reads only
+        # this, never storage; every write keeps it in sync.
         self._device_cache: dict[str, dict[str, Any]] = {}
 
     def warm_up(self) -> None:
-        """Load the signing secret + device cache from storage.
+        """Load the signing secret and device cache (blocking, once at setup).
 
-        Blocking file/DB I/O — called once via executor at setup so the
-        first ``validate_token`` on the event loop is pure CPU.
+        Afterwards validate_token needs no I/O and can run on the event loop.
         """
         self._signing_secret()
         with self._lock:
@@ -161,7 +150,7 @@ class AuthEngine:
     # -- signing secret ------------------------------------------------------
 
     def _signing_secret(self) -> bytes:
-        """The hub's JWT secret — generated once, persisted in hub config."""
+        """The hub's JWT secret, generated once and kept in hub config."""
         with self._lock:
             if self._secret is None:
                 stored = self._hub_config.get("jwt_secret")
@@ -172,7 +161,7 @@ class AuthEngine:
                 self._secret = bytes.fromhex(stored)
             return self._secret
 
-    # -- enrollment (storage — call via executor) ------------------------------
+    # -- enrollment (storage, call via executor) -------------------------------
 
     def enroll_device(
         self,
@@ -184,18 +173,15 @@ class AuthEngine:
         member_id: str | None = None,
         code_hash: str | None = None,
     ) -> str:
-        """Store a device's identity; returns the new device id.
+        """Store a new device and return its random id.
 
-        ``enrolled_via`` records the pairing code id the device redeemed (None
-        for paths that don't go through one); ``list_devices`` reports it.
-        ``code_hash`` is the hash of that code, which the idempotent re-pair
-        path keeps accepting for this device.
+        enrolled_via is the id of the pairing code the device redeemed (None
+        when there was none). code_hash is that code's hash, which the
+        idempotent re-pair path keeps accepting for this device.
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
-        # Pre-auth input — cap the stored length (truncate, never reject; see
-        # MAX_DEVICE_NAME_LENGTH). The second strip() keeps the cap from
-        # leaving a trailing space.
+        # The second strip() drops a space the length cap may leave behind.
         name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
@@ -212,8 +198,6 @@ class AuthEngine:
             raise EnrollError(str(err)) from err
 
         with self._lock:
-            # Exactly one admin per hub: the hub rejects any attempt to create
-            # a second one.
             if role == ROLE_ADMIN and self.has_admin():
                 raise AdminExistsError("This hub already has an admin")
 
@@ -226,17 +210,11 @@ class AuthEngine:
                 "ver": 1,
                 "paired_at": time.time(),
                 "enrolled_via": enrolled_via,
-                # Hash of the code this device actually redeemed. The idempotent
-                # re-pair path accepts it forever, so a double-submit — or a
-                # retry after a mid-redeem timeout — still works once that path
-                # checks the code, even though the code itself was consumed on
-                # the first pass. Older records don't have it.
+                # The re-pair path keeps accepting this code, so a retry after a
+                # timeout still works. Older records lack the field.
                 "enrolled_code_hash": code_hash,
-                # The PERSON this device belongs to. An "add device to member"
-                # pairing code carries an existing member_id (the device joins
-                # that person); a new-member code passes None and we mint one.
-                # favorites + user_settings key by member_id so a person's
-                # devices share them (auth itself still uses the per-device sub).
+                # The person this device belongs to: an "add a device" code
+                # names an existing member, otherwise the device starts one.
                 "member_id": member_id or f"mem-{secrets.token_urlsafe(9)}",
             }
             self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
@@ -245,10 +223,10 @@ class AuthEngine:
 
     @staticmethod
     def check_enrollment(name: Any, public_key_pem: Any) -> None:
-        """Raise EnrollError when a device name or public key can't be enrolled.
+        """Raise EnrollError when the name or public key can't be enrolled.
 
-        The same name and key checks :meth:`enroll_device` makes, so the enroll
-        view can refuse a malformed request before it consumes a pairing code.
+        Lets the enroll view refuse a bad request before it spends a pairing
+        code.
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
@@ -265,32 +243,19 @@ class AuthEngine:
         public_key_pem: str,
         rooms: list[str] | None = None,
     ) -> bool:
-        """Idempotently enroll a device under a CALLER-CHOSEN id.
+        """Enroll or update a sub-admin or user under a caller-chosen id.
 
-        The stable-id sibling of :meth:`enroll_device` (which mints a random,
-        unguessable id). Here the caller names the id, so declarative
-        provisioning — a manifest of trusted keys re-applied after every
-        factory reset — can pin an id that OUTLIVES the reset, instead of a
-        fresh random id breaking any tooling that hardcoded the old one.
-
-        Sub-admin / user only: the single-admin invariant means an admin
-        identity is never minted from a static manifest (same ceiling as
-        :meth:`update_device`). Returns True when it actually wrote a record,
-        False when the id is already enrolled with the SAME key/role/rooms — so
-        it is safe to call on every boot and every auth-changed event and only
-        ever writes on a real diff. If the id exists with DIFFERENT material the
-        record is rewritten and its ``ver`` bumped, killing any stale tokens
-        (same instant-revocation contract as :meth:`update_device`), so the
-        manifest stays authoritative. The write keeps the in-memory cache in
-        sync under the lock, so a freshly provisioned device can log in on the
-        very next request — no :meth:`warm_up` needed.
+        For the developer manifest (dev_enroll), whose ids must survive a
+        factory reset. Returns False when the id is already stored with the
+        same key, role and rooms, so it is safe to call on every boot.
+        Otherwise writes the record, bumping ver to revoke older tokens, and
+        updates the cache so the device can log in right away. Never creates an
+        admin, so a manifest can't get around the single-admin rule.
         """
         if not isinstance(device_id, str) or not device_id.strip():
             raise EnrollError("device_id is required")
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
-        # Never admin: the dev/provisioning path must not be able to mint an
-        # owner identity around the single-admin invariant.
         if role not in (ROLE_SUB_ADMIN, ROLE_USER):
             raise EnrollError("Provisioned role must be sub-admin or user")
         if rooms is not None and (
@@ -314,7 +279,7 @@ class AuthEngine:
                 and existing.get("role") == role
                 and existing.get("rooms") == rooms
             ):
-                return False  # already correct — idempotent no-op
+                return False  # already up to date
 
             if existing is not None:
                 ver = int(existing.get("ver", 1)) + 1
@@ -346,20 +311,14 @@ class AuthEngine:
         return True
 
     def replace_admin(self, name: str, public_key_pem: str) -> str:
-        """Swap the hub's admin for a new device (owner recovery).
+        """Swap the hub's admin for a new device (owner recovery); return its id.
 
-        The ONE sanctioned path around "the admin record is immutable":
-        the caller has already proven ownership by redeeming the owner
-        recovery code (LAN-only, throttled). Atomic under the
-        lock — the old admin device is unenrolled (its outstanding JWTs
-        die instantly via the ``ver`` cache, same as unpair) and the new
-        keypair becomes the admin. Inputs are validated BEFORE the old
-        admin is touched, so a bad key never leaves the hub adminless.
-
-        The new device takes over the old admin's member id: this is the owner
-        getting back in on a new phone, so their favorites, settings and the
-        rest of their member-keyed data stay theirs. No other device shares
-        that member id (codes can't add a device to the admin's member).
+        The caller has proven ownership with the recovery code. Inputs are
+        checked before the old admin is touched, so a bad key can't leave the
+        hub without an admin; the old admin's tokens die with its cache entry.
+        The new device keeps the old admin's member id, so the owner's
+        favorites and settings carry over (no other device can join the
+        admin's member).
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
@@ -378,8 +337,7 @@ class AuthEngine:
                 None,
             )
             if old_admin_id is None:
-                # Unclaimed hub: recovery has nothing to replace — the
-                # bootstrap pairing code is the right door.
+                # An unclaimed hub is claimed with the bootstrap code instead.
                 raise EnrollError("This hub has no admin to recover")
 
             old_record = self._devices.get(old_admin_id) or {}
@@ -396,8 +354,7 @@ class AuthEngine:
                 "rooms": None,
                 "ver": 1,
                 "paired_at": time.time(),
-                # Recovery is replace_admin, not a code redemption — no code id.
-                # Mirror the enroll record shape, which carries enrolled_via.
+                # No pairing code was redeemed; kept for the enroll record shape.
                 "enrolled_via": None,
                 "member_id": member_id,
             }
@@ -415,21 +372,19 @@ class AuthEngine:
         return device_id
 
     def has_admin(self) -> bool:
-        """True once the hub's single admin is enrolled (cache read — cheap)."""
+        """True once the hub's admin is enrolled (a cheap cache read)."""
         with self._lock:
             return any(
                 entry.get("role") == ROLE_ADMIN for entry in self._device_cache.values()
             )
 
-    # -- user management (storage — call via executor) ---------------------------
+    # -- user management (storage, call via executor) ----------------------------
 
     def list_devices(self) -> list[dict[str, Any]]:
-        """Every enrolled device, public fields only (no keys).
+        """Every enrolled device, public fields only.
 
-        ``last_seen`` is the in-memory clock from the last successful token
-        validation (None until the device makes its first authenticated call
-        this boot — like the throttle counters, it is deliberately not
-        persisted; a reboot just resets the liveness clock).
+        last_seen is kept in memory: None until the device makes an
+        authenticated call after the latest restart.
         """
         with self._lock:
             last_seen = {
@@ -451,12 +406,7 @@ class AuthEngine:
         ]
 
     def get_device(self, device_id: str) -> dict[str, Any] | None:
-        """Public fields for one enrolled device, or None when not enrolled.
-
-        Cheap DB + cache read (call via executor). ``/auth/whoami`` uses it
-        (through :meth:`device_for_token`) to report the device's CURRENT
-        role and name.
-        """
+        """Public fields for one enrolled device, or None."""
         record = self._devices.get(device_id)
         if record is None:
             return None
@@ -475,13 +425,11 @@ class AuthEngine:
         }
 
     def device_for_public_key(self, public_key_pem: str) -> dict[str, Any] | None:
-        """The enrolled device whose key matches ``public_key_pem``, or None.
+        """The enrolled device with this public key, or None.
 
-        The same-phone re-pair seam: a phone re-running onboarding (a UI glitch,
-        a redundant claim) sends the SAME public key it enrolled with. Matching
-        it lets enroll be IDEMPOTENT — return the existing identity instead of
-        bricking on an already-claimed hub. Safe: the returned id grants
-        nothing; the token still requires proving the PRIVATE key via login.
+        Lets enroll answer a phone that re-runs onboarding with its existing
+        identity. The id grants nothing: logging in still needs the private
+        key.
         """
         try:
             canonical_pem = auth_keys.validate_public_key(public_key_pem)
@@ -494,20 +442,17 @@ class AuthEngine:
                         "device_id": device_id,
                         "role": record.get("role"),
                         "rooms": record.get("rooms"),
-                        # Not part of the response body — the enroll view uses
-                        # it to accept the code this device originally redeemed
-                        # (already consumed) on an idempotent re-pair.
+                        # Only for the enroll view, which drops it from replies.
                         "enrolled_code_hash": record.get("enrolled_code_hash"),
                     }
         return None
 
     def member_id_for(self, device_id: str) -> str:
-        """The PERSON id this device belongs to.
+        """The member (person) this device belongs to.
 
         Favorites and user settings are keyed by it, so they follow the person
-        across their devices. A record without a member_id (older records, and
-        devices from the dev manifest) is its own one-device member, keyed by
-        its device id.
+        across devices. A record without a member_id (older records, dev
+        manifest devices) is its own member, keyed by its device id.
         """
         record = self._devices.get(device_id)
         if record is None:
@@ -515,10 +460,9 @@ class AuthEngine:
         return record.get("member_id") or device_id
 
     def member_device_count(self, member_id: str) -> int:
-        """How many enrolled devices belong to ``member_id``.
+        """How many enrolled devices belong to member_id.
 
-        Callers prune a member's personal data only when this reaches zero
-        (their last device unpaired).
+        Callers delete a member's personal data only when this reaches zero.
         """
         return sum(
             1
@@ -527,11 +471,9 @@ class AuthEngine:
         )
 
     def list_members(self) -> list[dict[str, Any]]:
-        """Distinct members (people), each with a device count.
+        """Distinct members with a device count, for the "add a device" picker.
 
-        Feeds the family-share "add a device to <member>" picker. Name, role
-        and rooms come from the member's most recently paired device (they are
-        set consistently per member at pairing).
+        Name, role and rooms come from the member's most recently paired device.
         """
         members: dict[str, dict[str, Any]] = {}
         for device_id, record in self._devices.items():
@@ -561,24 +503,20 @@ class AuthEngine:
         return list(members.values())
 
     def last_seen(self, device_id: str) -> float | None:
-        """The device's last-validated-token timestamp, or None this boot.
+        """When the device last presented a valid token; None since a restart.
 
-        Pure in-memory read (no DB) — cheap enough for the user sensors to
-        poll on the event loop. None until the device makes its first
-        authenticated call since the last hub restart.
+        An in-memory read, cheap enough for the user sensors on the event loop.
         """
         with self._lock:
             cached = self._device_cache.get(device_id)
             return cached.get("last_seen") if cached else None
 
     def device_for_token(self, token: str) -> dict[str, Any] | None:
-        """Public device info for ``token``'s subject if STILL enrolled.
+        """Public info for the token's device if it is still enrolled, else None.
 
-        Signature-verified but freshness-agnostic (see
-        ``auth_tokens.unverified_subject``): an expired or version-bumped
-        token whose device is still paired returns the device — the app's
-        ``/auth/whoami`` resume check wants enrollment status, not token
-        validity. Returns None for a forged token or an unpaired device.
+        Checks the signature but not expiry or ver (see
+        auth_tokens.unverified_subject): /auth/whoami asks whether the device
+        is still paired, whether or not the token is fresh.
         """
         device_id = auth_tokens.unverified_subject(self._signing_secret(), token)
         if device_id is None:
@@ -591,13 +529,11 @@ class AuthEngine:
         role: str | None = None,
         rooms: list[str] | object | None = ...,
     ) -> dict[str, Any]:
-        """Edit a device's role and/or room scope; outstanding JWTs die.
+        """Change a device's role and/or room scope; its outstanding JWTs die.
 
-        The admin record is immutable here — there is no demotion path
-        (factory reset is how an admin changes hands). Promotion
-        ceiling is sub-admin: ``role`` may only be sub-admin or user.
-        ``rooms=...`` (the sentinel) means "leave unchanged"; an explicit
-        None clears the scope. Room scope only applies to the user role.
+        The admin can't be edited here, and the highest role granted is
+        sub-admin. rooms=... (the default) leaves the scope unchanged; None
+        clears it. Only users can be room-scoped.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -614,7 +550,7 @@ class AuthEngine:
                 or any(not isinstance(room, str) or not room for room in new_rooms)
             ):
                 raise UserManagementError("rooms must be a list of area ids")
-            # Room-scoping is a per-USER toggle; sub-admins see all rooms.
+            # Only users are room-scoped; sub-admins see every room.
             if new_rooms is not None and new_role != ROLE_USER:
                 raise UserManagementError("Room scope only applies to the user role")
 
@@ -642,14 +578,11 @@ class AuthEngine:
         }
 
     def delete_device(self, device_id: str) -> str:
-        """Unpair a device — instant kill for all its tokens.
+        """Unpair a device, killing its tokens; return its member_id.
 
-        Returns the unpaired device's ``member_id`` so the caller can prune the
-        person's favorites/user_settings IFF this was their last device (see
-        :meth:`member_device_count`) — otherwise those rows orphan.
-
-        The admin cannot be deleted through the API; factory reset is the
-        only way the owner identity leaves the hub.
+        The caller uses the member_id to delete the person's favorites and
+        settings when this was their last device. The admin can't be removed
+        here; it leaves through leave_hub, owner recovery or a factory reset.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -660,31 +593,19 @@ class AuthEngine:
             member_id = record.get("member_id") or device_id
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
-            # Their login surface resets too — stale lockouts shouldn't
-            # follow a re-pair of the same phone.
+            # A re-paired phone shouldn't inherit an old lockout.
             self.throttle.clear(device_id)
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
         return member_id
 
     def leave_hub(self, device_id: str) -> str:
-        """Unpair a device AT ITS OWN REQUEST — the admin included.
+        """Unpair a device at its own request, the admin included.
 
-        Deliberately skips :meth:`delete_device`'s admin guard, and is the
-        ONLY path that may: that guard exists so one admin can't be evicted by
-        somebody else, which is not what is happening here — the caller proved
-        possession of this device's private key to get the token that names it.
-
-        This is what lets "Remove Hub" on the owner's phone hand the hub back.
-        Otherwise the hub would keep the phone enrolled as its one admin, and a
-        hub that HAS an admin refuses to enroll another, only ever issues
-        sub-admin/user codes and drops the bootstrap owner code, so nobody
-        could become admin again short of the recovery card or a reset from
-        Home Assistant. Once handed back, the hub is re-claimable with the
-        sticker code that shipped with it.
-
-        Returns the departing device's ``member_id`` so the caller can prune
-        that person's rows if this was their last device — same contract as
-        :meth:`delete_device`.
+        The only path past delete_device's admin guard, which stops others
+        evicting the admin; here the caller proved it holds this device's key.
+        It lets "Remove Hub" on the owner's phone hand the hub back, to be
+        claimed again with the sticker code. Returns the member_id, as
+        delete_device does.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -702,16 +623,11 @@ class AuthEngine:
         return member_id
 
     def wipe_all_devices(self) -> list[str]:
-        """Unpair EVERY device — admin included. The pairing factory reset.
+        """Unpair every device, the admin included; return the wiped ids.
 
-        Unlike :meth:`delete_device` and :meth:`update_device`, there is NO
-        admin guard here: wiping the owner IS the point. This hands the hub
-        back to the unclaimed state, so the next :meth:`has_admin` is False and
-        a fresh bootstrap admin code can be minted (the "Regenerate pairing
-        code" button does exactly that). Every device's outstanding JWTs die
-        instantly — its ``ver`` cache entry vanishes, same kill as an unpair —
-        and each device's login-throttle counter is cleared so a re-pair of the
-        same phone starts clean. Returns the wiped device ids.
+        Used by the "Regenerate pairing code" reset: the hub becomes unclaimed
+        so a new bootstrap code can be minted, every token dies, and each
+        device's login throttle is cleared so a re-paired phone starts clean.
         """
         with self._lock:
             wiped = list(self._devices.keys())
@@ -740,8 +656,8 @@ class AuthEngine:
                 for cid, challenge in self._challenges.items()
                 if challenge["device_id"] == device_id
             ]
-            # Cap outstanding nonces; drop the oldest rather than refuse —
-            # an app retrying over a flaky link shouldn't lock itself out.
+            # Drop the oldest nonce instead of refusing, so an app retrying
+            # over a flaky link can't lock itself out.
             while len(outstanding) >= MAX_CHALLENGES_PER_DEVICE:
                 self._challenges.pop(outstanding.pop(0), None)
 
@@ -777,8 +693,7 @@ class AuthEngine:
                 record["public_key"], challenge["nonce"], signature_b64
             )
         ):
-            # One generic failure path — the error must not reveal WHICH
-            # part was wrong (unknown device vs dead nonce vs bad signature).
+            # One generic failure, so the caller can't tell which check failed.
             self.throttle.record_failure(device_id)
             raise ChallengeError("Challenge verification failed")
 
@@ -798,65 +713,48 @@ class AuthEngine:
             "device_id": device_id,
         }
 
-    # -- validation + authorization (pure CPU — safe on the event loop) --------
+    # -- validation and authorization (no I/O, safe on the event loop) --------
 
     def validate_token(self, token: str) -> dict[str, Any]:
-        """Signature + claims + revocation check; claims or TokenError.
+        """Check the token's signature, claims and revocation; return its claims.
 
-        Beyond the cryptographic check, the token must point at a device
-        that is STILL enrolled with the SAME auth version — unpairing or
-        editing a device kills its outstanding JWTs here, on the next
-        request.
-        Pure in-memory work — safe on the event loop.
+        The device must still be enrolled with the token's auth version, so an
+        unpair or edit kills outstanding tokens on their next use. Raises
+        TokenError. No I/O, so it is safe on the event loop.
         """
         claims = auth_tokens.validate_token(self._signing_secret(), token)
         with self._lock:
             cached = self._device_cache.get(claims["sub"])
             if cached is None:
-                # warm_up() mirrors every enrolled device at startup and
-                # enroll/delete keep the cache in sync, so a miss means the
-                # device is GONE — the one condition that justifies telling
-                # the client to re-pair.
+                # The cache mirrors every enrolled device, so a miss means it
+                # is gone: the one case where the app should pair again.
                 raise TokenError("Token revoked", code="unenrolled")
             if cached["ver"] != claims.get("ver"):
-                # Device still enrolled, just edited since this token was
-                # minted (role/rooms change). A fresh login/mint recovers —
-                # clients must NOT treat this as a re-pair signal.
+                # Edited since the token was minted. Logging in again fixes
+                # it, so the app must not re-pair.
                 raise TokenError("Token revoked", code="token_stale")
-            # Liveness clock for the per-user sensors — in-memory, updated on
-            # the same lock+read we already do, so no extra cost on the hot
-            # path and no DB write per request.
+            # For the per-user sensors; kept in memory, so no write per request.
             cached["last_seen"] = time.time()
-            # Authorize off the STORED role/rooms, never the client-presented
-            # JWT claim. The ver gate above already guarantees they match, but
-            # stamping makes authorize() depend on the device record — so a token
-            # whose claims were somehow trusted without this check can't ride an
-            # elevated role past authorize().
+            # authorize() uses the stored role and rooms. The ver check means
+            # they match the claims; this keeps authorize() tied to the record.
             claims["role"] = cached["role"]
             claims["rooms"] = cached.get("rooms")
         return claims
 
     def is_owner_device(self, device_id: str) -> bool:
-        """True when ``device_id`` is the enrolled ADMIN (owner).
-
-        Decides who gets owner-only pushes (alarm, lock, tank). Unknown devices
-        and every other role return False.
-        """
+        """True when device_id is the admin (owner), who gets owner-only pushes."""
         with self._lock:
             cached = self._device_cache.get(device_id)
             return bool(cached and cached.get("role") == ROLE_ADMIN)
 
     @staticmethod
     def authorize(claims: dict[str, Any], permission: str) -> bool:
-        """True when the role grants the named permission.
+        """True when the claims' role holds the permission.
 
-        ``claims`` MUST come from ``AuthEngine.validate_token``, which stamps the
-        role/rooms from the STORED device record (not the raw JWT) — so the role
-        checked here is the device's, never a client-presented claim.
-
-        A ``scope: widget`` token is additionally capped to
-        ``WIDGET_SCOPE_PERMISSIONS`` — the scope check runs FIRST so a
-        widget token held by an admin still can't reach admin surfaces.
+        claims must come from validate_token, which sets the role and rooms
+        from the stored device record. A widget-scoped token is first limited
+        to WIDGET_SCOPE_PERMISSIONS, so an admin's widget token can't reach
+        admin endpoints.
         """
         if (
             claims.get("scope") == auth_tokens.SCOPE_WIDGET
@@ -865,18 +763,17 @@ class AuthEngine:
             return False
         allowed_roles = PERMISSIONS.get(permission)
         if allowed_roles is None:
-            # Unknown permission = programming error; fail closed, loudly.
+            # A programming error: refuse and log it.
             _LOGGER.error("authorize() called with unknown permission %r", permission)
             return False
         return claims.get("role") in allowed_roles
 
     def mint_widget_token(self, device_id: str) -> dict[str, Any]:
-        """Mint the long-lived, widget-scoped token for an enrolled device.
+        """Mint the long-lived widget token for an enrolled device.
 
-        Role/rooms/ver come from the device's CURRENT record — never from
-        the requesting token — so the widget token always reflects the
-        latest privilege edit and dies with the next one (``ver`` bump).
-        Raises ``UnknownDeviceError`` when the device is gone.
+        Role, rooms and ver come from the device's current record, so the
+        token reflects the latest edit and dies with the next one. Raises
+        UnknownDeviceError when the device is gone.
         """
         with self._lock:
             cached = self._device_cache.get(device_id)
