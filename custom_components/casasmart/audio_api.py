@@ -924,16 +924,18 @@ class CasaSmartAudioAthanView(_AudioView):
         if not_ready is not None:
             return not_ready
         athan = audio.get_athan()
-        # The effective location the scheduler will use: the app's pinned coords
-        # if any, else the hub's own home location (hass.config). The app shows
-        # it read-only ("Location follows your home · <timezone>").
+        # The effective location the scheduler will use: each coordinate the
+        # app pinned, else the hub's own home location (hass.config), exactly
+        # as AthanScheduler._resolve_config falls back. The app shows it
+        # read-only ("Location follows your home · <timezone>"); "source" is
+        # "home" only when neither coordinate is pinned.
         cfg = self._hass.config
-        pinned = athan.get("lat") is not None and athan.get("lon") is not None
+        lat, lon = athan.get("lat"), athan.get("lon")
         location = {
-            "lat": athan.get("lat") if pinned else cfg.latitude,
-            "lon": athan.get("lon") if pinned else cfg.longitude,
+            "lat": lat if lat is not None else cfg.latitude,
+            "lon": lon if lon is not None else cfg.longitude,
             "timezone": athan.get("timezone") or cfg.time_zone,
-            "source": "config" if pinned else "home",
+            "source": "home" if lat is None and lon is None else "config",
         }
         # Observability: the scheduler's last computed schedule (today's times,
         # which are still ahead, the next one, and the resolved target speakers)
