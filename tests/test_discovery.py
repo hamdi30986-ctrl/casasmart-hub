@@ -75,6 +75,17 @@ class InstanceNameTests(unittest.TestCase):
     def test_label_capped_at_63_bytes(self) -> None:
         self.assertLessEqual(len(build_instance_name("n" * 100, FP)), 63)
 
+    def test_long_names_fit_in_bytes_and_keep_the_fingerprint(self) -> None:
+        # The DNS limit is 63 bytes, not characters: an Arabic name of about
+        # 28 letters is over it in UTF-8, and zeroconf then refuses the whole
+        # record (no discovery at all). A long name also keeps the fingerprint
+        # suffix that tells same-named hubs apart.
+        for hub_name in ("فيلا " * 12, "n" * 100):
+            with self.subTest(hub_name=hub_name[:8]):
+                label = build_instance_name(hub_name, FP)
+                self.assertLessEqual(len(label.encode("utf-8")), 63)
+                self.assertTrue(label.endswith(f" ({FP[:8]})"))
+
 
 class ServiceDescriptorTests(unittest.TestCase):
     def test_full_descriptor(self) -> None:
