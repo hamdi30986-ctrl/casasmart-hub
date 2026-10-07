@@ -1,4 +1,18 @@
-"""Authenticated CasaSmart Now snapshot and room-activity endpoints."""
+"""Authenticated CasaSmart Now snapshot and room-activity endpoints.
+
+- ``GET /api/casasmart/now`` (``devices.read``) — the caller's Now page in
+  one response: recently used devices, pinned and suggested scenes, room
+  activity, weather, air quality and doors/windows, all filtered to the
+  caller's room scope.
+- ``GET/PUT /api/casasmart/now/config`` (``registry.manage``) — the
+  sources the Now page shows. The hub never picks sensors by itself.
+- ``PUT /api/casasmart/now/rooms/{room_id}/activity-policy``
+  (``registry.manage``) — whether a room takes part in room commands and
+  which approved devices they may switch.
+- ``POST /api/casasmart/now/rooms/{room_id}/activity`` (``devices.control``)
+  — switch a room's approved devices off, or back on from what the last OFF
+  captured. Idempotent per client key, one command per room at a time.
+"""
 
 from __future__ import annotations
 
@@ -50,7 +64,11 @@ _AIR_QUALITY_DEVICE_CLASSES = frozenset(
 _CONTACT_DEVICE_CLASSES = frozenset({"door", "window", "opening"})
 
 
+# -- helpers ------------------------------------------------------------------
+
+
 def get_now_data(hass: HomeAssistant) -> NowDataEngine | None:
+    """The Now store of the loaded entry, or None while the hub isn't loaded."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -64,6 +82,7 @@ def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 def _member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
+    """The person behind the token, so their devices share recents."""
     engine = get_engine(hass)
     return engine.member_id_for(claims["sub"]) if engine else claims["sub"]
 
@@ -84,6 +103,7 @@ def _state_is_unavailable(state: Any) -> bool:
 
 
 def _state_stale(state: Any) -> bool:
+    """True when an available state has not been updated for an hour."""
     if _state_is_unavailable(state):
         return False
     changed = getattr(state, "last_updated", None) or getattr(
@@ -96,13 +116,19 @@ def _state_stale(state: Any) -> bool:
     ).total_seconds() > _STALE_SECONDS
 
 
+# -- views --------------------------------------------------------------------
+
+
 class _NowView(HomeAssistantView):
-    requires_auth = False
+    """Shared plumbing for the Now views."""
+
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     def _now_or_503(self) -> tuple[NowDataEngine | None, web.Response | None]:
+        """The Now store, or a 503 while the hub isn't loaded."""
         now_data = get_now_data(self._hass)
         if now_data is None:
             return None, self.json_message(
@@ -266,7 +292,8 @@ class CasaSmartNowView(_NowView):
         suggestions = getattr(_runtime_data(self._hass), "suggestions", None)
         generated = getattr(suggestions, "generated", None)
         if generated is not None:
-            # Same authoritative ranking used for generated scene targets.
+            # Rank rooms exactly as the generated room suggestions do, so the
+            # page and its suggestions agree on the busiest rooms.
             ranked, _, _ = await generated.room_context(scope)
             previous = {r["room_id"]: r for r in active_rooms}
             active_rooms = [
@@ -287,8 +314,9 @@ class CasaSmartNowView(_NowView):
                 "suggestion": None,
             }
         )
-        # Keep the old nullable scene contract. Its explicit static/manual
-        # selection is only a fallback, never silently promoted to a time rule.
+        # suggested_routine is the scene an admin featured by hand. It shows
+        # only when no contextual rules are configured, and is never turned
+        # into a time rule.
         legacy = (
             visible_scene(config.get("suggested_scene_id"))
             if suggestions is None or contextual["status"] == "not_configured"
@@ -322,6 +350,7 @@ class CasaSmartNowView(_NowView):
         )
 
     def _weather_payload(self, entity_id: str | None) -> dict[str, Any]:
+        """The configured weather entity's reading, or why there is none."""
         if not entity_id:
             return {"available": False, "reason": "not_configured"}
         state = self._hass.states.get(entity_id)
@@ -337,6 +366,7 @@ class CasaSmartNowView(_NowView):
         }
 
     def _air_quality_payload(self, entity_id: str | None) -> dict[str, Any]:
+        """The configured air-quality sensor's reading, or why there is none."""
         if not entity_id:
             return {"supported": False}
         state = self._hass.states.get(entity_id)
@@ -353,6 +383,10 @@ class CasaSmartNowView(_NowView):
     def _contacts_payload(
         self, entity_ids: list[str], scope: list[str] | None
     ) -> dict[str, Any]:
+        """Open/closed summary of the configured doors, windows and locks.
+
+        A contact outside the caller's scope counts as unknown.
+        """
         if not entity_ids:
             return {"available": False}
         contact_states: list[tuple[str, str | None]] = []
@@ -418,6 +452,7 @@ class CasaSmartNowConfigView(_NowView):
     async def _validate_configuration(
         self, payload: dict[str, Any]
     ) -> web.Response | None:
+        """A 400 when a configured entity or scene is missing or the wrong kind."""
         weather_id = payload.get("outdoor_weather_entity_id")
         if weather_id is not None:
             if not isinstance(weather_id, str) or not self._is_openweathermap_weather(
@@ -464,6 +499,7 @@ class CasaSmartNowConfigView(_NowView):
         return None
 
     def _is_openweathermap_weather(self, entity_id: str) -> bool:
+        """A weather entity that belongs to an OpenWeatherMap config entry."""
         if (
             not entity_id.startswith("weather.")
             or self._hass.states.get(entity_id) is None
@@ -476,6 +512,7 @@ class CasaSmartNowConfigView(_NowView):
         return config_entry is not None and config_entry.domain == "openweathermap"
 
     def _is_air_quality_sensor(self, entity_id: object) -> bool:
+        """A sensor whose device class is an air-quality measurement."""
         if not isinstance(entity_id, str) or not entity_id.startswith("sensor."):
             return False
         state = self._hass.states.get(entity_id)
@@ -488,6 +525,7 @@ class CasaSmartNowConfigView(_NowView):
         return device_class in _AIR_QUALITY_DEVICE_CLASSES
 
     def _is_contact_sensor(self, entity_id: object) -> bool:
+        """A lock, or a door/window/opening binary sensor."""
         if not isinstance(entity_id, str):
             return False
         state = self._hass.states.get(entity_id)
@@ -505,6 +543,8 @@ class CasaSmartNowConfigView(_NowView):
 
 
 class CasaSmartRoomActivityPolicyView(_NowView):
+    """PUT /api/casasmart/now/rooms/{room_id}/activity-policy."""
+
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity-policy"
     name = f"api:{DOMAIN}:now:room:activity-policy"
 
@@ -545,6 +585,10 @@ class CasaSmartRoomActivityPolicyView(_NowView):
     async def _invalid_eligible_entities(
         self, room_id: str, entity_ids: list[Any]
     ) -> str | None:
+        """Why the list cannot be the room's policy, or None if it can.
+
+        Every entity must be served, in this room, and a safe candidate.
+        """
         if len(entity_ids) > 64 or any(
             not isinstance(entity_id, str) for entity_id in entity_ids
         ):
@@ -563,6 +607,7 @@ class CasaSmartRoomActivityPolicyView(_NowView):
         return None
 
     async def _room_accessible(self, room_id: str, scope: list[str] | None) -> bool:
+        """True for a registry room inside the caller's scope."""
         registry = self._registry()
         if registry is None or (scope is not None and room_id not in scope):
             return False
@@ -571,13 +616,19 @@ class CasaSmartRoomActivityPolicyView(_NowView):
 
 
 class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
-    """One lock-protected Hub command with durable idempotency/restore state."""
+    """One lock-protected Hub command with durable idempotency/restore state.
+
+    POST /api/casasmart/now/rooms/{room_id}/activity with ``{action:
+    turn_off|turn_on, idempotency_key}``. Shares the policy view's room
+    checks.
+    """
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
     name = f"api:{DOMAIN}:now:room:activity"
 
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass)
+        # Shared across view instances and listeners; see _room_command_locks.
         self._room_locks = _room_command_locks(hass)
 
     async def post(self, request: web.Request, room_id: str) -> web.Response:
@@ -618,6 +669,8 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         member_id = _member_id(self._hass, claims)
         lock = self._room_locks.setdefault(room_id, asyncio.Lock())
+        # The replay check, the command and storing its answer happen under
+        # the room's lock, so a retry waits for the original and replays it.
         async with lock:
             existing = await self._hass.async_add_executor_job(
                 now_data.idempotent_result, member_id, room_id, action, key
@@ -652,6 +705,12 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
     async def _run(
         self, room_id: str, action: str, now_data: NowDataEngine
     ) -> dict[str, Any]:
+        """Switch the room's eligible devices and report each one's outcome.
+
+        OFF targets every eligible device that is on; ON targets what the
+        restore set holds and is still off. A device counts as changed only
+        when its state afterwards confirms it.
+        """
         policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
         eligible_entity_ids = policy["eligible_entity_ids"]
         eligible = {
