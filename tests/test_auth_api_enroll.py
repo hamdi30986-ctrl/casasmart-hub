@@ -617,3 +617,94 @@ class TrustedLanIngressTests(EnrollGateTests):
         self.assertEqual(
             body["message"], "Recovery is only available on the hub's own network"
         )
+
+
+class NonAsciiCodeTests(EnrollGateTests):
+    """Codes are ASCII. Other text a phone keyboard produces (Arabic-Indic
+    digits, full-width or Arabic letters) used to crash the code hash with
+    UnicodeEncodeError: HTTP 500, and no throttle failure counted. It is now
+    the generic invalid-code answer, and counts like any wrong guess."""
+
+    INPUTS = {
+        "arabic-indic digits": "\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+        "full-width letters": "\uff21\uff22\uff23\uff24\uff25\uff26\uff27\uff28",
+        "arabic letters": "\u0627\u0628\u062c\u062f\u0647\u0648\u0632\u062d",
+        "mixed text": "ABCD \u0662\u0663\u0664\u0665 \uff25\uff26",
+    }
+
+    def _arm_recovery(self):
+        from casasmart.recovery import RecoveryManager
+
+        self.runtime.recovery = RecoveryManager(
+            self.storage.table("recovery_codes"), self.auth.has_admin
+        )
+        return self.runtime.recovery.ensure_armed()
+
+    async def _recover(self, code: str):
+        from casasmart.auth_api import CasaSmartRecoverView
+
+        resp = await CasaSmartRecoverView(self.hass).post(
+            H.FakeRequest(
+                body={
+                    "recovery_code": code,
+                    "public_key": make_public_pem(),
+                    "name": "New phone",
+                },
+                remote=LAN_IP,
+            )
+        )
+        return H.read_response(resp)
+
+    async def test_enroll_answers_invalid_code_and_throttles(self) -> None:
+        self.pairing.ensure_bootstrap_code()
+        for label, text in self.INPUTS.items():
+            with self.subTest(label):
+                for _ in range(MAX_FAILURES):
+                    status, body = await self._enroll(text, LAN_IP)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(body["message"], "Invalid pairing code")
+                status, _ = await self._enroll(text, LAN_IP)
+                self.assertEqual(status, 429)
+                self.pairing.throttle.clear(f"lan:{LAN_IP}")
+
+    async def test_re_pair_answers_invalid_code_and_throttles(self) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        pem = make_public_pem()
+        body = {"pairing_code": issued["code"], "public_key": pem, "name": "Phone"}
+        resp = await self.view.post(H.FakeRequest(body=body, remote=LAN_IP))
+        self.assertEqual(H.read_response(resp)[0], 201)
+        for label, text in self.INPUTS.items():
+            with self.subTest(label):
+                body["pairing_code"] = text
+                for _ in range(MAX_FAILURES):
+                    resp = await self.view.post(H.FakeRequest(body=body, remote=LAN_IP))
+                    status, answer = H.read_response(resp)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(answer["message"], "Invalid pairing code")
+                resp = await self.view.post(H.FakeRequest(body=body, remote=LAN_IP))
+                self.assertEqual(H.read_response(resp)[0], 429)
+                self.pairing.throttle.clear(f"lan:{LAN_IP}")
+
+    async def test_recover_answers_invalid_code_and_throttles(self) -> None:
+        self._claim_hub()
+        self._arm_recovery()
+        for label, text in self.INPUTS.items():
+            with self.subTest(label):
+                for _ in range(MAX_FAILURES):
+                    status, body = await self._recover(text)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(body["message"], "Invalid recovery code")
+                status, _ = await self._recover(text)
+                self.assertEqual(status, 429)
+                self.runtime.recovery.throttle.clear(LAN_IP)
+
+    async def test_sloppily_typed_valid_codes_still_work(self) -> None:
+        code = self.pairing.ensure_bootstrap_code()
+        status, body = await self._enroll(f" {code[:4].lower()}-{code[4:]} ", LAN_IP)
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")
+        card = self._arm_recovery()
+        status, body = await self._recover(f"  {card.lower().replace('-', ' ')} ")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")

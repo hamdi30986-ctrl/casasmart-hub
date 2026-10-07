@@ -4,6 +4,7 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -24,9 +25,20 @@ from pairing import (
     LanOnlyCodeError,
     PairingError,
     PairingManager,
+    hash_code,
 )
 from storage import HubStorage
 from throttle import FailureThrottle, ThrottledError
+
+# Text a phone keyboard can produce that is not in the ASCII code alphabet.
+NON_ASCII_INPUTS = {
+    "arabic-indic digits": "\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "full-width letters": "\uff21\uff22\uff23\uff24\uff25\uff26\uff27\uff28",
+    "arabic letters": "\u0627\u0628\u062c\u062f\u0647\u0648\u0632\u062d",
+    "mixed text": "ABCD \u0662\u0663\u0664\u0665 \uff25\uff26",
+    # Upper-cases to an ASCII "S", so it has to be dropped before upper().
+    "long s look-alike": "\u017fTAR2345",
+}
 
 
 class ThrottleTests(unittest.TestCase):
@@ -323,6 +335,48 @@ class PairingTests(unittest.TestCase):
             self.manager.redeem(issued["code"], "ip-shared", remote_source=True)
         grant = self.manager.redeem(issued["code"], "ip-shared")
         self.assertEqual(grant["role"], "user")
+
+    # -- input outside the issued (ASCII) alphabet --------------------------------
+
+    def test_non_ascii_input_is_an_ordinary_wrong_code(self):
+        # These used to survive normalization and crash the ASCII hash with
+        # UnicodeEncodeError: an HTTP 500 that never reached the throttle.
+        self.manager.install_bootstrap_hash(hash_code("STAR2345"))
+        for label, text in NON_ASCII_INPUTS.items():
+            with self.subTest(label):
+                for _ in range(throttle_mod.MAX_FAILURES):
+                    with self.assertRaises(CodeInvalidError):
+                        self.manager.redeem(text, f"ip-{label}")
+                with self.assertRaises(ThrottledError):
+                    self.manager.redeem(text, f"ip-{label}")
+
+    def test_non_ascii_input_is_a_wrong_code_on_the_re_pair_gate(self):
+        self.manager.install_bootstrap_hash(hash_code("STAR2345"))
+        allowed = (hash_code("STAR2345"),)
+        for label, text in NON_ASCII_INPUTS.items():
+            with self.subTest(label):
+                for _ in range(throttle_mod.MAX_FAILURES):
+                    with self.assertRaises(CodeInvalidError):
+                        self.manager.authorize_known_device(
+                            text, f"ip-{label}", allowed_hashes=allowed
+                        )
+                with self.assertRaises(ThrottledError):
+                    self.manager.authorize_known_device(
+                        text, f"ip-{label}", allowed_hashes=allowed
+                    )
+
+    def test_hash_of_a_valid_code_is_unchanged(self):
+        # Stored hashes (the sticker code's included) must keep matching.
+        expected = hashlib.sha256(b"STAR2345").hexdigest()
+        for typed in ("STAR2345", "star2345", " star-2345 ", "ST AR\t23-45"):
+            with self.subTest(typed=typed):
+                self.assertEqual(hash_code(typed), expected)
+
+    def test_sloppy_formatting_still_redeems(self):
+        issued = self.manager.generate_code("user")
+        code = issued["code"]
+        sloppy = f"  {code[:4].lower()}-{code[4:].lower()} "
+        self.assertEqual(self.manager.redeem(sloppy, "ip-1")["role"], "user")
 
     def test_success_clears_only_its_own_bucket(self):
         # Buckets are fully independent: 4 remote failures survive a LAN

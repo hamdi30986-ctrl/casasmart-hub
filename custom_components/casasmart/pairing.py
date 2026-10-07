@@ -130,9 +130,14 @@ class LanOnlyCodeError(PairingError):
 
 
 def normalize_code(code: str) -> str:
-    """Canonical form: uppercase, alphanumerics only (spaces/dashes dropped),
-    so a code typed with stray spacing or lowercase still matches."""
-    return "".join(ch for ch in code.upper() if ch.isalnum())
+    """Canonical form: uppercase, ASCII alphanumerics only (spaces/dashes
+    dropped), so a code typed with stray spacing or lowercase still matches.
+
+    Codes are ASCII, so everything else is dropped too, BEFORE upper-casing
+    (a few non-ASCII letters upper-case to ASCII ones). Non-ASCII input then
+    fails as an ordinary wrong code, throttle included, instead of crashing
+    the ASCII hash."""
+    return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
 
 
 def hash_code(code: str) -> str:

@@ -77,8 +77,10 @@ def _new_code() -> str:
 
 
 def normalize_code(code: str) -> str:
-    """Canonical form: uppercase, alphanumerics only (dashes/spaces dropped)."""
-    return "".join(ch for ch in code.upper() if ch.isalnum())
+    """Canonical form: uppercase, ASCII alphanumerics only (dashes/spaces
+    dropped). Non-ASCII is dropped before upper-casing, as in pairing, so it
+    fails as an ordinary wrong code instead of crashing the ASCII hash."""
+    return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
 
 
 def hash_code(code: str) -> str:
