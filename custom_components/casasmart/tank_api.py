@@ -180,7 +180,10 @@ async def _find_script_id(
 ) -> int | None:
     """The id of the Shelly script called ``name``, or None."""
     listing = await _shelly_rpc(session, ip, "Script.List")
-    for script in listing.get("scripts") or []:
+    scripts = listing.get("scripts") or []
+    if not isinstance(scripts, list):
+        raise ShellyRpcError("Script.List: malformed response")
+    for script in scripts:
         if isinstance(script, dict) and script.get("name") == name:
             script_id = script.get("id")
             return script_id if isinstance(script_id, int) else None
@@ -375,20 +378,15 @@ class CasaSmartTankProvisionView(_TankView):
             script_id = await _push_script(session, ip, script)
         except (ShellyRpcError, TankError) as err:
             _LOGGER.warning("Tank provision failed for %s: %s", ip, err)
-            # Undo this request's own mint so the user can simply retry: a
-            # leftover record would refuse the retry as a duplicate (409). The
-            # retry's _push_script replaces whatever this attempt left behind.
-            try:
-                await self._hass.async_add_executor_job(
-                    functools.partial(
-                        tanks.delete_device, record["device_id"], token=token
-                    )
-                )
-            except UnknownTankError:
-                pass  # already deleted, or re-minted by another request
+            await self._undo_mint(tanks, record["device_id"], token)
             return self.json_message(
                 f"Provisioning failed: {err}", HTTPStatus.BAD_GATEWAY
             )
+        except Exception:
+            # Something the RPC helpers don't model: still undo the mint so a
+            # retry works, then let the error surface as what it is.
+            await self._undo_mint(tanks, record["device_id"], token)
+            raise
 
         verified = False
         first_reading = None
@@ -419,6 +417,21 @@ class CasaSmartTankProvisionView(_TankView):
             },
             HTTPStatus.CREATED,
         )
+
+    async def _undo_mint(self, tanks: TankEngine, device_id: str, token: str) -> None:
+        """Drop the record this request minted after a failed upload.
+
+        So the user can simply retry: a leftover record would refuse the
+        retry as a duplicate (409). The retry's _push_script replaces whatever
+        this attempt left on the device. A record minted since by another
+        request (a different token) is left alone.
+        """
+        try:
+            await self._hass.async_add_executor_job(
+                functools.partial(tanks.delete_device, device_id, token=token)
+            )
+        except UnknownTankError:
+            pass  # already deleted, or re-minted by another request
 
 
 class CasaSmartTankReadingView(_TankView):
