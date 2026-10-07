@@ -20,6 +20,7 @@ Container/CI only (imports Home Assistant). Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -1180,6 +1181,113 @@ class ScopedSpeakerControl(AudioViewTestCase):
                         "speakers/000002/command",
                     ],
                 )
+
+
+class _StreamProtocol:
+    """The parts of aiohttp's protocol a request StreamReader touches."""
+
+    _reading_paused = False
+
+    def pause_reading(self, **_kwargs) -> None:
+        pass
+
+    def resume_reading(self, **_kwargs) -> None:
+        pass
+
+
+def _raw_request(headers: dict, body: bytes):
+    """A real aiohttp request carrying ``body``, so ``multipart()`` parses it."""
+    from aiohttp import streams
+    from aiohttp.test_utils import make_mocked_request
+
+    payload = streams.StreamReader(
+        _StreamProtocol(), 2**16, loop=asyncio.get_running_loop()
+    )
+    payload.feed_data(body)
+    payload.feed_eof()
+    return make_mocked_request(
+        "POST", "/api/casasmart/audio/pa", headers=headers, payload=payload
+    )
+
+
+_BOUNDARY = "multipart/form-data; boundary=XyZ"
+_AUDIO_PART = (
+    b'--XyZ\r\nContent-Disposition: form-data; name="audio"; filename="a.mp3"\r\n'
+    b"Content-Type: audio/mpeg\r\n\r\n\x00\x01\r\n--XyZ--\r\n"
+)
+
+
+def _part(headers: bytes, value: bytes) -> bytes:
+    return b"--XyZ\r\n" + headers + b"\r\n\r\n" + value + b"\r\n"
+
+
+class PaUploadBody(AudioViewTestCase):
+    """A PA upload body aiohttp can't parse is a 400, never a 500."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.adapter = FakeAdapter()
+        patcher = mock.patch(
+            "casasmart.audio_api.get_audio_adapter", lambda hass: self.adapter
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _post(self, body: bytes, content_type: str | None = _BOUNDARY):
+        headers = dict(self._admin())
+        if content_type is not None:
+            headers["Content-Type"] = content_type
+        view = CasaSmartAudioPaView(self.hass)
+        return H.read_response(await view.post(_raw_request(headers, body)))
+
+    async def test_unparseable_bodies_are_a_400(self) -> None:
+        targets = b'Content-Disposition: form-data; name="targets"'
+        cases = {
+            "no content type": (b"hello", None),
+            "no starting boundary": (b"garbage", _BOUNDARY),
+            "undecodable targets": (
+                _part(targets, b"\xff\xfe") + _AUDIO_PART,
+                _BOUNDARY,
+            ),
+            "unknown charset": (
+                _part(targets + b"\r\nContent-Type: text/plain; charset=nope", b"x")
+                + _AUDIO_PART,
+                _BOUNDARY,
+            ),
+            "malformed part header": (
+                _part(b"Content-Disposition form-data", b"x") + b"--XyZ--\r\n",
+                _BOUNDARY,
+            ),
+            "part header too long": (
+                _part(b"X-A: " + b"a" * 20000, b"x") + b"--XyZ--\r\n",
+                _BOUNDARY,
+            ),
+            "truncated part": (
+                b'--XyZ\r\nContent-Disposition: form-data; name="audio"\r\n\r\nzz',
+                _BOUNDARY,
+            ),
+            "nested multipart": (
+                _part(
+                    b"Content-Type: multipart/mixed; boundary=QQ",
+                    b"--QQ\r\n\r\nx\r\n--QQ--",
+                )
+                + b"--XyZ--\r\n",
+                _BOUNDARY,
+            ),
+        }
+        for name, (body, content_type) in cases.items():
+            with self.subTest(case=name):
+                status, _ = await self._post(body, content_type)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.adapter.published, [])
+        self.assertEqual(_pa_store(self.hass)._clips, {})
+
+    async def test_a_well_formed_upload_still_plays(self) -> None:
+        status, body = await self._post(_AUDIO_PART)
+        self.assertEqual((status, body["played_on"]), (200, "all"))
+        self.assertEqual(
+            [t for t, *_ in self.adapter.published], ["speakers/broadcast"]
+        )
 
 
 if __name__ == "__main__":
