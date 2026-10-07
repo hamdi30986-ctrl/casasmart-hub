@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -41,9 +43,12 @@ from .now_data import (
     summarize_openings,
 )
 from .registry import RegistryEngine
+from .storage import StorageError
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _STALE_SECONDS = 60 * 60
@@ -81,10 +86,16 @@ def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
     return entries[0].runtime_data if entries else None
 
 
-def _member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
-    """The person behind the token, so their devices share recents."""
+async def _async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
+    """The person behind the token, so their devices share recents.
+
+    A storage read, so it runs in the executor; it may raise StorageError or
+    sqlite3.Error.
+    """
     engine = get_engine(hass)
-    return engine.member_id_for(claims["sub"]) if engine else claims["sub"]
+    if engine is None:
+        return claims["sub"]
+    return await hass.async_add_executor_job(engine.member_id_for, claims["sub"])
 
 
 def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
@@ -140,6 +151,11 @@ class _NowView(HomeAssistantView):
         data = _runtime_data(self._hass)
         return data.registry if data is not None else None
 
+    def _storage_failure(self, err: Exception) -> web.Response:
+        """Log a storage error and answer a clean 500."""
+        _LOGGER.error("Now storage failure: %s", err)
+        return self.json_message("Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR)
+
 
 class CasaSmartNowView(_NowView):
     """Return the server-computed, user-scoped Now snapshot."""
@@ -158,7 +174,10 @@ class CasaSmartNowView(_NowView):
         if registry is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
 
-        member_id = _member_id(self._hass, claims)
+        try:
+            member_id = await _async_member_id(self._hass, claims)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
         scope = claims.get("rooms")
         (
             recents,
@@ -670,7 +689,10 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             key = now_data.validate_idempotency_key(payload.get("idempotency_key"))
         except NowDataError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-        member_id = _member_id(self._hass, claims)
+        try:
+            member_id = await _async_member_id(self._hass, claims)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
         lock = self._room_locks.setdefault(room_id, asyncio.Lock())
         # The replay check, the command and storing its answer happen under
         # the room's lock, so a retry waits for the original and replays it.
