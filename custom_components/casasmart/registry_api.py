@@ -1149,7 +1149,14 @@ class CasaSmartSceneActivateView(_RegistryView):
             and not scene.get("works_during_energy_saving", False)
         ):
             return self.json(
-                {"error": "scene_skipped_energy_saving", "scene_id": scene_id},
+                {
+                    "error": "scene_skipped_energy_saving",
+                    "scene_id": scene_id,
+                    "message": (
+                        "Energy Saving is active and this scene isn't set to "
+                        "run during it"
+                    ),
+                },
                 HTTPStatus.CONFLICT,
             )
 
