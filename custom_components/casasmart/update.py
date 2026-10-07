@@ -119,13 +119,14 @@ def parse_release(payload: Any) -> ReleaseInfo | None:
     body = payload.get("body")
     published = payload.get("published_at")
     url = payload.get("html_url")
+    assets = _asset_urls(payload)
     return ReleaseInfo(
         version=tag.strip(),
         changelog=body.strip() if isinstance(body, str) and body.strip() else None,
         published_at=published if isinstance(published, str) else None,
         release_url=url if isinstance(url, str) else None,
-        download_url=_pick_download_url(payload),
-        signature_url=_asset_urls(payload).get(SIGNATURE_ASSET_NAME),
+        download_url=assets.get(RELEASE_ASSET_NAME),
+        signature_url=assets.get(SIGNATURE_ASSET_NAME),
     )
 
 
@@ -142,11 +143,6 @@ def _asset_urls(payload: dict) -> dict[str, str]:
             if isinstance(name, str) and isinstance(href, str) and href.strip():
                 urls.setdefault(name, href.strip())
     return urls
-
-
-def _pick_download_url(payload: dict) -> str | None:
-    """The casasmart.zip asset URL, or None (never the source zipball)."""
-    return _asset_urls(payload).get(RELEASE_ASSET_NAME)
 
 
 # --- Install: the filesystem side -------------------------------------------
@@ -199,7 +195,7 @@ def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
     fixtures are ignored.
     """
     root = Path(extracted_root)
-    if _manifest_domain(root / "manifest.json") == domain:
+    if _manifest_field(root, "domain") == domain:
         return root
     matches = sorted(
         root.rglob(f"custom_components/{domain}/manifest.json"),
@@ -208,25 +204,21 @@ def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
     return matches[0].parent if matches else None
 
 
-def _manifest_domain(manifest: Path) -> str | None:
-    """The domain declared in a manifest file, or None if unreadable."""
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    domain = data.get("domain") if isinstance(data, dict) else None
-    return domain if isinstance(domain, str) else None
-
-
-def read_manifest_version(integration_dir: Any) -> str | None:
-    """The version in an integration dir's manifest.json, or None."""
+def _manifest_field(integration_dir: Any, key: str) -> str | None:
+    """A string field of an integration dir's manifest.json, or None."""
     manifest = Path(integration_dir) / "manifest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    version = data.get("version") if isinstance(data, dict) else None
-    return version if isinstance(version, str) and version.strip() else None
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def read_manifest_version(integration_dir: Any) -> str | None:
+    """The version in an integration dir's manifest.json, or None."""
+    version = _manifest_field(integration_dir, "version")
+    return version if version and version.strip() else None
 
 
 def versions_match(tag: Any, manifest_version: Any) -> bool:
