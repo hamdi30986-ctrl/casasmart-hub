@@ -53,9 +53,9 @@ everything in it is here.
 - `LICENSE` grants free use of the unmodified hub with CasaSmart; it remains
   proprietary.
 - `manifest.json` names the repository owner as codeowner, links to this
-  repository, declares `network` as a dependency, relaxes the prayer-times
-  requirement to `>=1.0.3` (the version Home Assistant ships), and passes
-  hassfest.
+  repository, declares `network` as a dependency, sets the prayer-times
+  requirement to `>=1.0.3,<2` (1.0.3 is the version Home Assistant ships),
+  and passes hassfest.
 - `hacs.json` declares the minimum Home Assistant version, 2025.3 (tested on
   2025.3, 2026.4 and 2026.9), and hides branch installs, so HACS always
   records a release tag.
@@ -87,9 +87,11 @@ everything in it is here.
   pairing, owner recovery and keyless speaker provisioning stay local even
   through a tunnel pointed at the hub's own TLS port. Remote pairing still
   works when `remote_pairing_enabled` is set.
-- The tank ingest throttle keys on Home Assistant's resolved client address,
-  so client-sent `CF-Connecting-IP` or `X-Forwarded-For` headers can't dodge
-  it.
+- Through the Cloudflare tunnel, the tank ingest throttle, the HQ reminder
+  rate limit and the login throttle tell remote clients apart by the address
+  Cloudflare reports, instead of putting every tunnel client in one bucket
+  where a few bad attempts locked them all out. A client-sent
+  `X-Forwarded-For` is never read.
 - Pairing-code hashes are compared in constant time everywhere.
 - `casasmart.factory_reset` and `casasmart.set_tunnel_url` are admin-only,
   and so are the "Factory reset" and "Regenerate pairing code" buttons. Any
@@ -128,6 +130,9 @@ everything in it is here.
   cut during recovery could leave the hub with no admin and a dead recovery
   card, and a failed reset left a half-wiped hub that still accepted old
   tokens.
+- A factory reset whose reload fails still revokes every wiped phone's token
+  at once, forgets the owner and recovery codes in one write, and reports the
+  failed reload instead of success.
 - A recovery code minted after the first one was dropped is saved before it
   is shown, so the engraved card still works after a restart.
 - Hubs the phone finds by scanning the local network show their name. The
@@ -221,9 +226,12 @@ everything in it is here.
 #### Speakers and athan
 
 - While the MQTT broker is unreachable, speaker commands, announcements and PA
-  answer 503 instead of being queued and played late, and an athan that can't
-  be delivered is skipped. Two broker changes at once no longer leave two MQTT
-  clients knocking each other off the broker.
+  answer 503 instead of being queued and played late; a removed speaker's
+  reset still waits for the broker, so it can't come back as a discovery
+  ghost. An athan the broker refuses is retried every 10 seconds for up to
+  two minutes past its time, then skipped, so it is never played late. Two
+  broker changes at once no longer leave two MQTT clients knocking each other
+  off the broker.
 - A prayer is never played twice (the hourly re-arm could replay one that had
   just played), and a malformed stored time zone no longer stops the hub from
   loading.
@@ -237,6 +245,9 @@ everything in it is here.
   before, every retry was refused as "already registered".
 - A tank whose Shelly sent an unexpected reply during setup can be set up
   again, and `0.0.0.0` is refused as a Shelly address.
+- A tank with a valid token always reports. The lockout for bad tokens used
+  to block every sender at the same address, which on Docker Desktop is every
+  tank, so one Shelly with a stale token silenced them all for up to an hour.
 
 #### Self-update
 
@@ -249,7 +260,8 @@ everything in it is here.
   place of the integration. Leftovers from earlier versions are moved there at
   startup.
 - Only one self-update runs at a time (a second gets "update already in
-  progress"), and the rollback copy survives a failed swap.
+  progress", and after a swap it asks for a restart of Home Assistant to
+  finish), and the rollback copy survives a failed swap.
 - The update no longer blocks Home Assistant's event loop with file work, and
   a malformed reply from GitHub no longer fails the update check.
 
@@ -264,12 +276,14 @@ everything in it is here.
   whole, so the next start can run it again instead of failing every time.
 - If Home Assistant can't unload the hub's entities, the hub reports it
   instead of shutting down anyway.
-- A long hub name in a non-Latin script no longer stops the hub from being
-  discovered.
+- A long hub name in a non-Latin script, emoji included, no longer stops the
+  hub from being discovered.
 - No Home Assistant 2026.9 deprecation warning about
   `device_registry.devices`, which stops working in 2027.9.
-- The macOS TLS relay handles an upstream timeout on the system Python 3.9,
-  and judges IPv4-mapped IPv6 peers by their IPv4 address.
+- The macOS TLS relay refuses connections from the Mac itself, so a tunnel
+  running there (ngrok, `ssh -R`) can't enter the hub as the local network. It
+  also handles an upstream timeout on the system Python 3.9, and judges
+  IPv4-mapped IPv6 peers by their IPv4 address.
 - Reloading or unloading the hub with a phone connected is instant; it took
   over 80 seconds while the phone's WebSocket held the TLS listener open.
 - A setup that fails part-way stops what it started. Before, the TLS port
