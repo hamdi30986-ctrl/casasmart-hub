@@ -440,13 +440,15 @@ class RegistryEngine:
         sort_order: Any = None,
     ) -> dict[str, Any]:
         """Create a room under a new random id; floor_id must exist or be None."""
-        record = {
-            "name": _clean_name(name, "Room"),
-            "floor_id": self._checked_floor_id(floor_id),
-            "icon": _clean_icon(icon),
-            "sort_order": _clean_sort_order(sort_order),
-        }
         with self._lock:
+            # The floor check shares the lock with the write, so a concurrent
+            # delete_floor either runs first (unknown floor) or sees this room.
+            record = {
+                "name": _clean_name(name, "Room"),
+                "floor_id": self._checked_floor_id(floor_id),
+                "icon": _clean_icon(icon),
+                "sort_order": _clean_sort_order(sort_order),
+            }
             room_id = f"room-{secrets.token_urlsafe(8)}"
             self._rooms[room_id] = record
         with self._mirror_lock:

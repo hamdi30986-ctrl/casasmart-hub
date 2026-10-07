@@ -6,6 +6,7 @@ Run from the repo root:
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from registry import (
     RegistryError,
     UnknownItemError,
 )
-from storage import HubStorage
+from storage import HubStorage, KeyValueTable
 
 
 def make_engine(storage: HubStorage) -> RegistryEngine:
@@ -92,6 +93,39 @@ class RoomTests(RegistryTestCase):
     def test_unknown_floor_refused(self):
         with self.assertRaises(RegistryError):
             self.engine.create_room("Living", floor_id="floor-nope")
+
+    def test_floor_deleted_while_a_room_is_created_on_it(self):
+        # delete_floor runs on another executor thread just as create_room
+        # checks the floor. The check must hold the registry lock, so the
+        # delete waits, then sees the new room and is refused; otherwise it
+        # slips in between and leaves the room on a floor that is gone.
+        floor_id = self.engine.create_floor("Ground")["floor_id"]
+        outcome = {}
+
+        def delete_floor():
+            try:
+                self.engine.delete_floor(floor_id)
+                outcome["delete"] = "deleted"
+            except InUseError:
+                outcome["delete"] = "refused"
+
+        class RacingFloors(KeyValueTable):
+            racer = None
+
+            def __contains__(self, key):
+                found = super().__contains__(key)
+                if self.racer is None:  # the delete lands right after the check
+                    self.racer = threading.Thread(target=delete_floor)
+                    self.racer.start()
+                    self.racer.join(timeout=0.3)
+                return found
+
+        racing = RacingFloors(self.storage, "registry_floors")
+        self.engine._floors = racing
+        room = self.engine.create_room("Kitchen", floor_id=floor_id)
+        racing.racer.join(timeout=5)
+        self.assertEqual(outcome, {"delete": "refused"})
+        self.assertIn(room["floor_id"], self.storage.table("registry_floors"))
 
     def test_delete_cascades_to_unassigned(self):
         room = self.engine.create_room("Living")
