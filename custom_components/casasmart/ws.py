@@ -67,6 +67,13 @@ class CasaSmartWebSocketView(HomeAssistantView):
 
 
 class WsConnection:
+    """One authenticated socket.
+
+    Event-loop listeners turn Home Assistant events into frames, a single
+    sender task writes them from a coalescing queue, and a periodic re-check
+    catches a token that was revoked or expired mid-connection.
+    """
+
     def __init__(
         self, hass: HomeAssistant, ws: web.WebSocketResponse, hub_version: str
     ) -> None:
@@ -88,12 +95,15 @@ class WsConnection:
 
         self._subscribed = False
         self._token: str | None = None
-
+        # Claims of the current token. None while a re-auth is pending, which
+        # holds back every frame that carries home data.
         self._claims: dict[str, Any] | None = None
-
+        # Closes the socket unless a fresh token arrives within the grace.
         self._reauth_deadline_task: asyncio.Task | None = None
 
     async def run(self) -> None:
+        """Authenticate, listen for the hub's events, then serve client frames
+        until the socket closes."""
         if not await self._authenticate_first_frame():
             return
 
@@ -130,6 +140,7 @@ class WsConnection:
             recheck_task.cancel()
 
     def cleanup(self) -> None:
+        """Drop every listener and cancel the connection's tasks (idempotent)."""
         if self._unsub_suggestions_changed is not None:
             self._unsub_suggestions_changed()
             self._unsub_suggestions_changed = None
@@ -199,8 +210,9 @@ class WsConnection:
     async def _async_validate_token(self, token: str) -> bool:
         """Validate a CasaSmart JWT and refresh the connection's claims.
 
-        The auth engine: signature + expiry + role permission. Pure
-        HMAC math — no executor hop. Returns False (never raises).
+        The auth engine checks the signature, the expiry and that the device is
+        still enrolled at the token's version, all in memory (no executor hop);
+        the socket then needs ``devices.read``. Returns False (never raises).
         """
         from .auth_api import get_engine  # local: auth_api is sibling glue
 
@@ -335,13 +347,12 @@ class WsConnection:
             self._reauth_deadline_task.cancel()
             self._reauth_deadline_task = None
         await self._enqueue(ws_protocol.frame_auth_ok(self._hub_version, API_VERSION))
-        # Re-send the snapshot after EVERY re-auth (m2). The app gates data
-        # frames while it re-authenticates (auth_required -> auth_ok), so any
-        # state_changed the hub pushed during that grace window is dropped
-        # client-side and its tiles freeze until the next reconnect. A fresh
-        # snapshot on re-auth reconciles that missed state — and also drops/gains
-        # rooms at once when an admin re-scoped this user mid-connection (the
-        # scope-change case this used to be limited to).
+        # Re-send the snapshot after EVERY re-auth. The app gates data frames
+        # while it re-authenticates (auth_required -> auth_ok), and the hub
+        # sends none in that window, so tiles would otherwise freeze until the
+        # next reconnect. A fresh snapshot reconciles the missed state, and
+        # drops or gains rooms at once when an admin re-scoped this user
+        # mid-connection.
         if self._subscribed:
             await self._emit_snapshot()
 
@@ -385,6 +396,8 @@ class WsConnection:
 
     @callback
     def _on_suggestions_changed(self, event: Event) -> None:
+        """Suggestions changed — a content-free nudge to subscribed sockets;
+        the app re-reads its suggestions GET."""
         if self._subscribed:
             self._offer_or_close({"type": "suggestions_changed", "version": 1})
 

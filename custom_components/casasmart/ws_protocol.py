@@ -20,6 +20,10 @@ Server -> client frames:
 - ``auth_ok`` / ``auth_failed`` / ``auth_required``
 - ``subscribed`` — subscription acknowledged, with device snapshot
 - ``state_changed`` — one device changed (same wire shape as REST)
+- ``entity_removed`` — a subscribed entity is gone (id only)
+- ``registry_changed`` / ``tank_changed`` / ``alarm_changed`` /
+  ``audio_changed`` / ``energy_changed`` / ``suggestions_changed`` —
+  content-free nudges: the app re-fetches through the matching REST endpoint
 - ``pong`` / ``error``
 """
 
@@ -194,8 +198,8 @@ def frame_error(message: str) -> dict[str, Any]:
 # -- Outbound backpressure -----------------------------------------------------
 # On a congested tunnel (LTE, weak WiFi) a burst of state changes — a scene
 # flipping 20 lights, a re-sync fan-out — can arrive faster than the socket
-# drains. The old queue force-closed (4003 "too slow") the moment it hit its
-# cap, killing a perfectly healthy app that would have caught up in a second.
+# drains. Closing the socket (4003 "too slow") at a fixed cap would kill a
+# perfectly healthy app that would have caught up in a second.
 #
 # These "push" frames are loss-tolerant: only the LATEST state of an entity
 # matters, and a nudge (registry/tank/alarm/audio) just says "re-fetch", so a
@@ -291,9 +295,9 @@ class CoalescingSendQueue:
 
         Returns True when the frame (or a newer equivalent) is queued, False
         only when the queue is full of undroppable protocol frames — then the
-        caller closes the socket. A None-key frame passed here is treated as
-        droppable-if-over-cap but never coalesced (defensive; callers pass real
-        push frames).
+        caller closes the socket. A frame without a coalesce key (the
+        suggestions nudge is one) is admitted like any push but, once queued,
+        is never coalesced or evicted.
         """
         key = coalesce_key(frame)
         if key is not None:

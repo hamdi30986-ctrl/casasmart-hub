@@ -2,6 +2,10 @@
 
 Handshake, health, devices, device commands and history live here;
 ``build_views`` collects them together with the other ``*_api`` modules' views.
+
+Views set ``requires_auth = False`` because they don't use Home Assistant's
+own tokens: each handler checks the CasaSmart JWT itself
+(``authenticate_request``) against the permission it needs.
 """
 
 from __future__ import annotations
@@ -162,6 +166,12 @@ def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView]:
+    """Every view the hub serves, freshly built.
+
+    Called for Home Assistant's HTTP server and again for the hub's TLS
+    listener (at start and on each refresh), so anything the listeners must
+    share lives in ``hass.data``, never on a view instance.
+    """
     return [
         CasaSmartHandshakeView(hass, hub_version),
         CasaSmartHealthView(hass, hub_version),
@@ -273,6 +283,13 @@ def async_register_views(hass: HomeAssistant, hub_version: str) -> None:
 
 
 class CasaSmartHandshakeView(HomeAssistantView):
+    """GET /api/casasmart/handshake — unauthenticated discovery probe.
+
+    Reports the API and hub versions and the capabilities, plus the TLS
+    identity the app pins and the tunnel URL when configured. With the API
+    version header it also says whether that version is supported.
+    """
+
     url = f"/api/{DOMAIN}/handshake"
     name = f"api:{DOMAIN}:handshake"
     requires_auth = False
@@ -441,6 +458,12 @@ class CasaSmartDeviceView(HomeAssistantView):
 
 
 class CasaSmartCommandView(HomeAssistantView):
+    """POST /api/casasmart/devices/{entity_id}/command — one whitelisted action.
+
+    The reply carries the device's state after the command, and a successful
+    command is recorded in the member's recently used devices.
+    """
+
     url = f"/api/{DOMAIN}/devices/{{entity_id}}/command"
     name = f"api:{DOMAIN}:device:command"
     requires_auth = False
@@ -491,6 +514,9 @@ class CasaSmartCommandView(HomeAssistantView):
         except CommandError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
+        # Listen before calling, so a state change that lands during the
+        # blocking call isn't missed; then give the device up to 2 s to report
+        # its new state so the reply can carry it.
         changed = asyncio.Event()
 
         @callback
@@ -546,6 +572,12 @@ class CasaSmartCommandView(HomeAssistantView):
 
 
 class CasaSmartHistoryView(HomeAssistantView):
+    """GET /api/casasmart/history — recorder history for served entities.
+
+    Ids that are unknown, not served or outside the caller's rooms are left
+    out of the query and the reply alike, so they can't be told apart.
+    """
+
     url = f"/api/{DOMAIN}/history"
     name = f"api:{DOMAIN}:history"
     requires_auth = False
@@ -594,11 +626,10 @@ class CasaSmartHistoryView(HomeAssistantView):
                 allowed,
                 include_start_time_state=True,
                 significant_changes_only=significant,
-                # CasaSmart's public history contract serializes full
-                # `state`/`last_changed` rows. HA's minimal form compresses
-                # subsequent rows (for example to `s`/`lu`), which caused the
-                # serializer to discard real Maan/POWCT counter samples and
-                # made a populated timeline look unavailable.
+                # The history contract returns a full state/last_changed row
+                # for every recorded sample. HA's minimal form thins and
+                # reshapes the rows after the first, which would drop real
+                # samples (meter counters, for one) from the timeline.
                 minimal_response=False,
                 no_attributes=True,
             )
