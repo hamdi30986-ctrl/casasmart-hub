@@ -60,19 +60,23 @@ integration's **Configure** dialog and paste a fresh code.
 | Kind | Name | Purpose |
 |---|---|---|
 | Alarm panel | `alarm_control_panel.casasmart_hub_security` | The hub's alarm, armed and disarmed from the app or HA |
-| Button | `button.casasmart_regenerate_pairing_code` | Unpair every phone and issue a new owner code (the old printed code stops working) |
+| Button | `button.casasmart_regenerate_pairing_code` | Unpair every phone, drop their push tokens, favorites and per-person settings, and issue a new owner code (the old printed code stops working) |
 | Button | `button.casasmart_factory_reset` | Wipe the app layer (see below) and issue new owner and recovery codes |
-| Sensor | `sensor.casasmart_energy_savings` | Whether Energy Saving is active |
+| Sensor | `sensor.casasmart_energy_savings` | The active Energy Saving level: `off`, `low`, `medium` or `smart` |
 | Sensors | `sensor.casasmart_user_*` | One per paired phone |
 | Service | `casasmart.factory_reset` | The same reset as the button |
 | Service | `casasmart.activate_scene` | Run a CasaSmart scene from an automation |
-| Service | `casasmart.set_tunnel_url` | Store the tunnel address the hub gives to phones |
-| Service | `casasmart.configure_hq_notifications` | Trust a signing key for HQ reminder notifications |
+| Service | `casasmart.set_tunnel_url` | Set the tunnel address the hub gives to phones. A bare `https://host` also becomes the Cloudflare tunnel hostname, with the tunnel switched on unless it was switched off before (see [Remote access](#remote-access)). |
+| Service | `casasmart.configure_hq_notifications` | Trust a signing key for HQ reminder notifications (Home Assistant admins only) |
 
 **Automation events:**
 - `casasmart_alarm_triggered`: an armed zone or a life-safety sensor tripped.
   Hook your siren here.
-- `casasmart_tank_low` and `casasmart_tank_offline`.
+- `casasmart_tank_low` (checked daily at 18:00, Home Assistant's time) and
+  `casasmart_tank_offline` (a tank silent for 20 minutes): at most once per
+  tank per day, and only while push notifications are set up.
+- `casasmart_auth_changed`: a phone was paired, recovered or unpaired, or its
+  role or rooms changed.
 - `casasmart_alarm_changed`, `casasmart_registry_changed`,
   `casasmart_audio_changed`, `casasmart_energy_changed`,
   `casasmart_tank_changed` and `casasmart_suggestions_changed`: state changes.
@@ -114,8 +118,9 @@ only from the local network.
 - **On Docker Desktop**, where addresses are hidden, you can tell it to trust
   its own TLS port behind the LAN-only relay instead (`lan_relay_ingress`,
   below). It never does this on its own.
-- **Through Cloudflare**, requests are never local, so a tunnel can't be used
-  to pair.
+- **Through Cloudflare**, requests are never local, so the owner claim and
+  recovery can't go through a tunnel, and by default neither can any other
+  pairing.
 
 To let invited members pair from anywhere, set `remote_pairing_enabled`. The
 owner claim always stays local.
@@ -123,10 +128,20 @@ owner claim always stays local.
 ### Remote access
 
 Phones reach the hub from outside the home through a Cloudflare tunnel to Home
-Assistant. Enter the tunnel's hostname during setup or in **Configure**. On
-Home Assistant OS the integration then starts the cloudflared add-on and
-keeps it on boot; the Configure dialog has an emergency on/off switch. On other
-installs, run cloudflared yourself and point it at Home Assistant.
+Assistant. Enter the tunnel's hostname during setup, which also turns the
+tunnel on, or in **Configure** together with the **Cloudflare tunnel enabled**
+switch. The hub gives the address to phones when they pair.
+
+On Home Assistant OS and Supervised installs, install and set up the
+Cloudflare Tunnel add-on first. With the switch on, the integration starts the
+add-on and keeps it starting at boot; with it off, it stops the add-on and
+sets it to manual start, so it stays down across reboots. Clearing the
+hostname gives the add-on back its start at boot. While the tunnel is on, the
+hub also checks it through Cloudflare every 5 minutes and restarts the add-on
+if Cloudflare reports it disconnected.
+
+On other installs, run cloudflared yourself and point it at Home Assistant;
+the switch has no effect there.
 
 ## Hub settings
 
@@ -141,7 +156,7 @@ none of them.
 
 | Key | Value | Effect |
 |---|---|---|
-| `hub_name` | string | Name shown when phones discover the hub (default "CasaSmart Hub") |
+| `hub_name` | string | Name shown when phones discover the hub (default "CasaSmart Hub"). On Docker Desktop the Mac helper's `--name` is shown instead. |
 | `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. |
 | `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
@@ -166,12 +181,12 @@ a made-up address that changes between restarts), so what keeps the hub's
 port off the internet is the loopback-only publish plus the relay, whatever
 this setting says.
 
-Don't edit the other keys in the file. They hold the hub's secrets, code hashes
-and relay state.
+Don't edit the other keys in the file. They hold the hub's secrets, code hashes,
+its push public key and values the services set.
 
 ## Data, backups and removal
 
-Everything the hub stores is in `/config/casasmart/`:
+The hub keeps its own data in `/config/casasmart/`:
 - the database;
 - its TLS and push identity keys;
 - `hub_config.json`;
@@ -179,6 +194,11 @@ Everything the hub stores is in `/config/casasmart/`:
 
 Home Assistant backups include it. Keep that folder intact when you move the
 hub, or every phone will have to pair again.
+
+The relay address, the tunnel hostname and switch, and the activation code
+until it is used are in the integration's Home Assistant config entry.
+Automations made in the app are ordinary Home Assistant automations, saved in
+`automations.yaml`.
 
 Removing the integration leaves `/config/casasmart/` in place, so reinstalling
 keeps the pairings. Delete the folder (with Home Assistant stopped) to start
@@ -191,7 +211,7 @@ from scratch.
 | "Pairing is only available on the hub's own network" | The phone must be on the hub's Wi-Fi/LAN, not mobile data, a VPN or the tunnel. On Docker Desktop, check the relay from [deploy/macos](deploy/macos/README.md). |
 | "Too many failed attempts" | Five wrong codes in a row from one phone lock that phone out for a minute, and repeats for longer. Behind the Docker Desktop relay all phones share one lockout. |
 | Phones can't find the hub | mDNS isn't reaching them: check host networking (Container) or the mDNS helper (Docker Desktop), and that the Wi-Fi doesn't isolate clients. |
-| No push notifications | Look for a "relay" notification in Home Assistant. Registration may need a fresh activation code (Configure). |
+| No push notifications | Look for a CasaSmart notification about the relay or activation in Home Assistant. Registration may need a fresh activation code (Configure). A relay that is only unreachable for a while is retried and logged, without a notification. |
 
 For detail, enable debug logging:
 
@@ -210,8 +230,8 @@ uv run --python 3.13 --no-project --with-requirements requirements_test.txt -- p
 uvx ruff@0.16.10 check . && uvx ruff@0.16.10 format --check .
 ```
 
-About 150 view-layer tests skip unless a real Home Assistant is importable. CI
-also runs the suite against Home Assistant itself (`test-ha` in
+The view-layer tests skip unless a real Home Assistant is importable. CI also
+runs the suite against Home Assistant itself (`test-ha` in
 `.github/workflows/ci.yml`). Contracts for some app features are in
 [`docs/api/`](docs/api/).
 
@@ -220,8 +240,10 @@ also runs the suite against Home Assistant itself (`test-ha` in
 Releases are cut only with `scripts/release.sh` (`check`, `tag`, `publish`,
 `promote`). The script enforces the rules HACS depends on:
 
+- Release from a clean checkout of `origin/main` with the tests passing.
 - Use three-part versions. The tag `vX.Y.Z` must equal `manifest.json`'s
-  `X.Y.Z`, and `CHANGELOG.md` must have a `## [X.Y.Z]` section.
+  `X.Y.Z`, and `CHANGELOG.md` must have a dated `## [X.Y.Z] - YYYY-MM-DD`
+  section.
 - `casasmart.zip` contains exactly the integration folder (files at the zip
   root). It is signed with the release key (`casasmart.zip.sig`).
 - Publish first as a prerelease, verify on a hub, then promote it to latest.
