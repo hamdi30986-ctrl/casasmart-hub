@@ -1,8 +1,10 @@
 """Since 2.3.0: the self-update installs only a signed casasmart.zip, and extraction
-can't write outside its staging dir."""
+can't write outside its staging dir. One install runs at a time, and none once
+a swap is waiting for its restart."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -19,8 +21,10 @@ from hastubs import install_casasmart_package, install_homeassistant_stubs
 install_homeassistant_stubs()
 install_casasmart_package()
 
+import view_harness as H  # noqa: E402
 from casasmart import update_install  # noqa: E402
 from casasmart.update import InstallError  # noqa: E402
+from casasmart.update_api import CasaSmartUpdateInstallView  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
     Ed25519PrivateKey,
 )
@@ -54,6 +58,9 @@ class _Checker:
 
 
 class _Hass:
+    def __init__(self) -> None:
+        self.data: dict = {}
+
     async def async_add_executor_job(self, func, *args):
         return func(*args)
 
@@ -62,6 +69,7 @@ class _RecordingHass(_Hass):
     """Knows whether the code it is running is inside an executor job."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.in_executor = False
 
     async def async_add_executor_job(self, func, *args):
@@ -152,6 +160,100 @@ class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
             await update_install.perform_install(_Hass(), _Checker(latest="v9.9.8"))
         self.assertIn("version mismatch", str(ctx.exception))
         self.assertEqual(self.swaps, [])
+
+    # -- one install at a time ---------------------------------------------------
+
+    def _hold_first_download(self) -> asyncio.Event:
+        """Park the first install in its download until the event is set."""
+        gate = asyncio.Event()
+        self.downloads: list[str] = []
+
+        async def download(hass, url, dest: Path) -> None:
+            self.downloads.append(url)
+            if len(self.downloads) == 1:
+                await gate.wait()
+            dest.write_bytes(self.served[url])
+
+        self._patch("_download_archive", download)
+        return gate
+
+    async def _until_downloading(self) -> None:
+        while not self.downloads:
+            await asyncio.sleep(0)
+
+    async def test_a_second_install_while_one_runs_is_refused(self) -> None:
+        hass = _Hass()
+        gate = self._hold_first_download()
+        first = asyncio.create_task(update_install.perform_install(hass, _Checker()))
+        await self._until_downloading()
+
+        with self.assertRaises(InstallError) as ctx:
+            await update_install.perform_install(hass, _Checker())
+        self.assertIn("already in progress", str(ctx.exception))
+
+        gate.set()
+        self.assertEqual(await first, {"installing": True, "target_version": "v9.9.9"})
+        self.assertEqual(self.swaps, ["9.9.9"])
+        self.assertEqual(self.restarts, [True])
+
+    async def test_no_second_install_once_swapped_until_the_restart(self) -> None:
+        # The running code still reports the old version, so the release looks
+        # new again; a second swap would replace the only rollback.
+        hass = _Hass()
+        await update_install.perform_install(hass, _Checker())
+        with self.assertRaises(InstallError) as ctx:
+            await update_install.perform_install(hass, _Checker())
+        self.assertIn("already in progress", str(ctx.exception))
+        self.assertEqual(self.swaps, ["9.9.9"])
+        self.assertEqual(self.restarts, [True])
+
+    async def test_a_failed_install_does_not_block_the_next(self) -> None:
+        hass = _Hass()
+        with self.assertRaises(InstallError):
+            await update_install.perform_install(hass, _Checker(latest="v9.9.8"))
+
+        def failing_swap(current, new_dir):
+            raise InstallError("failed to swap in new integration tree: boom")
+
+        with (
+            mock.patch.object(update_install, "swap_integration_dir", failing_swap),
+            self.assertRaises(InstallError),
+        ):
+            await update_install.perform_install(hass, _Checker())
+        self.assertEqual(self.restarts, [])
+
+        await update_install.perform_install(hass, _Checker())
+        self.assertEqual(self.swaps, ["9.9.9"])
+        self.assertEqual(self.restarts, [True])
+
+    async def test_the_app_gets_409_already_in_progress(self) -> None:
+        # The phone app reads a 409's {"error": ...} and shows "Update already
+        # in progress" when it contains "already in progress". Two views, as
+        # the plain and TLS listeners each build their own.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        hass, runtime = H.make_hub(tmp.name)
+        self.addCleanup(runtime.storage.close)
+        _, headers = H.session(runtime.auth, role="admin")
+        checker = _Checker()
+        plain = CasaSmartUpdateInstallView(hass, checker)
+        tls = CasaSmartUpdateInstallView(hass, checker)
+        gate = self._hold_first_download()
+
+        first = asyncio.create_task(plain.post(H.FakeRequest(headers=headers)))
+        await self._until_downloading()
+        status, body = H.read_response(await tls.post(H.FakeRequest(headers=headers)))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"error": "update already in progress"})
+
+        gate.set()
+        status, body = H.read_response(await first)
+        self.assertEqual(status, 202)
+
+        status, body = H.read_response(await tls.post(H.FakeRequest(headers=headers)))
+        self.assertEqual(status, 409)
+        self.assertIn("already in progress", body["error"].lower())
+        self.assertEqual(self.swaps, ["9.9.9"])
 
 
 class ExtractZipTests(unittest.TestCase):

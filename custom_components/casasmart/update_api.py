@@ -180,7 +180,8 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
     Gated ``update.install`` (admin only). On success the integration tree
     is already swapped and an HA restart is scheduled; the app gets a 202
     "installing" before the connection drops, then reconnects on the new
-    code. A "nothing newer" or a bad payload is a clean 409, never a 500.
+    code. A "nothing newer", a bad payload, or an install already running
+    (or swapped and waiting for its restart) is a clean 409, never a 500.
     """
 
     url = f"/api/{DOMAIN}/update/install"

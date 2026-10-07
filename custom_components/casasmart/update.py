@@ -27,6 +27,7 @@ import binascii
 import json
 import os
 import re
+import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -266,10 +267,14 @@ def versions_match(tag: Any, manifest_version: Any) -> bool:
 def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
     """Atomically replace ``current_dir`` with ``new_source_dir``; return the backup.
 
-    The live integration dir is moved aside to ``<name>.bak`` (an atomic
-    same-filesystem rename), then the new tree is copied into place. If the
-    copy fails partway, the partial dir is removed and the backup restored
-    so the hub is never left without its integration. The caller is
+    The new tree is first copied next to the live dir under a unique name, so
+    a slow or failed copy never touches the live tree or its rollback. Then
+    three same-filesystem renames (each atomic): the previous ``<name>.bak``
+    is set aside, the live dir becomes ``<name>.bak``, and the copy becomes
+    the live dir. Only then is the previous backup deleted. A failure at any
+    step undoes the renames before it, so the hub keeps its integration and
+    the rollback it had, and is raised as InstallError — including an
+    overlapping swap that finds a dir already moved. The caller is
     responsible for pruning the returned backup once the restart succeeds.
     """
     current = Path(current_dir)
@@ -278,15 +283,34 @@ def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
         raise InstallError(f"replacement source is not a directory: {new_source}")
 
     backup = current.with_name(current.name + ".bak")
-    if backup.exists():
-        shutil.rmtree(backup)
+    # Unique per swap, and dotted like ".bak" so Home Assistant never loads
+    # either as an integration.
+    token = secrets.token_hex(4)
+    staged = current.with_name(f"{current.name}.new-{token}")
+    retired = current.with_name(f"{current.name}.bak-old-{token}")
 
-    os.rename(current, backup)  # atomic on the same filesystem
     try:
-        shutil.copytree(new_source, current)
+        shutil.copytree(new_source, staged)
     except OSError as err:
-        if current.exists():
-            shutil.rmtree(current, ignore_errors=True)
-        os.rename(backup, current)  # roll back to the known-good tree
+        shutil.rmtree(staged, ignore_errors=True)
         raise InstallError(f"failed to install new integration tree: {err}") from err
+
+    done: list[tuple[Path, Path]] = []  # renames so far, to undo in reverse
+    try:
+        if backup.exists():
+            os.rename(backup, retired)
+            done.append((backup, retired))
+        os.rename(current, backup)
+        done.append((current, backup))
+        os.rename(staged, current)
+    except OSError as err:
+        message = f"failed to swap in new integration tree: {err}"
+        for src, dst in reversed(done):
+            try:
+                os.rename(dst, src)
+            except OSError as undo_err:
+                message += f"; could not move {dst} back to {src}: {undo_err}"
+        shutil.rmtree(staged, ignore_errors=True)
+        raise InstallError(message) from err
+    shutil.rmtree(retired, ignore_errors=True)
     return backup
