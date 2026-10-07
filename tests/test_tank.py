@@ -133,6 +133,15 @@ class IngestTests(TankTestCase):
                 self.engine.ingest(token, bad)
         self.assertIsNone(self.engine.last_reading("dev-1"))
 
+    def test_ingest_rejects_an_integer_too_large_for_a_float(self):
+        # The voltage is checked before the token, so any sender could
+        # otherwise turn this into an unthrottled 500 with a logged traceback.
+        _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        for sender_token in (token, "not-a-token"):
+            with self.assertRaises(TankError):
+                self.engine.ingest(sender_token, 10**400)
+        self.assertIsNone(self.engine.last_reading("dev-1"))
+
     def test_ingest_keeps_t_monotonic_across_clock_stepback(self):
         _, token = self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
         now = int(time.time())
@@ -322,6 +331,12 @@ class CalibrationStorageTests(TankTestCase):
             for bad in (0, -1.5, "x", True, float("nan"), float("inf")):
                 with self.assertRaises(TankError):
                     self.engine.set_calibration("dev-1", **{field: bad})
+
+    def test_positive_fields_reject_an_integer_too_large_for_a_float(self):
+        self.engine.mint_device("dev-1", "Tank", "10.0.0.5")
+        for field in ("calibration_voltage", "calibration_depth", "max_height"):
+            with self.assertRaises(TankError):
+                self.engine.set_calibration("dev-1", **{field: 10**400})
 
     def test_depth_cannot_exceed_height(self):
         self.engine.mint_device("dev-1", "Tank", "10.0.0.5")

@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 import threading
 import time
@@ -70,13 +71,25 @@ class UnknownTokenError(Exception):
 # -- helpers ------------------------------------------------------------------
 
 
-def _coerce_positive(value: Any, field: str) -> float:
-    """A finite, strictly-positive float, or a TankError naming the field."""
+def _finite_float(value: Any, field: str) -> float:
+    """value as a finite float, or a TankError naming the field.
+
+    NaN or infinity would make every later read invalid JSON.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TankError(f"{field} must be a number")
-    number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
+    try:
+        number = float(value)
+    except OverflowError:  # an int too large for a float
+        number = math.inf
+    if not math.isfinite(number):
         raise TankError(f"{field} must be a finite number")
+    return number
+
+
+def _coerce_positive(value: Any, field: str) -> float:
+    """A finite, strictly-positive float, or a TankError naming the field."""
+    number = _finite_float(value, field)
     if number <= 0:
         raise TankError(f"{field} must be greater than 0")
     return number
@@ -381,12 +394,7 @@ class TankEngine:
         """
         if not isinstance(token, str) or not token:
             raise UnknownTokenError
-        if isinstance(voltage, bool) or not isinstance(voltage, (int, float)):
-            raise TankError("voltage must be a number")
-        voltage = float(voltage)
-        if voltage != voltage or voltage in (float("inf"), float("-inf")):
-            # NaN or infinity would make every later read invalid JSON.
-            raise TankError("voltage must be a finite number")
+        voltage = _finite_float(voltage, "voltage")
         token_hash = _hash_token(token)
         with self._lock:
             device_id = None
