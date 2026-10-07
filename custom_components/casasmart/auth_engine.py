@@ -337,6 +337,11 @@ class AuthEngine:
         die instantly via the ``ver`` cache, same as unpair) and the new
         keypair becomes the admin. Inputs are validated BEFORE the old
         admin is touched, so a bad key never leaves the hub adminless.
+
+        The new device takes over the old admin's member id: this is the owner
+        getting back in on a new phone, so their favorites, settings and the
+        rest of their member-keyed data stay theirs. No other device shares
+        that member id (codes can't add a device to the admin's member).
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
@@ -359,6 +364,8 @@ class AuthEngine:
                 # bootstrap pairing code is the right door.
                 raise EnrollError("This hub has no admin to recover")
 
+            old_record = self._devices.get(old_admin_id) or {}
+            member_id = old_record.get("member_id") or old_admin_id
             del self._devices[old_admin_id]
             self._device_cache.pop(old_admin_id, None)
             self.throttle.clear(old_admin_id)
@@ -374,6 +381,7 @@ class AuthEngine:
                 # Recovery is replace_admin, not a code redemption — no code id.
                 # Mirror the enroll record shape, which carries enrolled_via.
                 "enrolled_via": None,
+                "member_id": member_id,
             }
             self._device_cache[device_id] = {
                 "role": ROLE_ADMIN,
@@ -480,8 +488,8 @@ class AuthEngine:
 
         Favorites and user settings are keyed by it, so they follow the person
         across their devices. A record without a member_id (older records, and
-        devices from owner recovery or the dev manifest) is its own one-device
-        member, keyed by its device id.
+        devices from the dev manifest) is its own one-device member, keyed by
+        its device id.
         """
         record = self._devices.get(device_id)
         if record is None:

@@ -225,6 +225,29 @@ class ReplaceAdminTests(unittest.TestCase):
         with self.assertRaises(EnrollError):
             self.engine.replace_admin("Another", self.old_pem)
 
+    def test_new_admin_takes_over_the_owners_member_id(self):
+        # Recovery is the owner getting back in on a new phone: favorites,
+        # settings and everything else keyed by member id must follow them.
+        member = self.engine.member_id_for(self.admin_id)
+        new_id = self.engine.replace_admin("New Phone", self.new_pem)
+        self.assertEqual(self.engine.member_id_for(new_id), member)
+        self.assertEqual(self.engine.member_device_count(member), 1)
+        members = [m for m in self.engine.list_members() if m["role"] == "admin"]
+        self.assertEqual([m["member_id"] for m in members], [member])
+        # A later recovery hands it on again.
+        _, newest_pem = make_keypair()
+        newest_id = self.engine.replace_admin("Newest Phone", newest_pem)
+        self.assertEqual(self.engine.member_id_for(newest_id), member)
+
+    def test_record_without_member_id_hands_over_its_device_id(self):
+        # Older records carry no member_id; their rows are keyed by device id.
+        table = self.storage.table("auth_devices")
+        record = table[self.admin_id]
+        record.pop("member_id")
+        table[self.admin_id] = record
+        new_id = self.engine.replace_admin("New Phone", self.new_pem)
+        self.assertEqual(self.engine.member_id_for(new_id), self.admin_id)
+
     def test_other_devices_survive_recovery(self):
         user_key, user_pem = make_keypair()
         user_id = self.engine.enroll_device("Kid", "user", user_pem, rooms=["a1"])
