@@ -28,6 +28,8 @@ from .const import (
     EVENT_SUGGESTIONS_CHANGED,
 )
 from .filtering import area_id_of, in_scope, is_served
+from .generated_suggestions import digest, make_suggestion, window
+from .now_data import is_room_activity_candidate
 from .storage import StorageError
 from .suggestions import SuggestionError, evaluate, next_boundary, state_value
 
@@ -233,8 +235,6 @@ class SuggestionRuntime:
                     ).total_seconds(),
                 )
                 if isinstance(self, GeneratedSuggestionRuntime):
-                    from .generated_suggestions import window
-
                     delay = min(
                         delay, max(0.05, (window(now)[1] - now).total_seconds())
                     )
@@ -287,8 +287,6 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         count; otherwise every visible room does. Returns (ranked rooms,
         states by room, states by entity).
         """
-        from .now_data import is_room_activity_candidate
-
         rooms, policies, devices = await self.hass.async_add_executor_job(
             lambda: (
                 self.registry.list_rooms(),
@@ -390,8 +388,6 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         the second an off plan. Returns the same tuple shape as the rule
         runtime, with the plans standing in for rules and scenes.
         """
-        from .generated_suggestions import digest, make_suggestion, window
-
         ranked, grouped, states = await self.room_context(scope)
         now = self.clock()
         scope_key = digest(
@@ -446,8 +442,6 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
 
     def payload_from(self, context, member, scope):
         """Every plan this member has not suppressed and nobody tried to run."""
-        from .generated_suggestions import window
-
         data, _, _, now, _ = context
         plans = []
         for _, plan, _ in self.candidates(context, scope):
