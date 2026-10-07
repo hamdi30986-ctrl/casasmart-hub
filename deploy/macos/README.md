@@ -17,9 +17,9 @@ Two small helpers run on the Mac and fix both. They need only `python3` and
 its standard library.
 
 - `tls_relay.py` listens on the Mac's port 8443, admits only clients from
-  local address ranges (private, link-local, loopback), and forwards the
-  encrypted bytes to the hub's TLS port. It doesn't terminate TLS, see pairing
-  codes, or hold any hub identity.
+  local address ranges (private and link-local; not the Mac itself), and
+  forwards the encrypted bytes to the hub's TLS port. It doesn't terminate
+  TLS, see pairing codes, or hold any hub identity.
 - `mdns_publish.py` reads the hub's public handshake and advertises
   `_casasmart._tcp` through macOS Bonjour with the hub's real fingerprint. It
   does this on the Mac's LAN address, port 8443.
@@ -50,9 +50,10 @@ services:
 > **Never publish 8443 on all interfaces, and never forward it from your router.**
 > Step 4 tells the hub to treat every connection on its TLS port as coming from
 > the LAN. The loopback-only mapping plus the LAN-only relay is what makes that
-> safe. For the same reason, don't point anything on the Mac that carries outside
-> traffic at `127.0.0.1:18443` or `8443`: Tailscale Serve or Funnel, ngrok,
-> `ssh -R`, or a reverse-proxy container.
+> safe. The relay refuses connections from the Mac itself, so a tunnel running
+> on the Mac (Tailscale Serve or Funnel, ngrok, `ssh -R`) can't enter through
+> it; for the same reason, never point such a tunnel or a reverse-proxy
+> container at `127.0.0.1:18443` directly.
 
 ## 3. Install the launch agents
 
