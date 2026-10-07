@@ -271,16 +271,23 @@ class AudioAdapter:
 
     # -- outbound (REST API and athan scheduler) -------------------------------
 
-    def _connected_client(self) -> Any:
-        """The client if it is running and connected, else AudioAdapterNotReady.
+    def _running_client(self) -> Any:
+        """The client if the adapter is running, else AudioAdapterNotReady.
 
-        While the link is down paho would queue a QoS 1 publish and send it
-        after reconnecting, maybe minutes later. A late play or volume change
-        is worse than a refused one.
+        While the link is down paho queues a QoS 1 publish and sends it after
+        reconnecting, maybe minutes later.
         """
         client = self._client
         if not self._started or client is None:
             raise AudioAdapterNotReady("Audio MQTT client is not connected")
+        return client
+
+    def _connected_client(self) -> Any:
+        """The client if it is running and connected, else AudioAdapterNotReady.
+
+        A late play or volume change is worse than a refused one.
+        """
+        client = self._running_client()
         if not client.is_connected():
             raise AudioAdapterNotReady(
                 "Speaker bus unavailable: the hub can't reach the MQTT broker"
@@ -288,15 +295,23 @@ class AudioAdapter:
         return client
 
     def publish(
-        self, topic: str, payload: Any, *, qos: int = 1, retain: bool = False
+        self,
+        topic: str,
+        payload: Any,
+        *,
+        qos: int = 1,
+        retain: bool = False,
+        queue_if_down: bool = False,
     ) -> None:
         """Publish a message the engine built; a dict is sent as JSON.
 
         Raises AudioAdapterNotReady when not connected, so the API can answer
         503 rather than drop or delay the command. A link that drops between
-        the check and the send is left to paho to retry.
+        the check and the send is left to paho to retry. With queue_if_down,
+        for a message that may arrive late (a removed speaker's reset), only
+        a stopped adapter raises and paho holds the message for the reconnect.
         """
-        client = self._connected_client()
+        client = self._running_client() if queue_if_down else self._connected_client()
         body = json.dumps(payload) if not isinstance(payload, (str, bytes)) else payload
         client.publish(topic, body, qos=qos, retain=retain)
 
@@ -304,10 +319,10 @@ class AudioAdapter:
         """Clear a removed speaker's retained status and state topics.
 
         Otherwise the broker replays them on the next reconnect and the
-        speaker reappears in discovery. Raises AudioAdapterNotReady when not
-        connected.
+        speaker reappears in discovery, so the clears are queued while the
+        link is down. Raises AudioAdapterNotReady when the adapter is stopped.
         """
-        client = self._connected_client()
+        client = self._running_client()
         for topic in (speaker_status_topic(mac6), speaker_state_topic(mac6)):
             client.publish(topic, "", qos=1, retain=True)
 

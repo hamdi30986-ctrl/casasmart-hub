@@ -445,19 +445,19 @@ class CasaSmartAudioSpeakerView(_AudioView):
         """Best effort: reset the speaker and clear its retained topics.
 
         Otherwise the broker replays them and the speaker shows up in
-        discovery again.
+        discovery again. Both may arrive late, so they wait for the broker
+        when the link is down.
         """
         adapter = get_audio_adapter(self._hass)
         if adapter is None:
             return
         try:
-            adapter.publish(reset_topic, reset_msg, qos=1)
+            adapter.publish(reset_topic, reset_msg, qos=1, queue_if_down=True)
             adapter.clear_speaker_retained(mac6)
         except AudioAdapterNotReady:
             _LOGGER.info(
-                "Speaker %s removed from registry but bus is down; reset/retain"
-                " clear skipped (it may briefly reappear as a ghost until it is"
-                " power-cycled)",
+                "Speaker %s removed from registry but the audio adapter is not"
+                " running; it was not reset and may reappear in discovery",
                 mac6,
             )
 

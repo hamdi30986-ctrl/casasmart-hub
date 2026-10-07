@@ -384,14 +384,36 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(AudioAdapterNotReady) as caught:
                     self.adapter.publish("speakers/a1b2c3/command", {"cmd": "stop"})
                 self.assertIn("broker", str(caught.exception))
-                with self.assertRaises(AudioAdapterNotReady):
-                    self.adapter.clear_speaker_retained("a1b2c3")
                 self.assertEqual(len(self.client.published), sent)
                 self.client.fire_connect()
                 self.client.fire_disconnect()
         self.client.fire_connect()
         self.adapter.publish("speakers/a1b2c3/command", {"cmd": "stop"})
         self.assertEqual(self.client.published[-1][0], "speakers/a1b2c3/command")
+
+    async def test_speaker_cleanup_is_queued_while_the_broker_is_unreachable(self):
+        # A removed speaker's reset and retained-topic clears are idempotent
+        # and late is better than never: a speaker that is never reset keeps
+        # announcing itself and comes back as a discovery ghost. paho queues
+        # a QoS 1 publish on a running client and sends it after reconnecting.
+        self.engine.set_broker(host="h", port=1883)
+        await self.adapter.async_start()
+        self.client.fire_connect()
+        self.client.fire_disconnect()
+        sent = len(self.client.published)
+        self.adapter.publish(
+            "speakers/a1b2c3/command", {"cmd": "reset"}, qos=1, queue_if_down=True
+        )
+        self.adapter.clear_speaker_retained("a1b2c3")
+        self.assertEqual(
+            [p[0] for p in self.client.published[sent:]],
+            [
+                "speakers/a1b2c3/command",
+                "speakers/a1b2c3/status",
+                "speakers/a1b2c3/state",
+            ],
+        )
+        self.assertTrue(all(p[2] == 1 for p in self.client.published[sent:]))
 
     async def test_athan_is_skipped_not_queued_while_disconnected(self):
         # The scheduler logs and skips a prayer it can't deliver, so the
