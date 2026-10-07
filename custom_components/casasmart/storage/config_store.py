@@ -102,10 +102,13 @@ class JsonConfigStore:
         except (TypeError, ValueError) as err:
             raise ConfigError(f"Config contains non-JSON value: {err}") from err
 
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=self._path.parent, prefix=self._path.name, suffix=".tmp"
-        )
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self._path.parent, prefix=self._path.name, suffix=".tmp"
+            )
+        except OSError as err:
+            raise ConfigError(f"Cannot write config {self._path}: {err}") from err
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload)
