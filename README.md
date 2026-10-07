@@ -92,6 +92,10 @@ integration's **Configure** dialog and paste a fresh code.
 **It keeps** tanks, alarm zones and settings, the hub's identity, relay
 registration, tunnel settings, and everything in Home Assistant itself.
 
+**Handing the hub to a new owner:** use factory reset. "Regenerate pairing
+code" keeps the recovery code, so whoever holds the old recovery card could
+still take the hub back from the local network.
+
 ## Networking
 
 The hub serves the apps on its own TLS port (8443). Home Assistant's own port
@@ -158,7 +162,7 @@ none of them.
 | Key | Value | Effect |
 |---|---|---|
 | `hub_name` | string | Name shown when phones discover the hub (default "CasaSmart Hub"). On Docker Desktop the Mac helper's `--name` is shown instead. |
-| `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. |
+| `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. A value that isn't a port number (1–65535) is ignored with a warning. |
 | `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
