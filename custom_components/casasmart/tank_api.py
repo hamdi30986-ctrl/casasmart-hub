@@ -71,13 +71,19 @@ def _is_lan_target(ip: str) -> bool:
 
     The provisioner makes server-side HTTP requests to a caller-supplied
     address — restrict it to RFC1918/link-local space so the endpoint
-    can't be aimed at loopback services or the public internet.
+    can't be aimed at loopback services or the public internet. The
+    unspecified address (0.0.0.0, ::) counts as private but connects to the
+    hub itself, so it is refused like loopback.
     """
     try:
         parsed = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return (parsed.is_private or parsed.is_link_local) and not parsed.is_loopback
+    return (
+        (parsed.is_private or parsed.is_link_local)
+        and not parsed.is_loopback
+        and not parsed.is_unspecified
+    )
 
 
 async def _shelly_rpc(
