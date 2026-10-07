@@ -716,6 +716,29 @@ def _warn_lan_relay_ingress_on(hub_config: JsonConfigStore, port: int) -> None:
     )
 
 
+def _configured_tls_port(hub_config: JsonConfigStore, data_dir: Path) -> int:
+    """The ``tls_port`` from hub config, or the default when unset or unusable.
+
+    It is hand-edited, so anything but a whole number from 1 to 65535 is
+    logged and ignored: a typo must neither stop setup nor reach mDNS, which
+    refuses an unusable port. A valid port that is already taken is a bind
+    failure instead, logged and retried by the listener.
+    """
+    port = hub_config.get("tls_port")
+    if port is None:
+        return TLS_PORT_DEFAULT
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        _LOGGER.warning(
+            "Ignoring invalid tls_port %r in %s (expected a whole number from 1 "
+            "to 65535); using %s",
+            port,
+            data_dir / HUB_CONFIG_FILENAME,
+            TLS_PORT_DEFAULT,
+        )
+        return TLS_PORT_DEFAULT
+    return port
+
+
 def _read_proc_version() -> str | None:
     """The kernel banner (identifies Docker Desktop's VM), or None off Linux."""
     try:
@@ -748,9 +771,7 @@ async def _async_start_tls(
         # can't fix it, a human must. ConfigEntryError, not NotReady.
         raise ConfigEntryError(str(err)) from err
 
-    port = runtime_data.hub_config.get("tls_port")
-    if not isinstance(port, int):
-        port = TLS_PORT_DEFAULT
+    port = _configured_tls_port(runtime_data.hub_config, data_dir)
 
     if runtime_data.hub_config.get(_RETIRED_EXTRA_LAN_CIDRS_KEY) is not None:
         # It could only ever widen the LAN gate to loopback (private ranges
