@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import builtins
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -57,6 +59,40 @@ class _Checker:
         return ZIP_URL, self._sig_url
 
 
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def iter_chunked(self, size: int):
+        for start in range(0, len(self._data), size):
+            await asyncio.sleep(0)
+            yield self._data[start : start + size]
+
+
+class _Download:
+    def __init__(self, data: bytes) -> None:
+        self.status = 200
+        self.content = _Body(data)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class _ServingSession:
+    """A GitHub stand-in for the real ``_download_archive``."""
+
+    def __init__(self, served: dict[str, bytes]) -> None:
+        self._served = served
+        self.urls: list[str] = []
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        return _Download(self._served[url])
+
+
 class _Hass:
     def __init__(self) -> None:
         self.data: dict = {}
@@ -82,6 +118,7 @@ class _RecordingHass(_Hass):
 
 class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self._real_download = update_install._download_archive
         self.key = Ed25519PrivateKey.generate()
         pub = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         self._patch("UPDATE_SIGNING_PUBLIC_KEY_B64", base64.b64encode(pub).decode())
@@ -154,6 +191,52 @@ class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
         self._patch("swap_integration_dir", swap)
         await update_install.perform_install(hass, _Checker())
         self.assertEqual(seen, [("extract", True), ("swap", True)])
+
+    async def test_no_blocking_file_io_on_the_event_loop(self) -> None:
+        # Home Assistant logs "Detected blocking call to open/scandir ...
+        # inside the event loop" for these calls; the real download writes the
+        # archive and the staging dir is removed afterwards, so both count.
+        hass = _RecordingHass()
+        on_loop: list[str] = []
+
+        def watch(owner, name):
+            original = getattr(owner, name)
+
+            def wrapper(*args, **kwargs):
+                if not hass.in_executor:
+                    on_loop.append(name)
+                return original(*args, **kwargs)
+
+            patcher = mock.patch.object(owner, name, wrapper)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        session = _ServingSession(self.served)
+        patcher = mock.patch(
+            "homeassistant.helpers.aiohttp_client.async_get_clientsession",
+            lambda hass: session,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._patch("_download_archive", self._real_download)
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (Path, "read_bytes"),
+            (Path, "read_text"),
+            (Path, "write_bytes"),
+            (Path, "write_text"),
+            (os, "scandir"),
+            (os, "listdir"),
+            (os, "walk"),
+        ):
+            watch(owner, name)
+
+        result = await update_install.perform_install(hass, _Checker())
+        self.assertEqual(result, {"installing": True, "target_version": "v9.9.9"})
+        self.assertEqual(session.urls, [ZIP_URL, SIG_URL])
+        self.assertEqual(self.swaps, ["9.9.9"])
+        self.assertEqual(on_loop, [])
 
     async def test_manifest_version_must_match_the_tag(self) -> None:
         with self.assertRaises(InstallError) as ctx:
