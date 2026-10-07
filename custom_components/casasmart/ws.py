@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from aiohttp import WSMsgType, web
@@ -16,6 +17,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.json import json_dumps
 
 from . import ws_protocol
+from .auth_api import get_engine
 from .auth_engine import AuthEngine
 from .auth_tokens import TokenError
 from .const import (
@@ -84,14 +86,7 @@ class WsConnection:
 
         self._send_queue = ws_protocol.CoalescingSendQueue(WS_SEND_QUEUE_MAX)
         self._sender_task: asyncio.Task | None = None
-        self._unsub_state_changed: Any = None
-        self._unsub_registry_changed: Any = None
-        self._unsub_suggestions_changed: Any = None
-        self._unsub_alarm_changed: Any = None
-        self._unsub_audio_changed: Any = None
-        self._unsub_energy_changed: Any = None
-        self._unsub_tank_changed: Any = None
-        self._unsub_auth_changed: Any = None
+        self._unsubs: list[Callable[[], None]] = []
 
         self._subscribed = False
         self._token: str | None = None
@@ -107,31 +102,17 @@ class WsConnection:
             return
 
         self._sender_task = asyncio.create_task(self._sender_loop())
-        self._unsub_state_changed = self._hass.bus.async_listen(
-            "state_changed", self._on_state_changed
-        )
-        self._unsub_registry_changed = self._hass.bus.async_listen(
-            EVENT_REGISTRY_CHANGED, self._on_registry_changed
-        )
-        self._unsub_suggestions_changed = self._hass.bus.async_listen(
-            EVENT_SUGGESTIONS_CHANGED, self._on_suggestions_changed
-        )
-        self._unsub_alarm_changed = self._hass.bus.async_listen(
-            EVENT_ALARM_CHANGED, self._on_alarm_changed
-        )
-        self._unsub_audio_changed = self._hass.bus.async_listen(
-            EVENT_AUDIO_CHANGED, self._on_audio_changed
-        )
-        self._unsub_energy_changed = self._hass.bus.async_listen(
-            EVENT_ENERGY_CHANGED, self._on_energy_changed
-        )
-        self._unsub_tank_changed = self._hass.bus.async_listen(
-            EVENT_TANK_CHANGED, self._on_tank_changed
-        )
-
-        self._unsub_auth_changed = self._hass.bus.async_listen(
-            EVENT_AUTH_CHANGED, self._on_auth_changed
-        )
+        for event_type, handler in (
+            ("state_changed", self._on_state_changed),
+            (EVENT_REGISTRY_CHANGED, self._on_registry_changed),
+            (EVENT_SUGGESTIONS_CHANGED, self._on_suggestions_changed),
+            (EVENT_ALARM_CHANGED, self._on_alarm_changed),
+            (EVENT_AUDIO_CHANGED, self._on_audio_changed),
+            (EVENT_ENERGY_CHANGED, self._on_energy_changed),
+            (EVENT_TANK_CHANGED, self._on_tank_changed),
+            (EVENT_AUTH_CHANGED, self._on_auth_changed),
+        ):
+            self._unsubs.append(self._hass.bus.async_listen(event_type, handler))
         recheck_task = asyncio.create_task(self._token_recheck_loop())
         try:
             await self._receive_loop()
@@ -140,30 +121,8 @@ class WsConnection:
 
     def cleanup(self) -> None:
         """Drop every listener and cancel the connection's tasks (idempotent)."""
-        if self._unsub_suggestions_changed is not None:
-            self._unsub_suggestions_changed()
-            self._unsub_suggestions_changed = None
-        if self._unsub_state_changed is not None:
-            self._unsub_state_changed()
-            self._unsub_state_changed = None
-        if self._unsub_registry_changed is not None:
-            self._unsub_registry_changed()
-            self._unsub_registry_changed = None
-        if self._unsub_alarm_changed is not None:
-            self._unsub_alarm_changed()
-            self._unsub_alarm_changed = None
-        if self._unsub_audio_changed is not None:
-            self._unsub_audio_changed()
-            self._unsub_audio_changed = None
-        if self._unsub_energy_changed is not None:
-            self._unsub_energy_changed()
-            self._unsub_energy_changed = None
-        if self._unsub_tank_changed is not None:
-            self._unsub_tank_changed()
-            self._unsub_tank_changed = None
-        if self._unsub_auth_changed is not None:
-            self._unsub_auth_changed()
-            self._unsub_auth_changed = None
+        while self._unsubs:
+            self._unsubs.pop()()
         for task in (self._sender_task, self._reauth_deadline_task):
             if task is not None:
                 task.cancel()
@@ -211,8 +170,6 @@ class WsConnection:
 
         The auth engine checks everything in memory, so this needs no executor.
         """
-        from .auth_api import get_engine  # local: auth_api is sibling glue
-
         engine = get_engine(self._hass)
         if engine is None:
             return False
@@ -304,7 +261,7 @@ class WsConnection:
         """
         if self._claims is None:
             return
-        rooms = (self._claims or {}).get("rooms")
+        rooms = self._claims.get("rooms")
         devices = [
             serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
