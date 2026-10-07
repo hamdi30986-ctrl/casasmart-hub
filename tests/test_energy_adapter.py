@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -1330,6 +1331,119 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.timers.fire(grace)
         await self.drain()
         self.assertEqual(len(self.calls()) - before, 1)
+
+    # -- Fahrenheit homes ----------------------------------------------------
+    #
+    # The rules are written in Celsius. A Fahrenheit home must get the same
+    # decisions for the same physical temperatures, with every setpoint sent
+    # in Fahrenheit (Home Assistant's climate services take the home's unit).
+
+    def use_unit(self, unit: str) -> None:
+        self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit=unit))
+
+    def climate_calls(self):
+        return [
+            (call[1], {k: v for k, v in call[2].items() if k != "entity_id"})
+            for call in self.calls("climate.ac")
+        ]
+
+    async def smart_climate_calls(self, unit: str, reading: str, sensor_unit: str):
+        """Climate commands for an occupied Smart room at ``reading``."""
+        states = [
+            _State("climate.ac", "cool", {"fan_modes": ["low", "max"]}),
+            _State(
+                "sensor.temp",
+                reading,
+                {"device_class": "temperature", "unit_of_measurement": sensor_unit},
+            ),
+            _State("binary_sensor.presence", "on", {"device_class": "occupancy"}),
+        ]
+        adapter, _ = self.make_adapter(states, {s.entity_id: "suite" for s in states})
+        self.use_unit(unit)
+        if self.engine.active_level is not None:
+            self.engine.deactivate()
+        self.activate(LEVEL_SMART)
+        await adapter.async_apply()
+        await self.drain()
+        return self.climate_calls()
+
+    async def test_fahrenheit_smart_room_decides_like_celsius(self):
+        for celsius, fahrenheit, expected_c, expected_f in (
+            # Hot: boost, at 16 °C = 60.8 °F.
+            (
+                "30",
+                "86",
+                [("set_temperature", {"temperature": 16.0})],
+                [("set_temperature", {"temperature": 60.8})],
+            ),
+            # Comfortable: settle at the 24 °C = 75.2 °F floor.
+            (
+                "25",
+                "77",
+                [("set_temperature", {"temperature": 24.0})],
+                [("set_temperature", {"temperature": 75.2})],
+            ),
+            # Already cool (21 °C = 69.8 °F): the AC goes off.
+            ("21", "69.8", [("turn_off", {})], [("turn_off", {})]),
+        ):
+            with self.subTest(fahrenheit=fahrenheit):
+                in_c = await self.smart_climate_calls("°C", celsius, "°C")
+                in_f = await self.smart_climate_calls("°F", fahrenheit, "°F")
+                self.assertEqual(in_c[: len(expected_c)], expected_c)
+                self.assertEqual(in_f[: len(expected_f)], expected_f)
+                # The fan follows the same decision in both homes.
+                self.assertEqual(in_c[len(expected_c) :], in_f[len(expected_f) :])
+
+    async def test_sensor_unit_wins_over_the_home_unit(self):
+        # A sensor still reporting Celsius in a Fahrenheit home: 30 °C is hot.
+        calls = await self.smart_climate_calls("°F", "30", "°C")
+        self.assertEqual(calls[0], ("set_temperature", {"temperature": 60.8}))
+
+    async def test_fahrenheit_medium_guard_floor_and_temperature_edge(self):
+        states = [
+            _State(
+                "climate.ac",
+                "cool",
+                {"temperature": 66, "fan_modes": ["low", "high"]},
+            ),
+            _State(
+                "sensor.temp",
+                "77",
+                {"device_class": "temperature", "unit_of_measurement": "°F"},
+            ),
+        ]
+        adapter, _ = self.make_adapter(states, {s.entity_id: "bed" for s in states})
+        self.use_unit("°F")
+        self.activate(LEVEL_MEDIUM)
+        adapter.async_start()
+        await adapter.async_apply()
+        await self.drain()
+        self.assertEqual(
+            self.climate_calls(),
+            [
+                ("set_temperature", {"temperature": 75.2}),
+                ("set_fan_mode", {"fan_mode": "low"}),
+            ],
+        )
+        # 70 °F is 21.1 °C, below the 22 °C cooling guard.
+        self.edge(adapter, "sensor.temp", "70")
+        await self.drain()
+        self.assertEqual(self.climate_calls()[-1], ("turn_off", {}))
+
+    async def test_fahrenheit_low_reads_the_ac_target_in_the_home_unit(self):
+        states = [
+            # 70 °F is below the 24 °C floor; 77 °F is above it.
+            _State("climate.ac", "cool", {"temperature": 70}),
+            _State("climate.warm", "cool", {"temperature": 77}),
+        ]
+        adapter, _ = self.make_adapter(states, {s.entity_id: "bed" for s in states})
+        self.use_unit("°F")
+        self.activate(LEVEL_LOW)
+        await adapter.async_apply()
+        self.assertEqual(
+            self.climate_calls(), [("set_temperature", {"temperature": 75.2})]
+        )
+        self.assertEqual(self.calls("climate.warm"), [])
 
 
 if __name__ == "__main__":

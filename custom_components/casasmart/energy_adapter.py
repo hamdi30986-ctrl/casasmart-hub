@@ -12,8 +12,10 @@ live Home Assistant side of the contract:
 * an own-command ledger so a human state change releases one device instead
   of making the mode fight them.
 
-Temperatures are in degrees Celsius: the thresholds below assume room
-sensors and ACs that report Celsius.
+The rules work in degrees Celsius. Readings are converted to Celsius as they
+are read (in the sensor's own unit, else the home's), and setpoints are
+converted to the home's unit as they are sent, so a Fahrenheit home gets the
+same decisions for the same temperatures.
 
 This module deliberately does not register APIs or manage its own lifecycle:
 ``energy_runtime.EnergyController`` (created in ``__init__.py``) starts and
@@ -33,8 +35,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .energy import (
     LEVEL_LOW,
@@ -80,6 +84,13 @@ LIGHT_CAP_PCT = {
 }
 
 _UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
+_TEMPERATURE_UNITS = frozenset(
+    {
+        UnitOfTemperature.CELSIUS,
+        UnitOfTemperature.FAHRENHEIT,
+        UnitOfTemperature.KELVIN,
+    }
+)
 _PRESENCE_CLASSES = frozenset({"occupancy", "motion", "presence"})
 # The only domains the adapter ever commands.
 _MANAGED_DOMAINS = frozenset({"light", "switch", "climate", "cover"})
@@ -128,6 +139,22 @@ def _as_datetime(value: Any) -> datetime | None:
     return result.astimezone(UTC)
 
 
+def _home_temperature_unit(hass: HomeAssistant) -> str:
+    """The unit HA reports climate temperatures in and climate services take.
+
+    A host without a unit system (a test double) counts as Celsius.
+    """
+    units = getattr(getattr(hass, "config", None), "units", None)
+    return getattr(units, "temperature_unit", UnitOfTemperature.CELSIUS)
+
+
+def _to_celsius(value: float | None, unit: str) -> float | None:
+    """A temperature in ``unit`` as Celsius; None stays None."""
+    if value is None or unit == UnitOfTemperature.CELSIUS:
+        return value
+    return TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS)
+
+
 def _state_changed(old_state: Any, new_state: Any) -> bool:
     """True when the state or any attribute differs (timestamps don't count)."""
     if old_state is None or new_state is None:
@@ -150,6 +177,9 @@ class EnergyEntity:
     room_id: str | None
     last_changed: datetime | None = None
     entity_category: str | None = None
+    # The unit of the entity's temperatures: a sensor's own unit, else the
+    # home's (climate attributes are always in the home's unit).
+    temperature_unit: str = UnitOfTemperature.CELSIUS
 
     @property
     def available(self) -> bool:
@@ -168,7 +198,15 @@ class EnergyEntity:
 
     @property
     def temperature(self) -> float | None:
-        return _as_float(self.state)
+        """The state read as a temperature, in Celsius."""
+        return _to_celsius(_as_float(self.state), self.temperature_unit)
+
+    @property
+    def target_temperature(self) -> float | None:
+        """An AC's target (its ``temperature`` attribute), in Celsius."""
+        return _to_celsius(
+            _as_float(self.attributes.get("temperature")), self.temperature_unit
+        )
 
 
 @dataclass(frozen=True)
@@ -316,6 +354,7 @@ class EnergyInventoryBuilder:
             self._registry.list_user_devices
         )
         raw_states = list(self._hass.states.async_all())
+        home_unit = _home_temperature_unit(self._hass)
         gang_devices = [
             device for device in raw_user_devices if self._is_gang_device(device)
         ]
@@ -342,13 +381,20 @@ class EnergyInventoryBuilder:
             }:
                 continue
             room_id = self._room_of(entity_id)
+            attributes = copy.deepcopy(dict(getattr(state, "attributes", {}) or {}))
+            unit = attributes.get("unit_of_measurement") if domain == "sensor" else None
             entity = EnergyEntity(
                 entity_id=entity_id,
                 state=str(state.state),
-                attributes=copy.deepcopy(dict(getattr(state, "attributes", {}) or {})),
+                attributes=attributes,
                 room_id=room_id,
                 last_changed=_as_datetime(getattr(state, "last_changed", None)),
                 entity_category=self._category_of(entity_id),
+                temperature_unit=(
+                    unit
+                    if isinstance(unit, str) and unit in _TEMPERATURE_UNITS
+                    else home_unit
+                ),
             )
             entities[entity_id] = entity
             if room_id is None:
@@ -834,7 +880,7 @@ class EnergyAdapter:
             if level == LEVEL_MEDIUM and self._temperature_kills(mode, temperature):
                 await self._turn_off(entity.entity_id)
                 continue
-            target = _as_float(entity.attributes.get("temperature"))
+            target = entity.target_temperature
             if mode == "cool":
                 if level == LEVEL_LOW and (target is None or target >= COOL_FLOOR):
                     continue
@@ -1521,12 +1567,25 @@ class EnergyAdapter:
         *,
         hvac_mode: str | None = None,
     ) -> bool:
-        """Set a target; ``hvac_mode`` is sent only to an AC that is off."""
-        data: dict[str, Any] = {"temperature": temperature}
+        """Set a Celsius target, sent in the home's unit.
+
+        ``hvac_mode`` is sent only to an AC that is off.
+        """
+        data: dict[str, Any] = {"temperature": self._in_home_unit(temperature)}
         current = self._inventory.entities.get(entity_id) if self._inventory else None
         if hvac_mode is not None and (current is None or current.state == "off"):
             data["hvac_mode"] = hvac_mode
         return await self._command(entity_id, "set_temperature", data)
+
+    def _in_home_unit(self, celsius: float) -> float:
+        """A Celsius setpoint in the unit HA's climate services take."""
+        unit = _home_temperature_unit(self._hass)
+        if unit == UnitOfTemperature.CELSIUS:
+            return celsius
+        converted = TemperatureConverter.convert(
+            celsius, UnitOfTemperature.CELSIUS, unit
+        )
+        return round(converted, 1)
 
     async def _set_fan(self, entity: EnergyEntity, desired: str) -> bool:
         """Set the AC's own name for a "low" or "max" fan, if it has one."""
