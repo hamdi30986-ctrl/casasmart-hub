@@ -185,7 +185,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             data = await self._hass.async_add_executor_job(
                 _read_yaml, self._config_path
             )
-        except AutomationFileError as err:
+        except (AutomationFileError, HomeAssistantError) as err:
+            # HomeAssistantError is how HA's YAML loader reports a file it
+            # cannot parse.
             _LOGGER.error("automations.yaml unusable: %s", err)
             return None, self.json_message(
                 f"automations.yaml unusable: {err}",
@@ -264,7 +266,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 await self._hass.async_add_executor_job(
                     _write_yaml, self._config_path, data
                 )
-            except OSError as err:
+            except (OSError, HomeAssistantError) as err:
+                # HA's atomic writer wraps every OSError in WriteError.
                 _LOGGER.error("automations.yaml write failed: %s", err)
                 return self.json_message(
                     "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
@@ -311,7 +314,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 await self._hass.async_add_executor_job(
                     _write_yaml, self._config_path, data
                 )
-            except OSError as err:
+            except (OSError, HomeAssistantError) as err:
+                # HA's atomic writer wraps every OSError in WriteError.
                 _LOGGER.error("automations.yaml write failed: %s", err)
                 return self.json_message(
                     "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
