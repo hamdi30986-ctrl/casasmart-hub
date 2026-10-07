@@ -57,6 +57,7 @@ from .const import (
     CONF_TUNNEL_ENABLED,
     DOMAIN,
     EVENT_AUTH_CHANGED,
+    KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY,
     PROVISION_SECRET_CONFIG_KEY,
     REMOTE_PAIRING_ENABLED_CONFIG_KEY,
 )
@@ -134,13 +135,27 @@ def get_provision_secret(hass: HomeAssistant) -> str | None:
     """The shared speaker-provisioning secret, or None when not set up.
 
     A Pi presents this (header ``X-CasaSmart-Provision-Key``) on
-    ``GET /audio/provision`` to fetch broker creds without the LAN-only gate.
+    ``GET /audio/provision`` to fetch broker creds from any source.
     """
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
     runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
     return runtime_data.hub_config.get(PROVISION_SECRET_CONFIG_KEY)
+
+
+def is_keyless_speaker_provisioning_enabled(hass: HomeAssistant) -> bool:
+    """The hub_config ``keyless_speaker_provisioning`` flag (default False).
+
+    When True, ``GET /audio/provision`` also serves a LAN client that has no
+    provisioning key. Strictly ``is True`` — unset or malformed means the key
+    is required, fail closed.
+    """
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return False
+    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+    return runtime_data.hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True
 
 
 def notify_recovery_code(hass: HomeAssistant, code: str) -> None:

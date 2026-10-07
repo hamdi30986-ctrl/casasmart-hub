@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -45,7 +46,7 @@ try:
         _pa_store,
         _parse_targets,
     )
-    from casasmart.const import EVENT_AUDIO_CHANGED
+    from casasmart.const import EVENT_AUDIO_CHANGED, PROVISION_SECRET_CONFIG_KEY
 
     _ERR = None
 except Exception as err:
@@ -55,7 +56,7 @@ except Exception as err:
     CasaSmartAudioBroadcastView = _parse_targets = None
     CasaSmartAudioPaView = _pa_store = None
     CasaSmartAudioProvisionView = None
-    EVENT_AUDIO_CHANGED = None
+    EVENT_AUDIO_CHANGED = PROVISION_SECRET_CONFIG_KEY = None
     _ERR = err
 
 _SKIP = H.IMPORT_ERROR or _ERR
@@ -749,41 +750,128 @@ class ParseTargets(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Provision — LAN-only, NO JWT, the response IS the broker secret
+# Provision — NO JWT, the response IS the broker secret
 # --------------------------------------------------------------------------- #
+# The hub_config.json key an operator sets to allow keyless LAN provisioning.
+_KEYLESS = "keyless_speaker_provisioning"
+_PROVISION_KEY = "test-provision-key"
+
+
 class ProvisionView(AudioViewTestCase):
+    """The provisioning key is required; keyless LAN access is an opt-in.
+
+    A valid ``X-CasaSmart-Provision-Key`` works from any source. Without one
+    the hub refuses even a LAN client, unless hub_config sets
+    ``keyless_speaker_provisioning`` to exactly ``true`` — then the LAN gate
+    admits it, as every hub did before.
+    """
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self.view = CasaSmartAudioProvisionView(self.hass)
-        # The broker secret the LAN speaker agent needs to connect.
+        # The broker secret the speaker agent needs to connect.
         self.rt.audio.set_broker(
             host="broker.local", username="pi", password="s3cret-pw"
         )
+        self.rt.hub_config.set(PROVISION_SECRET_CONFIG_KEY, _PROVISION_KEY)
 
-    async def test_non_lan_source_is_403(self) -> None:
-        # A leaked/photographed provision URL is useless off-LAN.
-        with (
-            mock.patch("casasmart.audio_api.is_lan_request", return_value=False),
-        ):
-            resp = await self.view.get(H.FakeRequest(headers={}, remote="8.8.8.8"))
-        status, _ = H.read_response(resp)
-        self.assertEqual(status, 403)
+    async def _get(self, *, lan: bool, key: str | None = None):
+        headers = {"X-CasaSmart-Provision-Key": key} if key is not None else {}
+        remote = "192.168.1.50" if lan else "203.0.113.9"
+        with mock.patch("casasmart.audio_api.is_lan_request", return_value=lan):
+            resp = await self.view.get(H.FakeRequest(headers=headers, remote=remote))
+        return resp
 
-    async def test_lan_source_returns_plaintext_creds_no_jwt(self) -> None:
-        # LAN-only with NO JWT: the response IS the secret (it never leaves the
-        # LAN), so — unlike GET /audio/broker — the password is NOT redacted.
-        with (
-            mock.patch("casasmart.audio_api.is_lan_request", return_value=True),
-        ):
-            resp = await self.view.get(
-                H.FakeRequest(headers={}, remote="192.168.1.50")  # no token
-            )
+    def _assert_refused(self, resp) -> None:
         status, body = H.read_response(resp)
-        self.assertEqual(status, 200)  # served with no Authorization at all
-        broker = body["broker"]
-        self.assertEqual(broker["username"], "pi")
-        self.assertEqual(broker["password"], "s3cret-pw")  # plaintext, by design
-        self.assertIn("s3cret-pw", _raw_body(resp))  # cred source, not redacted
+        self.assertEqual(status, 403)
+        self.assertIn("provisioning key", body["message"])
+        self.assertNotIn("s3cret-pw", _raw_body(resp))
+
+    def _assert_served(self, resp) -> None:
+        # No JWT: the response IS the secret, so — unlike GET /audio/broker —
+        # the password is NOT redacted.
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["broker"]["username"], "pi")
+        self.assertEqual(body["broker"]["password"], "s3cret-pw")
+
+    async def test_the_setting_lives_in_hub_config_under_its_documented_key(
+        self,
+    ) -> None:
+        from casasmart import const
+
+        self.assertEqual(const.KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY, _KEYLESS)
+
+    async def test_lan_without_key_is_refused_by_default(self) -> None:
+        self._assert_refused(await self._get(lan=True))
+
+    async def test_lan_without_key_is_refused_unless_exactly_true(self) -> None:
+        for value in (False, "true", "on", 1, None):
+            with self.subTest(value=value):
+                self.rt.hub_config.set(_KEYLESS, value)
+                self._assert_refused(await self._get(lan=True))
+
+    async def test_lan_without_key_is_served_when_keyless_is_on(self) -> None:
+        self.rt.hub_config.set(_KEYLESS, True)
+        self._assert_served(await self._get(lan=True))
+
+    async def test_valid_key_is_served_from_anywhere_in_both_modes(self) -> None:
+        for keyless in (False, True):
+            self.rt.hub_config.set(_KEYLESS, keyless)
+            for lan in (False, True):
+                with self.subTest(keyless=keyless, lan=lan):
+                    self._assert_served(await self._get(lan=lan, key=_PROVISION_KEY))
+
+    async def test_wrong_key_is_refused(self) -> None:
+        self._assert_refused(await self._get(lan=True, key="wrong-key"))
+        self.rt.hub_config.set(_KEYLESS, True)
+        self._assert_refused(await self._get(lan=False, key="wrong-key"))
+
+    async def test_non_lan_without_key_is_refused_in_both_modes(self) -> None:
+        # A leaked/photographed provision URL is useless off-LAN.
+        for keyless in (False, True):
+            with self.subTest(keyless=keyless):
+                self.rt.hub_config.set(_KEYLESS, keyless)
+                self._assert_refused(await self._get(lan=False))
+
+    async def test_refusal_logs_never_carry_the_secrets(self) -> None:
+        with self.assertLogs("casasmart.audio_api", level="WARNING") as logs:
+            self._assert_refused(await self._get(lan=True, key="wrong-key"))
+            self._assert_refused(await self._get(lan=False))
+        for line in logs.output:
+            for secret in ("s3cret-pw", _PROVISION_KEY, "wrong-key"):
+                self.assertNotIn(secret, line)
+
+
+@unittest.skipIf(_SKIP, f"casasmart views unimportable: {_SKIP}")
+class KeylessProvisioningSetupWarning(unittest.TestCase):
+    """Turning keyless provisioning on is visible in the HA log at setup."""
+
+    def _setup_with(self, value=None):
+        """Run the setup check over a hub_config holding ``value`` (None: unset)."""
+        integration = H.import_integration()
+        hub_config = H.FakeHubConfig()
+        hub_config.set(PROVISION_SECRET_CONFIG_KEY, _PROVISION_KEY)
+        if value is not None:
+            hub_config.set(_KEYLESS, value)
+        integration._warn_keyless_speaker_provisioning(
+            hub_config, Path("/config/casasmart")
+        )
+
+    def test_on_logs_a_warning_without_any_secret(self) -> None:
+        with self.assertLogs("casasmart", level="WARNING") as logs:
+            self._setup_with(True)
+        self.assertEqual(len(logs.records), 1)
+        message = logs.output[0]
+        self.assertIn(_KEYLESS, message)
+        self.assertIn("password", message)
+        self.assertNotIn(_PROVISION_KEY, message)
+
+    def test_off_says_nothing(self) -> None:
+        for value in (None, False, "true", 1):
+            with self.subTest(value=value), self.assertNoLogs("casasmart"):
+                self._setup_with(value)
 
 
 class SpeakerScope(AudioViewTestCase):

@@ -66,6 +66,7 @@ from .const import (
     FACTORY_RESET_TABLES,
     HUB_CONFIG_FILENAME,
     HUB_NAME_CONFIG_KEY,
+    KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
     PROVISION_SECRET_CONFIG_KEY,
     PUSH_RELAY_URL_CONFIG_KEY,
@@ -452,6 +453,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     if recovery_code is not None:
         notify_recovery_code(hass, recovery_code)
 
+    _warn_keyless_speaker_provisioning(hub_config, data_dir)
+
     _async_register_services(hass)
 
     integration = await async_get_integration(hass, DOMAIN)
@@ -633,6 +636,24 @@ async def _async_setup_dev_enroll(
         entry.async_create_task(hass, _provision())
 
     entry.async_on_unload(hass.bus.async_listen(EVENT_AUTH_CHANGED, _on_auth_changed))
+
+
+def _warn_keyless_speaker_provisioning(
+    hub_config: JsonConfigStore, data_dir: Path
+) -> None:
+    """Make an opted-in keyless speaker provisioning visible in the HA log."""
+    if hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is not True:
+        return
+    # WARNING, not INFO: Home Assistant hides INFO by default, and this hands
+    # the broker credentials to the local network.
+    _LOGGER.warning(
+        "Keyless speaker provisioning on: any device on the local network can "
+        "fetch the speaker broker's username and password without the "
+        "provisioning key. Speakers imaged with the key don't need it; set "
+        '"%s": false in %s and restart Home Assistant to require the key.',
+        KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY,
+        data_dir / HUB_CONFIG_FILENAME,
+    )
 
 
 _RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"

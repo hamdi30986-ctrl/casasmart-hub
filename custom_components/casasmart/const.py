@@ -58,6 +58,10 @@ RECOVERY_CODE_HASH_CONFIG_KEY = "recovery_code_hash"
 
 PROVISION_SECRET_CONFIG_KEY = "provision_secret"
 
+# True (exactly) lets GET /audio/provision serve LAN clients without the
+# provisioning key. Off by default: the response carries the broker password.
+KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY = "keyless_speaker_provisioning"
+
 
 REMOTE_PAIRING_ENABLED_CONFIG_KEY = "remote_pairing_enabled"
 
