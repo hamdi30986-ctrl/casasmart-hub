@@ -14,6 +14,16 @@ from datetime import datetime, timedelta
 
 from .suggestions import MAX_RULES, SuggestionError, integer, validate_rule
 
+# Caps on the stored records; a full store refuses new ones (429).
+_MAX_SUPPRESSIONS = 4096
+_MAX_EXECUTIONS = 2048
+_MAX_GENERATED_SELECTIONS = 1024
+# Rooms the generated suggestions pick per window.
+_GENERATED_ROOMS = 2
+_SNOOZE = timedelta(minutes=30)
+# Receipts and suppressions are kept this long after their offer expires.
+_KEEP_AFTER_EXPIRY = timedelta(days=1)
+
 
 class SuggestionStore:
     """The suggestion document in a HubStorage."""
@@ -76,11 +86,12 @@ class SuggestionStore:
     @staticmethod
     def _prune(data, now):
         """Drop receipts and suppressions more than a day past their expiry."""
+        cutoff = now - _KEEP_AFTER_EXPIRY
         for field in ("executions", "suppressions"):
             data[field] = {
                 key: value
                 for key, value in data[field].items()
-                if datetime.fromisoformat(value["expires_at"]) + timedelta(days=1) > now
+                if datetime.fromisoformat(value["expires_at"]) > cutoff
             }
 
     def suppress(self, member, suggestion, action, now):
@@ -91,14 +102,13 @@ class SuggestionStore:
             key = self.suppression_key(
                 member, suggestion.get("suppression_id", suggestion["occurrence_id"])
             )
-            if key not in data["suppressions"] and len(data["suppressions"]) >= 4096:
+            if (
+                key not in data["suppressions"]
+                and len(data["suppressions"]) >= _MAX_SUPPRESSIONS
+            ):
                 raise SuggestionError("suppression_capacity", 429)
             expires = datetime.fromisoformat(suggestion["expires_at"])
-            until = (
-                min(now + timedelta(minutes=30), expires)
-                if action == "snooze"
-                else expires
-            )
+            until = min(now + _SNOOZE, expires) if action == "snooze" else expires
             data["suppressions"][key] = {
                 "until": until.isoformat(),
                 "expires_at": expires.isoformat(),
@@ -133,7 +143,7 @@ class SuggestionStore:
                 )
             if receipt:
                 return False, receipt
-            if len(data["executions"]) >= 2048:
+            if len(data["executions"]) >= _MAX_EXECUTIONS:
                 raise SuggestionError("execution_capacity", 429)
             receipt = {
                 "occurrence_id": occurrence,
@@ -157,10 +167,13 @@ class SuggestionStore:
                 if v["start"] == start
             }
             if scope_key not in selections:
-                if len(selections) >= 1024:
+                if len(selections) >= _MAX_GENERATED_SELECTIONS:
                     raise SuggestionError("selection_capacity", 429)
-                selections[scope_key] = {"start": start, "room_ids": ranked_ids[:2]}
-            elif len(selections[scope_key]["room_ids"]) < 2:
+                selections[scope_key] = {
+                    "start": start,
+                    "room_ids": ranked_ids[:_GENERATED_ROOMS],
+                }
+            elif len(selections[scope_key]["room_ids"]) < _GENERATED_ROOMS:
                 # States may arrive after startup: fill an empty slot, but keep
                 # the rooms already chosen.
                 chosen = selections[scope_key]["room_ids"]
@@ -168,7 +181,7 @@ class SuggestionStore:
                     "start": start,
                     "room_ids": (
                         chosen + [rid for rid in ranked_ids if rid not in chosen]
-                    )[:2],
+                    )[:_GENERATED_ROOMS],
                 }
             if selections != data.get("generated_selections"):
                 data["generated_selections"] = selections
