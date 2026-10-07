@@ -73,7 +73,11 @@ class _SuggestionView(HomeAssistantView):
         try:
             return await operation(service, claims)
         except SuggestionError as err:
-            return self.json({"error": err.code}, err.status)
+            body = {"error": err.code}
+            if err.code == "energy_lockout":
+                # The phone reads code on a 403: this isn't an expired login.
+                body["code"] = err.code
+            return self.json(body, err.status)
         except (StorageError, sqlite3.Error):
             return self.json({"error": "suggestion_storage_unavailable"}, 503)
 

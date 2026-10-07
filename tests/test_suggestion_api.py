@@ -554,7 +554,12 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_energy_lockout_blocks_run(self):
         self.data.energy = NS(locked=True, active_level="away")
-        self.assertEqual((await self.action("run")).status, 403)
+        refused = await self.action("run")
+        self.assertEqual(refused.status, 403)
+        # The phone keeps "code" on a 403: it tells the lockout apart from a
+        # credential that a re-login would fix.
+        self.assertEqual(refused.data["error"], "energy_lockout")
+        self.assertEqual(refused.data["code"], "energy_lockout")
         self.data.energy.locked = False
         self.assertEqual((await self.action("run")).status, 409)
         self.assertEqual(self.calls, [])
