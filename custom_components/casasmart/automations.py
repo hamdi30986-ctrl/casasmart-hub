@@ -28,6 +28,9 @@ CASA_AUTOMATION_KEY_RE = re.compile(
     r"^" + re.escape(CASA_AUTOMATION_PREFIX) + r"[A-Za-z0-9_]+$"
 )
 
+# The longest automation id the hub keeps an Energy Saving flag for.
+MAX_AUTOMATION_KEY_LENGTH = 255
+
 # The primary-key field of each automations.yaml entry.
 CONF_ID = "id"
 
@@ -55,8 +58,10 @@ def is_valid_casa_automation_key(config_key: Any) -> bool:
     separator, ...) is ours-but-malformed and must be refused, not written
     into automations.yaml.
     """
-    return isinstance(config_key, str) and bool(
-        CASA_AUTOMATION_KEY_RE.match(config_key)
+    return (
+        isinstance(config_key, str)
+        and len(config_key) <= MAX_AUTOMATION_KEY_LENGTH
+        and bool(CASA_AUTOMATION_KEY_RE.match(config_key))
     )
 
 

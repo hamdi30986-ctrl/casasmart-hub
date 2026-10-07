@@ -179,6 +179,24 @@ class SharedMutationLockTests(unittest.IsolatedAsyncioTestCase):
             ["casa_automation_a", "casa_automation_b", "casa_automation_c"],
         )
 
+    async def test_overlong_id_is_refused_before_anything_is_written(self) -> None:
+        # The Energy Saving flag store refuses ids over 255 characters, so the
+        # view must too, before the file changes, not with a 500 afterwards.
+        key = "casa_automation_" + "a" * 240
+        view = self._view()
+        for response in (
+            await view.get(H.FakeRequest(), config_key=key),
+            await view.post(H.FakeRequest(body=_config("Long")), config_key=key),
+            await view.delete(H.FakeRequest(), config_key=key),
+        ):
+            status, body = H.read_response(response)
+            self.assertEqual(status, 400)
+            self.assertIn("at most 255 characters", body["message"])
+        self.assertEqual(
+            sorted(self._stored()),
+            ["casa_automation_a", "casa_automation_b", "casa_automation_c"],
+        )
+
     async def test_unparsable_file_is_a_json_500_and_is_not_rewritten(self) -> None:
         broken = "- id: casa_automation_a\n  alias: [unclosed\n"
         with open(self.path, "w", encoding="utf-8") as file:
