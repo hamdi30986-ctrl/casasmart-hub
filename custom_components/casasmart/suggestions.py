@@ -1,16 +1,11 @@
-"""Pure, bounded contextual recommendation policy. Never executes a command.
+"""Contextual suggestion rules: validation and evaluation, with no HA imports.
 
 An admin's rule names a saved scene, the weekdays and time window it is
-offered in (fixed clock times, or relative to sunset) and optional state
-conditions. This module validates rules and decides, for a moment in time
-and a set of entity states, whether a rule's scene should be suggested.
-It has no Home Assistant imports: the caller passes in the states, the home
-time zone and a sunset lookup. The wire contract is in
-``docs/api/CONTEXTUAL_SUGGESTIONS_V1.md``.
-
-Each offer has an occurrence id: a hash of the rule, the scene and the
-window start. Editing either changes it, so a card the user still sees
-can never run changed content.
+offered in (clock times, or relative to sunset) and optional state
+conditions. The caller passes in the states, the home time zone and a
+sunset lookup. An offer's occurrence id hashes the rule, the scene and the
+window start, so a card shown before an edit cannot run the edited scene.
+The contract is in docs/api/CONTEXTUAL_SUGGESTIONS_V1.md.
 """
 
 from __future__ import annotations
@@ -38,7 +33,7 @@ STATES = {
 
 
 class SuggestionError(Exception):
-    """A refused suggestion request: a machine ``code`` and an HTTP status."""
+    """A refused suggestion request: a machine-readable code and an HTTP status."""
 
     def __init__(self, code: str, status: int = 400):
         super().__init__(code)
@@ -46,14 +41,14 @@ class SuggestionError(Exception):
 
 
 def integer(value, low, high):
-    """True for a real int (not a bool) between ``low`` and ``high``."""
+    """True for an int (not a bool) from low to high inclusive."""
     return type(value) is int and low <= value <= high
 
 
 def validate_rule(raw: Any) -> dict:
     """Validate one rule and return it with every field filled in.
 
-    Raises ``SuggestionError`` with a code naming the bad part.
+    Raises SuggestionError with a code naming the bad part.
     """
     if not isinstance(raw, dict) or set(raw) - {
         "rule_id",
@@ -141,20 +136,19 @@ def validate_rule(raw: Any) -> dict:
 
 
 def _wall(day: date, value: str, zone: ZoneInfo, end: bool = False):
-    """The UTC instant of a home-local "HH:MM" on ``day``.
+    """The UTC instant of a home-local "HH:MM" on the given day.
 
-    A repeated local time (clocks going back) gives its first instant, or
-    its last for an ``end``; a time that does not exist gives None.
+    A repeated local time (clocks going back) gives its first instant, or its
+    last for an end; a time that does not exist gives None.
     """
     naive = datetime.combine(day, time.fromisoformat(value))
     choices = [naive.replace(tzinfo=zone, fold=fold).astimezone(UTC) for fold in (0, 1)]
     valid = [v for v in choices if v.astimezone(zone).replace(tzinfo=None) == naive]
-    # Skip a nonexistent boundary on spring-forward day; do not invent a time.
     return (max(valid) if end else min(valid)) if valid else None
 
 
 def interval(rule: dict, day: date, zone: ZoneInfo, sunset: Callable):
-    """The rule's UTC ``(start, end)`` for the window that opens on ``day``.
+    """The rule's UTC (start, end) for the window that opens on the day.
 
     None when the rule is not offered that weekday or the window cannot be
     placed (no sunset, a skipped clock time).
@@ -180,14 +174,14 @@ def interval(rule: dict, day: date, zone: ZoneInfo, sunset: Callable):
 
 
 def state_value(state):
-    """The state string of an HA ``State`` or a plain dict."""
+    """The state string of an HA State or a plain dict."""
     return (
         state.get("state") if isinstance(state, dict) else getattr(state, "state", None)
     )
 
 
 def attributes(state):
-    """The attributes of an HA ``State`` or a plain dict."""
+    """The attributes of an HA State or a plain dict."""
     return (
         state.get("attributes", {})
         if isinstance(state, dict)
@@ -196,7 +190,11 @@ def attributes(state):
 
 
 def scene_satisfied(scene: dict, states: dict) -> bool:
-    """Only compare fully understood absolute targets; never infer arbitrary actions."""
+    """True when the states already show the result of every scene action.
+
+    Only plain on/off, lock/unlock and cover positions are understood; any
+    other action counts as not satisfied.
+    """
     if not scene.get("entities"):
         return False
     for item in scene["entities"]:
@@ -236,12 +234,12 @@ def evaluate(
     *,
     policy_checks=True,
 ) -> tuple[dict | None, str]:
-    """Decide whether ``rule`` offers its scene at ``now``.
+    """Decide whether the rule offers its scene now.
 
-    Returns ``(suggestion, "eligible")`` or ``(None, reason)``. With
-    ``policy_checks=False`` the state checks (conditions, unavailable
-    devices, a scene already in effect) are skipped, so an action can still
-    find the occurrence whose receipt or suppression it should replay.
+    Returns (suggestion, "eligible") or (None, reason). With
+    policy_checks=False the state checks (conditions, unavailable devices, a
+    scene already in effect) are skipped, so an action can still find the
+    occurrence whose receipt or suppression it should replay.
     """
     if not rule["enabled"]:
         return None, "disabled"
@@ -278,7 +276,7 @@ def evaluate(
         return None, "scene_unavailable"
     if policy_checks and scene_satisfied(scene, states):
         return None, "already_satisfied"
-    # Scene edits invalidate old occurrences too, including identical rule IDs.
+    # Hashing the scene too means a scene edit also changes the occurrence.
     signature = json.dumps(
         [rule, scene, bounds[0].isoformat()], sort_keys=True, separators=(",", ":")
     )

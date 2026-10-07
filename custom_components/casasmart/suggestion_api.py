@@ -1,19 +1,17 @@
-"""Version-one suggestion contract. Evaluation is read-only; run is explicit.
+"""Suggestion endpoints under /api/casasmart/now/suggestions.
 
-Under ``/api/casasmart/now/suggestions``:
+- GET (devices.read): the caller's current suggestion.
+- GET/PUT /rules (suggestions.manage, unscoped admins only): read or replace
+  the whole rule set, with an optimistic revision.
+- POST /preview (suggestions.manage): evaluate a proposed rule.
+- POST /actions: dismiss or snooze (session.manage) or run (devices.control)
+  the occurrence the caller was shown.
+- GET /generated and POST /generated/actions: the same for the generated
+  room scenes.
 
-- ``GET`` (``devices.read``) — the caller's current suggestion.
-- ``GET/PUT /rules`` (``suggestions.manage``, unscoped admins only) — read
-  or replace the whole rule set, with an optimistic revision.
-- ``POST /preview`` (``suggestions.manage``) — evaluate a proposed rule.
-- ``POST /actions`` — dismiss or snooze (``session.manage``) or run
-  (``devices.control``) the occurrence the caller was shown.
-- ``GET /generated`` and ``POST /generated/actions`` — the same for the
-  generated room scenes.
-
-Errors carry an ``error`` code (and a readable ``message``); the full
-contract is in ``docs/api/CONTEXTUAL_SUGGESTIONS_V1.md`` and
-``docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md``.
+Reading never runs a scene. Errors carry an "error" code and a readable
+"message"; the contracts are in docs/api/CONTEXTUAL_SUGGESTIONS_V1.md and
+docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ def runtime_for(hass):
 class _SuggestionView(HomeAssistantView):
     """Shared auth, error mapping and body parsing for the suggestion views.
 
-    ``generated`` selects the generated-room runtime instead of the rules.
+    generated selects the generated-room runtime instead of the rules.
     """
 
     requires_auth = False  # CasaSmart JWT gate
@@ -51,19 +49,19 @@ class _SuggestionView(HomeAssistantView):
         self.hass = hass
 
     def json(self, result, status=200):
-        # Keep the machine code and the common CasaSmart error envelope.
-        # Tablet transports deliberately do not trust a bare HTTP status.
+        # Errors also get the usual "message": the tablet does not rely on
+        # the status code alone.
         if status >= 400 and isinstance(result, dict) and "error" in result:
             result = {"message": str(result["error"]).replace("_", " "), **result}
         return super().json(result, status)
 
     async def handle(self, request, permission, operation):
-        """Authenticate, pick the runtime, run ``operation``, map its errors."""
+        """Authenticate, pick the runtime, run the operation, map its errors."""
         claims, error = authenticate_request(self.hass, request, permission)
         if error is not None:
             return error
-        # Management replaces the whole bounded document; scoped administrators
-        # must not read or overwrite hidden rules in that document.
+        # Rules are read and replaced as one document, which may hold rules a
+        # room-scoped admin cannot see.
         if permission == "suggestions.manage" and claims.get("rooms") is not None:
             return self.json({"error": "unrestricted_admin_required"}, 403)
         runtime = runtime_for(self.hass)
@@ -80,10 +78,9 @@ class _SuggestionView(HomeAssistantView):
             return self.json({"error": "suggestion_storage_unavailable"}, 503)
 
     async def member(self, claims):
-        """The person behind the token; suppressions follow the person.
+        """The member behind the token; suppressions follow the member.
 
-        A storage read, so it runs in the executor; ``handle`` maps its storage
-        errors like any other.
+        A storage read in the executor; handle maps its storage errors.
         """
         auth = get_engine(self.hass)
         if auth is None:
@@ -91,7 +88,7 @@ class _SuggestionView(HomeAssistantView):
         return await self.hass.async_add_executor_job(auth.member_id_for, claims["sub"])
 
     async def body(self, request, allowed):
-        """The JSON object body, refusing any field outside ``allowed``."""
+        """The JSON object body, refusing any field not in allowed."""
         body = await json_body(request)
         if not isinstance(body, dict) or set(body) - allowed:
             raise SuggestionError("invalid_request")
@@ -206,8 +203,8 @@ class CasaSmartSuggestionPreviewView(_SuggestionView):
 class CasaSmartSuggestionActionView(_SuggestionView):
     """POST /api/casasmart/now/suggestions/actions.
 
-    A run is claimed durably before anything is sent, then every check is
-    repeated, so two taps (or two devices) can never run one occurrence
+    A run is claimed in storage before anything is sent and every check is
+    then repeated, so two taps (or two devices) cannot run one occurrence
     twice. Once the scene may have started, a failure marks the receipt
     "unknown" instead of releasing it.
     """
@@ -216,11 +213,9 @@ class CasaSmartSuggestionActionView(_SuggestionView):
     name = f"api:{DOMAIN}:now:suggestions:actions"
 
     async def post(self, request):
-        # Reading the occurrence needs read access. Dismiss/snooze write the
-        # person's suggestion state, so they need a session (session.manage —
-        # not a widget token). Run activates a scene, so it needs control:
-        # checked before the durable execution claim is taken, and again
-        # after it, just before dispatch.
+        # Reading needs devices.read. Dismiss and snooze need session.manage,
+        # which a widget token lacks. Run needs devices.control, checked
+        # before the claim and again right before dispatch.
         async def operation(service, claims):
             body = await self.body(request, {"action", "occurrence_id"})
             action, occurrence = body.get("action"), body.get("occurrence_id")
@@ -298,8 +293,8 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 )
             dispatched = False
             try:
-                # Executor scheduling is an async gap: re-read rules, scene,
-                # conditions, time and token privileges before the first action.
+                # Things may have changed while the claim was stored: check the
+                # rules, scene, conditions, time and token again.
                 await service.refresh()
                 fresh_claims, error = authenticate_request(
                     self.hass, request, "devices.control"

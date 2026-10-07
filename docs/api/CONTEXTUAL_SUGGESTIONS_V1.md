@@ -1,6 +1,6 @@
 # Contextual suggestions API contract
 
-The hub recommends existing CasaSmart scenes based on time and device state. Rules never execute automatically. An unrestricted administrator must explicitly enable them, and execution requires a separate authenticated Run request. This document is the contract between the hub and the app's rule editor and NOW card.
+The hub recommends existing CasaSmart scenes based on time and device state. Rules never execute automatically. An unrestricted administrator must explicitly enable them, and execution requires a separate authenticated Run request. This document is the contract between the hub and the app's rule editor and Now card.
 
 ## Capability and endpoints
 
@@ -64,7 +64,7 @@ GET returns `version`, `status`, nullable `suggestion`, and `refresh_at` when ev
 
 A suggestion contains `rule_id`, `scene_id`, `scene` (`scene_id`, `name`, `icon`), `occurrence_id`, `generated_at`, `expires_at`, and a typed `reason`. Timestamps are UTC ISO 8601 strings. Occurrence IDs are opaque 64-character hashes; do not construct them on the client.
 
-Reason codes are `time_window` and `time_and_state`. Parameters are `window_kind`, `match` and `condition_count`. The count is the number of configured conditions, not the number of active devices. Localize a truthful time/condition explanation; do not claim general household activity. All scene and condition references must be visible to the caller, even unmatched conditions in an Any rule.
+Reason codes are `time_window` and `time_and_state`. Parameters are `window_kind`, `match` and `condition_count`. The count is the number of configured conditions, not the number of active devices. Explain the time and conditions to the user; do not present the count as household activity. All scene and condition references must be visible to the caller, even unmatched conditions in an Any rule.
 
 Only entirely understood absolute targets are compared for already-satisfied suppression: plain on/off for lights/switches/fans, lock/unlock, and cover `set_position`. Complex action data and arbitrary actions are not guessed to be satisfied. Confirmed execution receipts cover those cases instead.
 
@@ -81,7 +81,7 @@ An execution receipt contains `occurrence_id`, `status`, `ok`, `expires_at`, `st
 - `executing`: HTTP 202; a command owner is still running. Repeating the same request reads the receipt rather than starting another run.
 - `succeeded`: HTTP 200; all dispatched service calls succeeded. The occurrence is suppressed globally. This is a service result, not a claim that a physical motor has finished moving.
 - `partial_failure`: HTTP 200 with `ok: false`. Show the failure/counts. If still eligible, the card carries `last_execution`. Repeating Run returns the same receipt and does not retry successful or uncertain device actions.
-- `unknown`: HTTP 200 with `ok: false`. A dispatched operation was interrupted or was in flight at restart. Never automatically retry it; the user must inspect devices and choose any further manual action deliberately.
+- `unknown`: HTTP 200 with `ok: false`. A dispatched operation was interrupted or was in flight at restart. It is never retried automatically; the user checks the devices and decides what to do.
 
 A claim rejected before the scene executor is called can be released safely. Storage failure before acquiring a claim cannot execute a scene. Once dispatch may have begun, uncertainty is retained rather than treated as permission to retry. Request replay is only available while the unchanged occurrence is current and its references remain visible; otherwise HTTP 409 is returned. Activating a scene by hand remains a separate, explicit workflow.
 
@@ -91,7 +91,7 @@ Error objects use `error` codes. Validation returns 400, denied permissions/lock
 
 Authenticated, subscribed WebSocket clients receive only `{type: "suggestions_changed", version: 1}`. No rule, room, entity, user, reason or occurrence is broadcast. Refetch the authorized GET response on this signal, reconnect/resume, `refresh_at` and `expires_at`. Do not keep a stale/offline Run button enabled. Notifications are coalesced and interest subscriptions are replaced when rules change or are disabled/deleted. Time boundaries and snooze expiry also schedule refreshes; evaluation never scans every device on state ticks.
 
-The NOW snapshot carries `contextual_suggestion` with the same response envelope. Its `suggested_routine` field is a nullable scene object: the scene an administrator featured by hand, shown only when no contextual rules exist. `suggested_routine_source` labels it `featured_manual`. Contextual cards use the action endpoint above, not the ordinary scene activation endpoint. A featured scene is never converted to a time rule, and nothing is enabled automatically on upgrade.
+The Now snapshot carries `contextual_suggestion` with the same response envelope. Its `suggested_routine` field is a nullable scene object: the scene an administrator featured by hand, shown only when no contextual rules exist. `suggested_routine_source` labels it `featured_manual`. Contextual cards use the action endpoint above, not the ordinary scene activation endpoint. A featured scene is never converted to a time rule, and nothing is enabled automatically on upgrade.
 
 ## Storage and limits
 
