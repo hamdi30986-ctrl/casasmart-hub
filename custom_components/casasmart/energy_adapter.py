@@ -1325,6 +1325,10 @@ class EnergyAdapter:
         *,
         honor_release: bool = True,
     ) -> bool:
+        if self._engine.active_level is None:
+            # A rule that was part-way through when Energy Saving stopped
+            # sends nothing more.
+            return False
         if honor_release and self._engine.is_released(entity_id):
             return False
         domain = _domain(entity_id)

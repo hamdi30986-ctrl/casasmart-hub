@@ -1293,6 +1293,44 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.bus.listeners["state_changed"], [])
         self.assertTrue(all(timer["cancelled"] for timer in self.timers.calls))
 
+    async def test_deactivate_mid_posture_stops_the_remaining_commands(self):
+        presence = _State("binary_sensor.presence", "on", {"device_class": "occupancy"})
+        states = [
+            _State("climate.ac", "cool", {"fan_modes": ["low", "max"]}),
+            _State("sensor.temp", "25", {"device_class": "temperature"}),
+            presence,
+            _State("light.one", "on", {"brightness": 100}),
+            _State("light.two", "on", {"brightness": 100}),
+        ]
+        rooms = {state.entity_id: "suite" for state in states}
+        adapter, _ = self.make_adapter(states, rooms)
+        self.activate(LEVEL_SMART)
+        adapter.async_start()
+        await adapter.async_apply()
+        await self.drain()
+        off = _State("binary_sensor.presence", "off", {"device_class": "occupancy"})
+        self.emit_change(adapter, presence, off)
+        await self.drain()
+        grace = self.timers.latest(EMPTY_GRACE_SECONDS)
+
+        record = self.hass.services.async_call
+
+        async def deactivate_during_first_command(
+            domain, service, data, blocking=False
+        ):
+            # The owner stops Energy Saving (what EnergyController does) while
+            # the empty room's first turn_off is still in flight.
+            self.hass.services.async_call = record
+            await record(domain, service, data, blocking)
+            self.engine.deactivate()
+            adapter.async_mode_stopped()
+
+        self.hass.services.async_call = deactivate_during_first_command
+        before = len(self.calls())
+        self.timers.fire(grace)
+        await self.drain()
+        self.assertEqual(len(self.calls()) - before, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
