@@ -1,9 +1,12 @@
-"""Live WebSockets when the entry unloads or the hub is factory reset.
+"""Live connections when the entry unloads, the hub is factory reset, or a
+phone drops mid-request.
 
 aiohttp waits for running handlers when a listener shuts down, and a socket's
 handler runs until the socket closes, so an open socket used to hold a reload
 for over a minute. Unload now closes every socket with "going away" first. A
-factory reset closes them too, so a wiped phone can't keep streaming.
+factory reset closes them too, so a wiped phone can't keep streaming. A request
+whose client goes away keeps running: its handler may be half-way through a
+device command.
 
 Runs the real TLS listener, WebSocket view, unload and reset service over a
 real aiohttp client; only hass is faked. Needs a real Home Assistant.
@@ -14,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import ssl
 import sys
 import tempfile
 import types
@@ -26,8 +30,10 @@ import view_harness as H
 
 try:
     import aiohttp
+    from aiohttp import web
     from casasmart import tls
     from casasmart import ws as wsmod
+    from homeassistant.components.http import HomeAssistantView
     from homeassistant.exceptions import HomeAssistantError
 
     integration = H.import_integration()
@@ -144,6 +150,57 @@ class TlsSocketUnloadTests(unittest.IsolatedAsyncioTestCase):
         msg = await asyncio.wait_for(reader, 2)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(msg.data, aiohttp.WSCloseCode.GOING_AWAY)
+
+
+@unittest.skipIf(_SKIP, f"Home Assistant unavailable: {_SKIP}")
+class TlsDroppedClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_dropped_connection_does_not_cancel_the_handler(self) -> None:
+        # A device command or scene runs a service call under its handler;
+        # cancelling it when the phone's connection drops (a Wi-Fi to LTE
+        # swap, the app killed) would leave the command half sent.
+        class SlowView(HomeAssistantView):
+            url = "/api/casasmart/slow"
+            name = "api:casasmart:slow"
+            requires_auth = False
+
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.outcome: list[str] = []
+
+            async def get(self, request):
+                self.started.set()
+                try:
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    self.outcome.append("cancelled")
+                    raise
+                self.outcome.append("finished")
+                return web.Response(text="ok")
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        hass, rt = H.make_hub(tmp.name)
+        self.addCleanup(rt.storage.close)
+        hass.is_stopping = False
+        port = _free_port()
+        server = tls.CasaSmartTlsServer(
+            hass, port, tls.ensure_tls_material(Path(tmp.name))
+        )
+        view = SlowView()
+        await server.async_start([view])
+        self.addAsyncCleanup(server.async_stop)
+
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        _, writer = await asyncio.open_connection("127.0.0.1", port, ssl=context)
+        writer.write(b"GET /api/casasmart/slow HTTP/1.1\r\nHost: hub\r\n\r\n")
+        await writer.drain()
+        await asyncio.wait_for(view.started.wait(), 2)
+        writer.close()  # the phone goes away mid-request
+        await writer.wait_closed()
+        await asyncio.sleep(0.8)
+        self.assertEqual(view.outcome, ["finished"])
 
 
 if __name__ == "__main__":
