@@ -1,5 +1,6 @@
 """Tests for the persistent, Home-Assistant-free Energy Saving engine."""
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ sys.path.insert(
 
 from energy import (
     CONFIG_SCHEMA_VERSION,
+    ENERGY_LEVELS,
     EVENT_ACTIVATED,
     EVENT_CONFIG_RESET,
     EVENT_CONFIG_UPDATED,
@@ -624,6 +626,97 @@ class EnergyEventsAndStatsTests(EnergyTestCase):
         self.clock.t = float("nan")
         with self.assertRaises(EnergyError):
             self._make_engine()
+
+
+class _RefusingTable:
+    """A storage table whose writes raise while ``refuse`` is set."""
+
+    def __init__(self, table) -> None:
+        self._table = table
+        self.refuse = False
+
+    def get(self, key, default=None):
+        return self._table.get(key, default)
+
+    def __setitem__(self, key, value) -> None:
+        if self.refuse:
+            raise sqlite3.OperationalError("disk I/O error")
+        self._table[key] = value
+
+
+class FailedWriteTests(EnergyTestCase):
+    """A write SQLite refuses leaves memory matching what is on disk."""
+
+    def setUp(self):
+        super().setUp()
+        self.configs = _RefusingTable(self.storage.table("energy_configs"))
+        self.state = _RefusingTable(self.storage.table("energy_state"))
+        self.engine = EnergyEngine(
+            self.configs,
+            self.state,
+            self.storage.energy_events(),
+            clock=self.clock,
+        )
+        self.engine.warm_up()
+
+    def _view(self, engine: EnergyEngine) -> tuple[dict, dict]:
+        configs = {level: engine.get_config(level) for level in ENERGY_LEVELS}
+        return configs, engine.snapshot()
+
+    def assert_refused_write_changes_nothing(self, table, operation) -> None:
+        before = self._view(self.engine)
+        table.refuse = True
+        with self.assertRaises(sqlite3.OperationalError):
+            operation()
+        table.refuse = False
+        self.assertEqual(self._view(self.engine), before)
+        # And memory is what a restart would load from disk.
+        self.assertEqual(self._view(self._make_engine()), before)
+
+    def test_config_writes(self):
+        self.assert_refused_write_changes_nothing(
+            self.configs, lambda: self._configure(LEVEL_MEDIUM)
+        )
+        self.assert_refused_write_changes_nothing(
+            self.configs,
+            lambda: self.engine.patch_config(LEVEL_LOW, {"excluded_rooms": ["den"]}),
+        )
+        self._configure(LEVEL_LOW)
+        self.assert_refused_write_changes_nothing(
+            self.configs, lambda: self.engine.reset_config(LEVEL_LOW)
+        )
+
+    def test_activation(self):
+        self._configure(LEVEL_SMART)
+        # The lockout choice is written to the Smart config first...
+        self.assert_refused_write_changes_nothing(
+            self.configs,
+            lambda: self.engine.activate(LEVEL_SMART, smart_lockout_enabled=False),
+        )
+        # ...then the active state. The choice stays stored when only the
+        # state write fails, but the level is not active, in memory or on disk.
+        before = self.engine.snapshot()
+        self.state.refuse = True
+        with self.assertRaises(sqlite3.OperationalError):
+            self.engine.activate(LEVEL_SMART, smart_lockout_enabled=False)
+        self.state.refuse = False
+        self.assertEqual(self.engine.snapshot(), before)
+        self.assertEqual(self._view(self._make_engine()), self._view(self.engine))
+
+    def test_state_writes_while_active(self):
+        self._configure(LEVEL_SMART)
+        self.engine.activate(LEVEL_SMART)
+        self.engine.mark_released("light.living", room_id="living")
+        self.engine.set_room_occupancy("living", True)
+        for operation in (
+            lambda: self.engine.mark_released("light.hall", room_id="hall"),
+            lambda: self.engine.clear_room_releases("living"),
+            lambda: self.engine.set_room_occupancy("living", False),
+            self.engine.reapply,
+            self.engine.deactivate,
+        ):
+            with self.subTest(operation=operation):
+                self.assert_refused_write_changes_nothing(self.state, operation)
 
 
 if __name__ == "__main__":

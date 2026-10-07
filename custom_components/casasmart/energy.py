@@ -16,7 +16,9 @@ Smart, until its room has been empty for the grace period).
 
 Storage methods are synchronous and must be called through Home Assistant's
 executor. An ``RLock`` protects the in-memory mirrors and their
-corresponding SQLite writes. Read-heavy adapter paths use snapshots and
+corresponding SQLite writes. Every change is written to SQLite first and
+only then applied to memory, so a write that fails leaves memory matching
+what is on disk. Read-heavy adapter paths use snapshots and
 ``is_released`` without touching disk.
 """
 
@@ -420,8 +422,8 @@ class EnergyEngine:
         clean_actor = self._optional_actor(actor)
         now = self._now()
         with self._lock:
-            self._configs[level] = normalized
             self._config_table[level] = copy.deepcopy(normalized)
+            self._configs[level] = normalized
             self._record_event(
                 EVENT_CONFIG_UPDATED,
                 level=level,
@@ -459,8 +461,8 @@ class EnergyEngine:
             merged = copy.deepcopy(self._configs[level])
             merged.update(copy.deepcopy(patch))
             normalized = validate_level_config(level, merged)
-            self._configs[level] = normalized
             self._config_table[level] = copy.deepcopy(normalized)
+            self._configs[level] = normalized
             self._record_event(
                 EVENT_CONFIG_UPDATED,
                 level=level,
@@ -480,8 +482,8 @@ class EnergyEngine:
         now = self._now()
         with self._lock:
             config = default_level_config(level)
-            self._configs[level] = config
             self._config_table[level] = copy.deepcopy(config)
+            self._configs[level] = config
             self._record_event(
                 EVENT_CONFIG_RESET,
                 level=level,
@@ -538,21 +540,22 @@ class EnergyEngine:
             ):
                 config = copy.deepcopy(config)
                 config["lockout_enabled"] = smart_lockout_enabled
-                self._configs[level] = config
                 self._config_table[level] = copy.deepcopy(config)
+                self._configs[level] = config
 
             lockout = config["lockout_enabled"] if level == LEVEL_SMART else True
-            self._state = {
-                "active_level": level,
-                "activated_at": now,
-                "last_applied_at": now,
-                "lockout_enabled": lockout,
-                "released_entities": [],
-                "release_details": {},
-                "room_occupancy": {},
-                "revision": self._state["revision"] + 1,
-            }
-            self._persist_state()
+            self._commit_state(
+                {
+                    "active_level": level,
+                    "activated_at": now,
+                    "last_applied_at": now,
+                    "lockout_enabled": lockout,
+                    "released_entities": [],
+                    "release_details": {},
+                    "room_occupancy": {},
+                    "revision": self._state["revision"] + 1,
+                }
+            )
             self._record_event(
                 EVENT_ACTIVATED,
                 level=level,
@@ -573,17 +576,18 @@ class EnergyEngine:
                 return self.snapshot()
             now = self._now()
             released_count = len(self._state["released_entities"])
-            self._state = {
-                "active_level": None,
-                "activated_at": None,
-                "last_applied_at": None,
-                "lockout_enabled": False,
-                "released_entities": [],
-                "release_details": {},
-                "room_occupancy": {},
-                "revision": self._state["revision"] + 1,
-            }
-            self._persist_state()
+            self._commit_state(
+                {
+                    "active_level": None,
+                    "activated_at": None,
+                    "last_applied_at": None,
+                    "lockout_enabled": False,
+                    "released_entities": [],
+                    "release_details": {},
+                    "room_occupancy": {},
+                    "revision": self._state["revision"] + 1,
+                }
+            )
             self._record_event(
                 EVENT_DEACTIVATED,
                 level=level,
@@ -603,10 +607,11 @@ class EnergyEngine:
             level = self._require_active()
             now = self._now()
             released_count = len(self._state["released_entities"])
-            self._state["released_entities"] = []
-            self._state["release_details"] = {}
-            self._state["last_applied_at"] = now
-            self._bump_and_persist()
+            state = self._next_state()
+            state["released_entities"] = []
+            state["release_details"] = {}
+            state["last_applied_at"] = now
+            self._commit_state(state)
             self._record_event(
                 EVENT_REAPPLIED,
                 level=level,
@@ -647,17 +652,18 @@ class EnergyEngine:
             if level is None:
                 return False
             clean_actor = self._optional_actor(actor)
-            details = self._state["release_details"]
-            if entity_id in details:
+            if entity_id in self._state["release_details"]:
                 return False
             released_at = self._now()
+            state = self._next_state()
+            details = state["release_details"]
             details[entity_id] = {
                 "room_id": clean_room,
                 "released_at": released_at,
                 "source": clean_source,
             }
-            self._state["released_entities"] = sorted(details)
-            self._bump_and_persist()
+            state["released_entities"] = sorted(details)
+            self._commit_state(state)
             self._record_event(
                 EVENT_RELEASED,
                 level=level,
@@ -692,10 +698,11 @@ class EnergyEngine:
             if not cleared:
                 return []
             now = self._now()
+            state = self._next_state()
             for entity_id in cleared:
-                details.pop(entity_id, None)
-            self._state["released_entities"] = sorted(details)
-            self._bump_and_persist()
+                state["release_details"].pop(entity_id, None)
+            state["released_entities"] = sorted(state["release_details"])
+            self._commit_state(state)
             self._record_event(
                 EVENT_RELEASES_CLEARED,
                 level=LEVEL_SMART,
@@ -750,8 +757,9 @@ class EnergyEngine:
                 "sensors_available": sensors_available,
                 "changed_at": now,
             }
-            self._state["room_occupancy"][room_id] = record
-            self._bump_and_persist()
+            state = self._next_state()
+            state["room_occupancy"][room_id] = record
+            self._commit_state(state)
             self._record_event(
                 EVENT_OCCUPANCY_CHANGED,
                 level=LEVEL_SMART,
@@ -951,12 +959,19 @@ class EnergyEngine:
             raise EnergyInactiveError("Energy Saving is not active")
         return level
 
-    def _persist_state(self) -> None:
-        self._state_table[_STATE_KEY] = copy.deepcopy(self._state)
+    def _next_state(self) -> dict[str, Any]:
+        """A copy of the live state with the next revision, to edit and commit."""
+        state = copy.deepcopy(self._state)
+        state["revision"] += 1
+        return state
 
-    def _bump_and_persist(self) -> None:
-        self._state["revision"] += 1
-        self._persist_state()
+    def _commit_state(self, state: dict[str, Any]) -> None:
+        """Write ``state``, then make it the live state.
+
+        A write that raises leaves the live state as it was, matching disk.
+        """
+        self._state_table[_STATE_KEY] = copy.deepcopy(state)
+        self._state = state
 
     def _record_event(
         self,
