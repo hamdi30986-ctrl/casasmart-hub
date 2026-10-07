@@ -416,5 +416,5 @@ class AthanScheduler:
         school = athan.get("school") or "shafi"
         try:
             return float(lat), float(lon), str(tz_name), str(method), str(school)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None

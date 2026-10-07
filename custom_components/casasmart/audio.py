@@ -13,6 +13,7 @@ adapter rebuilds it from the broker's retained topics on every reconnect.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -214,11 +215,15 @@ def _opt_str(value: Any, *, field: str) -> str | None:
 def _is_number(value: Any) -> bool:
     """True for a finite int or float (not a bool).
 
-    NaN and infinity are rejected because they serialise to invalid JSON.
+    NaN and infinity serialise to invalid JSON, and an integer too large for
+    a float can't be used as a coordinate.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return value == value and value not in (float("inf"), float("-inf"))
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _validate_host(value: Any, *, field: str) -> str:
