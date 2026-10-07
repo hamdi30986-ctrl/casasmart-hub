@@ -180,7 +180,6 @@ class AlarmEngine:
                     self._state.get("trigger_entity"),
                     self._state.get("trigger_zone", ZONE_ENTRY),
                     now=self._clock(),
-                    persist=True,
                 )
 
     @staticmethod
@@ -396,9 +395,7 @@ class AlarmEngine:
         # Life safety comes before any mode rule.
         if zone == ZONE_LIFE_SAFETY:
             with self._lock:
-                return self._enter_triggered(
-                    entity_id, zone, now=now, life_safety=True, persist=True
-                )
+                return self._enter_triggered(entity_id, zone, now=now, life_safety=True)
 
         with self._lock:
             mode = self._state["mode"]
@@ -413,7 +410,7 @@ class AlarmEngine:
 
             if zone == ZONE_ENTRY:
                 return self._enter_pending(entity_id, now=now)
-            return self._enter_triggered(entity_id, zone, now=now, persist=True)
+            return self._enter_triggered(entity_id, zone, now=now)
 
     def process_sensor_offline(
         self, entity_id: str, *, now: float | None = None
@@ -451,7 +448,6 @@ class AlarmEngine:
                 self._state.get("trigger_entity"),
                 self._state.get("trigger_zone", ZONE_ENTRY),
                 now=now,
-                persist=True,
             )
 
     def pending_deadline(self) -> float | None:
@@ -467,13 +463,12 @@ class AlarmEngine:
     # -- internal transitions (caller holds the lock) --------------------------
 
     def _enter_pending(self, entity_id: str, *, now: float) -> dict[str, Any]:
-        """Start the entry-delay countdown for an entry-zone trip."""
-        prior = self._state["mode"]
+        """Start the entry delay for an entry-zone trip in an armed mode."""
         deadline = now + self._state["entry_delay"]
         self._state.update(
             mode=MODE_PENDING,
             since=now,
-            armed_mode=prior if prior in ARMABLE_MODES else self._state["armed_mode"],
+            armed_mode=self._state["mode"],
             trigger_deadline=deadline,
             trigger_entity=entity_id,
             trigger_zone=ZONE_ENTRY,
@@ -496,7 +491,6 @@ class AlarmEngine:
         *,
         now: float,
         life_safety: bool = False,
-        persist: bool = False,
     ) -> dict[str, Any]:
         """Go to triggered, record the event and hand it to the alert sink."""
         self._state.update(
@@ -506,8 +500,7 @@ class AlarmEngine:
             trigger_entity=entity_id,
             trigger_zone=zone,
         )
-        if persist:
-            self._persist_state()
+        self._persist_state()
         kind = EVENT_LIFE_SAFETY if life_safety else EVENT_TRIGGERED
         event = self._record_event(
             kind, now=now, entity_id=entity_id, zone=zone, life_safety=life_safety
