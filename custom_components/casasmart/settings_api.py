@@ -131,6 +131,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             for tile in tiles:
                 if (
                     not isinstance(tile, dict)
+                    or not isinstance(tile.get("type"), str)
                     or tile.get("type") not in _ENTITY_TILE_TYPES
                 ):
                     continue
