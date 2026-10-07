@@ -47,14 +47,11 @@ ingest never touches storage.
 from __future__ import annotations
 
 import json
-import logging
 import re
 import threading
 import time
 from collections.abc import Callable
 from typing import Any
-
-_LOGGER = logging.getLogger(__name__)
 
 # -- MQTT topics (the speaker agent's own) -------------------------------------
 # Per-speaker command sink + the all-speakers broadcast sink. The agent
