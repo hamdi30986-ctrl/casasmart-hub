@@ -55,6 +55,12 @@ _BIDI_CONTROLS = frozenset(
 )
 # At least 22 base64url characters: room for 128 random bits.
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+# Audited reasons are short snake_case codes, safe to log.
+_SAFE_CODE = re.compile(r"[a-z0-9_]{1,80}")
+# Delivery outcomes the dispatcher reports; anything else is audited as failed.
+_DELIVERY_OUTCOMES = frozenset(
+    {"relay_accepted", "no_registered_tokens", "unavailable", "failed"}
+)
 
 
 class HqNotificationError(ValueError):
@@ -95,8 +101,13 @@ def canonical_request(timestamp: int, nonce: str, raw_body: bytes) -> bytes:
     )
 
 
-def normalize_public_key(value: str | None) -> tuple[str, str]:
-    """Validate an Ed25519 public key; return its canonical PEM and fingerprint."""
+def _timestamp(now: float | None) -> int:
+    """Whole Unix seconds: now if given, else the current time."""
+    return int(time.time() if now is None else now)
+
+
+def _load_public_key(value: object) -> Ed25519PublicKey:
+    """Load an Ed25519 public key from PEM, or raise HqNotificationError."""
     if not isinstance(value, str) or not value.strip():
         raise HqNotificationError("public_key_required")
     try:
@@ -105,6 +116,12 @@ def normalize_public_key(value: str | None) -> tuple[str, str]:
         raise HqNotificationError("invalid_public_key") from err
     if not isinstance(key, Ed25519PublicKey):
         raise HqNotificationError("invalid_public_key")
+    return key
+
+
+def normalize_public_key(value: str | None) -> tuple[str, str]:
+    """Validate an Ed25519 public key; return its canonical PEM and fingerprint."""
+    key = _load_public_key(value)
     raw = key.public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
@@ -164,11 +181,10 @@ class HqNotificationVerifier:
     ) -> None:
         self._table = table
         try:
-            canonical, _fingerprint = normalize_public_key(public_key_pem)
-            key = serialization.load_pem_public_key(canonical.encode("ascii"))
+            key: Ed25519PublicKey | None = _load_public_key(public_key_pem)
         except HqNotificationError:
             key = None
-        self._public_key = key if isinstance(key, Ed25519PublicKey) else None
+        self._public_key = key
 
     def verify(
         self, headers: Mapping[str, str], raw_body: bytes, now: float | None = None
@@ -231,7 +247,7 @@ class HqNotificationVerifier:
 
         Expired nonces are pruned first. The caller holds the delivery lock.
         """
-        current = int(time.time() if now is None else now)
+        current = _timestamp(now)
         self._prune_nonces(current)
         key = f"nonce:{nonce}"
         if key in self._table:
@@ -257,23 +273,10 @@ class HqNotificationVerifier:
         again rather than answered as a duplicate. Outcome and reason are
         reduced to known, log-safe values.
         """
-        current = int(time.time() if now is None else now)
-        safe_outcome = (
-            outcome
-            if outcome
-            in {
-                "relay_accepted",
-                "no_registered_tokens",
-                "unavailable",
-                "failed",
-            }
-            else "failed"
-        )
+        current = _timestamp(now)
+        safe_outcome = outcome if outcome in _DELIVERY_OUTCOMES else "failed"
         safe_reason = (
-            reason
-            if isinstance(reason, str)
-            and re.fullmatch(r"[a-z0-9_]{1,80}", reason) is not None
-            else None
+            reason if isinstance(reason, str) and _SAFE_CODE.fullmatch(reason) else None
         )
         if safe_outcome == "relay_accepted":
             key = f"event:{event_id}"
@@ -286,16 +289,16 @@ class HqNotificationVerifier:
 
     def record_rejection(self, code: str, now: float | None = None) -> None:
         """Audit a rejection by its code alone."""
-        current = int(time.time() if now is None else now)
-        safe_code = code if re.fullmatch(r"[a-z0-9_]{1,80}", code) else "rejected"
-        self._append_audit({"outcome": "rejected", "reason": safe_code}, current)
+        safe_code = code if _SAFE_CODE.fullmatch(code) else "rejected"
+        self._append_audit(
+            {"outcome": "rejected", "reason": safe_code}, _timestamp(now)
+        )
 
     def record_duplicate(self, event_id: str, now: float | None = None) -> None:
         """Audit a retry answered as a duplicate."""
-        current = int(time.time() if now is None else now)
         self._append_audit(
             {"event_id": event_id, "outcome": "duplicate", "reason": None},
-            current,
+            _timestamp(now),
         )
 
     def _append_audit(self, value: dict[str, Any], current: int) -> None:
