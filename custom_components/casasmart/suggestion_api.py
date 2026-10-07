@@ -170,8 +170,11 @@ class CasaSmartSuggestionActionView(_SuggestionView):
     name = f"api:{DOMAIN}:now:suggestions:actions"
 
     async def post(self, request):
-        # Dismiss/snooze require read access; Run is checked again with control
-        # permission immediately before acquiring a durable execution claim.
+        # Reading the occurrence needs read access. Dismiss/snooze write the
+        # person's suggestion state, so they need a session (session.manage —
+        # not a widget token); Run activates a scene, so it needs control, and
+        # is checked again immediately before acquiring a durable execution
+        # claim.
         async def operation(service, claims):
             body = await self.body(request, {"action", "occurrence_id"})
             action, occurrence = body.get("action"), body.get("occurrence_id")
@@ -181,12 +184,13 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 or len(occurrence) != 64
             ):
                 raise SuggestionError("invalid_action")
-            if action == "run":
-                claims, error = authenticate_request(
-                    self.hass, request, "devices.control"
-                )
-                if error is not None:
-                    return error
+            claims, error = authenticate_request(
+                self.hass,
+                request,
+                "devices.control" if action == "run" else "session.manage",
+            )
+            if error is not None:
+                return error
             member, scope = self.member(claims), claims.get("rooms")
             context = (
                 await service.context(scope)

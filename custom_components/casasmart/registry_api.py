@@ -1245,10 +1245,10 @@ class CasaSmartFavoritesView(_RegistryView):
         return self.json({"entity_ids": favorites})
 
     async def put(self, request: web.Request) -> web.Response:
-        # devices.control, not devices.read: it's a write. Every current
-        # role may favorite, but a future read-only role must not slip
-        # through a read permission into a mutation.
-        claims, error = authenticate_request(self._hass, request, "devices.control")
+        # session.manage, not devices.*: it's a write to the person's own
+        # list, not device control. Every role's session may favorite; a
+        # home-screen widget's token may not.
+        claims, error = authenticate_request(self._hass, request, "session.manage")
         if error is not None:
             return error
         registry, not_ready = self._registry_or_503()
