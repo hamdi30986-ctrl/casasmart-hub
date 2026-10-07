@@ -223,7 +223,15 @@ class CasaSmartHqNotificationView(HomeAssistantView):
                 {"accepted": False, "code": "INVALID_REQUEST"},
                 status=HTTPStatus.BAD_REQUEST,
             )
-        raw = await request.content.read(HQ_NOTIFICATION_MAX_BODY_BYTES + 1)
+        # content.read(n) returns what has arrived so far, so read until EOF.
+        raw = b""
+        while len(raw) <= HQ_NOTIFICATION_MAX_BODY_BYTES:
+            chunk = await request.content.read(
+                HQ_NOTIFICATION_MAX_BODY_BYTES + 1 - len(raw)
+            )
+            if not chunk:
+                break
+            raw += chunk
         if len(raw) > HQ_NOTIFICATION_MAX_BODY_BYTES:
             return web.json_response(
                 {"accepted": False, "code": "INVALID_REQUEST"},
