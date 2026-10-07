@@ -74,7 +74,7 @@ POST `/preview` accepts `{rule: ...}` and returns `version`, `eligible`, `reason
 
 POST `/actions` accepts exactly `{action: "dismiss" | "snooze" | "run", occurrence_id: "..."}`. Dismiss/Snooze returns `status` (`dismissed` or `snoozed`) and `until`. Suppression is tied to the authenticated member, shared across that member's devices, not sent as a client-controlled user ID. Repeating a still-active Snooze does not extend it.
 
-Run rechecks time, rule/scene content, conditions, room visibility, current control authorization and energy restrictions. It invokes the existing `async_execute_registry_scene` service; no second device-command engine exists. A persisted claim is acquired before dispatch. Simultaneous clients and repeated requests for the same occurrence cannot dispatch twice.
+Run rechecks time, rule/scene content, conditions, room visibility, current control authorization and energy restrictions. It runs the scene through the hub's one scene executor, `async_execute_registry_scene`; there is no second device-command path. A persisted claim is acquired before dispatch. Simultaneous clients and repeated requests for the same occurrence cannot dispatch twice.
 
 An execution receipt contains `occurrence_id`, `status`, `ok`, `expires_at`, `started_at` and, after a result, `succeeded_count`/`failed_count`. It does not include entity names or per-device errors. Status is:
 
@@ -83,18 +83,18 @@ An execution receipt contains `occurrence_id`, `status`, `ok`, `expires_at`, `st
 - `partial_failure`: HTTP 200 with `ok: false`. Show the failure/counts. If still eligible, the card carries `last_execution`. Repeating Run returns the same receipt and does not retry successful or uncertain device actions.
 - `unknown`: HTTP 200 with `ok: false`. A dispatched operation was interrupted or was in flight at restart. Never automatically retry it; the user must inspect devices and choose any further manual action deliberately.
 
-A claim rejected before the scene executor is called can be released safely. Storage failure before acquiring a claim cannot execute a scene. Once dispatch may have begun, uncertainty is retained rather than treated as permission to retry. Request replay is only available while the unchanged occurrence is current and its references remain visible; otherwise HTTP 409 is returned. Ordinary manual scene activation remains a separate, explicit existing workflow.
+A claim rejected before the scene executor is called can be released safely. Storage failure before acquiring a claim cannot execute a scene. Once dispatch may have begun, uncertainty is retained rather than treated as permission to retry. Request replay is only available while the unchanged occurrence is current and its references remain visible; otherwise HTTP 409 is returned. Activating a scene by hand remains a separate, explicit workflow.
 
 Error objects use `error` codes. Validation returns 400, denied permissions/lockouts 403, stale/ineligible occurrences, revision conflicts and a scene skipped because Energy Saving is active (`scene_skipped_energy_saving`) 409, bounded-state capacity 429, and unavailable action/management storage or service 503. Recommendation reads can instead return HTTP 200 with `status: unavailable` and no suggestion. A full active receipt/suppression store refuses new work rather than evicting safety records.
 
-## Refresh and backward compatibility
+## Refresh and compatibility
 
 Authenticated, subscribed WebSocket clients receive only `{type: "suggestions_changed", version: 1}`. No rule, room, entity, user, reason or occurrence is broadcast. Refetch the authorized GET response on this signal, reconnect/resume, `refresh_at` and `expires_at`. Do not keep a stale/offline Run button enabled. Notifications are coalesced and interest subscriptions are replaced when rules change or are disabled/deleted. Time boundaries and snooze expiry also schedule refreshes; evaluation never scans every device on state ticks.
 
-The existing NOW snapshot adds `contextual_suggestion` with the same response envelope. Its old `suggested_routine` remains a nullable scene object, used only for the explicitly configured static fallback when no contextual rules exist. `suggested_routine_source` labels that fallback `featured_manual`. Contextual cards use the new action endpoint, not the old scene activation endpoint. Existing static choices are not converted to time rules, and nothing is automatically enabled on upgrade.
+The NOW snapshot carries `contextual_suggestion` with the same response envelope. Its `suggested_routine` field is a nullable scene object: the scene an administrator featured by hand, shown only when no contextual rules exist. `suggested_routine_source` labels it `featured_manual`. Contextual cards use the action endpoint above, not the ordinary scene activation endpoint. A featured scene is never converted to a time rule, and nothing is enabled automatically on upgrade.
 
 ## Storage and limits
 
-State lives in the additive `suggestions_v1` namespace of the existing SQLite KV store. No schema-version migration or legacy NOW rewrite is required. The document holds version, collection revision, rules, per-member suppressions and execution receipts. Existing transaction/savepoint support makes revision changes and claims durable. Old hub code ignores this namespace; upgrading again retains it. Factory reset clears it.
+State lives in the `suggestions_v1` namespace of the hub's SQLite key-value store and needs no schema migration. The document holds version, collection revision, rules, per-member suppressions and execution receipts. Each revision change and claim is one storage transaction. A hub rolled back to a version without suggestions ignores the namespace, and a later upgrade finds it intact. Factory reset clears it.
 
 Limits are 64 rules, 16 conditions per rule, 4,096 suppression records and 2,048 execution receipts. Mutations prune records more than one day past occurrence expiry; active safety records are never evicted to make space. Startup converts interrupted execution claims to `unknown` without executing anything.
