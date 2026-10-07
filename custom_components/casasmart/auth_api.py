@@ -480,7 +480,10 @@ class CasaSmartEnrollView(HomeAssistantView):
 
         if grant["role"] == ROLE_ADMIN:
             # The hub is now claimed: arm the recovery code so the installer
-            # can engrave the card before leaving the site.
+            # can engrave the card before leaving the site. The owner code
+            # notification stays: the code is dormant, not spent (it works
+            # again when the last admin leaves), and that is its only
+            # plaintext copy.
             await self._hass.async_add_executor_job(arm_recovery, self._hass)
 
         # Refresh the per-user sensors.

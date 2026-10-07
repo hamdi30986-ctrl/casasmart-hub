@@ -52,7 +52,9 @@ from tank sensors on the LAN.
 2. Enter the push relay URL and the activation code. You can also enter the
    hub's Cloudflare tunnel hostname here (see [Remote access](#remote-access)).
 3. Home Assistant shows two notifications:
-   - the **pairing code**, a one-time code that claims the hub;
+   - the **pairing code** (the owner code printed on the hub), which claims
+     it. It stops working once an owner has paired and works again if the
+     owner removes the hub from the app, so keep the sticker;
    - the **recovery code**, which lets the owner take the hub back from a new
      phone. Write it down and keep it safe.
 4. On a phone on the same network, open the CasaSmart app, choose the hub and

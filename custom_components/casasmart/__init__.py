@@ -78,6 +78,7 @@ from .const import (
     HUB_NAME_CONFIG_KEY,
     KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY,
     MDNS_REFRESH_INTERVAL_MINUTES,
+    NOTIFY_BOOTSTRAP_CODE,
     PROVISION_SECRET_CONFIG_KEY,
     PUSH_RELAY_URL_CONFIG_KEY,
     RECOVERY_CODE_HASH_CONFIG_KEY,
@@ -496,7 +497,7 @@ async def _async_start_hub(
             "Use it in the CasaSmart app (on this network) to claim the "
             "hub. It stays valid until an admin is paired.",
             title="CasaSmart Hub: pairing code",
-            notification_id=f"{DOMAIN}_bootstrap_pairing",
+            notification_id=NOTIFY_BOOTSTRAP_CODE,
         )
 
     if recovery_code is not None:
