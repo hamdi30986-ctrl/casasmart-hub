@@ -42,7 +42,7 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn("validate_idempotency_key", source)
         self.assertIn("idempotent_result", source)
         self.assertIn("save_idempotent_result", source)
-        self.assertIn("save_restore_set", source)
+        self.assertIn("extend_restore_set", source)
         self.assertIn("consume_restore_set", source)
         self.assertIn("energy_lockout_applies", source)
 

@@ -339,6 +339,17 @@ class NowDataEngine:
             else:
                 self._restores.pop(room_id, None)
 
+    def extend_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
+        """Add newly switched-off ids to the room's outstanding capture.
+
+        A repeated OFF finds nothing still on, or only what was switched on
+        since; replacing the capture with that would forget what the earlier
+        OFF switched off. First-captured order, each id once; ON consumes it.
+        """
+        with self._lock:
+            self.save_restore_set(room_id, [*self.restore_set(room_id), *entity_ids])
+            return self.restore_set(room_id)
+
     def consume_restore_set(self, room_id: str) -> list[str]:
         with self._lock:
             ids = self.restore_set(room_id)
