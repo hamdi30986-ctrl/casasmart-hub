@@ -1097,8 +1097,8 @@ class EnergyAdapter:
                     await self._settle_entity(entity, "heat")
             else:
                 # Unknown/auto modes use the cooling-safe posture.  The
-                # command includes hvac_mode=COOL only for an off climate;
-                # active integrations retain their current cool mode.
+                # command includes hvac_mode=COOL only for an AC that is off;
+                # a running AC keeps its current mode.
                 if temperature < COOL_KILL_BELOW:
                     await self._turn_off(entity.entity_id)
                 elif temperature > COOL_BOOST_ABOVE:
