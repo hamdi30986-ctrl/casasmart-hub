@@ -116,6 +116,27 @@ class UserManagementError(AuthError):
     """A user-management edit was refused, for example on the admin."""
 
 
+def _require_name(name: Any) -> None:
+    if not isinstance(name, str) or not name.strip():
+        raise EnrollError("Device name is required")
+
+
+def _canonical_key(public_key_pem: Any) -> str:
+    """The key as canonical PEM; raises EnrollError when it isn't usable."""
+    try:
+        return auth_keys.validate_public_key(public_key_pem)
+    except auth_keys.KeyError_ as err:
+        raise EnrollError(str(err)) from err
+
+
+def _valid_rooms(rooms: Any) -> bool:
+    """True for None (all rooms) or a list of non-empty area ids."""
+    return rooms is None or (
+        isinstance(rooms, list)
+        and all(isinstance(room, str) and room for room in rooms)
+    )
+
+
 class AuthEngine:
     """Enrolls devices, runs the login challenge, and mints and checks JWTs."""
 
@@ -179,23 +200,16 @@ class AuthEngine:
         when there was none). code_hash is that code's hash, which the
         idempotent re-pair path keeps accepting for this device.
         """
-        if not isinstance(name, str) or not name.strip():
-            raise EnrollError("Device name is required")
+        _require_name(name)
         # The second strip() drops a space the length cap may leave behind.
         name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
-        if rooms is not None and (
-            not isinstance(rooms, list)
-            or any(not isinstance(room, str) or not room for room in rooms)
-        ):
+        if not _valid_rooms(rooms):
             raise EnrollError("rooms must be a list of area ids")
         if rooms is not None and role != ROLE_USER:
             raise EnrollError("Room scope only applies to the user role")
-        try:
-            canonical_pem = auth_keys.validate_public_key(public_key_pem)
-        except auth_keys.KeyError_ as err:
-            raise EnrollError(str(err)) from err
+        canonical_pem = _canonical_key(public_key_pem)
 
         with self._lock:
             if role == ROLE_ADMIN and self.has_admin():
@@ -203,7 +217,7 @@ class AuthEngine:
 
             device_id = f"dev-{secrets.token_urlsafe(12)}"
             self._devices[device_id] = {
-                "name": name.strip(),
+                "name": name,
                 "role": role,
                 "public_key": canonical_pem,
                 "rooms": rooms,
@@ -228,12 +242,8 @@ class AuthEngine:
         Lets the enroll view refuse a bad request before it spends a pairing
         code.
         """
-        if not isinstance(name, str) or not name.strip():
-            raise EnrollError("Device name is required")
-        try:
-            auth_keys.validate_public_key(public_key_pem)
-        except auth_keys.KeyError_ as err:
-            raise EnrollError(str(err)) from err
+        _require_name(name)
+        _canonical_key(public_key_pem)
 
     def ensure_enrolled(
         self,
@@ -254,21 +264,14 @@ class AuthEngine:
         """
         if not isinstance(device_id, str) or not device_id.strip():
             raise EnrollError("device_id is required")
-        if not isinstance(name, str) or not name.strip():
-            raise EnrollError("Device name is required")
+        _require_name(name)
         if role not in (ROLE_SUB_ADMIN, ROLE_USER):
             raise EnrollError("Provisioned role must be sub-admin or user")
-        if rooms is not None and (
-            not isinstance(rooms, list)
-            or any(not isinstance(room, str) or not room for room in rooms)
-        ):
+        if not _valid_rooms(rooms):
             raise EnrollError("rooms must be a list of area ids")
         if rooms is not None and role != ROLE_USER:
             raise EnrollError("Room scope only applies to the user role")
-        try:
-            canonical_pem = auth_keys.validate_public_key(public_key_pem)
-        except auth_keys.KeyError_ as err:
-            raise EnrollError(str(err)) from err
+        canonical_pem = _canonical_key(public_key_pem)
 
         device_id = device_id.strip()
         with self._lock:
@@ -320,12 +323,8 @@ class AuthEngine:
         favorites and settings carry over (no other device can join the
         admin's member).
         """
-        if not isinstance(name, str) or not name.strip():
-            raise EnrollError("Device name is required")
-        try:
-            canonical_pem = auth_keys.validate_public_key(public_key_pem)
-        except auth_keys.KeyError_ as err:
-            raise EnrollError(str(err)) from err
+        _require_name(name)
+        canonical_pem = _canonical_key(public_key_pem)
 
         with self._lock:
             old_admin_id = next(
@@ -545,10 +544,7 @@ class AuthEngine:
             if new_role not in (ROLE_SUB_ADMIN, ROLE_USER):
                 raise UserManagementError("Role must be sub-admin or user")
             new_rooms = record.get("rooms") if rooms is ... else rooms
-            if new_rooms is not None and (
-                not isinstance(new_rooms, list)
-                or any(not isinstance(room, str) or not room for room in new_rooms)
-            ):
+            if not _valid_rooms(new_rooms):
                 raise UserManagementError("rooms must be a list of area ids")
             # Only users are room-scoped; sub-admins see every room.
             if new_rooms is not None and new_role != ROLE_USER:
