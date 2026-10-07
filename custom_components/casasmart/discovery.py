@@ -91,13 +91,16 @@ def build_instance_name(hub_name: str | None, fingerprint: str) -> str:
     Appending the short fingerprint makes two hubs that share a name
     (both default "CasaSmart Hub") distinct on one LAN without relying on
     zeroconf's "(2)"/"(3)" collision rename — and ties the visible label
-    to the crypto identity. A label is capped at 63 bytes by DNS; ours is
-    far under, but the cap is honoured defensively.
+    to the crypto identity. DNS caps a label at 63 bytes of UTF-8, and
+    zeroconf refuses the whole record past it, so a long name is shortened
+    (never mid-character) and the fingerprint suffix always survives.
     """
     base = (hub_name or "").strip() or DEFAULT_HUB_NAME
     short = _short_fingerprint(fingerprint)
-    label = f"{base} ({short})" if short else base
-    return label[:63]
+    suffix = f" ({short})" if short else ""
+    budget = 63 - len(suffix.encode("utf-8"))
+    base = base.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip()
+    return f"{base}{suffix}"
 
 
 def build_txt_records(
