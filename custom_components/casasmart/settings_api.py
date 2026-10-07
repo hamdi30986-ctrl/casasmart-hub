@@ -62,25 +62,21 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         engine = get_engine(self._hass)
         sub = claims["sub"]
 
-        def _load() -> tuple[str, dict]:
-            mid = engine.member_id_for(sub) if engine else sub
-            return mid, settings.get(mid)
+        def _load() -> dict:
+            return settings.get(engine.member_id_for(sub) if engine else sub)
 
-        _member_id, doc = await self._hass.async_add_executor_job(_load)
+        doc = await self._hass.async_add_executor_job(_load)
         # Filter for the reply only: during HA startup states are still
         # arriving, and saving the filtered list would erase the layout.
-        tiles = doc.get("widget_tiles")
-        if tiles:
-            served = [t for t in tiles if self._tile_alive(t)]
-            doc["widget_tiles"] = served
+        if doc.get("widget_tiles"):
             scope = claims.get("rooms")
             doc["widget_tiles"] = [
-                t for t in doc["widget_tiles"] if self._tile_in_scope(t, scope)
+                tile for tile in doc["widget_tiles"] if self._tile_allowed(tile, scope)
             ]
         return self.json(doc)
 
-    def _tile_alive(self, tile: object) -> bool:
-        """False for an entity tile whose entity is missing or not served."""
+    def _tile_allowed(self, tile: object, scope: list[str] | None) -> bool:
+        """False for an entity tile that is missing, unserved or out of scope."""
         if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
             return True
         eid = tile.get("entityId")
@@ -88,13 +84,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             isinstance(eid, str)
             and self._hass.states.get(eid) is not None
             and is_served(self._hass, eid)
+            and in_scope(self._hass, eid, scope)
         )
-
-    def _tile_in_scope(self, tile: object, scope: object) -> bool:
-        """False for an entity tile outside the caller's rooms."""
-        if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
-            return True
-        return in_scope(self._hass, tile.get("entityId"), scope)
 
     async def put(self, request: web.Request) -> web.Response:
         claims, error = authenticate_request(self._hass, request, "session.manage")
@@ -108,27 +99,19 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        # An entity tile must name a served entity in the caller's rooms. Shape
-        # errors are left to the engine's validation.
+        # Shape errors, a non-string type included, are left to the engine.
         tiles = payload.get("widget_tiles")
         if isinstance(tiles, list):
             scope = claims.get("rooms")
             for tile in tiles:
                 if (
-                    not isinstance(tile, dict)
-                    or not isinstance(tile.get("type"), str)
-                    or tile.get("type") not in _ENTITY_TILE_TYPES
-                ):
-                    continue
-                eid = tile.get("entityId")
-                if (
-                    not isinstance(eid, str)
-                    or self._hass.states.get(eid) is None
-                    or not is_served(self._hass, eid)
-                    or not in_scope(self._hass, eid, scope)
+                    isinstance(tile, dict)
+                    and isinstance(tile.get("type"), str)
+                    and not self._tile_allowed(tile, scope)
                 ):
                     return self.json_message(
-                        f"Unknown device {eid!r}", HTTPStatus.BAD_REQUEST
+                        f"Unknown device {tile.get('entityId')!r}",
+                        HTTPStatus.BAD_REQUEST,
                     )
         engine = get_engine(self._hass)
         sub = claims["sub"]
