@@ -42,6 +42,16 @@ EVENT_AUTOMATION_DISABLE_FAILED = "automation_disable_failed"
 EVENT_AUTOMATION_RESTORE_FAILED = "automation_restore_failed"
 
 
+def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool:
+    """True when the caller is non-admin and the active level locks control."""
+    state = engine.snapshot()
+    return bool(
+        state["active"]
+        and state["lockout_enabled"]
+        and claims.get("role") != ROLE_ADMIN
+    )
+
+
 class EnergyFlags:
     """Dedicated KV namespace for automation flags and restore bookkeeping.
 
@@ -109,16 +119,6 @@ class EnergyFlags:
             self._table[_DISABLED_KEY] = {"entity_ids": clean}
         else:
             self._table.pop(_DISABLED_KEY, None)
-
-
-def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool:
-    """True when the caller is non-admin and the active level locks control."""
-    state = engine.snapshot()
-    return bool(
-        state["active"]
-        and state["lockout_enabled"]
-        and claims.get("role") != ROLE_ADMIN
-    )
 
 
 class EnergyAutomationManager:
