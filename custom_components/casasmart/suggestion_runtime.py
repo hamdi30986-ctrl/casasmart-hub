@@ -228,16 +228,7 @@ class SuggestionRuntime:
                 if fingerprint != self._fingerprint:
                     self._fingerprint = fingerprint
                     self.hass.bus.async_fire(EVENT_SUGGESTIONS_CHANGED)
-                delay = max(
-                    0.05,
-                    (
-                        next_boundary(data["rules"], now, zone, self.sunset) - now
-                    ).total_seconds(),
-                )
-                if isinstance(self, GeneratedSuggestionRuntime):
-                    delay = min(
-                        delay, max(0.05, (window(now)[1] - now).total_seconds())
-                    )
+                delay = self._seconds_to_boundary(data, now, zone)
                 # Wake when a snooze ends, even if nothing else changes.
                 for suppression in data["suppressions"].values():
                     seconds = (
@@ -252,6 +243,15 @@ class SuggestionRuntime:
                 self._timer.cancel()
             if not self._stopped:
                 self._timer = self.hass.loop.call_later(delay, self._kick)
+
+    def _seconds_to_boundary(self, data, now, zone):
+        """Seconds until the next window opens or closes."""
+        return max(
+            0.05,
+            (
+                next_boundary(data["rules"], now, zone, self.sunset) - now
+            ).total_seconds(),
+        )
 
     def stop(self):
         """Cancel every listener, timer and pending refresh."""
@@ -439,6 +439,13 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         for plan in context[0]["_generated_plans"]:
             if all(visible(a["entity_id"]) for a in plan["actions"]):
                 yield {}, dict(plan), "eligible"
+
+    def _seconds_to_boundary(self, data, now, zone):
+        """The rule boundary or the end of the two-hour window, if sooner."""
+        return min(
+            super()._seconds_to_boundary(data, now, zone),
+            max(0.05, (window(now)[1] - now).total_seconds()),
+        )
 
     def payload_from(self, context, member, scope):
         """Every plan this member has not suppressed and nobody tried to run."""
