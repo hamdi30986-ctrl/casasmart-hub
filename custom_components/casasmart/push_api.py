@@ -69,6 +69,16 @@ def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
     )
 
 
+def _hq_attempts(hass: HomeAssistant) -> defaultdict[str, deque[float]]:
+    """Recent HQ request times per address, shared by every view instance.
+
+    As with the delivery lock, one limit has to cover both listeners.
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault(
+        "hq_notification_attempts", defaultdict(deque)
+    )
+
+
 class CasaSmartPushTokenView(HomeAssistantView):
     """POST and DELETE /api/casasmart/auth/push-token.
 
@@ -185,7 +195,7 @@ class CasaSmartHqNotificationView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         self._lock = _hq_delivery_lock(hass)
-        self._attempts: dict[str, deque[float]] = defaultdict(deque)
+        self._attempts = _hq_attempts(hass)
 
     def _rate_limited(self, peer: str) -> bool:
         """True once peer has used up its requests for the current window."""

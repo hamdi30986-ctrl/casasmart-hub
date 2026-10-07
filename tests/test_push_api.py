@@ -207,6 +207,21 @@ class HqNotificationViewTests(unittest.IsolatedAsyncioTestCase):
             (200, {"accepted": True, "duplicate": True, "delivery": "relay_accepted"}),
         )
 
+    async def test_rate_limit_covers_both_listeners(self) -> None:
+        plain = CasaSmartHqNotificationView(self.hass)
+        tls = CasaSmartHqNotificationView(self.hass)
+        for _ in range(30):
+            request = self._request("hq-reminder:00000001", "a" * 24)
+            request.content_type = "text/plain"  # answered after the limit check
+            response = await plain.post(request)
+            self.assertEqual(H.read_response(response)[0], 400)
+        response = await tls.post(self._request("hq-reminder:00000001", "b" * 24))
+        self.assertEqual(
+            H.read_response(response),
+            (429, {"accepted": False, "code": "RATE_LIMITED"}),
+        )
+        self.assertEqual(self.rt.push_dispatcher.sent, [])
+
     async def test_different_events_are_each_delivered(self) -> None:
         plain = CasaSmartHqNotificationView(self.hass)
         tls = CasaSmartHqNotificationView(self.hass)
