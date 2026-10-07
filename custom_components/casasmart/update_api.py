@@ -111,7 +111,13 @@ class UpdateChecker:
                             repo,
                         )
                         return
-                    payload = await response.json()
+                    try:
+                        payload = await response.json()
+                    except ValueError:
+                        _LOGGER.warning(
+                            "Update check: GitHub sent malformed JSON for %s", repo
+                        )
+                        return
             except (TimeoutError, aiohttp.ClientError) as err:
                 _LOGGER.warning("Update check: GitHub unreachable (%s): %s", repo, err)
                 return
