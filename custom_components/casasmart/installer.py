@@ -90,17 +90,14 @@ def _valid_base_topic(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     topic = value.strip().strip("/")
-    if not topic:
-        return None
-    segments = topic.split("/")
-    if any(not seg or not _SEGMENT_OK(seg) for seg in segments):
+    if not all(_is_topic_segment(segment) for segment in topic.split("/")):
         return None
     return topic
 
 
-def _SEGMENT_OK(segment: str) -> bool:
-    """True when a topic segment holds only letters, digits, _ and -."""
-    return all(ch.isalnum() or ch in "_-" for ch in segment)
+def _is_topic_segment(segment: str) -> bool:
+    """True for a non-empty run of letters, digits, _ and -."""
+    return bool(segment) and all(ch.isalnum() or ch in "_-" for ch in segment)
 
 
 def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[str]:
