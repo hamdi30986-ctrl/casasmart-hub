@@ -17,7 +17,7 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
 )
 
-from auth_engine import AuthEngine, EnrollError
+from auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine, EnrollError
 from auth_tokens import TokenError
 from recovery import (
     RECOVERY_CODE_ID,
@@ -278,6 +278,12 @@ class ReplaceAdminTests(unittest.TestCase):
         )
         restarted.warm_up()
         self.assertTrue(restarted.has_admin())
+
+    def test_a_long_name_is_capped_like_a_paired_device(self):
+        new_id = self.engine.replace_admin(" " + "n" * 200, self.new_pem)
+        self.assertEqual(
+            self.engine.get_device(new_id)["name"], "n" * MAX_DEVICE_NAME_LENGTH
+        )
 
     def test_other_devices_survive_recovery(self):
         user_key, user_pem = make_keypair()

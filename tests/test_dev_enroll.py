@@ -24,7 +24,7 @@ sys.path.insert(
 
 import auth_keys
 import dev_enroll
-from auth_engine import AuthEngine, EnrollError
+from auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine, EnrollError
 from auth_tokens import ROLE_SUB_ADMIN, ROLE_USER, TokenError
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -192,6 +192,14 @@ class EnsureEnrolledTests(_EngineFixture):
         )
         self.assertTrue(self.engine.has_admin())
         self.assertEqual(len(self.engine.list_devices()), 2)
+
+    def test_a_long_name_is_capped_like_a_paired_device(self):
+        self.engine.ensure_enrolled(
+            "dev-x", " " + "n" * 200, ROLE_SUB_ADMIN, self.public_pem
+        )
+        self.assertEqual(
+            self.engine.get_device("dev-x")["name"], "n" * MAX_DEVICE_NAME_LENGTH
+        )
 
 
 class DevEnrollManifestTests(_EngineFixture):
