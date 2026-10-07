@@ -1,7 +1,11 @@
-"""CasaSmart 'Regenerate pairing code' button — pairing factory reset.
+"""CasaSmart owner-control buttons: regenerate pairing code, factory reset.
 
-One button entity — ``button.casasmart_regenerate_pairing_code`` — the hub
-owner presses to FACTORY-RESET pairing. A single press, in one executor job:
+``button.casasmart_factory_reset`` calls the ``casasmart.factory_reset``
+service, which wipes the CasaSmart app layer (see
+``CasaSmartFactoryResetButton``).
+
+``button.casasmart_regenerate_pairing_code`` is what the hub owner presses to
+FACTORY-RESET pairing. A single press, in one executor job:
 
 1. Unpairs EVERY enrolled device — admin, sub-admins and users alike. Their
    JWTs die instantly (the same ``ver`` kill as an unpair), the login-throttle
@@ -12,16 +16,20 @@ owner presses to FACTORY-RESET pairing. A single press, in one executor job:
    ``ensure_bootstrap_code`` re-arms the unclaimed-hub onboarding path, so the
    owner re-pairs from scratch — the hub only ever mints admin codes.
 4. Surfaces the new plaintext admin code as an HA persistent notification —
-   the one and only time it exists in the clear.
+   the one and only time it exists in the clear. Its hash replaces the
+   printed sticker's, so the old sticker stops working.
+
+The same job also clears push tokens, favorites and per-user settings, all
+of which belong to the members who were just unpaired.
 
 Sub-admin and user access are NOT minted here: they come exclusively from the
 app's family-share screen, which POSTs to ``/api/casasmart/pairing/codes``
 behind the admin-only ``pairing.generate`` gate. No hub button is involved.
 
-Like ``casasmart.factory_reset``, the control is reachable only through Home
-Assistant itself: pressing it requires HA access (on-site or over remote Home
-Assistant access), which IS the hub's owner-authorization boundary — a stolen
-app token can never reach it.
+Both buttons are reachable only through Home Assistant itself: pressing one
+requires HA access (on-site or over remote Home Assistant access), which IS
+the hub's owner-authorization boundary — a stolen app token can never reach
+them.
 """
 
 from __future__ import annotations
@@ -160,19 +168,21 @@ class CasaSmartRegeneratePairingButton(ButtonEntity):
 
 
 class CasaSmartFactoryResetButton(ButtonEntity):
-    """Nuclear reset (last-resort recovery / ownership transfer) — wipes the app layer.
+    """Nuclear reset (last-resort recovery / ownership transfer).
 
-    Presses ``casasmart.factory_reset`` (``__init__._handle_factory_reset``).
-    Cleared: every paired device, pairing + recovery codes, favorites, scenes,
-    per-user settings, Now data and suggestion rules, push tokens, HQ
-    notifications + the trusted HQ key, the alarm log + armed state, audio
-    config + speakers, Energy Saving data, and the registry organization layer
-    (floors, rooms, room tags, device assignments and grouping), which re-seeds
-    from Home Assistant on reload (``const.FACTORY_RESET_TABLES``). The printed admin sticker + metal recovery card are
-    ROTATED — fresh codes are surfaced after the reset and the OLD printed
-    codes are dead. KEPT: tanks, alarm zones + settings, HA devices/automations/
-    Zigbee mesh, the hub's TLS/push identities and relay registration, and the
-    tunnel settings.
+    Calls ``casasmart.factory_reset`` (``__init__._handle_factory_reset``),
+    which wipes the app layer. Cleared: every paired device, pairing +
+    recovery codes, favorites, scenes, per-user settings, Now data and
+    suggestion rules, push tokens, HQ notifications + the trusted HQ key, the
+    alarm log + armed state, audio config + speakers, Energy Saving data, and
+    the registry organization layer (floors, rooms, room tags, device
+    assignments and grouping), which re-seeds from Home Assistant on reload
+    (``const.FACTORY_RESET_TABLES``). The printed admin sticker + metal
+    recovery card are ROTATED — fresh codes are surfaced after the reset and
+    the OLD printed codes are dead. KEPT: tanks, alarm zones + settings, HA
+    devices/automations/Zigbee mesh, the hub's TLS/push identities and relay
+    registration, and the tunnel settings.
+
     Operator-only: reachable through Home Assistant (admin login, on-site or
     over remote Home Assistant access), never the CasaSmart API.
     """

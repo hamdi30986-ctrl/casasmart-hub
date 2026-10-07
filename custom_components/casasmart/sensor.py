@@ -1,4 +1,8 @@
-"""CasaSmart enrolled-user sensors — one per paired device.
+"""CasaSmart sensors: the Energy Saving status and one sensor per paired device.
+
+``sensor.casasmart_energy_savings`` mirrors the hub-authoritative Energy
+Saving state: the active level (or ``off``) as its state, the rest of the
+engine snapshot as attributes. It repaints on ``EVENT_ENERGY_CHANGED``.
 
 Each enrolled device surfaces as ``sensor.casasmart_user_<name>`` whose STATE
 is the device's role (``admin`` / ``sub-admin`` / ``user``) and whose
@@ -7,9 +11,9 @@ room scope + display name). They are the household roster as first-class HA
 entities — visible on a dashboard, usable in automations ("notify me when a
 new sub-admin pairs").
 
-The set is dynamic: the platform seeds from the auth engine at setup, then
-reconciles on every ``EVENT_AUTH_CHANGED`` (pair / role-or-room edit / unpair
-/ admin recovery / pairing-code regeneration) — adding sensors for new
+The user set is dynamic: the platform seeds from the auth engine at setup,
+then reconciles on every ``EVENT_AUTH_CHANGED`` (pair / role-or-room edit /
+unpair / admin recovery / pairing-code regeneration) — adding sensors for new
 devices, removing them for gone ones, repainting the rest. ``last_seen`` is
 the engine's in-memory liveness clock (see ``AuthEngine.list_devices``): None
 until the device makes its first authenticated call this boot.
@@ -86,14 +90,17 @@ class CasaSmartEnergySavingsSensor(SensorEntity):
 
     @callback
     def _on_changed(self, _event: Event) -> None:
+        """Repaint on any Energy Saving change."""
         self.async_write_ha_state()
 
     @property
     def native_value(self) -> str:
+        """The active Energy Saving level, or ``off``."""
         return self._entry.runtime_data.energy.active_level or "off"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Engine snapshot fields plus the adapter's current issues."""
         state = self._entry.runtime_data.energy.snapshot()
         adapter = self._entry.runtime_data.energy_adapter
         return {
@@ -131,9 +138,9 @@ class _UserSensorManager:
     def _next_entity_id(self, record: dict[str, Any]) -> str:
         """A unique ``sensor.casasmart_user_<name>`` id for a new device.
 
-        Pinned (not device-name-prefixed); deduped across
-        the live state machine AND the ids already handed out this batch, so
-        same-named devices get ``…_2`` / ``…_3`` rather than colliding.
+        Pinned (not device-name-prefixed); deduped across the live state
+        machine AND the ids already handed out, so same-named devices get
+        ``…_2`` / ``…_3`` rather than colliding.
         """
         name = record.get("name") or record["device_id"]
         object_id = f"casasmart_user_{slugify(name)}"
@@ -145,6 +152,7 @@ class _UserSensorManager:
         return entity_id
 
     async def async_start(self) -> None:
+        """Seed the sensors, then follow every roster change until unload."""
         await self._reconcile()
         self._entry.async_on_unload(
             self._hass.bus.async_listen(EVENT_AUTH_CHANGED, self._on_auth_changed)
@@ -152,9 +160,15 @@ class _UserSensorManager:
 
     @callback
     def _on_auth_changed(self, _event: Event) -> None:
+        """Reconcile in a task (listeners must not block the bus)."""
         self._entry.async_create_task(self._hass, self._reconcile())
 
     async def _reconcile(self) -> None:
+        """Add, repaint and remove sensors to match the enrolled devices.
+
+        A removed device's sensor is also dropped from the entity registry,
+        so its entity id is free for a device paired later.
+        """
         async with self._lock:
             auth = self._entry.runtime_data.auth
             devices = await self._hass.async_add_executor_job(auth.list_devices)
@@ -234,10 +248,12 @@ class CasaSmartUserSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
+        """The device's role."""
         return self._record.get("role")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Identity, room scope, enrolment time and live last-seen."""
         return {
             "device_id": self._device_id,
             "name": self._record.get("name"),
