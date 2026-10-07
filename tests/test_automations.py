@@ -82,6 +82,10 @@ class TestIsValidCasaAutomationKey(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertFalse(is_valid_casa_automation_key(bad))
 
+    def test_length_is_bounded_by_the_flag_store(self):
+        self.assertTrue(is_valid_casa_automation_key("casa_automation_" + "a" * 239))
+        self.assertFalse(is_valid_casa_automation_key("casa_automation_" + "a" * 240))
+
     def test_rejects_what_ownership_gate_already_rejects(self):
         # A malformed/foreign key is never "valid" either.
         for bad in (

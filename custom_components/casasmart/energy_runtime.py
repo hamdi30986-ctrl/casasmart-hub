@@ -25,6 +25,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .auth_tokens import ROLE_ADMIN
+from .automations import MAX_AUTOMATION_KEY_LENGTH
 from .const import EVENT_ENERGY_CHANGED
 from .energy import EnergyEngine, EnergyInactiveError
 from .energy_adapter import EnergyAdapter
@@ -68,8 +69,10 @@ class EnergyFlags:
         if not isinstance(config_key, str) or not config_key.strip():
             raise ValueError("automation config key must be a non-empty string")
         key = config_key.strip()
-        if len(key) > 255:
-            raise ValueError("automation config key must be <= 255 characters")
+        if len(key) > MAX_AUTOMATION_KEY_LENGTH:
+            raise ValueError(
+                f"automation config key must be <= {MAX_AUTOMATION_KEY_LENGTH} characters"
+            )
         return key
 
     def works_during_energy_saving(self, config_key: str) -> bool:

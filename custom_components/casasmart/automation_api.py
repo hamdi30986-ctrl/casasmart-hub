@@ -64,6 +64,7 @@ from .auth_api import authenticate_request, json_body
 from .auth_engine import AuthEngine
 from .automations import (
     CASA_AUTOMATION_PREFIX,
+    MAX_AUTOMATION_KEY_LENGTH,
     delete_automation,
     get_automation,
     is_casa_automation_key,
@@ -161,6 +162,12 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         if not is_casa_automation_key(config_key):
             return self.json_message(
                 f"Not a CasaSmart automation id: {config_key!r}",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if len(config_key) > MAX_AUTOMATION_KEY_LENGTH:
+            return self.json_message(
+                "Invalid automation id: at most "
+                f"{MAX_AUTOMATION_KEY_LENGTH} characters are allowed",
                 HTTPStatus.BAD_REQUEST,
             )
         if not is_valid_casa_automation_key(config_key):
