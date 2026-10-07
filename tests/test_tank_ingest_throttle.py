@@ -108,3 +108,18 @@ class IngestThrottleKeyTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self._post(token, "192.168.1.59")
         self.assertEqual(status, 200)
         self.assertEqual(body["device_id"], "dev-1")
+
+    async def test_a_valid_token_is_never_blocked_by_other_senders(self) -> None:
+        # On Docker Desktop every LAN sender shares one address, so one Shelly
+        # with a stale token used to lock every tank out for up to an hour.
+        self.addCleanup(tank_api._INGEST_THROTTLE.clear, "192.168.1.59")
+        _, token = self.tanks.mint_device("dev-1", "Tank", "192.168.1.59")
+        for _ in range(MAX_FAILURES + 1):
+            status, _ = await self._post("stale-token", "192.168.1.59")
+        self.assertEqual(status, 429)
+        status, body = await self._post(token, "192.168.1.59")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["device_id"], "dev-1")
+        # The stale sender stays locked out.
+        status, _ = await self._post("stale-token", "192.168.1.59")
+        self.assertEqual(status, 429)

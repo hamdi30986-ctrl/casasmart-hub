@@ -407,7 +407,7 @@ class CasaSmartTankReadingView(_TankView):
     Body: {"device_token": ..., "voltage": ...}. The device token is the
     credential, so any source is accepted: the Shelly may reach the hub on the
     LAN or through the Cloudflare tunnel. Bad tokens are throttled per client
-    address.
+    address; a valid one always ingests, since the token is 128 bits.
     """
 
     url = f"/api/{DOMAIN}/tank/reading"
@@ -421,28 +421,28 @@ class CasaSmartTankReadingView(_TankView):
         if error is not None:
             return error
 
-        source = client_address(request)
-        try:
-            _INGEST_THROTTLE.check(source)
-        except ThrottledError as err:
-            return web.json_response(
-                {"message": str(err), "retry_after": int(err.retry_after)},
-                status=HTTPStatus.TOO_MANY_REQUESTS,
-                headers={"Retry-After": str(int(err.retry_after))},
-            )
-
         try:
             device_id = await self._hass.async_add_executor_job(
                 tanks.ingest, payload.get("device_token"), payload.get("voltage")
             )
         except UnknownTokenError:
+            # Only bad tokens count. On Docker Desktop every LAN sender shares
+            # one address, so a stale token on one tank must not block the rest.
+            source = client_address(request)
+            try:
+                _INGEST_THROTTLE.check(source)
+            except ThrottledError as err:
+                return web.json_response(
+                    {"message": str(err), "retry_after": int(err.retry_after)},
+                    status=HTTPStatus.TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(int(err.retry_after))},
+                )
             _INGEST_THROTTLE.record_failure(source)
             # The same answer whether the token is unknown or malformed.
             return self.json_message("Invalid device token", HTTPStatus.UNAUTHORIZED)
         except TankError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        _INGEST_THROTTLE.clear(source)
         # Connected apps re-fetch the tank's level.
         self._hass.bus.async_fire(EVENT_TANK_CHANGED, {"device_id": device_id})
         return self.json({"ok": True, "device_id": device_id})
