@@ -30,7 +30,8 @@ everything in it is here.
 - **HQ reminder pushes** are titled "CasaSmart HQ" unless a sender name is set
   (the new `sender_name` field of `casasmart.configure_hq_notifications`).
 - **Services:** `casasmart.factory_reset` and `casasmart.set_tunnel_url` need
-  a Home Assistant admin. Automations can still call them.
+  a Home Assistant admin, and so do the "Factory reset" and "Regenerate
+  pairing code" buttons. Automations can still call or press them.
 
 ### Added
 
@@ -90,9 +91,11 @@ everything in it is here.
   so client-sent `CF-Connecting-IP` or `X-Forwarded-For` headers can't dodge
   it.
 - Pairing-code hashes are compared in constant time everywhere.
-- `casasmart.factory_reset` and `casasmart.set_tunnel_url` are admin-only.
-  Any Home Assistant user could unpair every phone or point the phones at
-  another tunnel.
+- `casasmart.factory_reset` and `casasmart.set_tunnel_url` are admin-only,
+  and so are the "Factory reset" and "Regenerate pairing code" buttons. Any
+  Home Assistant user could unpair every phone or point the phones at
+  another tunnel. A pairing reset that fails part-way reloads the hub;
+  pressing the button again finishes it.
 - The login throttle counts failures per device and source address. Anyone
   who knew the owner's device id (a sub-admin can see it) could send a few
   bad logins and lock the owner out.
@@ -293,7 +296,8 @@ everything in it is here.
   activity policy, which belongs to `/activity-policy`.
 - Numbers too large for a float in tank readings and calibration and in
   athan coordinates, and history timestamps that overflow in UTC, get a 400
-  instead of a server error. Athan coordinates saved earlier no longer break
+  instead of a server error. Such a colour temperature in a saved automation
+  is ignored when the automation is read back. Athan coordinates saved earlier no longer break
   setup.
 - Device names from owner recovery and the developer manifest are capped at
   the same length as pairing's.
