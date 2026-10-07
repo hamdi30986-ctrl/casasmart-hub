@@ -6,10 +6,9 @@ third face: a first-class Home Assistant ``alarm_control_panel`` entity that
 mirrors the engine's arm state, so
 
 - arm/disarm shows up in HA dashboards and the logbook, and
-- installer automations trigger on a standard ``alarm_control_panel`` state
-  (``triggered`` / ``armed_away`` / …) instead of only the custom
-  ``EVENT_ALARM_TRIGGERED`` bus event. The breach->siren hook keeps working as
-  before; this just adds the native, arm-state-aware trigger surface.
+- installer automations can trigger on a standard ``alarm_control_panel``
+  state (``triggered`` / ``armed_away`` / …) as well as on the custom
+  ``EVENT_ALARM_TRIGGERED`` bus event, which still carries the siren hook.
 
 Both directions ride one engine. Arming through HA routes into the same
 ``AlarmEngine.arm`` the app calls and fires ``EVENT_ALARM_CHANGED``; arming
@@ -116,6 +115,7 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
         self._schedule_arming_refresh()
 
     async def async_will_remove_from_hass(self) -> None:
+        """Drop the listener and any pending grace refresh."""
         if self._unsub_changed is not None:
             self._unsub_changed()
             self._unsub_changed = None
@@ -189,11 +189,13 @@ class CasaSmartAlarmPanel(AlarmControlPanelEntity):
 
     @callback
     def _on_arming_done(self, _now: Any) -> None:
+        """The exit grace lapsed: repaint ARMING as the armed state."""
         self._cancel_arming = None
         self.async_write_ha_state()
 
     @callback
     def _cancel_arming_refresh(self) -> None:
+        """Cancel the pending grace refresh, if any."""
         if self._cancel_arming is not None:
             self._cancel_arming()
             self._cancel_arming = None

@@ -10,7 +10,8 @@ wires the engine to live Home Assistant. Specifically it
 - treats a mapped sensor going ``unavailable``/``unknown`` (or vanishing)
   while armed as tamper (``process_sensor_offline``),
 - runs ONE exact timer per entry-delay countdown (``pending`` ->
-  ``tick``), rescheduled from the engine's own deadline rather than polling,
+  ``tick``), rescheduled from the engine's own deadline rather than polling
+  (and re-armed for the remainder if it fires a moment early),
 - fires ``EVENT_ALARM_CHANGED`` on every transition so the WS server can
   nudge connected apps and so this adapter re-syncs its own timer (which is
   how an app-driven disarm cancels a running countdown), and
@@ -160,6 +161,7 @@ class AlarmAdapter:
         self._hass.async_create_task(self._run_tick())
 
     async def _run_tick(self) -> None:
+        """Run the engine's tick off-loop, then react (or re-arm if early)."""
         try:
             alarm_event = await self._hass.async_add_executor_job(self._engine.tick)
         except Exception:
