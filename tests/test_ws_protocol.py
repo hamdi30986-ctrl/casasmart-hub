@@ -286,6 +286,36 @@ class TestCoalescingSendQueue(unittest.IsolatedAsyncioTestCase):
         ids = [f["device"]["entity_id"] for f in frames[1:]]
         self.assertEqual(ids, ["light.b", "light.c"])
 
+    async def test_drop_data_keeps_only_control_frames_in_order(self):
+        # A token that failed revalidation: everything carrying home data that
+        # is still queued goes; the auth/pong/error dialogue survives, in order.
+        q = CoalescingSendQueue(maxsize=16)
+        q.put_protocol(frame_auth_ok("1.0", 1))
+        q.put_protocol(frame_subscribed([{"entity_id": "light.a"}]))
+        q.offer(_state("light.a"))
+        q.put_protocol(frame_pong())
+        q.offer(frame_entity_removed("light.b"))
+        for nudge in (
+            frame_registry_changed("rooms"),
+            frame_tank_changed("tank-1"),
+            frame_alarm_changed(),
+            frame_audio_changed(),
+            frame_energy_changed(),
+            {"type": "suggestions_changed", "version": 1},
+        ):
+            q.offer(nudge)
+        q.put_protocol(frame_error("bad frame"))
+        q.put_protocol(frame_auth_failed("nope"))
+        q.put_protocol(frame_auth_required(30))
+
+        q.drop_data()
+
+        frames = await self._drain(q)
+        self.assertEqual(
+            [f["type"] for f in frames],
+            ["auth_ok", "pong", "error", "auth_failed", "auth_required"],
+        )
+
     async def test_get_waits_for_a_frame_then_returns_it(self):
         q = CoalescingSendQueue(maxsize=4)
         getter = asyncio.ensure_future(q.get())
