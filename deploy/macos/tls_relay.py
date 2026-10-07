@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Expose a container-only CasaSmart TLS listener on the macOS LAN.
+"""Expose a Docker Desktop hub's TLS port on the Mac's LAN, to LAN clients only.
 
-Docker Desktop does not preserve the LAN client's address when it publishes a
-container port directly. CasaSmart pairing is intentionally LAN-only, so the
-hub rejects that rewritten address. This byte-for-byte TCP relay accepts the
-LAN connection on macOS and forwards it through the loopback-only Docker port.
-TLS remains end-to-end between the app and the hub.
-
-Standard library only, and kept runnable by macOS's own python3 (3.9), which
-launchd starts at login (deploy/macos/README.md).
+Docker Desktop hides the LAN client's address from a published container
+port, and the hub accepts pairing only from the LAN. This TCP relay accepts
+LAN clients on the Mac and forwards their bytes to the loopback-only Docker
+port; TLS stays end to end between the app and the hub. Standard library
+only, for macOS's own python3 (3.9), which launchd starts at login.
 """
 
 from __future__ import annotations
@@ -25,10 +22,9 @@ _BUFFER_SIZE = 64 * 1024
 
 
 def is_lan_peer(peer: object) -> bool:
-    """Return whether a socket peer belongs to a local-only address range.
+    """True for a socket peer in a private, link-local or loopback range.
 
-    Private, link-local and loopback addresses count; a zone suffix
-    (``fe80::1%en0``) is ignored. Anything else, or no address, doesn't.
+    A zone suffix (fe80::1%en0) is ignored.
     """
     if not isinstance(peer, tuple) or not peer or not isinstance(peer[0], str):
         return False
@@ -98,7 +94,7 @@ async def start_relay(
     upstream_host: str,
     upstream_port: int,
 ) -> asyncio.AbstractServer:
-    """Listen on ``listen_host:listen_port`` and relay each client upstream."""
+    """Listen on listen_host:listen_port and relay each client upstream."""
 
     async def _accept(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
