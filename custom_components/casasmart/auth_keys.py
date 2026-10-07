@@ -1,17 +1,10 @@
-"""Device public-key handling: P-256 validate + verify.
+"""Device public keys: validate a P-256 key and verify login signatures.
 
-The only module that touches the ``cryptography`` package (an HA core
-dependency — present in every HA install, nothing to add to the
-manifest). Keeping the crypto in one seam means the engine and the API
-layer stay testable and the primitive is swappable in one place.
-
-Contract with the app:
-
-- Phone generates a P-256 keypair on first launch; the PUBLIC key crosses
-  the wire once, at pairing, as SubjectPublicKeyInfo PEM.
-- Every login: hub hands out a one-time nonce, phone signs the exact
-  nonce string (UTF-8 bytes) with ECDSA-SHA256, sends the DER signature
-  base64-encoded. The private key never travels.
+The phone creates a P-256 keypair on first launch and sends the public key
+once, at pairing, as SubjectPublicKeyInfo PEM. At each login it signs the
+hub's nonce string (UTF-8) with ECDSA-SHA256 and sends the DER signature
+base64-encoded; the private key never leaves the phone. cryptography ships
+with Home Assistant, so the manifest needs no extra requirement.
 """
 
 from __future__ import annotations
@@ -26,16 +19,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 class KeyError_(Exception):
     """The supplied public key is not a usable P-256 key.
 
-    The trailing underscore keeps it from shadowing the builtin ``KeyError``.
+    The trailing underscore keeps it from shadowing the builtin KeyError.
     """
 
 
 def validate_public_key(public_key_pem: str) -> str:
-    """Validate an enrollment key; return it re-serialized in canonical PEM.
+    """Validate an enrollment key and return it as canonical PEM.
 
-    Re-serializing (instead of storing the client's bytes verbatim) strips
-    any garbage around the PEM body and guarantees that what's in storage
-    always loads back.
+    Storing the re-serialized key drops anything around the PEM body and
+    guarantees the stored value loads back.
     """
     if not isinstance(public_key_pem, str) or "BEGIN PUBLIC KEY" not in public_key_pem:
         raise KeyError_("Expected a PEM-encoded public key (SubjectPublicKeyInfo)")
@@ -54,9 +46,10 @@ def validate_public_key(public_key_pem: str) -> str:
 
 
 def verify_signature(public_key_pem: str, nonce: str, signature_b64: str) -> bool:
-    """True iff ``signature_b64`` is a valid ECDSA-SHA256 signature of the
-    nonce string by the holder of the stored public key. Never raises on
-    bad input — a malformed signature is just a failed verification."""
+    """Whether signature_b64 is the key holder's ECDSA-SHA256 signature of nonce.
+
+    Malformed input returns False instead of raising.
+    """
     try:
         key = serialization.load_pem_public_key(public_key_pem.encode())
         signature = base64.b64decode(signature_b64, validate=True)
