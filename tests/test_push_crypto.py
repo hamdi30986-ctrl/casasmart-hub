@@ -90,6 +90,18 @@ class CreationTests(PushIdentityTestCase):
         )
 
 
+class PublishLogTests(PushIdentityTestCase):
+    def test_publishing_the_pubkey_asks_for_no_manual_step(self) -> None:
+        # The hub registers the key with the relay itself (relay_registration),
+        # so the log line must not read as a step for the operator.
+        with self.assertLogs("casasmart.push_crypto", "INFO") as logs:
+            signer = ensure_push_identity(self.data_dir, self.config)
+        published = [line for line in logs.output if signer.public_key_hex in line]
+        self.assertEqual(len(published), 1)
+        self.assertIn("hub_config", published[0])
+        self.assertNotIn("register", published[0].lower())
+
+
 class FailurePostureTests(PushIdentityTestCase):
     def test_corrupt_key_raises_and_is_untouched(self) -> None:
         ensure_push_identity(self.data_dir, self.config)
