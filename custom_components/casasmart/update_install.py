@@ -111,12 +111,15 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
     out, or another install is running or waiting for its restart. Until
     that restart the old code still reports the old version, so the same
     release would look new and a second swap would overwrite the rollback.
+    The restart may have been refused (a config check failure), so the
+    message asks for one rather than claiming it is under way.
     """
     domain_data = hass.data.setdefault(DOMAIN, {})
     swapped = domain_data.get(_SWAPPED_VERSION_KEY)
     if swapped is not None:
         raise InstallError(
-            f"{_IN_PROGRESS}: {swapped} is installed and Home Assistant is restarting"
+            f"{_IN_PROGRESS}: {swapped} is installed; restart Home Assistant to "
+            "finish the update"
         )
     lock = domain_data.get(_INSTALL_LOCK_KEY)
     if lock is None:
