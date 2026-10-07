@@ -238,6 +238,12 @@ class AthanConfigTests(AudioTestCase):
         with self.assertRaises(AudioError):
             self.engine.set_athan({"enabled": True, "lat": float("inf"), "lon": 39})
 
+    def test_rejects_coords_too_large_for_a_float(self):
+        # JSON parses a 400-digit integer, but the scheduler can't use it.
+        with self.assertRaises(AudioError):
+            self.engine.set_athan({"enabled": True, "lat": 10**400, "lon": 39})
+        self.assertEqual(self.engine.get_athan(), {})
+
     def test_preserves_unknown_scheduler_keys(self):
         # The blob is opaque — keys the hub doesn't model must round-trip.
         cfg = {"enabled": True, "lat": 21, "lon": 39, "per_prayer": {"fajr": 5}}

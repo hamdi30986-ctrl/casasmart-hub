@@ -171,6 +171,14 @@ class TestConfigResolution(unittest.TestCase):
         s = A.AthanScheduler(_Hass(), _Engine({}), _Adapter())
         self.assertIsNone(s._resolve_config())
 
+    def test_stored_coordinate_too_large_for_a_float_returns_none(self):
+        # A config stored before set_athan refused such values must not make
+        # every reschedule (and so integration setup) raise OverflowError.
+        s = A.AthanScheduler(
+            _Hass(), _Engine({"enabled": True, "lat": 10**400, "lon": 39}), _Adapter()
+        )
+        self.assertIsNone(s._resolve_config())
+
     def test_fallback_to_ha_config(self):
         s = A.AthanScheduler(
             _Hass(), _Engine({"enabled": True, "method": "makkah"}), _Adapter()
