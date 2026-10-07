@@ -668,11 +668,10 @@ class CasaSmartAudioPaView(_AudioView):
         if adapter_not_ready is not None:
             return adapter_not_ready
 
-        _filename, content_type, data, targets, read_error = await self._read_pa_parts(
-            request
-        )
-        if read_error is not None:
-            return read_error
+        parts = await self._read_pa_parts(request)
+        if isinstance(parts, web.Response):
+            return parts
+        content_type, data, targets = parts
 
         allowed = _controllable_speakers(self._hass, audio, claims)
         if allowed is not None:
@@ -734,24 +733,18 @@ class CasaSmartAudioPaView(_AudioView):
 
     async def _read_pa_parts(
         self, request: web.Request
-    ) -> tuple[str, str, bytes, list[str], web.Response | None]:
+    ) -> tuple[str, bytes, list[str]] | web.Response:
         """Read the audio part (size-capped) and the optional targets part.
 
-        Returns (filename, content_type, data, targets, None), or empty values
-        and an error response. No targets means every speaker.
+        Returns (content_type, data, targets), or an error response. No
+        targets means every speaker.
         """
         not_multipart = "Body must be multipart/form-data with an 'audio' file"
         try:
             reader = await request.multipart()
         except (AssertionError, KeyError, ValueError):
-            return (
-                "",
-                "",
-                b"",
-                [],
-                self.json_message(not_multipart, HTTPStatus.BAD_REQUEST),
-            )
-        filename = content_type = ""
+            return self.json_message(not_multipart, HTTPStatus.BAD_REQUEST)
+        content_type = ""
         data: bytes | None = None
         targets: list[str] = []
         try:
@@ -763,7 +756,6 @@ class CasaSmartAudioPaView(_AudioView):
                     continue
                 if name != "audio":
                     continue
-                filename = part.filename or "pa.mp3"
                 content_type = part.headers.get(
                     "Content-Type", "application/octet-stream"
                 )
@@ -775,37 +767,21 @@ class CasaSmartAudioPaView(_AudioView):
                         break
                     size += len(chunk)
                     if size > _PA_MAX_BYTES:
-                        return (
-                            "",
-                            "",
-                            b"",
-                            [],
-                            self.json_message(
-                                f"Audio too large (max {_PA_MAX_BYTES} bytes)",
-                                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                            ),
+                        return self.json_message(
+                            f"Audio too large (max {_PA_MAX_BYTES} bytes)",
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                     chunks.append(chunk)
                 data = b"".join(chunks)
         except (AssertionError, BadHttpMessage, LookupError, ValueError):
             # What aiohttp's multipart parser raises for a malformed body (some
             # versions assert), and text() for a field it can't decode.
-            return (
-                "",
-                "",
-                b"",
-                [],
-                self.json_message(not_multipart, HTTPStatus.BAD_REQUEST),
-            )
+            return self.json_message(not_multipart, HTTPStatus.BAD_REQUEST)
         if data is None:
-            return (
-                "",
-                "",
-                b"",
-                [],
-                self.json_message("Missing 'audio' file part", HTTPStatus.BAD_REQUEST),
+            return self.json_message(
+                "Missing 'audio' file part", HTTPStatus.BAD_REQUEST
             )
-        return filename, content_type, data, targets, None
+        return content_type, data, targets
 
 
 class CasaSmartAudioPaClipView(_AudioView):
