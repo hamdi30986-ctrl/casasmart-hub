@@ -166,11 +166,13 @@ def is_served(hass: HomeAssistant, entity_id: str) -> bool:
     sensors are left out except OpenWeatherMap's live readings. Device lists,
     pushes, commands, history and scene writes all use it.
     """
-    weather_measurement = is_openweathermap_measurement(hass, entity_id)
     return (
         is_exposed(entity_id)
         and is_visible(hass, entity_id)
-        and (weather_measurement or not is_weather_service_entity(hass, entity_id))
+        and (
+            not is_weather_service_entity(hass, entity_id)
+            or is_openweathermap_measurement(hass, entity_id)
+        )
     )
 
 
