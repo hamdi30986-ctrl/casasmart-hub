@@ -26,7 +26,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .alarm import AlarmEngine, AlarmError, UnknownZoneError
-from .auth_api import authenticate_request, read_json_object
+from .auth_api import authenticate_request, read_json_object, ready_or_503
 from .const import DOMAIN, EVENT_ALARM_CHANGED
 from .runtime_lookup import loaded_runtime_data
 
@@ -75,12 +75,7 @@ class _AlarmView(HomeAssistantView):
 
     def _alarm_or_503(self) -> tuple[AlarmEngine | None, web.Response | None]:
         """(engine, None), or (None, 503) while the hub is loading."""
-        alarm = get_alarm(self._hass)
-        if alarm is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return alarm, None
+        return ready_or_503(self, get_alarm(self._hass))
 
     def _notify_change(self) -> None:
         """Tell connected apps and the alarm adapter the state changed."""

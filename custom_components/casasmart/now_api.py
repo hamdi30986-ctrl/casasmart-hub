@@ -27,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .auth_api import authenticate_request, get_engine, read_json_object
+from .auth_api import authenticate_request, get_engine, read_json_object, ready_or_503
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .filtering import area_id_of, in_scope, is_served, serialize_device
@@ -125,12 +125,7 @@ class _NowView(HomeAssistantView):
 
     def _now_or_503(self) -> tuple[NowDataEngine | None, web.Response | None]:
         """The Now store, or a 503 while the hub isn't loaded."""
-        now_data = get_now_data(self._hass)
-        if now_data is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return now_data, None
+        return ready_or_503(self, get_now_data(self._hass))
 
     def _registry(self) -> RegistryEngine | None:
         data = loaded_runtime_data(self._hass)

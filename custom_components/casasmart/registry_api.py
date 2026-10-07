@@ -23,7 +23,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .auth_api import authenticate_request, get_engine, read_json_object
+from .auth_api import authenticate_request, get_engine, read_json_object, ready_or_503
 from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .energy_runtime import energy_lockout_applies
@@ -195,16 +195,9 @@ class _RegistryView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
-    def _registry_or_503(
-        self,
-    ) -> tuple[RegistryEngine | None, web.Response | None]:
+    def _registry_or_503(self) -> tuple[RegistryEngine | None, web.Response | None]:
         """The registry engine, or a 503 response while the hub isn't set up."""
-        registry = get_registry(self._hass)
-        if registry is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return registry, None
+        return ready_or_503(self, get_registry(self._hass))
 
     def _notify_change(self, kind: str) -> None:
         """Tell connected apps the organization changed (they re-fetch)."""

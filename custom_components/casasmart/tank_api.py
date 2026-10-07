@@ -33,6 +33,7 @@ from homeassistant.core import HomeAssistant
 from .auth_api import (
     authenticate_request,
     read_json_object,
+    ready_or_503,
 )
 from .const import DOMAIN, EVENT_TANK_CHANGED
 from .runtime_lookup import loaded_runtime_data
@@ -236,12 +237,7 @@ class _TankView(HomeAssistantView):
 
     def _tanks_or_503(self) -> tuple[TankEngine | None, web.Response | None]:
         """(engine, None), or (None, 503) while the hub is loading."""
-        tanks = get_tanks(self._hass)
-        if tanks is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return tanks, None
+        return ready_or_503(self, get_tanks(self._hass))
 
     def _ingest_url(self) -> str | None:
         """The tank_ingest_url override from hub config, or None.

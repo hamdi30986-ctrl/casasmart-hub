@@ -279,6 +279,15 @@ async def read_json_object(
     return payload, None
 
 
+def ready_or_503[T](
+    view: HomeAssistantView, engine: T | None
+) -> tuple[T | None, web.Response | None]:
+    """(engine, None), or (None, the view's 503) while the hub isn't loaded."""
+    if engine is None:
+        return None, view.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+    return engine, None
+
+
 def _throttled_response(err: ThrottledError) -> web.Response:
     """HTTP 429 with the lockout's remaining seconds (body and Retry-After)."""
     return web.json_response(

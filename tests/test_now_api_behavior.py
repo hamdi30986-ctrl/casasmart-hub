@@ -61,6 +61,13 @@ def _load_now_api():
     auth.authenticate_request = lambda *args: ({}, None)
     auth.get_engine = lambda hass: None
     auth.read_json_object = None
+
+    def ready_or_503(view, engine):
+        if engine is None:
+            return None, view.json_message("Hub not ready", 503)
+        return engine, None
+
+    auth.ready_or_503 = ready_or_503
     const = _module("casasmart.const")
     const.DOMAIN = "casasmart"
     energy = _module("casasmart.energy_runtime")
