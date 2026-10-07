@@ -74,8 +74,10 @@ Both agents start at login and restart if they exit. They log to
 
 - The relay's default ports (8443 in, `127.0.0.1:18443` out) match step 2.
 - The publisher finds the Mac's LAN address itself. It reads the handshake
-  from `https://127.0.0.1:18443` and advertises the name "CasaSmart Hub". To
-  change any of these, add `--address`, `--handshake` or `--name` to its plist.
+  from `https://127.0.0.1:18443` and advertises the name "CasaSmart Hub" on
+  port 8443, the relay's port. To change any of these, add `--address`,
+  `--handshake` (a loopback `https://` address only), `--name` or `--port` to
+  its plist.
 
 To update the helpers later, pull the checkout and restart them:
 
@@ -113,7 +115,8 @@ Requests that crossed Cloudflare are never LAN, whatever this says. Home
 Assistant's own port (8123, where a tunnel enters) is never trusted this way.
 
 Behind the relay every phone looks the same to the hub, so they share one
-pairing throttle. After five wrong codes from anyone, everyone waits a minute.
+pairing throttle. After five wrong codes from anyone, everyone waits a minute,
+and longer if it happens again.
 
 ## 5. Check it
 

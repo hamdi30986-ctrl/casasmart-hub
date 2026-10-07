@@ -6,14 +6,16 @@
 # the hub handshake report manifest.json's "version". These must never disagree,
 # so every step below refuses to continue on any mismatch.
 #
-#   scripts/release.sh check   X.Y.Z   gates only (clean main, manifest, tests); no changes
+#   scripts/release.sh check   X.Y.Z   gates only (clean tree at origin/main, manifest
+#                                      version, dated CHANGELOG section, tests); no changes
 #   scripts/release.sh tag     X.Y.Z   gates + build/sign/verify dist/, then the annotated tag (local)
 #   scripts/release.sh publish X.Y.Z   push the tag + create the GitHub release as a PRERELEASE
 #   scripts/release.sh promote X.Y.Z   mark the prerelease as the latest release (same tag/asset)
 #
 # Needs: git, python3 (or uv), unzip, OpenSSL 3 (for `pkeyutl -rawin`; macOS's
-# built-in LibreSSL lacks it), the release signing key, and an authenticated
-# GitHub CLI (`gh`) for publish/promote.
+# built-in LibreSSL lacks it), the release signing key ($CASASMART_RELEASE_KEY,
+# default ~/.casasmart/release_ed25519.pem), and an authenticated GitHub CLI
+# (`gh`) for publish/promote.
 #
 # Tags and published assets are never moved or replaced: fix forward with X.Y.Z+1.
 set -euo pipefail
@@ -90,6 +92,7 @@ key = Ed25519PublicKey.from_public_bytes(base64.b64decode(m.group(1)))
 key.verify(Path(sys.argv[2]).read_bytes(), Path(sys.argv[1]).read_bytes())
 print("signature OK")
 PY
+  # The release notes are this version's CHANGELOG section, without its heading.
   awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > "$dist/notes.md"
   [ -s "$dist/notes.md" ] || die "empty release notes for $version"
   echo "$commit" > "$dist/COMMIT"
