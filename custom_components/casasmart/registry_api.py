@@ -31,7 +31,7 @@ from .auth_api import (
 )
 from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
-from .energy_runtime import energy_lockout_applies
+from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .entity_bridge import CommandError, validate_command
 from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
 from .registry import (
@@ -1094,17 +1094,7 @@ class CasaSmartSceneActivateView(_RegistryView):
         runtime = loaded_runtime_data(self._hass)
         energy = getattr(runtime, "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
-            return self.json(
-                {
-                    "error": "energy_lockout",
-                    "message": (
-                        "Energy saving is active — controls are locked by the admin"
-                    ),
-                    # The phone reads code on a 403: this isn't an expired login.
-                    "code": "energy_lockout",
-                },
-                HTTPStatus.FORBIDDEN,
-            )
+            return self.json(energy_lockout_refusal(), HTTPStatus.FORBIDDEN)
         if (
             energy is not None
             and energy.active_level is not None

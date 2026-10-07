@@ -32,6 +32,7 @@ from casasmart.energy_runtime import (  # noqa: E402
     EnergyController,
     EnergyFlags,
     energy_lockout_applies,
+    energy_lockout_refusal,
 )
 from homeassistant.core import State  # noqa: E402
 from storage import HubStorage  # noqa: E402
@@ -229,6 +230,14 @@ class EnergyRuntimeTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(energy_lockout_applies(self.engine, {"role": "admin"}))
         self.engine.deactivate()
         self.assertFalse(energy_lockout_applies(self.engine, {"role": "user"}))
+
+    def test_lockout_refusal_carries_its_code(self):
+        # The phone keeps "code" on a 403: it tells the lockout apart from a
+        # credential that a re-login would fix.
+        body = energy_lockout_refusal()
+        self.assertEqual(body["error"], "energy_lockout")
+        self.assertEqual(body["code"], "energy_lockout")
+        self.assertIsInstance(body["message"], str)
 
     async def test_disables_unflagged_and_restores_exact_successful_set(self):
         states = [
