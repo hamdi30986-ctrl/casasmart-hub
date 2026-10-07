@@ -114,7 +114,7 @@ def ensure_push_identity(data_dir: Path, hub_config: JsonConfigStore) -> PushSig
     if hub_config.get(PUSH_PUBLIC_KEY_CONFIG_KEY) != signer.public_key_hex:
         hub_config.set(PUSH_PUBLIC_KEY_CONFIG_KEY, signer.public_key_hex)
         _LOGGER.info(
-            "Push-identity public key published to hub_config (register with relay): %s",
+            "Push-identity public key written to hub_config: %s",
             signer.public_key_hex,
         )
     return signer
