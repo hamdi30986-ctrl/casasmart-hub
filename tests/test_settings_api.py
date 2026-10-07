@@ -153,6 +153,15 @@ class SettingsPut(SettingsViewTestCase):
         status, _ = await self._put(hdr, {"widget_tiles": bad})
         self.assertEqual(status, 400)
 
+    async def test_rejects_non_string_tile_type(self) -> None:
+        # A list/object type is unhashable: the entity-tile gate must not raise
+        # TypeError (a 500) before the engine can reject the tile.
+        _, hdr = H.session(self.rt.auth, role="user")
+        for tile_type in (["toggle"], {"t": "toggle"}):
+            bad = [{"type": tile_type, "entityId": "light.a", "name": "x"}]
+            status, _ = await self._put(hdr, {"widget_tiles": bad})
+            self.assertEqual(status, 400)
+
     async def test_empty_body_is_400(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         status, _ = await self._put(hdr, {})
