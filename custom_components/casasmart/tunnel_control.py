@@ -233,10 +233,11 @@ class CloudflaredController:
         return decision
 
     async def async_restore_boot_auto(self, slug: str) -> None:
-        """Hand auto-boot back to the Supervisor (integration removal).
+        """Hand auto-boot back to the Supervisor (domain cleared, or
+        integration removal).
 
-        Deliberately does NOT start the add-on — removal is not consent to
-        open remote access right now, only to stop pinning it down.
+        Deliberately does NOT start the add-on — giving up control is not
+        consent to open remote access right now, only to stop pinning it down.
         """
         try:
             await self._addons().set_addon_options(

@@ -1020,6 +1020,17 @@ async def _async_options_updated(
                     "Cloudflare domain cleared — no longer advertising %s",
                     derived,
                 )
+            # Without a domain the reconciler never touches the add-on again,
+            # so undo the boot=manual a tunnel-OFF may have left, as removal
+            # does.
+            if runtime_data.tunnel_control is not None:
+                entry.async_create_background_task(
+                    hass,
+                    _async_restore_tunnel_boot(
+                        runtime_data.tunnel_control, "Cloudflare domain cleared"
+                    ),
+                    name="casasmart-tunnel-restore-boot",
+                )
         runtime_data.tunnel_options_applied = _tunnel_options_snapshot(entry)
 
     entry.async_create_background_task(
@@ -1390,17 +1401,28 @@ async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Entry deleted: best-effort restore of cloudflared to boot=auto.
 
-    The reconciler may have parked the add-on at boot=manual (tunnel
-    disabled). Removing the integration must not permanently strand the
-    home's remote access, so hand auto-boot back to the Supervisor —
-    without starting the add-on (removal is not consent to open remote
-    access right now). Best effort by design: no Supervisor, no add-on, or
-    a Supervisor error is logged and dropped. runtime_data is already gone
-    here, so a fresh controller is built.
+    runtime_data is already gone here, so a fresh controller is built.
+    Without a domain there is nothing to undo: clearing it already
+    restored the boot mode.
     """
     if not entry.options.get(CONF_CLOUDFLARE_DOMAIN):
         return
-    controller = CloudflaredController(hass)
+    await _async_restore_tunnel_boot(CloudflaredController(hass), "CasaSmart removed")
+
+
+async def _async_restore_tunnel_boot(
+    controller: CloudflaredController, reason: str
+) -> None:
+    """Hand cloudflared's auto-boot back to the Supervisor, best effort.
+
+    For when CasaSmart stops managing the add-on (domain cleared, entry
+    removed). The reconciler may have parked it at boot=manual (tunnel
+    disabled), and that must not permanently strand the home's remote
+    access — so restore boot=auto, without starting the add-on (giving up
+    control is not consent to open remote access right now). Best effort by
+    design: no Supervisor, no add-on, or a Supervisor error is logged and
+    dropped.
+    """
     if not controller.available():
         return
     try:
@@ -1408,8 +1430,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         if slug is not None:
             await controller.async_restore_boot_auto(slug)
             _LOGGER.info(
-                "CasaSmart removed — cloudflared add-on %s restored to boot=auto",
-                slug,
+                "%s — cloudflared add-on %s restored to boot=auto", reason, slug
             )
     except TunnelControlError as err:
-        _LOGGER.warning("Could not restore cloudflared boot mode on removal: %s", err)
+        _LOGGER.warning("Could not restore cloudflared boot mode (%s): %s", reason, err)
