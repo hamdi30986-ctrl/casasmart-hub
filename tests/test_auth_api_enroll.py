@@ -806,3 +806,55 @@ class OwnerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         # more pushes: life-safety alarms go to every registered token.
         self.assertIsNone(self.push.get_token(lost))
         self.assertIsNotNone(self.push.get_token(family))
+
+
+class MalformedClaimTests(unittest.IsolatedAsyncioTestCase):
+    """A request with a bad name or key is refused BEFORE the code is redeemed.
+
+    Redeeming consumes the code, so checking afterwards cost the owner their
+    sticker code until the next restart (and a member their invite).
+    """
+
+    asyncSetUp = EnrollGateTests.asyncSetUp
+    _claim_hub = EnrollGateTests._claim_hub
+
+    async def _post(self, code: str, *, name="Phone", public_key=None):
+        resp = await self.view.post(
+            H.FakeRequest(
+                body={
+                    "pairing_code": code,
+                    "public_key": make_public_pem()
+                    if public_key is None
+                    else public_key,
+                    "name": name,
+                },
+                remote=LAN_IP,
+            )
+        )
+        return H.read_response(resp)
+
+    async def test_bad_claims_leave_the_owner_code_unused(self) -> None:
+        code = self.pairing.ensure_bootstrap_code()
+        for name, public_key in (
+            ("", None),
+            ("   ", None),
+            (42, None),
+            ("Owner phone", "not a key"),
+            ("Owner phone", 42),
+        ):
+            with self.subTest(name=name, public_key=public_key):
+                status, _ = await self._post(code, name=name, public_key=public_key)
+                self.assertEqual(status, 400)
+        status, body = await self._post(code, name="Owner phone")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")
+
+    async def test_a_bad_key_leaves_a_member_code_unused(self) -> None:
+        self._claim_hub()
+        issued = self.pairing.generate_code("user")
+        status, body = await self._post(issued["code"], public_key="not a key")
+        self.assertEqual(status, 400)
+        self.assertIn("PEM", body["message"])
+        status, body = await self._post(issued["code"])
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "user")

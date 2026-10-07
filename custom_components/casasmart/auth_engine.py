@@ -241,6 +241,20 @@ class AuthEngine:
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
         return device_id
 
+    @staticmethod
+    def check_enrollment(name: Any, public_key_pem: Any) -> None:
+        """Raise EnrollError when a device name or public key can't be enrolled.
+
+        The same name and key checks :meth:`enroll_device` makes, so the enroll
+        view can refuse a malformed request before it consumes a pairing code.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise EnrollError("Device name is required")
+        try:
+            auth_keys.validate_public_key(public_key_pem)
+        except auth_keys.KeyError_ as err:
+            raise EnrollError(str(err)) from err
+
     def ensure_enrolled(
         self,
         device_id: str,
