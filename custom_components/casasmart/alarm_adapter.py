@@ -4,7 +4,8 @@ The pure decision engine lives in ``alarm.py`` (stdlib only, unit-tested on a
 temp DB). This module is everything that engine deliberately does NOT do: it
 wires the engine to live Home Assistant. Specifically it
 
-- subscribes to ``state_changed`` and feeds **mapped** sensor edges into
+- subscribes to ``state_changed`` and feeds **mapped** sensor edges (state
+  transitions; attribute-only updates are dropped) into
   ``AlarmEngine.process_sensor`` (offloaded to the executor — the engine
   writes to SQLite on a triggering edge),
 - treats a mapped sensor going ``unavailable``/``unknown`` (or vanishing)
@@ -96,13 +97,24 @@ class AlarmAdapter:
     def _on_state_changed(self, event: Event) -> None:
         """Runs for every HA state change — reject unmapped edges cheaply.
 
-        The guard is a pure in-memory dict lookup; only edges on sensors the
-        alarm actually watches pay for the executor hop that follows.
+        The guard is a pure in-memory dict lookup; only state transitions on
+        sensors the alarm actually watches pay for the executor hop that
+        follows.
         """
         entity_id = event.data.get("entity_id")
         if entity_id is None or self._engine.zone_of(entity_id) is None:
             return
         new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        # HA fires state_changed for attribute-only updates too. They are not
+        # edges: an open window must not trip the alarm on its next battery
+        # report. Any real transition, from unavailable/unknown included, is.
+        if (
+            old_state is not None
+            and new_state is not None
+            and old_state.state == new_state.state
+        ):
+            return
         self._hass.async_create_task(self._evaluate(entity_id, new_state))
 
     async def _evaluate(self, entity_id: str, new_state: Any) -> None:
