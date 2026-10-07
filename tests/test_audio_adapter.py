@@ -11,6 +11,7 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -361,6 +362,26 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await self.adapter.async_reconfigure()
         self.assertTrue(first.loop_stopped)
         self.assertEqual(self.client.connected_to, ("new", 1883))
+
+    async def test_concurrent_reconfigures_leave_one_live_client(self):
+        # Two broker PUTs at once (a double tap on Save). The executor hop in
+        # stop really suspends, so the second reconfigure can run in between.
+        # Every client but the adapter's own must end up stopped: two live
+        # clients with the same client id knock each other off the broker.
+        self.engine.set_broker(host="broker", port=1883)
+        await self.adapter.async_start()
+
+        async def _hopping_executor_job(func, *args):
+            await asyncio.sleep(0)
+            return func(*args)
+
+        self.hass.async_add_executor_job = _hopping_executor_job
+        await asyncio.gather(
+            self.adapter.async_reconfigure(), self.adapter.async_reconfigure()
+        )
+        live = [c for c in self.made if c.loop_started and not c.loop_stopped]
+        self.assertEqual(len(live), 1)
+        self.assertIs(live[0], self.adapter._client)
 
 
 if __name__ == "__main__":
