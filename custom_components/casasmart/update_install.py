@@ -1,40 +1,12 @@
-"""Self-update execution: the install action.
+"""The self-update install (POST /api/casasmart/update/install).
 
-``POST /api/casasmart/update/install`` (owner only, ``update.install``) turns
-the "update available" state ``update_api`` reports into an actual upgrade:
-
-    1. Re-check the latest release; refuse (409) if nothing is newer.
-    2. Download the release's ``casasmart.zip`` asset (the file HACS
-       installs) and its ``casasmart.zip.sig``. No signature, no install —
-       the source zipball is never used.
-    3. Verify the Ed25519 signature against the pinned release key
-       (``const.UPDATE_SIGNING_PUBLIC_KEY_B64``) BEFORE extracting anything.
-    4. Extract it (every member must stay inside the staging dir), locate
-       the integration, and verify its ``manifest.json`` version matches
-       the tag we fetched.
-    5. Atomically swap the live integration dir for the new tree, keeping
-       the previous one as the rollback.
-    6. Schedule an HA restart *after* the HTTP response flushes, so the app
-       gets a clean "installing" reply before the connection drops; Home
-       Assistant comes back up on the new code.
-
-Only one install runs at a time, and none once a swap is waiting for its
-restart: a second request gets a 409 "update already in progress".
-
-A hub managed by HACS should be updated through HACS: a self-update swaps
-the files without HACS knowing, so HACS keeps reporting the old version.
-
-Its working dirs are under the hub's data dir, ``<config>/casasmart/update``
-(see ``update.py``), never in custom_components. The rollback is
-``<config>/casasmart/update/rollback``: to go back, stop Home Assistant and
-put that directory in place of ``custom_components/casasmart``. Setup moves
-the rollback that earlier versions kept in custom_components there too
-(``async_clear_legacy_update_dirs``).
-
-The filesystem mechanics (locate / version-match / atomic swap) are pure and
-live in ``update.py`` so they unit-test with temp dirs. This module owns the
-download, the zip extraction and the restart. All file work runs in the
-executor: Home Assistant flags blocking calls made on its event loop.
+Re-checks for a newer release, downloads its casasmart.zip and signature,
+verifies the signature against the pinned release key before extracting
+anything, checks the manifest version against the tag, swaps the new tree in
+(keeping the old one as the rollback) and restarts Home Assistant once the
+reply has gone out. One install runs at a time, and none while a swap waits
+for its restart. To roll back by hand, stop Home Assistant and put
+<config>/casasmart/update/rollback in place of custom_components/casasmart.
 """
 
 from __future__ import annotations
@@ -66,11 +38,9 @@ from .update_api import UpdateChecker
 
 _LOGGER = logging.getLogger(__name__)
 
-# Downloading the release zip is heavier than the status poll: give it room,
-# but still bounded so a wedged transfer can't hang forever.
+# Longer than the status check's timeout, but bounded so a stuck download ends.
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120)
-# ``browser_download_url`` asset downloads ignore Accept; a GitHub media type is
-# kept so the request looks like every other GitHub API call the hub makes.
+# Asset downloads ignore Accept; it matches the hub's other GitHub requests.
 _DOWNLOAD_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "CasaSmart-Hub",
@@ -79,9 +49,8 @@ _DOWNLOAD_HEADERS = {
 _MAX_SIGNATURE_BYTES = 1024
 # Seconds to let the HTTP response reach the app before HA restarts.
 _RESTART_GRACE_SECONDS = 2.0
-# hass.data[DOMAIN] keys, shared by both listeners' install views: the lock one
-# install holds from status check to scheduled restart, and the version a
-# finished swap is waiting to restart into.
+# hass.data[DOMAIN] keys shared by both listeners' views: the install lock, and
+# the version a finished swap is waiting to restart into.
 _INSTALL_LOCK_KEY = "update_install_lock"
 _SWAPPED_VERSION_KEY = "update_swapped_version"
 # The CasaSmart app shows "Update already in progress" for a 409 whose error
@@ -90,23 +59,20 @@ _IN_PROGRESS = "update already in progress"
 
 
 def _integration_dir() -> Path:
-    """The live ``custom_components/casasmart`` dir — where this code runs from."""
+    """The live custom_components/casasmart dir, where this code runs from."""
     return Path(__file__).resolve().parent
 
 
 def _update_dir(hass: HomeAssistant) -> Path:
-    """``<config>/casasmart/update``: the self-update's working dirs."""
+    """<config>/casasmart/update: the self-update's working dirs."""
     return Path(hass.config.path(DATA_DIR_NAME, UPDATE_DIR_NAME))
 
 
 async def async_clear_legacy_update_dirs(hass: HomeAssistant) -> None:
-    """Move or remove self-update dirs that earlier versions left beside us.
+    """Move or remove self-update dirs earlier versions left in custom_components.
 
-    Runs at setup. Earlier versions kept the rollback (``casasmart.bak``) and
-    interrupted swaps' copies in custom_components, where Home Assistant may
-    load one of them instead of the integration. The rollback moves to the
-    data dir and the rest is removed (``update.clear_legacy_update_dirs``);
-    every outcome is logged, and a failure never fails setup.
+    Runs at setup, since Home Assistant may load such a copy instead of the
+    integration. Every outcome is logged, and a failure never fails setup.
     """
     try:
         actions = await hass.async_add_executor_job(
@@ -139,16 +105,12 @@ async def async_clear_legacy_update_dirs(hass: HomeAssistant) -> None:
 
 
 async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
-    """Run the full self-update. Returns a status dict; raises InstallError.
+    """Run the self-update and return the reply for the app.
 
-    Refuses cleanly (InstallError) if there's nothing newer to install or
-    the downloaded payload doesn't match the tag. On success the live
-    integration dir has already been swapped and an HA restart is scheduled.
-
-    Also refuses while another install runs, and after a swap until the
-    restart: the running code still reports the old version, so the same
-    release looks new again, and a second swap would replace the rollback
-    with the first one's tree.
+    Raises InstallError when nothing is newer, the download doesn't check
+    out, or another install is running or waiting for its restart. Until
+    that restart the old code still reports the old version, so the same
+    release would look new and a second swap would overwrite the rollback.
     """
     domain_data = hass.data.setdefault(DOMAIN, {})
     swapped = domain_data.get(_SWAPPED_VERSION_KEY)
@@ -168,7 +130,7 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
 async def _async_install(
     hass: HomeAssistant, checker: UpdateChecker, domain_data: dict
 ) -> dict:
-    """The install itself; ``perform_install`` holds the install lock."""
+    """The install itself; perform_install holds the install lock."""
     status = await checker.async_status()
     if not status.get("update_available"):
         raise InstallError("no update available")
@@ -182,9 +144,7 @@ async def _async_install(
 
     _LOGGER.info("Self-update: installing %s from %s", target_version, download_url)
 
-    # Download and extract into one temp dir in the update's staging dir,
-    # always removed afterwards. Creating and removing it is file work too, so
-    # it runs in the executor like the rest.
+    # One temp dir in staging holds the download and extraction.
     update_dir = _update_dir(hass)
     staging_path = Path(
         await hass.async_add_executor_job(_make_download_dir, update_dir)
@@ -195,7 +155,6 @@ async def _async_install(
         signature = staging_path / "release.zip.sig"
         await _download_archive(hass, signature_url, signature)
         await hass.async_add_executor_job(_verify_archive, archive, signature)
-        # File work (extract, inspect, copy the tree in) stays off the event loop.
         backup = await hass.async_add_executor_job(
             _stage_and_swap,
             archive,
@@ -218,11 +177,7 @@ async def _async_install(
 
 
 async def _download_archive(hass: HomeAssistant, url: str, dest: Path) -> None:
-    """Stream a release archive to ``dest`` in chunks (never load it whole).
-
-    The network reads stay on the event loop; opening, writing and closing
-    the file run in the executor.
-    """
+    """Stream a release file to dest; the file writes run in the executor."""
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
     session = async_get_clientsession(hass)
@@ -253,7 +208,7 @@ def _verify_archive(archive: Path, signature: Path) -> None:
 
 
 def _make_download_dir(update_dir: Path) -> str:
-    """Executor: a fresh temp dir for one install's download and extraction."""
+    """A fresh temp dir for one install's download and extraction (executor)."""
     staging = update_dir / STAGING_DIR_NAME
     try:
         staging.mkdir(parents=True, exist_ok=True)
@@ -265,10 +220,10 @@ def _make_download_dir(update_dir: Path) -> str:
 def _stage_and_swap(
     archive: Path, extracted: Path, target_version: str, update_dir: Path
 ) -> Path:
-    """Executor: extract the verified zip, check it, swap it in; returns the backup.
+    """Extract the verified zip, check it and swap it in (executor).
 
-    Raises InstallError (nothing swapped) if the archive holds no casasmart
-    integration or its manifest version doesn't match the release tag.
+    Returns the rollback dir. Raises InstallError, with nothing swapped, if
+    the archive has no casasmart integration or its version doesn't match.
     """
     _extract_zip(archive, extracted)
     new_dir = locate_integration_dir(extracted, DOMAIN)
@@ -287,7 +242,7 @@ def _stage_and_swap(
 
 
 def _extract_zip(archive: Path, dest: Path) -> None:
-    """Extract ``archive`` into ``dest``, rejecting any entry that escapes it."""
+    """Extract archive into dest, refusing any entry that escapes it."""
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
     try:
@@ -304,7 +259,7 @@ def _extract_zip(archive: Path, dest: Path) -> None:
 
 
 def _schedule_restart(hass: HomeAssistant) -> None:
-    """Restart HA after a short grace period so the HTTP reply flushes first."""
+    """Restart HA after a short delay, so the HTTP reply goes out first."""
 
     async def _restart_later() -> None:
         await asyncio.sleep(_RESTART_GRACE_SECONDS)
