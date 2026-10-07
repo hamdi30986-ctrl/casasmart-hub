@@ -1,19 +1,22 @@
 """Automation config endpoints.
 
-The REST surface that replaces the app's raw-token calls to HA's own
-``/api/config/automation/config/{id}`` (create / edit / delete) and the
-entity-registry ghost cleanup that followed a delete:
+The CasaSmart app creates, edits and deletes its automations through the
+hub, with a CasaSmart token, instead of calling Home Assistant's own
+``/api/config/automation/config/{id}`` with an HA token. The hub does what
+HA's config view does, including the entity-registry cleanup after a
+delete:
 
 - ``GET    /api/casasmart/automations/{config_key}/config`` — one
-  automation's config, for the editor's lazy load.
+  automation's config plus its ``works_during_energy_saving`` flag, for
+  the editor's lazy load.
 - ``POST   /api/casasmart/automations/{config_key}/config`` — create or
   update; the config is validated with HA's OWN automation validator
   before a byte is written, then automations.yaml is rewritten
   atomically and the automation component reloads just that id.
 - ``DELETE /api/casasmart/automations/{config_key}/config`` — remove
-  from automations.yaml, reload, and clean the ghost entity out of HA's
-  entity registry (the hub does the cleanup the app used to do with a
-  second raw-token call).
+  from automations.yaml and drop the automation's entity-registry entry,
+  which retires the running entity. Like HA's own config view, a delete
+  does not reload.
 
 All three sit behind ``automations.manage`` (admin + sub-admin — family
 members toggle and trigger through the command endpoint, they never
@@ -23,6 +26,10 @@ automations have no room, so a scoped grant cannot contain them.
 The surface is scoped to the app's own automations — config keys MUST
 carry the ``casa_automation_`` prefix. Hub-internal and installer
 automations are not reachable here, in either direction.
+
+``works_during_energy_saving`` is the hub's own flag, kept in the Energy
+Saving flag store (``energy_runtime.EnergyFlags``) rather than in
+automations.yaml. Setting it needs ``energy.manage``.
 
 Automation STATE (on/off, last_triggered) deliberately does not live
 here: automation is an exposed domain in ``entity_bridge``, so state
@@ -65,6 +72,7 @@ from .automations import (
 )
 from .const import DOMAIN
 
+# Tells "field absent" apart from any value the request body could carry.
 _UNSET = object()
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,6 +157,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return claims, None
 
     def _check_key(self, config_key: str) -> web.Response | None:
+        """A 400 unless the key is one of the app's own, well-formed ids."""
         if not is_casa_automation_key(config_key):
             return self.json_message(
                 f"Not a CasaSmart automation id: {config_key!r}",
@@ -167,6 +176,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return None
 
     def _energy_flags(self):
+        """The Energy Saving flag store, or None while the hub isn't loaded."""
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             return None
@@ -179,8 +189,11 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
     async def _load(
         self,
     ) -> tuple[list[dict[str, Any]] | None, web.Response | None]:
-        """Read automations.yaml off-loop; a corrupt file is a 500, never
-        an empty list a later write would clobber."""
+        """Read automations.yaml off the event loop.
+
+        A file that is not a list, or cannot be parsed, is a 500 — never an
+        empty list that the next write would clobber it with.
+        """
         try:
             data = await self._hass.async_add_executor_job(
                 _read_yaml, self._config_path
@@ -232,6 +245,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
+        # The Energy Saving flag is the hub's, not part of HA's config: take
+        # it out before HA validates and stores the rest.
         payload = dict(payload)
         energy_flag = payload.pop("works_during_energy_saving", _UNSET)
         if energy_flag is not _UNSET and not isinstance(energy_flag, bool):
@@ -274,6 +289,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 )
 
         await self._reload(config_key)
+        # Answer with the stored flag, so an edit that did not send it still
+        # reports the value the automation keeps.
         flags = self._energy_flags()
         effective_flag = False
         if flags is not None and energy_flag is not _UNSET:
@@ -295,7 +312,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         )
 
     async def delete(self, request: web.Request, config_key: str) -> web.Response:
-        """Remove from automations.yaml, reload, evict the ghost entity."""
+        """Remove from automations.yaml and evict the registry entry."""
         _, error = self._gate(request)
         if error is not None:
             return error
@@ -321,9 +338,11 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                     "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
                 )
 
-        # The cleanup HA's own config API does on delete: the registry
-        # entry (unique_id == config key) lingers after the config is
-        # gone and would haunt the entities feed as "unavailable".
+        # The cleanup HA's own config view does on delete, and like it no
+        # reload: removing the registry entry (unique_id == config key)
+        # retires the running automation entity. Left alone, the entry
+        # would linger after the config is gone and haunt the entities feed
+        # as "unavailable".
         ent_reg = er.async_get(self._hass)
         entity_id = ent_reg.async_get_entity_id(
             AUTOMATION_DOMAIN, AUTOMATION_DOMAIN, config_key

@@ -1,7 +1,7 @@
 """Pure automation-config logic — no HA imports.
 
-The list surgery behind ``automation_api.py``'s read-modify-write on
-automations.yaml, kept import-free so the unit tests run without a
+The id checks and list surgery behind ``automation_api``'s read-modify-write
+of automations.yaml, kept import-free so the unit tests run without a
 Home Assistant install (same split as ``history.py`` / ``entity_bridge.py``).
 
 automations.yaml is a YAML list of dicts, each carrying an ``id`` key —
@@ -14,21 +14,21 @@ import re
 from typing import Any
 
 # The app's automation ids look like "casa_automation_20260303_143022015"
-# (CasaAutomation.generateId). The prefix IS the ownership boundary:
-# config keys without it are not reachable through the CasaSmart API,
-# in either direction.
+# (the prefix plus a creation timestamp). The prefix IS the ownership
+# boundary: config keys without it are not reachable through the CasaSmart
+# API, in either direction.
 CASA_AUTOMATION_PREFIX = "casa_automation_"
 
-# A well-formed key is the prefix followed by one-or-more characters drawn
-# ONLY from [A-Za-z0-9_]. The app's generator (CasaAutomation.generateId)
-# only ever emits a timestamp — digits and underscores — so this rejects
-# nothing real. What it slams the door on is a hand-crafted key smuggling
-# in dashes, dots, slashes, spaces or other characters that have no
-# business landing in an automations.yaml ``id``.
+# A well-formed key is the prefix followed by one or more characters drawn
+# ONLY from [A-Za-z0-9_]. The app only ever generates digits and underscores
+# after the prefix, so this rejects nothing real. It refuses a hand-crafted
+# key carrying dashes, dots, slashes, spaces or other characters that have
+# no business in an automations.yaml ``id``.
 CASA_AUTOMATION_KEY_RE = re.compile(
     r"^" + re.escape(CASA_AUTOMATION_PREFIX) + r"[A-Za-z0-9_]+$"
 )
 
+# The primary-key field of each automations.yaml entry.
 CONF_ID = "id"
 
 
@@ -90,7 +90,7 @@ def upsert_automation(
 
 
 def delete_automation(data: list[dict[str, Any]], config_key: str) -> bool:
-    """Remove the config with this id, in place. False = wasn't there."""
+    """Remove the config with this id, in place; False if it was not there."""
     for index, item in enumerate(data):
         if str(item.get(CONF_ID)) == config_key:
             del data[index]
