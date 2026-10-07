@@ -1,17 +1,15 @@
-"""Authenticated CasaSmart Now snapshot and room-activity endpoints.
+"""Now page endpoints: the page snapshot and room activity commands.
 
-- ``GET /api/casasmart/now`` (``devices.read``) — the caller's Now page in
-  one response: recently used devices, pinned and suggested scenes, room
-  activity, weather, air quality and doors/windows, all filtered to the
-  caller's room scope.
-- ``GET/PUT /api/casasmart/now/config`` (``registry.manage``) — the
-  sources the Now page shows. The hub never picks sensors by itself.
-- ``PUT /api/casasmart/now/rooms/{room_id}/activity-policy``
-  (``registry.manage``) — whether a room takes part in room commands and
-  which approved devices they may switch.
-- ``POST /api/casasmart/now/rooms/{room_id}/activity`` (``devices.control``)
-  — switch a room's approved devices off, or back on from what the last OFF
-  captured. Idempotent per client key, one command per room at a time.
+- GET /api/casasmart/now (devices.read): the caller's Now page in one
+  response (recent devices, scenes, room activity, weather, air quality,
+  doors and windows), filtered to their room scope.
+- GET/PUT /api/casasmart/now/config (registry.manage): the sources the page
+  shows. The hub never picks sensors by itself.
+- PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
+  whether a room takes part in room commands, and which devices they switch.
+- POST /api/casasmart/now/rooms/{room_id}/activity (devices.control): switch
+  a room's approved devices off, or back on from what the last off captured.
+  Idempotent per client key, one command per room at a time.
 """
 
 from __future__ import annotations
@@ -87,10 +85,9 @@ def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 async def _async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
-    """The person behind the token, so their devices share recents.
+    """The member behind the token, so all their devices share recents.
 
-    A storage read, so it runs in the executor; it may raise StorageError or
-    sqlite3.Error.
+    Runs in the executor and may raise StorageError or sqlite3.Error.
     """
     engine = get_engine(hass)
     if engine is None:
@@ -99,12 +96,10 @@ async def _async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
 
 
 def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
-    """The per-room command locks, shared across view instances.
+    """The per-room command locks, kept in hass.data.
 
-    ``build_views`` constructs fresh view objects for HA's own HTTP app and
-    the TLS listener (and again on each daily TLS refresh); a room's commands
-    must queue behind each other whichever listener they arrive on — so the
-    locks live in ``hass.data``, never on a view.
+    build_views makes separate view objects for HA's HTTP app and the TLS
+    listener, and a room's commands must queue whichever one they arrive on.
     """
     return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
 
@@ -266,11 +261,8 @@ class CasaSmartNowView(_NowView):
                     "room_id": room_id,
                     "name": room["name"],
                     "icon": room.get("icon"),
-                    # The tablet derives the visible switch/count from its
-                    # live state feed so a successful command repaints in the
-                    # same frame. Exposing the already-validated policy list
-                    # lets it preserve both the Hub policy and its own strict
-                    # actuator allowlist instead of guessing membership.
+                    # The tablet draws the room from its live state feed, so
+                    # it needs the approved list instead of guessing it.
                     "eligible_entity_ids": list(eligible_entity_ids),
                     "active_count": len(devices),
                     "most_recent_activity_at": max(timestamps)
@@ -311,8 +303,8 @@ class CasaSmartNowView(_NowView):
         suggestions = getattr(_runtime_data(self._hass), "suggestions", None)
         generated = getattr(suggestions, "generated", None)
         if generated is not None:
-            # Rank rooms exactly as the generated room suggestions do, so the
-            # page and its suggestions agree on the busiest rooms.
+            # Rank rooms as the generated suggestions do, so both agree on
+            # the busiest rooms.
             ranked, _, _ = await generated.room_context(scope)
             previous = {r["room_id"]: r for r in active_rooms}
             active_rooms = [
@@ -333,9 +325,8 @@ class CasaSmartNowView(_NowView):
                 "suggestion": None,
             }
         )
-        # suggested_routine is the scene an admin featured by hand. It shows
-        # only when no contextual rules are configured, and is never turned
-        # into a time rule.
+        # suggested_routine is a scene an admin featured by hand, shown only
+        # while no contextual rules exist.
         legacy = (
             visible_scene(config.get("suggested_scene_id"))
             if suggestions is None or contextual["status"] == "not_configured"
@@ -431,7 +422,7 @@ class CasaSmartNowView(_NowView):
 
 
 class CasaSmartNowConfigView(_NowView):
-    """Store explicit Hub configuration; this never auto-selects sensors."""
+    """GET/PUT /api/casasmart/now/config."""
 
     url = f"/api/{DOMAIN}/now/config"
     name = f"api:{DOMAIN}:now:config"
@@ -635,11 +626,10 @@ class CasaSmartRoomActivityPolicyView(_NowView):
 
 
 class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
-    """One lock-protected Hub command with durable idempotency/restore state.
+    """POST /api/casasmart/now/rooms/{room_id}/activity.
 
-    POST /api/casasmart/now/rooms/{room_id}/activity with ``{action:
-    turn_off|turn_on, idempotency_key}``. Shares the policy view's room
-    checks.
+    The body is {action: turn_off|turn_on, idempotency_key}. Commands run one
+    at a time per room, and a retry with the same key replays the answer.
     """
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
@@ -732,7 +722,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
     ) -> dict[str, Any]:
         """Switch the room's eligible devices and report each one's outcome.
 
-        OFF targets every eligible device that is on; ON targets what the
+        Off targets every eligible device that is on; on targets what the
         restore set holds and is still off. A device counts as changed only
         when its state afterwards confirms it.
         """
@@ -791,15 +781,14 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 outcome["outcome"] = "failed"
         restore_pending: list[str] = []
         if action == "turn_off":
-            # Add to the outstanding capture, never replace it: a repeated OFF
-            # (another member, a retry with a new key) finds little or nothing
-            # still on and must not forget what the earlier OFF switched off.
+            # Add to the capture rather than replace it: a repeated off finds
+            # little still on and must not forget what the first one captured.
             restore_pending = await self._hass.async_add_executor_job(
                 now_data.extend_restore_set, room_id, changed_ids
             )
         else:
-            # An ON request consumes the captured set once, even when a device was
-            # removed or a service failed, so a later tap cannot re-run stale work.
+            # On clears the capture even if a device failed, so a later tap
+            # cannot replay stale work.
             await self._hass.async_add_executor_job(
                 now_data.consume_restore_set, room_id
             )
