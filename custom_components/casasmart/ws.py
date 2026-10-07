@@ -39,6 +39,7 @@ from .const import (
     WS_SEND_QUEUE_MAX,
     WS_TOKEN_RECHECK,
 )
+from .entity_bridge import is_exposed
 from .filtering import in_scope, is_served, serialize_device
 
 _LOGGER = logging.getLogger(__name__)
@@ -303,8 +304,13 @@ class WsConnection:
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         if new_state is None:
-            # The entity was removed; tell the app to drop its tile.
-            if entity_id and self._subscription.matches(entity_id):
+            # Tell the app to drop the tile. Only exposed domains have tiles,
+            # and the id alone would reveal any other entity.
+            if (
+                entity_id
+                and is_exposed(entity_id)
+                and self._subscription.matches(entity_id)
+            ):
                 self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
             return
         if (
