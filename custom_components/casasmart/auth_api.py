@@ -585,7 +585,7 @@ class CasaSmartChallengeView(HomeAssistantView):
 
         try:
             challenge = await self._hass.async_add_executor_job(
-                engine.create_challenge, device_id
+                engine.create_challenge, device_id, request.remote or "unknown"
             )
         except ThrottledError as err:
             return _throttled_response(err)
@@ -628,7 +628,11 @@ class CasaSmartTokenView(HomeAssistantView):
 
         try:
             issued = await self._hass.async_add_executor_job(
-                engine.redeem_challenge, device_id, challenge_id, signature
+                engine.redeem_challenge,
+                device_id,
+                challenge_id,
+                signature,
+                request.remote or "unknown",
             )
         except ThrottledError as err:
             return _throttled_response(err)
