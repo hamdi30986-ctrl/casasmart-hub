@@ -111,7 +111,7 @@ class _Suggestions:
 
 
 class _FailingEnergyController:
-    """The probe's fault: the first storage read of the Energy Saving start."""
+    """The injected fault: the first storage read of the Energy Saving start."""
 
     def __init__(self, *args, **kwargs) -> None:
         self.stopped = False
