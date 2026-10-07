@@ -523,11 +523,7 @@ class CasaSmartNowConfigView(_NowView):
         state = self._hass.states.get(entity_id)
         if state is None:
             return False
-        entry = er.async_get(self._hass).async_get(entity_id)
-        device_class = state.attributes.get("device_class")
-        if entry is not None and entry.original_device_class:
-            device_class = entry.original_device_class
-        return device_class in _AIR_QUALITY_DEVICE_CLASSES
+        return self._device_class(entity_id, state) in _AIR_QUALITY_DEVICE_CLASSES
 
     def _is_contact_sensor(self, entity_id: object) -> bool:
         """A lock, or a door/window/opening binary sensor."""
@@ -540,11 +536,14 @@ class CasaSmartNowConfigView(_NowView):
             return True
         if not entity_id.startswith("binary_sensor."):
             return False
+        return self._device_class(entity_id, state) in _CONTACT_DEVICE_CLASSES
+
+    def _device_class(self, entity_id: str, state: Any) -> Any:
+        """The integration's own device class, else the one in the state."""
         entry = er.async_get(self._hass).async_get(entity_id)
-        device_class = state.attributes.get("device_class")
         if entry is not None and entry.original_device_class:
-            device_class = entry.original_device_class
-        return device_class in _CONTACT_DEVICE_CLASSES
+            return entry.original_device_class
+        return state.attributes.get("device_class")
 
 
 class CasaSmartRoomActivityPolicyView(_NowView):
