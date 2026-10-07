@@ -2,27 +2,28 @@
 
 The app's thin-client surface over the hub-side ``AlarmEngine``. Matches the
 established API pattern (``tank_api`` / ``registry_api``): plain views on HA's
-port and the dedicated TLS port both serve these, every handler gates in-band with
-``authenticate_request``, and storage-touching engine calls hop the executor.
+port and the dedicated TLS port both serve these, every handler gates in-band
+with ``authenticate_request``, and storage-touching engine calls hop the
+executor.
 
-Endpoints (one panel with zone attributes):
+Endpoints (the hub has one alarm; zones are per-sensor assignments):
 
-- ``GET    /api/casasmart/alarm/state``            — arm-state snapshot
-- ``POST   /api/casasmart/alarm/arm``              — arm away/home/night
-- ``POST   /api/casasmart/alarm/disarm``           — disarm / silence
-- ``GET    /api/casasmart/alarm/zones``            — sensor -> zone map
-- ``PUT    /api/casasmart/alarm/zones/{entity_id}``— assign a sensor's zone
-- ``DELETE /api/casasmart/alarm/zones/{entity_id}``— unassign a sensor
-- ``GET    /api/casasmart/alarm/settings``         — default entry/exit delays
-- ``PUT    /api/casasmart/alarm/settings``         — edit default delays
-- ``GET    /api/casasmart/alarm/history``          — event history
+- ``GET    /api/casasmart/alarm/state``             — arm-state snapshot
+- ``POST   /api/casasmart/alarm/arm``               — arm away/home/night
+- ``POST   /api/casasmart/alarm/disarm``            — disarm / silence
+- ``GET    /api/casasmart/alarm/zones``             — sensor -> zone map
+- ``PUT    /api/casasmart/alarm/zones/{entity_id}`` — assign a sensor's zone
+- ``DELETE /api/casasmart/alarm/zones/{entity_id}`` — unassign a sensor
+- ``GET    /api/casasmart/alarm/settings``          — default entry/exit delays
+- ``PUT    /api/casasmart/alarm/settings``          — edit default delays
+- ``GET    /api/casasmart/alarm/history``           — event history
 
-Role gates (a plain user has NO alarm access):
-``alarm.read`` for state/zones/history, ``alarm.arm`` for arm/disarm,
-``alarm.manage`` for zone configuration. Every mutation fires
-``EVENT_ALARM_CHANGED`` so the WS server nudges connected apps and the alarm
-adapter re-syncs its entry-delay timer (an app-driven disarm cancelling a
-running countdown rides this exact path).
+Permission gates (admins and sub-admins hold them; a plain user has NO alarm
+access): ``alarm.read`` for state/zones/settings/history, ``alarm.arm`` for
+arm/disarm, ``alarm.manage`` for zones and settings changes. Every mutation
+fires ``EVENT_ALARM_CHANGED`` so the WS server nudges connected apps and the
+alarm adapter re-syncs its entry-delay timer (an app-driven disarm cancelling
+a running countdown rides this exact path).
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ class _AlarmView(HomeAssistantView):
         self._hass = hass
 
     def _alarm_or_503(self) -> tuple[AlarmEngine | None, web.Response | None]:
+        """``(engine, None)``, or ``(None, 503)`` while the hub is loading."""
         alarm = get_alarm(self._hass)
         if alarm is None:
             return None, self.json_message(
@@ -104,7 +106,9 @@ class CasaSmartAlarmArmView(_AlarmView):
     """POST /api/casasmart/alarm/arm — command an armed mode.
 
     Body: ``{"mode": "armed_away|armed_home|armed_night", "exit_delay"?,
-    "entry_delay"?}``. Delays are optional and clamped by the engine.
+    "entry_delay"?}``. Delays are optional (the hub's stored defaults apply)
+    and must be whole seconds 0-600. The caller's device id is recorded as
+    the actor in the history.
     """
 
     url = f"/api/{DOMAIN}/alarm/arm"
@@ -253,11 +257,12 @@ class CasaSmartAlarmSettingsView(_AlarmView):
     """GET/PUT /api/casasmart/alarm/settings — hub-owned default delays.
 
     The app's settings screen reads these on open and writes edits here, so
-    they live on the hub (phone-independent) like everything else. ``read``
-    to view, ``manage`` to change.
+    they live on the hub (phone-independent) like everything else.
+    ``alarm.read`` to view, ``alarm.manage`` to change.
 
     PUT body: ``{"entry_delay"?: int, "exit_delay"?: int}`` (seconds). Omitted
-    fields keep their current value; both are clamped by the engine.
+    fields keep their current value; the engine rejects anything outside
+    0-600.
     """
 
     url = f"/api/{DOMAIN}/alarm/settings"

@@ -9,10 +9,11 @@ unit-tested on a temp SQLite file like ``registry.py``/``tank.py``). It owns
 the *decisions*; it never talks to Home Assistant. The split is deliberate:
 
 - ``AlarmEngine`` — the arm state machine + zone model. Persists arm state,
-  zone→sensor assignments, and a bounded event history across reboots
-  (three storage tables). ``process_sensor`` is the trigger evaluator: given
-  a sensor's active/clear edge it decides nothing / entry-delay countdown /
-  immediate trigger, honouring the current arm mode and the per-zone rules.
+  zone→sensor assignments, the default entry/exit delays and a bounded event
+  history across reboots (four storage tables). ``process_sensor`` is the
+  trigger evaluator: given a sensor's active/clear edge it decides nothing /
+  entry-delay countdown / immediate trigger, honouring the current arm mode
+  and the per-zone rules.
 - **Life Safety is always armed.** Smoke/gas/CO/leak fire regardless of arm
   mode — *including ``disarmed``*.
 - **Alerts go to an injected ``alert_sink``** (trigger, life-safety, tamper).
@@ -21,11 +22,12 @@ the *decisions*; it never talks to Home Assistant. The split is deliberate:
   life-safety, and the push dispatcher listens for that event. Tamper is
   deliberately neither sounded nor pushed; it is recorded and logged.
 
-What is intentionally NOT here (it lives in ``alarm_adapter.py``):
-subscribing to ``state_changed`` events, real async timers, firing the siren
-automation hook, and the ``alarm_control_panel`` entity mapping. The engine is driven by the adapter calling ``process_sensor``
-/ ``tick`` and reading ``snapshot()``; time is injected so it stays pure and
-deterministic under test.
+What is intentionally NOT here: subscribing to ``state_changed`` events, real
+async timers and firing the siren automation hook (``alarm_adapter.py``), and
+the ``alarm_control_panel`` entity (``alarm_control_panel.py``). The engine is
+driven by the adapter calling ``process_sensor`` / ``tick`` and reading
+``snapshot()``; time is injected so it stays pure and deterministic under
+test.
 
 Storage-touching methods are synchronous (call via executor) and guarded by
 an ``RLock``, same posture as ``RegistryEngine``/``TankEngine``. A small
@@ -65,7 +67,10 @@ ALL_ZONES = (ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY, ZONE_LIFE_SAFETY)
 
 # Which non-life-safety zones are active per arm mode.
 # Away = everything; Home = perimeter only (motion ignored); Night = perimeter
-# + entry doors (no motion). Life Safety is added unconditionally below.
+# + entry doors (no motion). Pending (an entry delay running) uses the Away
+# set whatever mode it came from, so during an entry delay any non-entry zone
+# triggers at once; triggered reports the Away set but ignores edges. Life
+# Safety is evaluated separately, in every mode.
 _ACTIVE_ZONES_BY_MODE: dict[str, frozenset[str]] = {
     MODE_AWAY: frozenset({ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY}),
     MODE_HOME: frozenset({ZONE_PERIMETER}),
@@ -88,8 +93,9 @@ DEFAULT_ENTRY_DELAY_SECONDS = 30
 DEFAULT_EXIT_DELAY_SECONDS = 60
 _MAX_DELAY_SECONDS = 600  # sanity cap; a 10-min delay is already absurd
 _NAME_MAX = 64
-# History is a single bounded blob (like tank readings). Plenty for an audit
-# trail without growing unbounded on a chatty install.
+# History is a single bounded blob: at most _MAX_HISTORY events, none older
+# than _HISTORY_RETENTION_SECONDS. Plenty for an audit trail without growing
+# unbounded on a chatty install.
 _MAX_HISTORY = 1000
 _HISTORY_RETENTION_SECONDS = 90 * 24 * 3600
 
@@ -108,6 +114,7 @@ class UnknownZoneError(AlarmError):
 
 
 def _clean_name(name: Any) -> str:
+    """A required, stripped, length-capped sensor display name."""
     if not isinstance(name, str) or not name.strip():
         raise AlarmError("Sensor name is required")
     cleaned = name.strip()
@@ -117,12 +124,14 @@ def _clean_name(name: Any) -> str:
 
 
 def _validate_zone(zone: Any) -> str:
+    """One of ``ALL_ZONES``, else ``AlarmError``."""
     if zone not in ALL_ZONES:
         raise AlarmError(f"Unknown zone {zone!r} (expected one of {ALL_ZONES})")
     return zone
 
 
 def _validate_delay(value: Any, *, field: str, default: int) -> int:
+    """Whole seconds 0-``_MAX_DELAY_SECONDS``; ``None`` means ``default``."""
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -142,13 +151,15 @@ def active_zones_for_mode(mode: str) -> frozenset[str]:
 
 
 class AlarmEngine:
-    """Arm state machine + zone model over three storage tables.
+    """Arm state machine + zone model over four storage tables.
 
     Tables (all dict-like ``KeyValueTable`` handles):
-      * ``state_table``   — one row (``_STATE_KEY``) with the live arm state,
+      * ``state_table``    — one row (``_STATE_KEY``) with the live arm state,
         so a reboot restores the previous mode instead of silently disarming.
-      * ``zones_table``   — one row per sensor: ``entity_id -> {zone, name}``.
-      * ``history_table`` — one bounded ``{"entries": [...]}`` row.
+      * ``zones_table``    — one row per sensor: ``entity_id -> {zone, name}``.
+      * ``history_table``  — one bounded ``{"entries": [...]}`` row.
+      * ``settings_table`` — one row (``_SETTINGS_KEY``) with the default
+        entry/exit delays.
 
     ``alert_sink`` is called with each alert dict the moment an alarm fires
     (trigger / life-safety / tamper). It defaults to logging the alert as a
@@ -285,8 +296,8 @@ class AlarmEngine:
     ) -> dict[str, Any]:
         """Update one or both default delays (omitted fields keep their value).
 
-        Validated and clamped exactly like the per-arm delays. Returns the new
-        full settings dict.
+        Validated exactly like the per-arm delays (whole seconds, 0-600).
+        Returns the new full settings dict.
         """
         with self._lock:
             updated = dict(self._settings)
@@ -321,6 +332,7 @@ class AlarmEngine:
         return dict(record)
 
     def remove_zone(self, entity_id: Any) -> None:
+        """Unassign a sensor; ``UnknownZoneError`` if it has no zone."""
         with self._lock:
             if entity_id not in self._zones:
                 raise UnknownZoneError(f"No sensor assigned under {entity_id!r}")
@@ -333,6 +345,10 @@ class AlarmEngine:
             return {eid: dict(rec) for eid, rec in self._zones.items()}
 
     def zone_of(self, entity_id: str) -> str | None:
+        """The sensor's zone, or None when the alarm doesn't watch it.
+
+        Lock-free: the adapter calls it for every HA state change.
+        """
         rec = self._zones.get(entity_id)
         return rec["zone"] if rec else None
 
@@ -350,8 +366,10 @@ class AlarmEngine:
 
         ``exit_delay`` grace lets the user leave: sensor edges before it
         elapses are ignored (life safety still fires). ``entry_delay`` is the
-        countdown an entry-zone trip starts later. Both default sensibly and
-        are clamped. Returns the new public snapshot.
+        countdown an entry-zone trip starts later. Both default to the hub's
+        stored settings and must be whole seconds 0-600. Arming from any state
+        (pending and triggered included) replaces it. Returns the new public
+        snapshot.
         """
         if mode not in ARMABLE_MODES:
             raise AlarmError(
@@ -418,7 +436,7 @@ class AlarmEngine:
 
         Rules:
           * Life Safety active -> trigger *immediately, in any mode* incl.
-            disarmed (this is the whitelisted shadow-mode delta).
+            disarmed.
           * ``active`` is False (sensor cleared) -> never triggers.
           * During exit-delay grace (now < active_at) -> ignored.
           * Entry-zone trip in an active mode -> start the entry-delay
@@ -466,7 +484,8 @@ class AlarmEngine:
     ) -> dict[str, Any] | None:
         """A mapped sensor dropped offline. While armed, that is tamper.
 
-        Log + push, but do NOT trigger the full alarm — a dead
+        Recorded in the history and handed to the alert sink (which logs it),
+        but it does NOT trigger the full alarm or a phone push — a dead
         battery should not wake the house. Ignored while disarmed.
         """
         now = self._clock() if now is None else now
@@ -485,8 +504,8 @@ class AlarmEngine:
     def tick(self, *, now: float | None = None) -> dict[str, Any] | None:
         """Promote a lapsed entry-delay countdown to triggered.
 
-        The HA adapter calls this when the pending deadline fires (or on a
-        coarse poll). Idempotent: a no-op unless ``pending`` has expired.
+        The HA adapter calls this when its entry-delay timer fires.
+        Idempotent: a no-op unless ``pending`` has expired.
         """
         now = self._clock() if now is None else now
         with self._lock:
@@ -514,6 +533,7 @@ class AlarmEngine:
     # -- internal transitions (caller holds the lock) --------------------------
 
     def _enter_pending(self, entity_id: str, *, now: float) -> dict[str, Any]:
+        """Start the entry-delay countdown for an entry-zone trip."""
         prior = self._state["mode"]
         deadline = now + self._state["entry_delay"]
         self._state.update(
@@ -544,6 +564,7 @@ class AlarmEngine:
         life_safety: bool = False,
         persist: bool = False,
     ) -> dict[str, Any]:
+        """Go to triggered, record the event and hand it to the alert sink."""
         self._state.update(
             mode=MODE_TRIGGERED,
             since=now,
@@ -563,7 +584,7 @@ class AlarmEngine:
     # -- alerts ----------------------------------------------------------------
 
     def _emit_alert(self, event: dict[str, Any]) -> None:
-        """Hand the event to the push sink, never letting a sink fault break
+        """Hand the event to the alert sink, never letting a sink fault break
         the state machine."""
         try:
             self._alert_sink(dict(event))
@@ -579,6 +600,10 @@ class AlarmEngine:
     # -- history (storage) -----------------------------------------------------
 
     def _record_event(self, kind: str, *, now: float, **fields: Any) -> dict[str, Any]:
+        """Append one event to the bounded history and return it.
+
+        ``None`` fields are left out. Caller holds the lock.
+        """
         event = {"kind": kind, "at": now}
         event.update({k: v for k, v in fields.items() if v is not None})
         blob = self._history_table.get(_HISTORY_KEY) or {}
@@ -640,6 +665,7 @@ class AlarmEngine:
 
 
 def _actor_str(actor: Any) -> str | None:
+    """Who armed/disarmed, as a capped string for the history (or None)."""
     if actor is None:
         return None
     return str(actor)[:_NAME_MAX]
