@@ -27,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .auth_api import authenticate_request, get_engine, json_body
+from .auth_api import authenticate_request, get_engine, read_json_object
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .filtering import area_id_of, in_scope, is_served, serialize_device
@@ -428,11 +428,9 @@ class CasaSmartNowConfigView(_NowView):
         now_data, not_ready = self._now_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         error_response = await self._validate_configuration(payload)
         if error_response is not None:
             return error_response
@@ -551,11 +549,9 @@ class CasaSmartRoomActivityPolicyView(_NowView):
         now_data, not_ready = self._now_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         eligible_entity_ids = payload.get("eligible_entity_ids")
         if not isinstance(eligible_entity_ids, list):
             return self.json_message(
@@ -651,11 +647,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 },
                 HTTPStatus.FORBIDDEN,
             )
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         action = payload.get("action")
         if action not in {"turn_off", "turn_on"}:
             return self.json_message(

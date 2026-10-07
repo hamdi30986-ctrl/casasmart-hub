@@ -55,7 +55,7 @@ from .auth_api import (
     get_provision_secret,
     is_keyless_speaker_provisioning_enabled,
     is_lan_request,
-    json_body,
+    read_json_object,
 )
 from .const import DOMAIN, EVENT_AUDIO_CHANGED
 from .runtime_lookup import loaded_runtime_data
@@ -372,11 +372,9 @@ class CasaSmartAudioSpeakersView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             record = await self._hass.async_add_executor_job(
                 _enroll_job,
@@ -406,11 +404,9 @@ class CasaSmartAudioSpeakerView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             record = await self._hass.async_add_executor_job(
                 _update_job,
@@ -512,11 +508,9 @@ class CasaSmartAudioCommandView(_AudioView):
         adapter, adapter_not_ready = self._adapter_or_503()
         if adapter_not_ready is not None:
             return adapter_not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             _require_controllable(
                 mac6, _controllable_speakers(self._hass, audio, claims)
@@ -555,11 +549,9 @@ class CasaSmartAudioAirplayView(_AudioView):
         adapter, adapter_not_ready = self._adapter_or_503()
         if adapter_not_ready is not None:
             return adapter_not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             _require_controllable(
                 mac6, _controllable_speakers(self._hass, audio, claims)
@@ -596,11 +588,9 @@ class CasaSmartAudioBroadcastView(_AudioView):
         adapter, adapter_not_ready = self._adapter_or_503()
         if adapter_not_ready is not None:
             return adapter_not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             topic, message = audio.build_play(
                 url=payload.get("url"),
@@ -834,11 +824,9 @@ class CasaSmartAudioAthanView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         config = payload.get("athan", payload)
         try:
             stored = await self._hass.async_add_executor_job(audio.set_athan, config)
@@ -893,11 +881,9 @@ class CasaSmartAudioBrokerView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             broker = await self._hass.async_add_executor_job(
                 _set_broker_job, audio, payload
@@ -935,11 +921,9 @@ class CasaSmartAudioPaConfigView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             pa = await self._hass.async_add_executor_job(_set_pa_job, audio, payload)
         except AudioError as err:

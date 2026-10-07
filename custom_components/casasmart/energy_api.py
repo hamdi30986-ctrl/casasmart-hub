@@ -23,7 +23,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .auth_api import authenticate_request, json_body
+from .auth_api import authenticate_request, read_json_object
 from .auth_tokens import ROLE_ADMIN
 from .const import DOMAIN
 from .energy import (
@@ -428,11 +428,9 @@ class CasaSmartEnergyConfigView(_EnergyView):
         runtime, error = self._ready()
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         if "lockout_enabled" in payload and not isinstance(
             payload["lockout_enabled"], bool
         ):
@@ -488,11 +486,9 @@ class CasaSmartEnergyActivateView(_EnergyView):
         runtime, error = self._ready()
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         if "lockout_enabled" in payload and not isinstance(
             payload["lockout_enabled"], bool
         ):

@@ -28,7 +28,7 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
-from .auth_api import authenticate_request, json_body
+from .auth_api import authenticate_request, read_json_object
 from .const import DOMAIN, ZIGBEE_BASE_TOPICS_CONFIG_KEY
 from .installer import (
     ALLOWED_FLOW_HANDLERS,
@@ -108,11 +108,9 @@ class CasaSmartAdminPermitJoinView(_AdminView):
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             enable, duration = parse_permit_join(payload)
         except InstallerError as err:
@@ -229,11 +227,9 @@ class CasaSmartAdminEntityView(_AdminView):
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             changes = parse_entity_patch(payload)
         except InstallerError as err:
@@ -283,11 +279,9 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         handler = payload.get("handler")
         if not isinstance(handler, str) or handler not in ALLOWED_FLOW_HANDLERS:
             return self.json_message("Handler not allowed", HTTPStatus.BAD_REQUEST)
@@ -316,11 +310,9 @@ class CasaSmartAdminConfigFlowView(_AdminView):
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         flow_mgr = self._hass.config_entries.flow
         # Another integration's flow gets the same 404 as an unknown one.
         try:
@@ -350,11 +342,9 @@ class CasaSmartAdminRemoteCommandView(_AdminView):
         _, error = authenticate_request(self._hass, request, _PERMISSION)
         if error is not None:
             return error
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             entity_id, commands = parse_remote_command(payload)
         except InstallerError as err:

@@ -17,7 +17,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .auth_api import authenticate_request, get_engine, json_body
+from .auth_api import authenticate_request, get_engine, read_json_object
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .filtering import in_scope, is_served
 from .runtime_lookup import loaded_runtime_data
@@ -94,11 +94,9 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         settings = get_user_settings(self._hass)
         if settings is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         # Shape errors, a non-string type included, are left to the engine.
         tiles = payload.get("widget_tiles")
         if isinstance(tiles, list):

@@ -42,7 +42,7 @@ def load_api():
         "room_api_fixture.auth_api",
         authenticate_request=None,
         get_engine=None,
-        json_body=None,
+        read_json_object=None,
     )
     module("room_api_fixture.auth_engine", AuthEngine=object)
     module(
@@ -82,8 +82,12 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
         async def executor(job):
             return job()
 
-        async def body(request):
-            return request
+        async def body(view, request):
+            # The tests post the payload itself; like read_json_object, refuse
+            # anything but a dict.
+            if not isinstance(request, dict):
+                return None, view.json_message("Body must be a JSON object", 400)
+            return request, None
 
         def authenticate(hass, request, permission):
             self.permissions.append(permission)
@@ -101,7 +105,7 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
             member_id_for=lambda sub: "member"
         )
         self.api.authenticate_request = authenticate
-        self.api.json_body = body
+        self.api.read_json_object = body
         self.api.is_assignable = lambda hass, eid: eid in {"light.one", "cover.two"}
         self.api.ha_area_id_of = lambda hass, eid: None
         self.view = self.api.CasaSmartRoomMoveView(self.hass)
