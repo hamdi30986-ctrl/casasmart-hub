@@ -328,7 +328,7 @@ class CasaSmartAdminConfigFlowsView(_AdminView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
         handler = payload.get("handler")
-        if handler not in ALLOWED_FLOW_HANDLERS:
+        if not isinstance(handler, str) or handler not in ALLOWED_FLOW_HANDLERS:
             return self.json_message("Handler not allowed", HTTPStatus.BAD_REQUEST)
         try:
             result = await self._hass.config_entries.flow.async_init(
