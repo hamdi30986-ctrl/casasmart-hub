@@ -112,6 +112,11 @@ _ATHAN_MAX_SPEAKERS = 64
 # Live-mirror string fields (room/title/...) from the broker — capped so a
 # giant retained value can't bloat what the hub serves the app.
 _LIVE_STR_MAX = 128
+# Cap on live-mirror entries. Every speaker id heard on the bus gets one, and
+# every speaker shares one broker identity, so anything holding it could
+# otherwise grow the table without bound. Enrolled speakers always keep
+# their entry; un-enrolled ones are evicted stalest first.
+_LIVE_MAX = 256
 # Max length for a custom-icon key (an app icon-set key like ``speaker`` /
 # ``sonos``, not free text). Bounds a hostile payload without policing the
 # vocabulary — the app owns the icon-key set.
@@ -660,14 +665,17 @@ class AudioEngine:
 
         ``online`` is the raw broker payload — the agent publishes the strings
         ``"online"`` / ``"offline"``. Tolerant of bool too. Unknown/unenrolled
-        ids are still tracked (a speaker can announce before it is enrolled).
+        ids are still tracked (a speaker can announce before it is enrolled),
+        within the ``_LIVE_MAX`` cap.
         """
         mac6 = normalize_mac6(mac)
         is_online = online is True or (
             isinstance(online, str) and online.strip().lower() == "online"
         )
         with self._lock:
-            live = self._live.setdefault(mac6, {})
+            live = self._live_entry(mac6)
+            if live is None:
+                return
             live["online"] = is_online
             live["last_seen"] = self._clock()
 
@@ -683,7 +691,9 @@ class AudioEngine:
         if not isinstance(payload, dict):
             return
         with self._lock:
-            live = self._live.setdefault(mac6, {})
+            live = self._live_entry(mac6)
+            if live is None:
+                return
             live["online"] = True
             live["last_seen"] = self._clock()
             # Allowlist + type-check the broker's fields — a NaN/wrong-type blob
@@ -702,11 +712,34 @@ class AudioEngine:
         """
         mac6 = normalize_mac6(mac)
         with self._lock:
-            live = self._live.setdefault(mac6, {})
+            live = self._live_entry(mac6)
+            if live is None:
+                return
             live["online"] = True
             live["last_seen"] = self._clock()
             if isinstance(room, str) and room.strip():
                 live["room"] = room.strip()[:_LIVE_STR_MAX]
+
+    def _live_entry(self, mac6: str) -> dict[str, Any] | None:
+        """The live-mirror entry for ``mac6``, created if there is room.
+
+        At ``_LIVE_MAX`` entries a new id first evicts the stalest
+        un-enrolled entry. With none to evict, an enrolled speaker is still
+        admitted (the registry bounds those) and an unknown one is not
+        tracked (None). Caller holds the lock.
+        """
+        live = self._live.get(mac6)
+        if live is not None:
+            return live
+        if len(self._live) >= _LIVE_MAX:
+            unknown = [m for m in self._live if m not in self._speakers]
+            if unknown:
+                stalest = min(unknown, key=lambda m: self._live[m].get("last_seen", 0))
+                del self._live[stalest]
+            elif mac6 not in self._speakers:
+                return None
+        live = self._live[mac6] = {}
+        return live
 
     def discovered(
         self, *, ttl: float | None = _DISCOVERY_TTL_SECONDS

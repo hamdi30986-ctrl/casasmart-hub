@@ -8,11 +8,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
 )
 
+import audio as audio_module
 from audio import (
     CMD_RESET,
     CMD_STOP,
@@ -406,6 +408,51 @@ class DiscoveryTests(AudioTestCase):
         self.engine.ingest_announce("a1b2c3", "Work Room")  # re-seen at t=1500
         self.clock.advance(400)  # 400s since last seen, < TTL
         self.assertEqual([s["mac6"] for s in self.engine.discovered()], ["a1b2c3"])
+
+
+class LiveTableBoundTests(AudioTestCase):
+    """Every id heard on the bus gets a live entry, so the table is bounded.
+
+    All speakers share one broker identity, so anything holding it can
+    publish ``speakers/<any hex>/status``. Enrolled speakers always keep
+    their entry; un-enrolled ones are evicted stalest first.
+    """
+
+    def _flood(self, count, start=0):
+        for index in range(start, start + count):
+            self.clock.advance(1)
+            self.engine.ingest_status(f"{index:06x}", "online")
+
+    def test_a_flood_of_unknown_ids_is_capped(self):
+        self._flood(300)
+        seen = [s["mac6"] for s in self.engine.discovered(ttl=None)]
+        self.assertEqual(len(seen), 256)
+        # The stalest were evicted; the newest are kept.
+        self.assertNotIn(f"{0:06x}", seen)
+        self.assertIn(f"{299:06x}", seen)
+
+    def test_enrolled_speakers_survive_a_flood(self):
+        self.engine.enroll_speaker("a1b2c3", "Work Room")
+        self.engine.ingest_state("a1b2c3", {"volume": 30})
+        self._flood(300)
+        self.assertEqual(self.engine.live_status("a1b2c3")["volume"], 30)
+        self.assertTrue(self.engine.live_status("a1b2c3")["online"])
+
+    def test_unknown_ids_go_before_enrolled_ones(self):
+        with mock.patch.object(audio_module, "_LIVE_MAX", 3):
+            self.engine.enroll_speaker("a1b2c3", "One")
+            self.engine.enroll_speaker("d4e5f6", "Two")
+            for mac6 in ("a1b2c3", "d4e5f6"):
+                self.engine.ingest_status(mac6, "online")
+            self._flood(5)  # only one unknown fits, the newest
+            self.assertEqual(
+                [s["mac6"] for s in self.engine.discovered(ttl=None)], [f"{4:06x}"]
+            )
+            # A full table of enrolled speakers still admits an enrolled one.
+            self.engine.enroll_speaker("abcdef", "Three")
+            self.engine.ingest_status("abcdef", "online")
+            self.assertTrue(self.engine.live_status("abcdef")["online"])
+            self.assertTrue(self.engine.live_status("a1b2c3")["online"])
 
 
 class CommandTests(AudioTestCase):
