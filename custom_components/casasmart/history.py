@@ -1,10 +1,10 @@
 """History query contract: parse + serialize, no HA imports.
 
-The history endpoint replaces the app's raw-token ``GET
-/api/history/period/<ts>`` call (energy screen's weekly sampling). This
-module is the pure half — query-string validation and point
-serialization — kept HA-import-free so the unit tests exercise every
-rejection branch without an HA install, same split as ``entity_bridge``.
+The history endpoint gives the app recorder history (its energy screens)
+without a Home Assistant token. This module is the pure half — query-string
+validation and point serialization — kept HA-import-free so the unit tests
+exercise every rejection branch without an HA install, same split as
+``entity_bridge``.
 
 The recorder call itself lives in the view (``api.py``): it needs the
 running recorder instance and the executor, neither of which belongs in
@@ -17,10 +17,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-# Hard caps — the recorder query runs on the hub's SQLite; an unbounded
-# range or entity list is a self-inflicted DoS, not a feature. The app's
-# real consumer (weekly energy sampling) asks for ~1h windows over a
-# handful of sensors, so these are generous.
+# Hard caps — the recorder query runs on Home Assistant's own database; an
+# unbounded range or entity list is a self-inflicted DoS, not a feature. The
+# app's energy screens ask for a handful of sensors at a time.
 MAX_HISTORY_ENTITIES = 50
 MAX_HISTORY_RANGE = timedelta(days=35)
 
@@ -97,10 +96,10 @@ def parse_history_query(
 def serialize_history_point(point: Any) -> dict[str, str] | None:
     """One recorder row → ``{"state", "last_changed"}`` wire dict.
 
-    The recorder's ``minimal_response`` mode returns a full ``State``
-    object for each entity's first row and bare dicts after it (its
-    documented shape) — normalize both. Rows that can't yield a state
-    string and a timestamp are dropped, never half-serialized.
+    Accepts a State-like object (what the view's full-row query returns)
+    or a plain mapping (the shape of HA's minimal rows), so the serializer
+    does not depend on the query mode. Rows that can't yield a state string
+    and a timestamp are dropped, never half-serialized.
     """
     if isinstance(point, Mapping):
         state = point.get("state")
