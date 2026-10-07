@@ -1301,5 +1301,63 @@ class PaUploadBody(AudioViewTestCase):
         )
 
 
+class _OfflinePaho:
+    """A paho client that is running but can't reach its broker."""
+
+    def __init__(self, client_id) -> None:
+        self.published: list = []
+
+    def __getattr__(self, name):  # username_pw_set, connect_async, loop_start...
+        return lambda *args, **kwargs: None
+
+    def is_connected(self) -> bool:
+        return False
+
+    def publish(self, topic, payload=None, qos=0, retain=False):
+        self.published.append(topic)
+
+
+class BrokerUnreachable(AudioViewTestCase):
+    """With the broker down, control fails fast with a 503 instead of queueing."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        from casasmart.audio_adapter import AudioAdapter
+
+        self.rt.audio.enroll_speaker("aabbccddeeff", "Kitchen")
+        self.rt.audio.set_broker(host="broker.local")
+        clients = []
+        self.adapter = AudioAdapter(
+            self.hass,
+            self.rt.audio,
+            client_factory=lambda cid: clients.append(_OfflinePaho(cid)) or clients[-1],
+        )
+        await self.adapter.async_start()
+        self.client = clients[0]
+        patcher = mock.patch(
+            "casasmart.audio_api.get_audio_adapter", lambda hass: self.adapter
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_command_broadcast_and_pa_answer_503(self) -> None:
+        calls = {
+            "command": CasaSmartAudioCommandView(self.hass).post(
+                H.FakeRequest(headers=self._admin(), body={"cmd": "stop"}),
+                mac6="ddeeff",
+            ),
+            "broadcast": CasaSmartAudioBroadcastView(self.hass).post(
+                H.FakeRequest(headers=self._admin(), body={"url": "http://x/a.mp3"})
+            ),
+            "pa": CasaSmartAudioPaView(self.hass).post(_PaRequest(self._admin())),
+        }
+        for name, call in calls.items():
+            with self.subTest(endpoint=name):
+                status, body = H.read_response(await call)
+                self.assertEqual(status, 503)
+                self.assertIn("broker", body["message"])
+        self.assertEqual(self.client.published, [])
+
+
 if __name__ == "__main__":
     unittest.main()

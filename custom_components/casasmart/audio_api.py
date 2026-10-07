@@ -378,7 +378,7 @@ class _AudioView(HomeAssistantView):
     def _publish_or_503(
         self, adapter: AudioAdapter, topic: str, payload: Any, *, retain: bool = False
     ) -> web.Response | None:
-        """Publish through the adapter; a client that isn't running is a 503."""
+        """Publish through the adapter; a bus that is down is a 503."""
         try:
             adapter.publish(topic, payload, qos=1, retain=retain)
         except AudioAdapterNotReady as err:
@@ -959,10 +959,10 @@ class CasaSmartAudioAthanView(_AudioView):
             stored = await self._hass.async_add_executor_job(audio.set_athan, config)
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-        # Publish retained for other listeners on athan/config. A client that
-        # isn't running is non-fatal: the config is saved, the adapter
-        # re-publishes it on its next connect, and ``relayed`` tells the app it
-        # hasn't gone out yet.
+        # Publish retained for other listeners on athan/config. A bus that is
+        # down is non-fatal: the config is saved, the adapter re-publishes it
+        # on its next connect, and ``relayed`` tells the app it hasn't gone out
+        # yet.
         adapter = get_audio_adapter(self._hass)
         relayed = False
         if adapter is not None:

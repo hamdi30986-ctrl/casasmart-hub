@@ -87,6 +87,7 @@ class _FakePaho:
         self.password = None
         self.tls = False
         self.connected_to = None
+        self.connected = False  # the broker link, as is_connected() reports it
         self.loop_started = False
         self.loop_stopped = False
         self.disconnected = False
@@ -123,9 +124,17 @@ class _FakePaho:
     def publish(self, topic, payload=None, qos=0, retain=False):
         self.published.append((topic, payload, qos, retain))
 
+    def is_connected(self):
+        return self.connected
+
     # -- test drivers ----------------------------------------------------------
     def fire_connect(self, rc=0):
+        self.connected = rc == 0
         self.on_connect(self, None, None, rc)
+
+    def fire_disconnect(self, rc=1):
+        self.connected = False
+        self.on_disconnect(self, None, rc)
 
     def fire_message(self, topic, payload):
         msg = types.SimpleNamespace(topic=topic, payload=payload)
@@ -266,8 +275,10 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
     # -- ingest paths ----------------------------------------------------------
 
     async def _started(self):
+        """Start the adapter and let its client reach the broker."""
         self.engine.set_broker(host="h", port=1883)
         await self.adapter.async_start()
+        self.client.fire_connect()
 
     async def test_announce_makes_speaker_discoverable(self):
         await self._started()
@@ -331,6 +342,46 @@ class AudioAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         topic, body, _qos, retain = self.client.published[-1]
         self.assertEqual(body, "raw")
         self.assertTrue(retain)
+
+    async def test_publish_fails_fast_while_the_broker_is_unreachable(self):
+        # A running client whose broker link is down must refuse the publish
+        # (the API answers 503) rather than let paho queue it for whenever the
+        # broker comes back: a late "play" or volume change is worse than none.
+        self.engine.set_broker(host="h", port=1883)
+        await self.adapter.async_start()  # running, not yet connected
+        for phase in ("before the first connect", "after a drop"):
+            with self.subTest(phase=phase):
+                sent = len(self.client.published)
+                with self.assertRaises(AudioAdapterNotReady) as caught:
+                    self.adapter.publish("speakers/a1b2c3/command", {"cmd": "stop"})
+                self.assertIn("broker", str(caught.exception))
+                with self.assertRaises(AudioAdapterNotReady):
+                    self.adapter.clear_speaker_retained("a1b2c3")
+                self.assertEqual(len(self.client.published), sent)
+                self.client.fire_connect()
+                self.client.fire_disconnect()
+        self.client.fire_connect()
+        self.adapter.publish("speakers/a1b2c3/command", {"cmd": "stop"})
+        self.assertEqual(self.client.published[-1][0], "speakers/a1b2c3/command")
+
+    async def test_athan_is_skipped_not_queued_while_disconnected(self):
+        # The scheduler logs and skips a prayer it can't deliver, so the
+        # speakers never play it late once the broker returns.
+        from casasmart.athan_scheduler import AthanScheduler
+
+        self.engine.set_athan(
+            {"enabled": True, "lat": 24.7, "lon": 46.7, "timezone": "Asia/Riyadh"}
+        )
+        self.engine.set_broker(host="h", port=1883)
+        await self.adapter.async_start()
+        self.client.fire_connect()
+        self.client.fire_disconnect()
+        sent = len(self.client.published)
+        scheduler = AthanScheduler(self.hass, self.engine, self.adapter)
+        with self.assertLogs("casasmart.athan_scheduler", level="WARNING") as logs:
+            scheduler._fire_athan("Dhuhr")
+        self.assertEqual(len(self.client.published), sent)
+        self.assertTrue(any("not delivered" in line for line in logs.output))
 
     async def test_discover_pings_and_returns_unenrolled(self):
         await self._started()

@@ -337,7 +337,11 @@ class AthanScheduler:
         return _fire
 
     def _fire_athan(self, prayer: str) -> None:
-        """Publish the athan play for ``prayer`` to its target speakers."""
+        """Publish the athan play for ``prayer`` to its target speakers.
+
+        A speaker the bus can't reach right now is logged and skipped: the
+        adapter refuses rather than queues, so an athan never plays late.
+        """
         # Re-check at fire time: the config may have been disabled since arming.
         if self._resolve_config() is None:
             _LOGGER.info(
