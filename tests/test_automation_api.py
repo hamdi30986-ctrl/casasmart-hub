@@ -151,6 +151,53 @@ class SharedMutationLockTests(unittest.IsolatedAsyncioTestCase):
             {"casa_automation_a": "Alpha edited", "casa_automation_d": "Delta"},
         )
 
+    # Home Assistant's file helpers report failures as HomeAssistantError
+    # (WriteError for a write, a plain HomeAssistantError for unparsable YAML),
+    # never as OSError. Each must still get the hub's JSON 500 and leave the
+    # file as it was.
+
+    async def test_failed_write_is_a_json_500(self) -> None:
+        from homeassistant.util.file import WriteError
+
+        def refuse(path, contents):
+            raise WriteError(PermissionError(13, "Permission denied"))
+
+        view = self._view()
+        with mock.patch.object(automation_api, "write_utf8_file_atomic", refuse):
+            for response in (
+                await view.post(
+                    H.FakeRequest(body=_config("Delta")),
+                    config_key="casa_automation_d",
+                ),
+                await view.delete(H.FakeRequest(), config_key="casa_automation_a"),
+            ):
+                status, body = H.read_response(response)
+                self.assertEqual(status, 500)
+                self.assertEqual(body["message"], "Failed to persist automation")
+        self.assertEqual(
+            sorted(self._stored()),
+            ["casa_automation_a", "casa_automation_b", "casa_automation_c"],
+        )
+
+    async def test_unparsable_file_is_a_json_500_and_is_not_rewritten(self) -> None:
+        broken = "- id: casa_automation_a\n  alias: [unclosed\n"
+        with open(self.path, "w", encoding="utf-8") as file:
+            file.write(broken)
+
+        view = self._view()
+        for response in (
+            await view.get(H.FakeRequest(), config_key="casa_automation_a"),
+            await view.post(
+                H.FakeRequest(body=_config("Delta")), config_key="casa_automation_d"
+            ),
+            await view.delete(H.FakeRequest(), config_key="casa_automation_a"),
+        ):
+            status, body = H.read_response(response)
+            self.assertEqual(status, 500)
+            self.assertIn("automations.yaml unusable", body["message"])
+        with open(self.path, encoding="utf-8") as file:
+            self.assertEqual(file.read(), broken)
+
 
 if __name__ == "__main__":
     unittest.main()
