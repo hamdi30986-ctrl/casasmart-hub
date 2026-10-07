@@ -536,11 +536,11 @@ class AuthEngine:
     def device_version(self, device_id: str) -> int | None:
         """The device's auth version, or None when it isn't enrolled.
 
-        An in-memory read, safe on the event loop. Every edit bumps it.
+        An in-memory read that doesn't wait on writers, so it is safe on the
+        event loop. Every edit bumps it.
         """
-        with self._lock:
-            cached = self._device_cache.get(device_id)
-            return cached["ver"] if cached else None
+        cached = self._device_cache.get(device_id)
+        return cached["ver"] if cached else None
 
     def device_for_token(self, token: str) -> dict[str, Any] | None:
         """Public info for the token's device if it is still enrolled, else None.
