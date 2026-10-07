@@ -129,6 +129,27 @@ def _canonical_key(public_key_pem: Any) -> str:
         raise EnrollError(str(err)) from err
 
 
+def _member_of(device_id: str, record: dict[str, Any]) -> str:
+    """The device's member id; a record without one is its own member."""
+    return record.get("member_id") or device_id
+
+
+def _public_device(
+    device_id: str, record: dict[str, Any], last_seen: float | None
+) -> dict[str, Any]:
+    """A device record's public fields (no key), as the users list shows them."""
+    return {
+        "device_id": device_id,
+        "name": record.get("name"),
+        "role": record.get("role"),
+        "rooms": record.get("rooms"),
+        "paired_at": int(record.get("paired_at", 0)),
+        "enrolled_via": record.get("enrolled_via"),
+        "member_id": _member_of(device_id, record),
+        "last_seen": last_seen,
+    }
+
+
 def _valid_rooms(rooms: Any) -> bool:
     """True for None (all rooms) or a list of non-empty area ids."""
     return rooms is None or (
@@ -340,7 +361,7 @@ class AuthEngine:
                 raise EnrollError("This hub has no admin to recover")
 
             old_record = self._devices.get(old_admin_id) or {}
-            member_id = old_record.get("member_id") or old_admin_id
+            member_id = _member_of(old_admin_id, old_record)
             del self._devices[old_admin_id]
             self._device_cache.pop(old_admin_id, None)
             self.throttle.clear(old_admin_id)
@@ -391,16 +412,7 @@ class AuthEngine:
                 for device_id, entry in self._device_cache.items()
             }
         return [
-            {
-                "device_id": device_id,
-                "name": record.get("name"),
-                "role": record.get("role"),
-                "rooms": record.get("rooms"),
-                "paired_at": int(record.get("paired_at", 0)),
-                "enrolled_via": record.get("enrolled_via"),
-                "member_id": record.get("member_id") or device_id,
-                "last_seen": last_seen.get(device_id),
-            }
+            _public_device(device_id, record, last_seen.get(device_id))
             for device_id, record in self._devices.items()
         ]
 
@@ -412,16 +424,7 @@ class AuthEngine:
         with self._lock:
             cached = self._device_cache.get(device_id, {})
             last_seen = cached.get("last_seen")
-        return {
-            "device_id": device_id,
-            "name": record.get("name"),
-            "role": record.get("role"),
-            "rooms": record.get("rooms"),
-            "paired_at": int(record.get("paired_at", 0)),
-            "enrolled_via": record.get("enrolled_via"),
-            "member_id": record.get("member_id") or device_id,
-            "last_seen": last_seen,
-        }
+        return _public_device(device_id, record, last_seen)
 
     def device_for_public_key(self, public_key_pem: str) -> dict[str, Any] | None:
         """The enrolled device with this public key, or None.
@@ -456,7 +459,7 @@ class AuthEngine:
         record = self._devices.get(device_id)
         if record is None:
             return device_id
-        return record.get("member_id") or device_id
+        return _member_of(device_id, record)
 
     def member_device_count(self, member_id: str) -> int:
         """How many enrolled devices belong to member_id.
@@ -466,7 +469,7 @@ class AuthEngine:
         return sum(
             1
             for device_id, record in self._devices.items()
-            if (record.get("member_id") or device_id) == member_id
+            if _member_of(device_id, record) == member_id
         )
 
     def list_members(self) -> list[dict[str, Any]]:
@@ -476,7 +479,7 @@ class AuthEngine:
         """
         members: dict[str, dict[str, Any]] = {}
         for device_id, record in self._devices.items():
-            mid = record.get("member_id") or device_id
+            mid = _member_of(device_id, record)
             paired_at = int(record.get("paired_at", 0))
             entry = members.get(mid)
             if entry is None:
@@ -586,7 +589,7 @@ class AuthEngine:
                 raise UnknownDeviceError("Unknown device")
             if record.get("role") == ROLE_ADMIN:
                 raise UserManagementError("The admin account cannot be unpaired")
-            member_id = record.get("member_id") or device_id
+            member_id = _member_of(device_id, record)
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
             # A re-paired phone shouldn't inherit an old lockout.
@@ -607,7 +610,7 @@ class AuthEngine:
             record = self._devices.get(device_id)
             if record is None:
                 raise UnknownDeviceError("Unknown device")
-            member_id = record.get("member_id") or device_id
+            member_id = _member_of(device_id, record)
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
             self.throttle.clear(device_id)
