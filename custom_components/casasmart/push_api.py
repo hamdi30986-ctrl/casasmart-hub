@@ -38,20 +38,23 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-
-def _get_push_store(hass: HomeAssistant):
-    """Return the PushTokenStore from runtime data, or None."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.push
+# Per-address limit on HQ requests. Idle addresses are forgotten once more than
+# _HQ_RATE_MAX_PEERS are tracked.
+_HQ_RATE_LIMIT = 30
+_HQ_RATE_WINDOW_SECONDS = 60
+_HQ_RATE_MAX_PEERS = 512
 
 
-def _get_runtime_data(hass: HomeAssistant):
+def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
     """The loaded entry's runtime data, or None while the hub isn't set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
+
+
+def _get_push_store(hass: HomeAssistant):
+    """The push-token store, or None while the hub isn't set up."""
+    runtime = _get_runtime_data(hass)
+    return runtime.push if runtime is not None else None
 
 
 def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
@@ -185,20 +188,18 @@ class CasaSmartHqNotificationView(HomeAssistantView):
         self._attempts: dict[str, deque[float]] = defaultdict(deque)
 
     def _rate_limited(self, peer: str) -> bool:
-        """True once peer has sent 30 requests in the last minute.
-
-        Idle addresses are dropped once more than 512 are tracked.
-        """
+        """True once peer has used up its requests for the current window."""
         now = time.monotonic()
+        window_start = now - _HQ_RATE_WINDOW_SECONDS
         attempts = self._attempts[peer]
-        while attempts and attempts[0] <= now - 60:
+        while attempts and attempts[0] <= window_start:
             attempts.popleft()
-        if len(attempts) >= 30:
+        if len(attempts) >= _HQ_RATE_LIMIT:
             return True
         attempts.append(now)
-        if len(self._attempts) > 512:
+        if len(self._attempts) > _HQ_RATE_MAX_PEERS:
             for key in list(self._attempts):
-                if not self._attempts[key] or self._attempts[key][-1] <= now - 60:
+                if not self._attempts[key] or self._attempts[key][-1] <= window_start:
                     self._attempts.pop(key, None)
         return False
 
