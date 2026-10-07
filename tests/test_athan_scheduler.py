@@ -68,8 +68,11 @@ class _Engine:
 class _Adapter:
     def __init__(self):
         self.published = []
+        self.down = False  # the broker link, as the real adapter refuses
 
     def publish(self, topic, payload, qos=1):
+        if self.down:
+            raise RuntimeError("Speaker bus unavailable")
         self.published.append((topic, payload))
 
 
@@ -335,6 +338,79 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.IsolatedAsyncioTestCase
             [times["Asr"], times["Maghrib"], times["Isha"]],
         )
         self.assertEqual(s.schedule_snapshot()["next"]["name"], "Asr")
+
+    def _scheduler_with(self, times, adapter):
+        A.compute_prayer_times_utc = lambda *args: dict(times)
+        return A.AthanScheduler(
+            _Hass(),
+            _Engine(
+                {
+                    "enabled": True,
+                    "lat": 24.7136,
+                    "lon": 46.6753,
+                    "timezone": "Asia/Riyadh",
+                    "method": "makkah",
+                }
+            ),
+            adapter,
+        )
+
+    async def test_a_broker_blip_at_prayer_time_is_retried_within_the_grace(self):
+        # The prayer counts as played only once its play is published. While
+        # the bus refuses, the timer retries every _RETRY_SEC inside the grace
+        # window, and the prayer never plays twice.
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append((action, when)) or (lambda: None)
+        )
+        now = datetime.datetime.now(datetime.UTC)
+        times = {"Dhuhr": now - timedelta(seconds=5), "Asr": now + timedelta(hours=3)}
+        adapter = _Adapter()
+        s = self._scheduler_with(times, adapter)
+        await s.async_reschedule()
+        (dhuhr,) = [action for action, when in armed if when == times["Dhuhr"]]
+
+        armed.clear()
+        adapter.down = True
+        with self.assertLogs("casasmart.athan_scheduler", level="WARNING"):
+            dhuhr(now)
+        self.assertEqual(adapter.published, [])
+        (retry, retry_at) = armed[0]
+        self.assertAlmostEqual((retry_at - now).total_seconds(), A._RETRY_SEC, delta=2)
+        # Not marked played: a reschedule arms it again.
+        armed.clear()
+        await s.async_reschedule()
+        self.assertIn(times["Dhuhr"], [when for _, when in armed])
+
+        adapter.down = False
+        retry(retry_at)
+        self.assertEqual(len(adapter.published), 1)
+        retry(retry_at)  # a stray second timer can't replay it
+        dhuhr(now)
+        self.assertEqual(len(adapter.published), 1)
+        armed.clear()
+        await s.async_reschedule()
+        self.assertEqual([when for _, when in armed], [times["Asr"]])
+
+    async def test_the_retry_gives_up_when_the_grace_ends(self):
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append((action, when)) or (lambda: None)
+        )
+        now = datetime.datetime.now(datetime.UTC)
+        # Still inside the grace, but the next retry would land past it.
+        times = {"Dhuhr": now - timedelta(seconds=A._GRACE_SEC - 3)}
+        adapter = _Adapter()
+        adapter.down = True
+        s = self._scheduler_with(times, adapter)
+        await s.async_reschedule()
+        (dhuhr,) = [action for action, when in armed if when == times["Dhuhr"]]
+        armed.clear()
+        with self.assertLogs("casasmart.athan_scheduler", level="WARNING") as logs:
+            dhuhr(now)
+        self.assertEqual(adapter.published, [])
+        self.assertEqual(armed, [])
+        self.assertTrue(any("giving up" in line for line in logs.output))
 
     async def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
         # zoneinfo raises ValueError, not "not found", for keys like these. The
