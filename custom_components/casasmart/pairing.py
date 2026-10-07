@@ -117,6 +117,18 @@ def _code_class(code_id: str, record: dict[str, Any]) -> str:
     return CODE_CLASS_MEMBER
 
 
+def _bootstrap_record(code_hash: str) -> dict[str, Any]:
+    """The stored bootstrap code: grants admin, redeemable until an admin exists."""
+    return {
+        "code_hash": code_hash,
+        "role": ROLE_ADMIN,
+        "rooms": None,
+        "created_at": time.time(),
+        "expires_at": None,
+        "code_class": CODE_CLASS_BOOTSTRAP,
+    }
+
+
 def _throttle_key(source_key: str, remote_source: bool) -> str:
     """Redeem throttle key: the source, prefixed by its network class."""
     purpose = THROTTLE_PURPOSE_REMOTE if remote_source else THROTTLE_PURPOSE_LAN
@@ -263,11 +275,7 @@ class PairingManager:
         Otherwise raises CodeInvalidError, throttled like redeem.
         """
         throttle_key = _throttle_key(source_key, remote_source)
-        self.throttle.check(throttle_key)
-        if not isinstance(code, str) or not code.strip():
-            self.throttle.record_failure(throttle_key)
-            raise CodeInvalidError("Invalid pairing code")
-        code_hash = hash_code(code)
+        code_hash = self._hash_attempt(code, throttle_key)
 
         with self._lock:
             self._purge_expired()
@@ -299,11 +307,7 @@ class PairingManager:
         separate throttle buckets, so neither can lock out the other.
         """
         throttle_key = _throttle_key(source_key, remote_source)
-        self.throttle.check(throttle_key)
-        if not isinstance(code, str) or not code.strip():
-            self.throttle.record_failure(throttle_key)
-            raise CodeInvalidError("Invalid pairing code")
-        code_hash = hash_code(code)
+        code_hash = self._hash_attempt(code, throttle_key)
 
         with self._lock:
             self._purge_expired()
@@ -349,6 +353,17 @@ class PairingManager:
             "code_class": code_class,
         }
 
+    def _hash_attempt(self, code: str, throttle_key: str) -> str:
+        """Hash a submitted code; an empty one counts as a failed attempt.
+
+        Raises ThrottledError while throttle_key is locked out.
+        """
+        self.throttle.check(throttle_key)
+        if not isinstance(code, str) or not code.strip():
+            self.throttle.record_failure(throttle_key)
+            raise CodeInvalidError("Invalid pairing code")
+        return hash_code(code)
+
     # -- bootstrap ---------------------------------------------------------------
 
     def ensure_bootstrap_code(self) -> str | None:
@@ -365,14 +380,7 @@ class PairingManager:
             if BOOTSTRAP_CODE_ID in self._codes:
                 return None
             code = _new_code()
-            self._codes[BOOTSTRAP_CODE_ID] = {
-                "code_hash": hash_code(code),
-                "role": ROLE_ADMIN,
-                "rooms": None,
-                "created_at": time.time(),
-                "expires_at": None,  # redeemable until an admin exists
-                "code_class": CODE_CLASS_BOOTSTRAP,
-            }
+            self._codes[BOOTSTRAP_CODE_ID] = _bootstrap_record(hash_code(code))
         _LOGGER.info("Bootstrap admin pairing code generated")
         return code
 
@@ -388,14 +396,7 @@ class PairingManager:
                 if BOOTSTRAP_CODE_ID in self._codes:
                     del self._codes[BOOTSTRAP_CODE_ID]
                 return
-            self._codes[BOOTSTRAP_CODE_ID] = {
-                "code_hash": code_hash,
-                "role": ROLE_ADMIN,
-                "rooms": None,
-                "created_at": time.time(),
-                "expires_at": None,  # redeemable until an admin exists
-                "code_class": CODE_CLASS_BOOTSTRAP,
-            }
+            self._codes[BOOTSTRAP_CODE_ID] = _bootstrap_record(code_hash)
 
     # -- housekeeping --------------------------------------------------------------
 
