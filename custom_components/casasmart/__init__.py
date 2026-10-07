@@ -412,8 +412,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     Storage and the engines come first. The TLS listener starts before mDNS
     and push, which both need its identity fingerprint. Optional parts (the
     TLS port, mDNS, push, the tunnel) log their failures and the rest of the
-    hub keeps running; only storage that won't open (retried by Home
-    Assistant) or a corrupt identity key (which needs a person) stops setup.
+    hub keeps running. Storage that won't open is retried by Home Assistant;
+    a corrupt identity key stops setup until a person fixes it.
     """
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
 
@@ -1373,8 +1373,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _handle_configure_hq_notifications(call) -> None:
         """Trust one HQ signing key and optional sender name (HA admins only).
 
-        Each call replaces the whole trust and clears the stored HQ
-        notifications, so nothing signed under an earlier key lingers.
+        Each call replaces the whole trust and clears the HQ ingress state
+        kept under the previous key (replay nonces and the receipt log).
         """
         user_id = call.context.user_id
         user = await hass.auth.async_get_user(user_id) if user_id else None
