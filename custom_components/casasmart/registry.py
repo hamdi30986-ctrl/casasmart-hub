@@ -182,7 +182,10 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(key, str) or not isinstance(gang, dict):
             raise RegistryError("gangs entries must be {entity_id: {...}}")
         presentation = gang.get("presentation", "grouped")
-        if presentation not in _VALID_GANG_PRESENTATIONS:
+        if (
+            not isinstance(presentation, str)
+            or presentation not in _VALID_GANG_PRESENTATIONS
+        ):
             raise RegistryError("gang presentation must be grouped, solo or hidden")
         gtype = gang.get("type")
         clean_type = "switch" if gtype is None else _clean_gang_type(gtype)
@@ -1193,7 +1196,10 @@ class RegistryEngine:
         operation is a validated assignment of the single presentation field."""
 
         def mutate(gang: dict[str, Any]) -> None:
-            if presentation not in _VALID_GANG_PRESENTATIONS:
+            if (
+                not isinstance(presentation, str)
+                or presentation not in _VALID_GANG_PRESENTATIONS
+            ):
                 raise RegistryError("gang presentation must be grouped, solo or hidden")
             gang["presentation"] = presentation
 

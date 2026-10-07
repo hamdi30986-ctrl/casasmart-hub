@@ -210,6 +210,20 @@ class GangCommandsPhase3Tests(unittest.TestCase):
             self.engine.set_gang_presentation("grp", "switch.a", "bogus")
         self.assertEqual(self._pres("switch.a"), "grouped")  # unchanged
 
+    def test_non_string_presentation_is_a_registry_error(self):
+        # A JSON list/object is unhashable: the set membership test must not
+        # surface it as a TypeError (a 500), on either write path.
+        for value in (["solo"], {"v": "solo"}):
+            with self.assertRaises(RegistryError):
+                self.engine.set_gang_presentation("grp", "switch.a", value)
+            with self.assertRaises(RegistryError):
+                self.engine.upsert_user_device(
+                    "x",
+                    entity_ids=["switch.x"],
+                    gangs={"switch.x": {"presentation": value}},
+                )
+        self.assertEqual(self._pres("switch.a"), "grouped")  # unchanged
+
     def test_set_gang_type_known_accepted_unknown_rejected(self):
         served = self.engine.set_gang_type("grp", "switch.a", "heater")
         self.assertEqual(served["gangs"]["switch.a"]["type"], "heater")
