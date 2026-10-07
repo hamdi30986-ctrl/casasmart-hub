@@ -499,6 +499,15 @@ class CasaSmartEnrollView(HomeAssistantView):
                 )
             return self.json(existing, HTTPStatus.CREATED)
 
+        # Refuse a malformed name or key BEFORE redeeming: redeem consumes the
+        # code, and a burnt sticker code stays gone until the next restart.
+        try:
+            engine.check_enrollment(
+                payload.get("name", ""), payload.get("public_key", "")
+            )
+        except EnrollError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
         source = request.remote or "unknown"
         try:
             grant = await self._hass.async_add_executor_job(
@@ -543,9 +552,9 @@ class CasaSmartEnrollView(HomeAssistantView):
                 )
             )
         except EnrollError as err:
-            # The code was already consumed (single-use is non-negotiable), so
-            # a bad name or key costs it: the admin can mint another, and the
-            # owner's sticker code is reinstalled at the next restart.
+            # Name and key were checked before redeeming, so this is rare (the
+            # single-admin rule losing a race). The code is spent either way:
+            # single-use is non-negotiable.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         if grant["role"] == ROLE_ADMIN:
