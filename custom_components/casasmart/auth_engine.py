@@ -338,11 +338,11 @@ class AuthEngine:
         """Swap the hub's admin for a new device (owner recovery); return its id.
 
         The caller has proven ownership with the recovery code. Inputs are
-        checked before the old admin is touched, so a bad key can't leave the
-        hub without an admin; the old admin's tokens die with its cache entry.
-        The new device keeps the old admin's member id, so the owner's
-        favorites and settings carry over (no other device can join the
-        admin's member).
+        checked first and the swap is one transaction, so neither a bad key
+        nor a failed write can leave the hub without an admin; the old
+        admin's tokens die with its cache entry. The new device keeps the old
+        admin's member id, so the owner's favorites and settings carry over
+        (no other device can join the admin's member).
         """
         _require_name(name)
         canonical_pem = _canonical_key(public_key_pem)
@@ -362,22 +362,22 @@ class AuthEngine:
 
             old_record = self._devices.get(old_admin_id) or {}
             member_id = _member_of(old_admin_id, old_record)
-            del self._devices[old_admin_id]
+            device_id = f"dev-{secrets.token_urlsafe(12)}"
+            with self._devices.transaction():
+                del self._devices[old_admin_id]
+                self._devices[device_id] = {
+                    "name": name.strip(),
+                    "role": ROLE_ADMIN,
+                    "public_key": canonical_pem,
+                    "rooms": None,
+                    "ver": 1,
+                    "paired_at": time.time(),
+                    # No pairing code was redeemed; kept for the enroll record shape.
+                    "enrolled_via": None,
+                    "member_id": member_id,
+                }
             self._device_cache.pop(old_admin_id, None)
             self.throttle.clear(old_admin_id)
-
-            device_id = f"dev-{secrets.token_urlsafe(12)}"
-            self._devices[device_id] = {
-                "name": name.strip(),
-                "role": ROLE_ADMIN,
-                "public_key": canonical_pem,
-                "rooms": None,
-                "ver": 1,
-                "paired_at": time.time(),
-                # No pairing code was redeemed; kept for the enroll record shape.
-                "enrolled_via": None,
-                "member_id": member_id,
-            }
             self._device_cache[device_id] = {
                 "role": ROLE_ADMIN,
                 "rooms": None,

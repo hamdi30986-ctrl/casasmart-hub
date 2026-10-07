@@ -272,6 +272,10 @@ class KeyValueTable(MutableMapping):
 
     # -- extras ----------------------------------------------------------------
 
+    def transaction(self):
+        """The storage's transaction(), for writes that must land together."""
+        return self._storage.transaction()
+
     def clear(self) -> None:
         """Delete every key in this namespace in one statement."""
         self._storage._execute_write(

@@ -2,11 +2,14 @@
 
 A ConfigError (say, a read-only data directory) must reach Home Assistant as
 a HomeAssistantError: the caller sees the reason, and the log no traceback.
+A factory reset that fails part-way leaves no hub that is half wiped, or
+wiped with live caches.
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import types
@@ -31,7 +34,7 @@ try:
 
     _async_register_services = H.import_integration()._async_register_services
     from casasmart.const import DOMAIN
-    from casasmart.storage import JsonConfigStore, config_store
+    from casasmart.storage import JsonConfigStore, config_store, store
 
     _ERR = None
 except Exception as err:
@@ -75,6 +78,7 @@ class HubConfigSaveFailureTests(unittest.IsolatedAsyncioTestCase):
         self.hass.auth = types.SimpleNamespace(
             async_get_user=self._admin_user,
         )
+        self.hass.config_entries.async_reload = mock.AsyncMock()
         _async_register_services(self.hass)
 
     @staticmethod
@@ -109,6 +113,32 @@ class HubConfigSaveFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_factory_reset(self) -> None:
         with self._saves_fail(), self.assertRaises(HomeAssistantError):
             await self._call("factory_reset")
+        self.assertEqual(self.rt.hub_config.as_dict(), self.before)
+        # The tables were wiped before the save failed, so the in-memory
+        # caches must be rebuilt from them.
+        self.hass.config_entries.async_reload.assert_awaited_once()
+
+    async def test_factory_reset_wipes_all_tables_or_none(self) -> None:
+        owner = H.enroll(self.rt.auth, role="admin")
+        self.rt.storage.table("user_settings")["member"] = {"theme": "dark"}
+        real_clear = store.KeyValueTable.clear
+        cleared = []
+
+        def _fifth_clear_fails(table) -> None:
+            cleared.append(table)
+            if len(cleared) == 5:
+                raise sqlite3.OperationalError("disk I/O error")
+            real_clear(table)
+
+        with (
+            mock.patch.object(store.KeyValueTable, "clear", _fifth_clear_fails),
+            self.assertRaises(HomeAssistantError),
+        ):
+            await self._call("factory_reset")
+        self.assertIsNotNone(self.rt.auth.get_device(owner))
+        self.assertEqual(
+            self.rt.storage.table("user_settings").get("member"), {"theme": "dark"}
+        )
         self.assertEqual(self.rt.hub_config.as_dict(), self.before)
 
 

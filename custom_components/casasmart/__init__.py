@@ -1421,9 +1421,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
         """Wipe the app layer (FACTORY_RESET_TABLES) and reload the entry.
 
         Energy Saving is stopped first so the automations it disabled come
-        back; if any can't, the reset stops before wiping anything. The owner
-        code hashes are deleted, so the reload mints a new pairing code and
-        recovery card.
+        back; if any can't, the reset stops before wiping anything. The tables
+        are wiped in one transaction. The owner code hashes are deleted next,
+        so the reload mints a new pairing code and recovery card; if that
+        fails, the reload still runs, and running the reset again finishes it.
         """
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
@@ -1441,20 +1442,30 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 + ", ".join(pending_automations)
             )
 
-        def _wipe() -> None:
-            for table in FACTORY_RESET_TABLES:
-                runtime_data.storage.table(table).clear()
-            runtime_data.storage.energy_events().clear()
-            runtime_data.hub_config.delete("registry_imported")
+        def _wipe_tables() -> None:
+            with runtime_data.storage.transaction():
+                for table in FACTORY_RESET_TABLES:
+                    runtime_data.storage.table(table).clear()
+                runtime_data.storage.energy_events().clear()
 
+        def _forget_codes() -> None:
+            runtime_data.hub_config.delete("registry_imported")
             runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
             runtime_data.hub_config.delete(HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY)
             runtime_data.hub_config.delete(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
 
         try:
-            await hass.async_add_executor_job(_wipe)
+            await hass.async_add_executor_job(_wipe_tables)
         except (StorageError, sqlite3.Error) as err:
+            raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
+        # Every phone was just unpaired; don't leave that to the reload.
+        await async_close_connections(hass)
+        try:
+            await hass.async_add_executor_job(_forget_codes)
+        except ConfigError as err:
+            # The in-memory caches no longer match the wiped tables.
+            await hass.config_entries.async_reload(entries[0].entry_id)
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
         _LOGGER.warning(
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
@@ -1465,8 +1476,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "codes rotated"
         )
 
-        # Every phone was just unpaired; don't leave that to the reload.
-        await async_close_connections(hass)
         await hass.config_entries.async_reload(entries[0].entry_id)
 
     admin_handlers = {
