@@ -1425,9 +1425,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         Energy Saving is stopped first so the automations it disabled come
         back; if any can't, the reset stops before wiping anything. The tables
-        are wiped in one transaction. The owner code hashes are deleted next,
-        so the reload mints a new pairing code and recovery card; if that
-        fails, the reload still runs, and running the reset again finishes it.
+        are wiped in one transaction, then the auth engine forgets its device
+        cache, so the wiped phones' tokens die even if the reload fails. The
+        owner code hashes are deleted next, so the reload mints a new pairing
+        code and recovery card; if that fails, the reload still runs, and
+        running the reset again finishes it.
         """
         entry = _loaded_entry()
         runtime_data: CasaSmartRuntimeData = entry.runtime_data
@@ -1448,13 +1450,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 for table in FACTORY_RESET_TABLES:
                     runtime_data.storage.table(table).clear()
                 runtime_data.storage.energy_events().clear()
+            # Outside the transaction: the engine locks itself before storage,
+            # and taking its lock while holding storage's could deadlock.
+            runtime_data.auth.wipe_all_devices()
 
         def _forget_codes() -> None:
-            runtime_data.hub_config.delete("registry_imported")
-            runtime_data.hub_config.delete(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
-            runtime_data.hub_config.delete(RECOVERY_CODE_HASH_CONFIG_KEY)
-            runtime_data.hub_config.delete(HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY)
-            runtime_data.hub_config.delete(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
+            runtime_data.hub_config.delete_many(
+                (
+                    "registry_imported",
+                    BOOTSTRAP_CODE_HASH_CONFIG_KEY,
+                    RECOVERY_CODE_HASH_CONFIG_KEY,
+                    HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY,
+                    HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY,
+                )
+            )
 
         try:
             await hass.async_add_executor_job(_wipe_tables)
@@ -1477,7 +1486,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "codes rotated"
         )
 
-        await hass.config_entries.async_reload(entry.entry_id)
+        if not await hass.config_entries.async_reload(entry.entry_id):
+            raise HomeAssistantError(
+                "Factory reset wiped the data, but the hub did not reload; "
+                "restart Home Assistant"
+            )
 
     admin_handlers = {
         "factory_reset": (_handle_factory_reset, vol.Schema({})),

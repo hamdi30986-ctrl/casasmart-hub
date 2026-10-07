@@ -28,6 +28,7 @@ try:
     import aiohttp
     from casasmart import tls
     from casasmart import ws as wsmod
+    from homeassistant.exceptions import HomeAssistantError
 
     integration = H.import_integration()
     _ERR: Exception | None = None
@@ -134,9 +135,12 @@ class TlsSocketUnloadTests(unittest.IsolatedAsyncioTestCase):
 
         client = await self._open_socket(authenticated=True)
         reader = asyncio.create_task(client.receive())
-        await reset(
-            types.SimpleNamespace(data={}, context=types.SimpleNamespace(user_id=None))
-        )
+        with self.assertRaises(HomeAssistantError):  # the failed reload is reported
+            await reset(
+                types.SimpleNamespace(
+                    data={}, context=types.SimpleNamespace(user_id=None)
+                )
+            )
         msg = await asyncio.wait_for(reader, 2)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(msg.data, aiohttp.WSCloseCode.GOING_AWAY)

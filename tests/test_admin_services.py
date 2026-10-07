@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
 try:
-    from homeassistant.exceptions import Unauthorized
+    from homeassistant.exceptions import HomeAssistantError, Unauthorized
 
     _async_register_services = H.import_integration()._async_register_services
     from casasmart.const import DOMAIN
@@ -89,6 +89,20 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._call("factory_reset", "admin")
         self.assertIsNone(self.rt.auth.get_device(self.owner))
         self.hass.config_entries.async_reload.assert_awaited_once()
+
+    async def test_a_failed_reload_is_reported_and_keeps_wiped_phones_out(
+        self,
+    ) -> None:
+        # Token checks answer from the engine's cache, which only a reload
+        # used to rebuild, so a reload that failed left the wiped phones
+        # trusted and the service reporting success.
+        token = H.token_for(self.rt.auth, self.owner)
+        self.hass.config_entries.async_reload = mock.AsyncMock(return_value=False)
+        with self.assertRaisesRegex(HomeAssistantError, "restart Home Assistant"):
+            await self._call("factory_reset", "admin")
+        self.assertIsNone(self.rt.auth.get_device(self.owner))
+        with self.assertRaises(Exception):
+            self.rt.auth.validate_token(token)
 
     async def test_any_user_can_run_a_scene(self) -> None:
         # The member gets past the admin gate to the handler's own refusal.
