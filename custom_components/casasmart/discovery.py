@@ -221,8 +221,7 @@ class MdnsAdvertiser:
         try:
             from homeassistant.components import network
 
-            ip = await network.async_get_source_ip(self._hass, network.MDNS_TARGET_IP)
-            return ip
+            return await network.async_get_source_ip(self._hass, network.MDNS_TARGET_IP)
         except Exception as err:
             _LOGGER.debug("source IP lookup failed, hostname-only mDNS: %s", err)
             return None
