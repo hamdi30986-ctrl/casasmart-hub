@@ -441,6 +441,35 @@ class AlarmTestCase(unittest.TestCase):
         self.assertEqual(event["kind"], EVENT_LIFE_SAFETY)
         self.assertEqual(engine.snapshot()["mode"], MODE_TRIGGERED)
 
+    # -- storage failures --------------------------------------------------------
+
+    def _fail_writes(self):
+        """Make every storage write raise, as a read-only SD card does."""
+        self.storage._connection.execute("PRAGMA query_only = 1")
+
+    def test_trigger_alerts_when_storage_writes_fail(self):
+        self._seed_zones()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self._fail_writes()
+        with self.assertLogs("alarm", level="ERROR"):
+            event = self.engine.process_sensor("binary_sensor.window", True)
+        self.assertEqual(event["kind"], EVENT_TRIGGERED)
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
+        self.assertEqual([alert["kind"] for alert in self.alerts], [EVENT_TRIGGERED])
+
+    def test_entry_delay_runs_when_storage_writes_fail(self):
+        self._seed_zones()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self._fail_writes()
+        with self.assertLogs("alarm", level="ERROR"):
+            event = self.engine.process_sensor("binary_sensor.front_door", True)
+            self.assertEqual(event["kind"], EVENT_ENTRY_DELAY)
+            self.assertIsNotNone(self.engine.pending_deadline())
+            self.clock.advance(DEFAULT_ENTRY_DELAY_SECONDS)
+            event = self.engine.tick()
+        self.assertEqual(event["kind"], EVENT_TRIGGERED)
+        self.assertEqual([alert["kind"] for alert in self.alerts], [EVENT_TRIGGERED])
+
     def test_default_alert_sink_logs_the_alert_accurately(self):
         # Production builds the engine without a sink: alerts are logged (tamper
         # has no other log trace), and the line must not claim push is unwired.

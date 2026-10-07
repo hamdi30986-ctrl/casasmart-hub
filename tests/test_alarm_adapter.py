@@ -362,6 +362,27 @@ class AlarmAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("evaluation failed" in m.lower() for m in logs.output))
         self.assertEqual(self.hass.bus.fired, [])
 
+    async def test_storage_write_failure_still_sounds_the_siren(self):
+        self.adapter.async_start()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self.storage._connection.execute("PRAGMA query_only = 1")
+        self._state_changed("binary_sensor.window", "on")
+        with self.assertLogs("alarm", level="ERROR"):
+            await self._drain()
+        self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_CHANGED), 1)
+        self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_TRIGGERED), 1)
+
+    async def test_storage_write_failure_still_starts_the_entry_delay(self):
+        self.adapter.async_start()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self.storage._connection.execute("PRAGMA query_only = 1")
+        self._state_changed("binary_sensor.front_door", "on")
+        with self.assertLogs("alarm", level="ERROR"):
+            await self._drain()
+        self.assertEqual(self.hass.bus.kinds_fired(EVENT_ALARM_CHANGED), 1)
+        self._emit(EVENT_ALARM_CHANGED, {"mode": MODE_PENDING})
+        self.assertEqual(self.timer.last_delay, DEFAULT_ENTRY_DELAY_SECONDS)
+
     # -- entry-delay timer -----------------------------------------------------
 
     async def test_entry_delay_schedules_single_timer_with_exact_delay(self):

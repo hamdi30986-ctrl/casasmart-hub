@@ -527,18 +527,22 @@ class AlarmEngine:
     def _record_event(self, kind: str, *, now: float, **fields: Any) -> dict[str, Any]:
         """Append one event to the bounded history and return it.
 
-        None fields are left out. The caller holds the lock.
+        None fields are left out. The caller holds the lock. A storage error
+        is logged, not raised, so the transition still reaches the alert.
         """
         event = {"kind": kind, "at": now}
         event.update({k: v for k, v in fields.items() if v is not None})
-        blob = self._history_table.get(_HISTORY_KEY) or {}
-        entries = blob.get("entries") if isinstance(blob, dict) else None
-        if not isinstance(entries, list):
-            entries = []
-        entries.append(event)
-        cutoff = now - _HISTORY_RETENTION_SECONDS
-        entries = [e for e in entries if e.get("at", 0) >= cutoff][-_MAX_HISTORY:]
-        self._history_table[_HISTORY_KEY] = {"entries": entries}
+        try:
+            blob = self._history_table.get(_HISTORY_KEY) or {}
+            entries = blob.get("entries") if isinstance(blob, dict) else None
+            if not isinstance(entries, list):
+                entries = []
+            entries.append(event)
+            cutoff = now - _HISTORY_RETENTION_SECONDS
+            entries = [e for e in entries if e.get("at", 0) >= cutoff][-_MAX_HISTORY:]
+            self._history_table[_HISTORY_KEY] = {"entries": entries}
+        except Exception:
+            _LOGGER.exception("Could not save the alarm %s event to history", kind)
         return event
 
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -573,14 +577,21 @@ class AlarmEngine:
             }
 
     def _persist_state(self) -> None:
-        """Persist the arm state so a reboot restores it (caller holds the lock)."""
-        self._state_table[_STATE_KEY] = {
-            "mode": self._state["mode"],
-            "since": self._state["since"],
-            "active_at": self._state["active_at"],
-            "trigger_deadline": self._state["trigger_deadline"],
-            "armed_mode": self._state["armed_mode"],
-            "trigger_entity": self._state["trigger_entity"],
-            "trigger_zone": self._state["trigger_zone"],
-            "entry_delay": self._state["entry_delay"],
-        }
+        """Persist the arm state so a reboot restores it (caller holds the lock).
+
+        A storage error is logged, not raised: the alarm runs on the state in
+        memory, and a failed write must not silence an intrusion.
+        """
+        try:
+            self._state_table[_STATE_KEY] = {
+                "mode": self._state["mode"],
+                "since": self._state["since"],
+                "active_at": self._state["active_at"],
+                "trigger_deadline": self._state["trigger_deadline"],
+                "armed_mode": self._state["armed_mode"],
+                "trigger_entity": self._state["trigger_entity"],
+                "trigger_zone": self._state["trigger_zone"],
+                "entry_delay": self._state["entry_delay"],
+            }
+        except Exception:
+            _LOGGER.exception("Could not save the alarm state")
