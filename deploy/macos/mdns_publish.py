@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Publish the CasaSmart hub's real handshake identity through macOS Bonjour."""
+"""Publish the CasaSmart hub's real handshake identity through macOS Bonjour.
+
+A hub inside Docker Desktop can't announce itself on the LAN over multicast
+DNS, so this helper does it from the Mac. It reads the hub's handshake over
+loopback, takes the TLS identity fingerprint and API version from it, and
+runs ``dns-sd -P`` to advertise ``_casasmart._tcp`` at the Mac's LAN address,
+with the TXT records the hub itself would publish (``id``, ``api``, ``v``,
+``name``). Every ``--refresh`` seconds it reads the handshake again and
+re-registers if anything changed or ``dns-sd`` exited; a failed refresh
+keeps the last good advertisement.
+
+Standard library only, and kept runnable by macOS's own python3 (3.9).
+"""
 
 from __future__ import annotations
 
@@ -22,6 +34,8 @@ _SERVICE_TYPE = "_casasmart._tcp"
 
 @dataclass(frozen=True)
 class Advertisement:
+    """One Bonjour registration: what ``dns-sd -P`` is given."""
+
     instance: str
     hostname: str
     address: str
@@ -32,6 +46,11 @@ class Advertisement:
 
 
 def read_handshake(url: str, timeout: float = 5.0) -> dict[str, object]:
+    """Fetch the hub's handshake JSON over loopback HTTPS.
+
+    Only a loopback URL is accepted. The certificate isn't verified: it is
+    the hub's self-signed identity, whose fingerprint is what this reads.
+    """
     parsed = urllib.parse.urlparse(url)
     hostname = parsed.hostname or ""
     try:
@@ -51,6 +70,11 @@ def read_handshake(url: str, timeout: float = 5.0) -> dict[str, object]:
 
 
 def infer_lan_address() -> str:
+    """The Mac's LAN IPv4 address: the source address of its default route.
+
+    Connecting a UDP socket sends nothing; 192.0.2.1 is a reserved
+    documentation address, used only to pick the route.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.connect(("192.0.2.1", 9))
         address = probe.getsockname()[0]
@@ -67,6 +91,11 @@ def advertisement_from_handshake(
     advertised_port: int,
     hub_name: str,
 ) -> Advertisement:
+    """Build the advertisement, or raise ValueError for a bad handshake.
+
+    The instance and host names carry the fingerprint's first 8 characters,
+    like the hub's own, so two hubs on one LAN don't collide.
+    """
     tls = payload.get("tls")
     if not isinstance(tls, dict):
         raise ValueError("handshake has no TLS identity")
@@ -97,6 +126,7 @@ def advertisement_from_handshake(
 
 
 def dns_sd_command(advertisement: Advertisement, executable: str) -> list[str]:
+    """The ``dns-sd -P`` (proxy registration) command line for ``advertisement``."""
     return [
         executable,
         "-P",
@@ -128,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Keep the advertisement current until SIGINT or SIGTERM."""
     args = build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     stopping = False
