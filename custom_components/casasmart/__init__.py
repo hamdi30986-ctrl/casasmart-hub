@@ -1501,8 +1501,17 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
-    """Stop every runtime this entry started, then close storage."""
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    """Unload the platforms, then stop every runtime and close storage.
+
+    All or nothing: when a platform fails to unload, its entities still use
+    the engines, so nothing is stopped and False tells Home Assistant (which
+    then keeps runtime_data and the on-unload callbacks; the stop listener
+    still closes storage at shutdown). Storage closes last, after the TLS
+    listener stops serving.
+    """
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        _LOGGER.error("CasaSmart Hub platforms failed to unload; hub left running")
+        return False
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
     if entry.runtime_data.energy_controller is not None:
