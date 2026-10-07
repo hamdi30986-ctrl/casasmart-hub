@@ -138,7 +138,7 @@ def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "featured_room_id": rooms[0]["room_id"],
         "cards": [room["room_id"] for room in rooms[1:5]],
-        "view_all_count": max(0, count - 5),
+        "view_all_count": count - 5,
     }
 
 
