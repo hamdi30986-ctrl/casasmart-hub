@@ -1,3 +1,15 @@
+"""Push endpoints: device push tokens and HQ reminder notifications.
+
+- ``/api/casasmart/auth/push-token``: a paired device registers (POST) or
+  removes (DELETE) the FCM token its notifications go to. The device id comes
+  from the caller's CasaSmart token, so a device can only manage its own entry.
+- ``/api/casasmart/notifications/hq``: HQ's signed reminder requests
+  (``hq_notifications``), each turned into one generic push to the owner.
+
+Like every CasaSmart view, both are served on Home Assistant's own HTTP port
+and on the hub's TLS listener.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -40,6 +52,7 @@ def _get_push_store(hass: HomeAssistant):
 
 
 def _get_runtime_data(hass: HomeAssistant):
+    """The loaded entry's runtime data, or None while the hub isn't set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
 
@@ -59,7 +72,12 @@ def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
 
 
 class CasaSmartPushTokenView(HomeAssistantView):
-    """POST + DELETE /api/casasmart/auth/push-token."""
+    """POST + DELETE /api/casasmart/auth/push-token.
+
+    Both need ``session.manage``, which every paired role has but a widget
+    token doesn't: a widget may read and control devices, but must not
+    redirect or drop its owner's notifications.
+    """
 
     url = "/api/casasmart/auth/push-token"
     name = "api:casasmart:auth:push-token"
@@ -69,9 +87,7 @@ class CasaSmartPushTokenView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
-        """Register or refresh an FCM push token."""
-        # session.manage, not devices.read: a widget token must not repoint
-        # where its owner's notifications go.
+        """Register or refresh the caller's FCM push token (an upsert)."""
         claims, err = authenticate_request(self._hass, request, "session.manage")
         if err is not None:
             return err
@@ -152,7 +168,21 @@ class CasaSmartPushTokenView(HomeAssistantView):
 
 
 class CasaSmartHqNotificationView(HomeAssistantView):
-    """Accept one signed, content-free reminder wake-up from HQ."""
+    """POST /api/casasmart/notifications/hq: one signed, content-free reminder.
+
+    There is no CasaSmart token here; HQ's Ed25519 signature authenticates
+    the request (``HqNotificationVerifier``). The cheap checks come first: push
+    available, a per-address rate limit, content type and size, then the
+    signature. Then, under one lock shared by every view instance, the nonce
+    is reserved, a retry of an event already delivered is answered as a
+    duplicate, and otherwise one owner-only push is sent and recorded.
+
+    Answers: 202 when the relay accepted the push; 200 with ``duplicate:
+    true`` for an event already delivered; 401 ``HQ_AUTH_REJECTED`` for any
+    failed check of the signed request (the reason is audited, never
+    returned); 400 for a wrong content type or size; 429 over the rate limit;
+    503 when push isn't running or the delivery failed.
+    """
 
     url = "/api/casasmart/notifications/hq"
     name = "api:casasmart:notifications:hq"
@@ -164,6 +194,11 @@ class CasaSmartHqNotificationView(HomeAssistantView):
         self._attempts: dict[str, deque[float]] = defaultdict(deque)
 
     def _rate_limited(self, peer: str) -> bool:
+        """True once ``peer`` has sent 30 requests in the last minute.
+
+        Addresses with no recent request are dropped when more than 512 are
+        tracked, so the map stays small.
+        """
         now = time.monotonic()
         attempts = self._attempts[peer]
         while attempts and attempts[0] <= now - 60:

@@ -1,7 +1,24 @@
-"""Push notifications sent through the relay.
+"""Push notifications, signed by the hub and delivered through the push relay.
 
-``PushDispatcher`` turns alarm, lock, new-pairing and widget-relevant events
-into signed relay pushes; ``TankPushMonitor`` runs the timer-driven tank checks.
+``PushDispatcher`` turns hub events into pushes: alarm triggers
+(``casasmart_alarm_triggered``), settled lock and unlock changes, a newly
+paired device, HQ reminders (``push_api``), and a silent "refresh your
+widgets" nudge when a control entity's state settles. ``TankPushMonitor``
+adds the timer-driven water-tank alerts.
+
+Each push is one batch to the relay's push endpoint: the same payload for
+every target device's FCM token, signed with the hub's Ed25519 push key
+(``push_crypto``). The relay checks the signature against the public key the
+hub registered (``relay_registration``) and delivers each payload to its
+token. Payloads are plain text, protected in transit by HTTPS; the hub does
+not encrypt them.
+
+Most alert types go to the owner's (admin) devices only. A life-safety alarm
+goes to every registered device, and so do alarm and lock alerts when device
+roles can't be read.
+
+``__init__.py`` creates both objects once a relay is configured and the TLS
+and push identities load; without them the hub runs without push.
 """
 
 from __future__ import annotations
@@ -42,16 +59,17 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# --- Push types and audiences -----------------------------------------------
 
+# The ``type`` field of a push payload; the apps route on it. The tank and
+# widget types live in const.py.
 PUSH_TYPE_SECURITY = "security"
 PUSH_TYPE_LOCK = "lock"
-
-
 PUSH_TYPE_DEVICE_PAIRED = "device_paired"
-
 PUSH_TYPE_HQ_REMINDER = "hq_reminder"
 
-
+# Sent only to the owner's (admin) devices. A life-safety alarm overrides this
+# for its own push: smoke, gas, CO or a leak must reach everyone in the house.
 _OWNER_ONLY_TYPES = frozenset(
     {
         PUSH_TYPE_SECURITY,
@@ -69,34 +87,46 @@ _OWNER_ONLY_TYPES = frozenset(
 # notification on a family member's phone.
 _FAIL_OPEN_WITHOUT_ROLES = frozenset({PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK})
 
-
+# Batch priority sent to the relay; only alarm triggers are critical.
 PRIORITY_CRITICAL = "critical"
 PRIORITY_NORMAL = "normal"
 
+# --- Event filters ----------------------------------------------------------
 
 STATE_LOCKED = "locked"
 STATE_UNLOCKED = "unlocked"
-
 
 _LOCK_PREFIX = "lock."
 _LOCK_SETTLED = frozenset({STATE_LOCKED, STATE_UNLOCKED})
 _LOCK_FLAP_STATES = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
-
+# Domains whose state a home-screen widget shows.
 _WIDGET_DOMAINS = frozenset(
     {"light", "switch", "input_boolean", "lock", "cover", "climate", "fan"}
 )
 
-
+# Widget refreshes are coalesced: the first change arms one push this many
+# seconds later, and changes inside the window ride along with it.
 _WIDGET_PUSH_COALESCE_SECONDS = 15.0
 
 _WIDGET_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
-
+# Random bytes of the per-batch nonce (hex-encoded in the request). With the
+# timestamp it lets the relay refuse a replayed batch.
 _NONCE_BYTES = 32
 
 
 class PushDispatcher:
+    """Sends hub events to the push relay as signed batches.
+
+    ``async_start`` subscribes to alarm triggers and state changes;
+    ``async_stop`` drops the subscriptions, the pending widget flush and any
+    send still in flight. Sending never raises: every send path returns a
+    small result such as ``{"delivery": "relay_accepted"}`` or
+    ``{"delivery": "failed", "reason": ...}``, because a push is best effort
+    and must never fail the code that triggered it.
+    """
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -124,10 +154,12 @@ class PushDispatcher:
 
     @property
     def relay_url(self) -> str:
+        """The relay push endpoint this dispatcher posts to."""
         return self._relay_url
 
     @callback
     def async_start(self) -> None:
+        """Subscribe to alarm triggers and state changes."""
         self._active = True
         self._unsub_alarm = self._hass.bus.async_listen(
             EVENT_ALARM_TRIGGERED, self._on_alarm_triggered
@@ -143,6 +175,7 @@ class PushDispatcher:
 
     @callback
     def async_stop(self) -> None:
+        """Unsubscribe and cancel pending work; safe to call more than once."""
         self._active = False
         if self._unsub_alarm is not None:
             self._unsub_alarm()
@@ -159,6 +192,7 @@ class PushDispatcher:
 
     @callback
     def _schedule_dispatch(self, coro: Any) -> None:
+        """Run a send as a tracked task, so ``async_stop`` can cancel it."""
         task = self._hass.async_create_task(coro)
         if isinstance(task, asyncio.Task):
             self._tasks.add(task)
@@ -166,11 +200,13 @@ class PushDispatcher:
 
     @callback
     def _on_alarm_triggered(self, event: Event) -> None:
+        """A critical push for every ``casasmart_alarm_triggered``."""
         data = self._build_security_payload(event.data or {})
         self._schedule_dispatch(self._dispatch(data, PRIORITY_CRITICAL))
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
+        """Lock pushes and widget refreshes, from HA's state changes."""
         entity_id = event.data.get("entity_id")
         if not isinstance(entity_id, str):
             return
@@ -212,6 +248,7 @@ class PushDispatcher:
 
     @callback
     def _flush_widget_refresh(self, _now: Any) -> None:
+        """Timer callback: send this window's one silent widget refresh."""
         self._widget_flush_cancel = None
         data = {"type": PUSH_TYPE_UPDATE_WIDGETS, "silent": "1"}
         self._schedule_dispatch(self._dispatch(data, PRIORITY_NORMAL))
@@ -244,8 +281,8 @@ class PushDispatcher:
         body = f"{name} triggered the alarm" if name else "The alarm was triggered"
         data = {"type": PUSH_TYPE_SECURITY, "title": title, "body": body}
         if life_safety:
-            # House-wide audience flag: a fire/smoke (life-safety) alarm must
-            # reach EVERYONE, not just the owner (consumed in _dispatch_inner).
+            # House-wide audience flag: a life-safety alarm (smoke, gas, CO, a
+            # leak) must reach everyone, not just the owner (_dispatch_inner).
             data["life_safety"] = "1"
         if isinstance(entity_id, str) and entity_id:
             data["entity_id"] = entity_id
@@ -274,19 +311,22 @@ class PushDispatcher:
         return name if isinstance(name, str) and name else None
 
     async def async_send(self, data: dict[str, str], priority: str) -> dict[str, str]:
+        """Send one push and return its delivery result; never raises.
+
+        The tank monitor and the HQ notification view send through here.
+        """
         return await self._dispatch(data, priority)
 
     async def async_send_device_paired(
         self, name: str, role: str, device_id: str
     ) -> None:
-        """Owner notification for a successful NEW device enroll.
+        """Tell the owner a new device was paired ("New device paired").
 
-        "New device paired: <name> (<role>)" — the enroll view calls this
-        after ``enroll_device`` lands, so a member code redeemed anywhere
-        (LAN or, with ``remote_pairing_enabled`` on, remotely) is always
-        visible to the owner. Rides the same signed relay path and the same
-        owner-only audience filter as alarm/lock/tank; notification-only —
-        no approval gate. Never raises.
+        The enroll view calls this once a new device has enrolled (a phone
+        pairing again with the same key doesn't count), so a member code
+        redeemed on the LAN or, with ``remote_pairing_enabled``, from anywhere
+        always reaches the owner. Owner-only, like the alarm, lock and tank
+        alerts. It is a notice, not an approval step. Never raises.
         """
         await self._dispatch(
             {
@@ -299,6 +339,7 @@ class PushDispatcher:
         )
 
     async def _dispatch(self, data: dict[str, str], priority: str) -> dict[str, str]:
+        """``_dispatch_inner`` behind a last-resort guard: a push never raises."""
         try:
             return await self._dispatch_inner(data, priority)
         except Exception:
@@ -308,6 +349,7 @@ class PushDispatcher:
     async def _dispatch_inner(
         self, data: dict[str, str], priority: str
     ) -> dict[str, str]:
+        """Pick the audience's tokens, sign the batch and post it."""
         if not self._active:
             return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         try:
@@ -358,6 +400,7 @@ class PushDispatcher:
             return {"delivery": "no_registered_tokens"}
 
         body = self._build_request(device_tokens, data, priority)
+        # The dispatcher may have been stopped while the tokens were read.
         if not self._active:
             return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         return await self._send(body)
@@ -390,6 +433,7 @@ class PushDispatcher:
         return {**signed, "signature": signature}
 
     async def _send(self, body: dict[str, Any]) -> dict[str, str]:
+        """POST the batch; on success drop any token the relay reports dead."""
         if not self._active:
             return {"delivery": "unavailable", "reason": "dispatcher_inactive"}
         timeout = aiohttp.ClientTimeout(total=PUSH_RELAY_TIMEOUT_SECONDS)
@@ -418,7 +462,11 @@ class PushDispatcher:
             return None
 
     async def _cleanup_dead_tokens(self, payload: Any) -> None:
-        """Drop any token the relay flagged ``remove_token`` (UNREGISTERED)."""
+        """Drop every token the relay flagged ``remove_token``.
+
+        The relay flags a token its push service reports as no longer
+        registered, for example because the app was uninstalled.
+        """
         if not isinstance(payload, dict):
             return
         errors = payload.get("errors")
@@ -453,37 +501,40 @@ class PushDispatcher:
         return removed
 
 
+# --- Water-tank alerts -----------------------------------------------------
+
 # Local wall-clock hour (HA's configured time zone) of the daily low-water sweep.
 TANK_LOW_CHECK_LOCAL_HOUR = 18
 
+# A tank that has reported before and then sends nothing for this long is
+# offline. Sensors post every 5 minutes by default.
 TANK_OFFLINE_TIMEOUT_SECONDS = 20 * 60
 
-
+# How often the offline watchdog runs.
 TANK_OFFLINE_POLL = timedelta(minutes=5)
 
 
 class TankPushMonitor:
-    """Water-tank low-level + offline push notifications.
+    """Water-tank low-level and offline alerts.
 
-    Unlike the alarm/lock dispatcher this is **timer-driven, not event-driven**:
-    tank readings arrive on a 5-minute REST cadence, and "low at 6pm" / "silent
-    for 20 minutes" are time questions, not state edges. Two timers:
+    Unlike the alarm and lock pushes this is timer-driven, not event-driven:
+    tank readings arrive by REST every 5 minutes, and "low at 6pm" or "silent
+    for 20 minutes" are questions about time, not state changes. Two timers:
 
-    - a daily 18:00 sweep in Home Assistant's time zone: for every calibrated
-      tank, compute the current percent and push once if it's below the tank's
-      ``low_percent``;
-    - a 5-minute watchdog: push once when a tank that *was* reporting has gone
-      silent for 20+ minutes.
+    - a daily 18:00 sweep in Home Assistant's time zone: every calibrated tank
+      whose latest reading is below its ``low_percent`` gets one push;
+    - a 5-minute watchdog: one push when a tank that was reporting has gone
+      silent for 20 minutes or more.
 
-    Both are deduped to at most one push per device per **local calendar day**
-    (so the offline watchdog can't fire every 5 minutes). Each alert also fires its
-    HA bus event (EVENT_TANK_LOW / EVENT_TANK_OFFLINE) as the installer
-    automation hook, then dispatches the phone push through the shared signed
-    relay path (``PushDispatcher.async_send``).
+    Each is limited to one push per tank per local calendar day (so the
+    watchdog doesn't repeat every 5 minutes). Each alert first fires its HA
+    event (``casasmart_tank_low`` / ``casasmart_tank_offline``) for
+    automations, then sends the owner push through
+    ``PushDispatcher.async_send``.
 
-    The decision methods (``async_check_low_water`` / ``async_check_offline``)
-    take their "now" from an injectable ``clock`` and read the engine via the
-    executor, so they're unit-testable without HA timers or a live relay.
+    The checks (``async_check_low_water`` / ``async_check_offline``) take
+    "now" from an injectable ``clock`` and read the engine through the
+    executor, so they can be tested without HA timers or a relay.
     """
 
     def __init__(
@@ -509,9 +560,9 @@ class TankPushMonitor:
 
     @callback
     def async_start(self) -> None:
-        """Wire the two timers. Imported lazily so the module stays importable
-        (the dispatcher unit tests stub only ``homeassistant.const``/``core``).
-        """
+        """Start the daily low-water sweep and the offline watchdog."""
+        # Imported at call time so tests can patch these helpers on
+        # homeassistant.helpers.event.
         from homeassistant.helpers.event import (
             async_track_time_change,
             async_track_time_interval,
@@ -538,7 +589,7 @@ class TankPushMonitor:
 
     @callback
     def async_stop(self) -> None:
-        """Release both timers (idempotent — safe on any unload)."""
+        """Cancel both timers; safe to call more than once."""
         if self._unsub_daily is not None:
             self._unsub_daily()
             self._unsub_daily = None
@@ -609,6 +660,7 @@ class TankPushMonitor:
     # -- emit ------------------------------------------------------------------
 
     async def _emit_low(self, device: dict[str, Any], status: dict[str, Any]) -> None:
+        """Fire ``casasmart_tank_low``, then push to the owner."""
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
         percent = round(status["percent"])
@@ -633,6 +685,7 @@ class TankPushMonitor:
         )
 
     async def _emit_offline(self, device: dict[str, Any], last: dict[str, Any]) -> None:
+        """Fire ``casasmart_tank_offline``, then push to the owner."""
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
         self._hass.bus.async_fire(
@@ -656,6 +709,7 @@ class TankPushMonitor:
     # -- internals -------------------------------------------------------------
 
     async def _list_devices(self) -> list[dict[str, Any]]:
+        """Every tank device, or [] (logged) if the engine read fails."""
         try:
             return await self._hass.async_add_executor_job(self._tanks.list_devices)
         except Exception:
