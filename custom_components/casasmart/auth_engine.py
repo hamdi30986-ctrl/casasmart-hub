@@ -656,6 +656,7 @@ class AuthEngine:
         Used by the "Regenerate pairing code" reset: the hub becomes unclaimed
         so a new bootstrap code can be minted, every token dies, and each
         device's login throttle is cleared so a re-paired phone starts clean.
+        The factory reset calls it after its own table wipe, for the cache.
         """
         with self._lock:
             wiped = list(self._devices.keys())

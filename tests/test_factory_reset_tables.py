@@ -49,8 +49,10 @@ class FactoryResetTablesTests(unittest.TestCase):
         init = (_PKG / "__init__.py").read_text()
         handler = init[init.index("async def _handle_factory_reset") :]
         handler = handler[: handler.index("async def ", 10)]
+        forget = handler[handler.index("hub_config.delete_many(") :]
+        forget = forget[: forget.index(")")]
         for key in (
             "HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY",
             "HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY",
         ):
-            self.assertIn(f"hub_config.delete({key})", handler)
+            self.assertIn(key, forget)

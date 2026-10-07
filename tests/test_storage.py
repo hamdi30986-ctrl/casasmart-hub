@@ -443,6 +443,16 @@ class TestJsonConfigStore(unittest.TestCase):
         store.delete("a")  # deleting twice is a no-op, not an error
         self.assertIsNone(JsonConfigStore(self.path).get("a"))
 
+    def test_delete_many_is_one_write(self):
+        store = JsonConfigStore(self.path)
+        store.update({"a": 1, "b": 2, "c": 3})
+        with mock.patch.object(store, "_save", wraps=store._save) as save:
+            store.delete_many(["a", "b", "missing"])
+            save.assert_called_once()
+            store.delete_many(["a", "missing"])  # nothing set: no write
+            save.assert_called_once()
+        self.assertEqual(JsonConfigStore(self.path).as_dict(), {"c": 3})
+
     def test_corrupted_file_raises_config_error(self):
         self.path.write_text("{not json!!", encoding="utf-8")
         with self.assertRaises(ConfigError):

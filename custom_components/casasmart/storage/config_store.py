@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,15 @@ class JsonConfigStore:
             candidate.update(values)
             self._save(candidate)
             self._data = candidate
+
+    def delete_many(self, keys: Iterable[str]) -> None:
+        """Remove several keys with a single write; no write when none is set."""
+        with self._lock:
+            candidate = dict(self._data)
+            removed = [k for k in keys if candidate.pop(k, _MISSING) is not _MISSING]
+            if removed:
+                self._save(candidate)
+                self._data = candidate
 
     def as_dict(self) -> dict[str, Any]:
         """A shallow copy of the whole config."""

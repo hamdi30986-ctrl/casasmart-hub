@@ -105,6 +105,10 @@ class FakeHubConfig:
     def delete(self, key):
         self._d.pop(key, None)
 
+    def delete_many(self, keys):
+        for key in keys:
+            self._d.pop(key, None)
+
 
 class FakeBus:
     """Captures ``async_fire`` calls so tests can assert nudges fired."""
