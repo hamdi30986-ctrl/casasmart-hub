@@ -67,10 +67,10 @@ ALL_ZONES = (ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY, ZONE_LIFE_SAFETY)
 
 # Which non-life-safety zones are active per arm mode.
 # Away = everything; Home = perimeter only (motion ignored); Night = perimeter
-# + entry doors (no motion). Pending (an entry delay running) uses the Away
-# set whatever mode it came from, so during an entry delay any non-entry zone
-# triggers at once; triggered reports the Away set but ignores edges. Life
-# Safety is evaluated separately, in every mode.
+# + entry doors (no motion). While an entry delay runs (pending), zones the
+# armed mode monitors follow it instead of triggering at once, so pending and
+# triggered ignore edges; their entries here only feed the snapshot's
+# ``active_zones``. Life Safety is evaluated separately, in every mode.
 _ACTIVE_ZONES_BY_MODE: dict[str, frozenset[str]] = {
     MODE_AWAY: frozenset({ZONE_PERIMETER, ZONE_INTERIOR, ZONE_ENTRY}),
     MODE_HOME: frozenset({ZONE_PERIMETER}),
@@ -446,9 +446,12 @@ class AlarmEngine:
             disarmed.
           * ``active`` is False (sensor cleared) -> never triggers.
           * During exit-delay grace (now < active_at) -> ignored.
-          * Entry-zone trip in an active mode -> start the entry-delay
-            countdown (mode -> pending), unless already pending/triggered.
-          * Any other active zone trip in an active mode -> trigger now.
+          * Entry-zone trip in an armed mode -> start the entry-delay
+            countdown (mode -> pending).
+          * Any other active zone trip in an armed mode -> trigger now.
+          * While the entry delay runs, every other edge changes nothing:
+            zones the armed mode monitors follow the delay (the alarm
+            triggers when it ends unless disarmed), the rest stay ignored.
           * Sensor not in an active zone for the current mode -> ignored.
         """
         now = self._clock() if now is None else now
@@ -473,6 +476,11 @@ class AlarmEngine:
             mode = self._state["mode"]
             if mode in (MODE_DISARMED, MODE_TRIGGERED):
                 return None
+            # An entry delay is already running. Zones the armed mode monitors
+            # follow it (the alarm triggers when it ends unless disarmed), and
+            # zones it doesn't monitor stay ignored: either way, nothing now.
+            if mode == MODE_PENDING:
+                return None
             # Exit-delay grace: the user is still on their way out.
             if now < self._state["active_at"]:
                 return None
@@ -480,8 +488,6 @@ class AlarmEngine:
                 return None
 
             if zone == ZONE_ENTRY:
-                if mode == MODE_PENDING:
-                    return None  # countdown already running
                 return self._enter_pending(entity_id, now=now)
             # Perimeter / interior in an armed mode -> immediate.
             return self._enter_triggered(entity_id, zone, now=now, persist=True)
