@@ -979,7 +979,12 @@ class CasaSmartAudioProvisionView(_AudioView):
         # gate admits a keyless client only when the operator opted in.
         secret = get_provision_secret(self._hass)
         presented = request.headers.get("X-CasaSmart-Provision-Key", "")
-        secret_ok = bool(secret) and hmac.compare_digest(presented, secret)
+        # Compared as bytes: compare_digest refuses non-ASCII str, and aiohttp
+        # passes non-ASCII header bytes through as text.
+        secret_ok = bool(secret) and hmac.compare_digest(
+            presented.encode("utf-8", "surrogatepass"),
+            secret.encode("utf-8", "surrogatepass"),
+        )
         if not secret_ok:
             if not is_keyless_speaker_provisioning_enabled(self._hass):
                 _LOGGER.warning(

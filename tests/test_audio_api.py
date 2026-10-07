@@ -828,6 +828,19 @@ class ProvisionView(AudioViewTestCase):
         self.rt.hub_config.set(_KEYLESS, True)
         self._assert_refused(await self._get(lan=False, key="wrong-key"))
 
+    async def test_non_ascii_key_is_refused_like_a_wrong_key(self) -> None:
+        # aiohttp passes non-ASCII header bytes through as text, and
+        # hmac.compare_digest raises TypeError for non-ASCII str arguments.
+        for key in ("١٢٣", "café", "\udcff\udcfe"):
+            with self.subTest(key=key):
+                self._assert_refused(await self._get(lan=False, key=key))
+
+    async def test_a_non_ascii_provisioning_key_still_works(self) -> None:
+        # provision_secret lives in hub_config.json, so an operator may set it.
+        self.rt.hub_config.set(PROVISION_SECRET_CONFIG_KEY, "clé-secrète")
+        self._assert_served(await self._get(lan=False, key="clé-secrète"))
+        self._assert_refused(await self._get(lan=False, key="cle-secrete"))
+
     async def test_non_lan_without_key_is_refused_in_both_modes(self) -> None:
         # A leaked/photographed provision URL is useless off-LAN.
         for keyless in (False, True):
