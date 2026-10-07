@@ -170,6 +170,44 @@ class HqNotificationVerifierTest(unittest.TestCase):
         )
 
 
+class HqDeliveredEventsAreBoundedTest(unittest.TestCase):
+    """Delivered events are remembered so a retry is a duplicate, but only the
+    newest HQ_NOTIFICATION_MAX_EVENTS, like the nonces and the audit trail."""
+
+    def setUp(self) -> None:
+        self.table: dict = {}
+        self.verifier = MODULE.HqNotificationVerifier(self.table, None)
+        self.now = 1_700_000_000
+
+    def _events(self) -> list[str]:
+        return [key for key in self.table if key.startswith("event:")]
+
+    def test_only_the_newest_events_are_kept(self) -> None:
+        limit = MODULE.HQ_NOTIFICATION_MAX_EVENTS
+        for index in range(limit + 5):
+            self.verifier.record_delivery(
+                f"hq-reminder:{index:08d}", "relay_accepted", now=self.now + index
+            )
+        self.assertEqual(len(self._events()), limit)
+        for index in range(5):
+            self.assertIsNone(self.verifier.previous(f"hq-reminder:{index:08d}"))
+        for index in (5, limit + 4):
+            self.assertIsNotNone(self.verifier.previous(f"hq-reminder:{index:08d}"))
+
+    def test_the_event_just_delivered_is_kept_within_one_second(self) -> None:
+        limit = MODULE.HQ_NOTIFICATION_MAX_EVENTS
+        for index in range(limit):
+            self.verifier.record_delivery(
+                f"hq-reminder:z{index:08d}", "relay_accepted", now=self.now
+            )
+        # Sorts before every other key recorded in the same second.
+        self.verifier.record_delivery(
+            "hq-reminder:a0000000", "relay_accepted", now=self.now
+        )
+        self.assertEqual(len(self._events()), limit)
+        self.assertIsNotNone(self.verifier.previous("hq-reminder:a0000000"))
+
+
 class HqSenderNameTest(unittest.TestCase):
     """The push title is the owner's chosen sender name, or a neutral default."""
 
