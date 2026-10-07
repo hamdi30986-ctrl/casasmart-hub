@@ -1,44 +1,47 @@
 """Hub-side audio engine — the pure half.
 
-The hub-side source of truth for the speaker stack: hub = brain, phone =
-display, Pi = dumb endpoint. The hub, not the phone, holds the MQTT broker
-creds + PA host/key and drives the speakers, and the Pi pulls its broker
-credentials from the hub.
+The hub is the source of truth for the speaker stack: the hub decides, the
+app displays, and each speaker (a Raspberry Pi running the speaker agent)
+plays what it is told. The hub, not the phone, holds the MQTT broker
+credentials and drives the speakers; a speaker fetches its broker
+credentials from the hub (``GET /audio/provision``).
 
 Like ``alarm.py``/``registry.py``/``tank.py`` this is the flat-importable
 engine: **stdlib only, no Home Assistant imports, no network I/O**. It owns
-the *decisions* and the *state*; it never touches MQTT, the broker, the PA
-service or the LAN. Those live in the adapter (``audio_adapter.py``), exactly as
+the *decisions* and the *state*; it never touches MQTT, the broker or the
+LAN. Those live in the adapter (``audio_adapter.py``), exactly as
 ``alarm_adapter.py`` is the HA glue for the pure ``AlarmEngine``. The split is
 what lets this be unit-tested on a temp SQLite file with a hand-cranked clock.
 
 What it owns:
 
 - **Broker config** — host / port / TLS / username / password. The single
-  source of truth the Pi pulls on boot (``provision``), and the only place
-  the creds live (phones never hold them).
-- **PA config** — the PA service host / port / api-key the adapter proxies
-  uploads through.
-- **Athan config** — stored hub-side and relayed (retained) to the scheduler.
-  The engine treats the payload as a validated-but-opaque blob: the scheduler
-  owns its semantics, the hub just persists + hands it to the adapter to
-  publish. Inventing a field schema here would couple the hub to the
-  scheduler's internals.
+  source of truth the speakers fetch on boot (``provision``), and the only
+  place the credentials live (phones never hold them).
+- **PA config** — a PA service host / port / api-key, stored and served to
+  the installer screens. PA clips themselves are hosted by the hub
+  (``audio_api.PaClipStore``), so nothing on the hub dials this service.
+- **Athan config** — stored hub-side, read by the hub's athan scheduler
+  (``athan_scheduler.py``) and published retained to ``athan/config`` by the
+  adapter. The engine treats the payload as a validated-but-opaque blob: the
+  scheduler owns its semantics, the engine only bounds it.
 - **Speaker registry** — the enrolled speakers (``mac6 -> {name, room,
-  enrolled_at}``), persisted, plus an **ephemeral** live-status mirror
-  (online / volume / playing / …) rebuilt from the broker's retained
-  ``status``/``state`` topics on every (re)connect, so it is never persisted.
+  custom_icon, area_id, enrolled_at}``), persisted, plus an **ephemeral**
+  live-status mirror (online / volume / playing / …) rebuilt from the
+  broker's retained ``status``/``state`` topics on every (re)connect, so it is
+  never persisted.
 - **Command construction** — turns an app request ("set speaker X to 40%")
-  into the exact ``{"cmd": …}`` payload + topic the Pi agent already speaks,
-  validated. The wire format is taken verbatim from the live agent
-  (``pi-speaker-agent/app.py``): the command field is ``cmd`` (not
-  ``action``), volume carries a ``ts`` for stale-command rejection, status is
-  a retained ``online``/``offline`` string, ``state`` is a retained JSON blob.
+  into the exact ``{"cmd": …}`` payload + topic the speaker agent speaks,
+  validated. The wire format is the agent's own: the command field is ``cmd``
+  (not ``action``), volume carries a ``ts`` for stale-command rejection,
+  status is a retained ``online``/``offline`` string, ``state`` is a retained
+  JSON blob.
 
 Storage-touching methods are synchronous (call via executor) and guarded by
 an ``RLock`` — same posture as the other engines. The live-status mirror is
-updated on the event-loop hot path (every retained ``state`` message) and is
-pure in-memory, so ingest never hops the executor.
+updated for every ``status``/``state``/announce message, from the MQTT
+client's network thread; it is pure in-memory (under the same lock), so
+ingest never touches storage.
 """
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-# -- MQTT topics (verbatim from the live Pi agent) -----------------------------
+# -- MQTT topics (the speaker agent's own) -------------------------------------
 # Per-speaker command sink + the all-speakers broadcast sink. The agent
 # subscribes both and runs the same handler, so a broadcast is just a command
 # with no speaker id.
@@ -61,14 +64,17 @@ TOPIC_ATHAN_CONFIG = "athan/config"
 
 
 def speaker_command_topic(mac6: str) -> str:
+    """The per-speaker command topic the agent subscribes."""
     return f"speakers/{mac6}/command"
 
 
 def speaker_status_topic(mac6: str) -> str:
+    """The agent's retained ``online``/``offline`` status topic."""
     return f"speakers/{mac6}/status"
 
 
 def speaker_state_topic(mac6: str) -> str:
+    """The agent's retained JSON state topic (volume, playing, AirPlay, …)."""
     return f"speakers/{mac6}/state"
 
 
@@ -78,7 +84,7 @@ def speaker_airplay_remote_topic(mac6: str) -> str:
     shairport-sync runs with ``enable_remote = "yes"`` and ``topic =
     speakers/<mac6>/airplay``; a raw command word published to ``<topic>/remote``
     is relayed as a DACP command to the *AirPlay source* (the phone), so the
-    phone's own playback actually pauses/skips — not a cosmetic hub-side stop.
+    phone's own playback pauses/skips, rather than the speaker just going quiet.
     """
     return f"speakers/{mac6}/airplay/remote"
 
@@ -134,16 +140,16 @@ _ATHAN_MAX_SPEAKERS = 64
 # Live-mirror string fields (room/title/...) from the broker — capped so a
 # giant retained value can't bloat what the hub serves the app.
 _LIVE_STR_MAX = 128
-# The agent's play-priority vocabulary, taken verbatim — an
-# arbitrary priority would defeat the speaker-side ranking.
+# The agent's play-priority vocabulary, verbatim — an arbitrary priority
+# would defeat the speaker-side ranking.
 PRIORITY_VALUES = frozenset({"athan", "pa", "normal"})
 # A discovered (un-enrolled) speaker that announced once then died must not
 # clutter the add-flow forever. Entries not heard from within this window are
 # dropped from ``discovered()``. Generous enough that a healthy speaker
 # pinged on every ``/audio/discover`` never ages out between refreshes.
 _DISCOVERY_TTL_SECONDS = 600
-# A mac6 is the last 6 hex of the speaker's MAC, lower-case (matches the
-# agent's ``self.mac6``). Accept colons / 12-hex input and normalise.
+# A mac6 is the last 6 hex digits of the speaker's MAC, lower-case (the
+# agent's own id). Colon/dash-separated or full 12-hex input is normalised.
 _MAC6_RE = re.compile(r"^[0-9a-f]{6}$")
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
 
@@ -175,6 +181,7 @@ def normalize_mac6(value: Any) -> str:
 
 
 def _clean_name(name: Any, *, field: str = "name") -> str:
+    """A required, stripped, length-capped display string."""
     if not isinstance(name, str) or not name.strip():
         raise AudioError(f"{field} is required")
     cleaned = name.strip()
@@ -184,6 +191,7 @@ def _clean_name(name: Any, *, field: str = "name") -> str:
 
 
 def _clean_optional_name(name: Any, *, field: str) -> str | None:
+    """Like ``_clean_name``, but ``None`` passes through."""
     if name is None:
         return None
     return _clean_name(name, field=field)
@@ -229,6 +237,7 @@ def _clean_optional_area_id(area_id: Any) -> str | None:
 
 
 def _validate_volume(value: Any) -> int:
+    """An int 0-100 (a bool is not a volume)."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise AudioError("volume must be an integer 0-100")
     if not _VOLUME_MIN <= value <= _VOLUME_MAX:
@@ -237,6 +246,7 @@ def _validate_volume(value: Any) -> int:
 
 
 def _validate_port(value: Any, *, field: str, default: int) -> int:
+    """A TCP port 1-65535; ``None`` keeps ``default``."""
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
@@ -247,6 +257,7 @@ def _validate_port(value: Any, *, field: str, default: int) -> int:
 
 
 def _opt_str(value: Any, *, field: str) -> str | None:
+    """``None`` or a string, unchanged; anything else is rejected."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -263,8 +274,8 @@ def _is_number(value: Any) -> bool:
 
 
 def _validate_host(value: Any, *, field: str) -> str:
-    """A hostname/IP for a config field the hub serves VERBATIM to every Pi —
-    reject whitespace/garbage that would black-hole the fleet."""
+    """A hostname/IP for a config field the hub serves verbatim to every
+    speaker — reject whitespace/garbage that would cut off the whole fleet."""
     if not isinstance(value, str) or not value.strip():
         raise AudioError(f"{field} is required")
     host = value.strip()
@@ -363,6 +374,7 @@ class AudioEngine:
         }
 
     def _coerce_broker(self, stored: Any) -> dict[str, Any]:
+        """Merge a persisted broker blob onto defaults, dropping bad types."""
         broker = self._default_broker()
         if isinstance(stored, dict):
             if isinstance(stored.get("host"), str):
@@ -410,12 +422,12 @@ class AudioEngine:
             return dict(updated)
 
     def provision(self) -> dict[str, Any]:
-        """Broker coordinates the Pi pulls on boot.
+        """Broker coordinates a speaker fetches on boot.
 
-        This is the cred source for ``GET /audio/provision``. Returns the
-        shared broker identity the speaker Pis connect with; per-speaker unique
-        creds are a hardening layer addable later without app changes (the
-        speaker record already has room for them).
+        The body of ``GET /audio/provision``: the one shared broker identity
+        every speaker connects with, password included. The endpoint is gated
+        by the provisioning key (or, when the operator opts in, LAN access),
+        not by a user token.
         """
         with self._lock:
             return {
@@ -433,6 +445,7 @@ class AudioEngine:
         return {"host": None, "port": 9876, "api_key": None}
 
     def _coerce_pa(self, stored: Any) -> dict[str, Any]:
+        """Merge a persisted PA blob onto defaults, dropping bad types."""
         pa = self._default_pa()
         if isinstance(stored, dict):
             if isinstance(stored.get("host"), str):
@@ -446,12 +459,14 @@ class AudioEngine:
         return pa
 
     def get_pa(self) -> dict[str, Any]:
+        """The stored PA service config (copy)."""
         with self._lock:
             return dict(self._pa)
 
     def set_pa(
         self, *, host: Any = None, port: Any = None, api_key: Any = None
     ) -> dict[str, Any]:
+        """Update PA service config (omitted fields keep their value)."""
         with self._lock:
             updated = dict(self._pa)
             if host is not None:
@@ -475,9 +490,9 @@ class AudioEngine:
     def set_athan(self, config: Any) -> dict[str, Any]:
         """Replace the athan config. Validated as a bounded JSON object.
 
-        The hub does not interpret the fields — the scheduler owns the schema.
-        It only guarantees the payload is a sane, bounded object before it gets
-        relayed (retained) to ``athan/config`` by the adapter.
+        The engine checks only what would break the scheduler or the relayed
+        blob (``enabled``, ``lat``/``lon``, ``speakers``, size); every other
+        field is the scheduler's business and is stored as given.
         """
         if not isinstance(config, dict):
             raise AudioError("athan config must be a JSON object")
@@ -499,10 +514,9 @@ class AudioEngine:
             if value is not None and not _is_number(value):
                 raise AudioError(f"athan {coord!r} must be a finite number")
         # Optional per-speaker target list. Absent/empty => athan broadcasts to
-        # ALL speakers (default). Present => only those fire. We validate it is a
-        # bounded list of non-empty strings here; the scheduler normalises each
-        # id and intersects with the enrolled set at fire time (it owns the
-        # schema — the hub just guarantees a sane, bounded blob).
+        # ALL speakers (default). Present => only those fire. Here it only has
+        # to be a bounded list of non-empty strings; the scheduler normalises
+        # each id and intersects with the enrolled set at fire time.
         speakers = config.get("speakers")
         if speakers is not None:
             if not isinstance(speakers, list):
@@ -545,7 +559,8 @@ class AudioEngine:
 
         Called at the end of the app's add-speaker flow once the speaker is on
         the LAN and named. Idempotent on the id: re-enrolling updates the
-        name/room/icon/area and preserves ``enrolled_at``.
+        name/room and preserves ``enrolled_at``; an omitted icon or area keeps
+        the stored one.
         """
         mac6 = normalize_mac6(mac)
         clean_name = _clean_name(name)
@@ -604,6 +619,7 @@ class AudioEngine:
             return dict(record)
 
     def remove_speaker(self, mac: Any) -> None:
+        """Drop an enrolled speaker and its live status."""
         mac6 = normalize_mac6(mac)
         with self._lock:
             if mac6 not in self._speakers:
@@ -613,6 +629,7 @@ class AudioEngine:
             self._live.pop(mac6, None)
 
     def is_enrolled(self, mac: Any) -> bool:
+        """Whether ``mac`` names an enrolled speaker (False for a bad id)."""
         try:
             mac6 = normalize_mac6(mac)
         except AudioError:
@@ -630,15 +647,15 @@ class AudioEngine:
             result = []
             for mac6 in sorted(self._speakers):
                 record = dict(self._speakers[mac6])
-                # Always present in the served shape, even for speakers enrolled
-                # before these fields existed (persisted rows won't carry them).
+                # Always present in the served shape, even for rows stored
+                # without them.
                 record.setdefault("custom_icon", None)
                 record.setdefault("area_id", None)
                 record["live"] = dict(self._live.get(mac6, {"online": False}))
                 result.append(record)
             return result
 
-    # -- live status ingest (hot path — pure CPU, no storage) ------------------
+    # -- live status ingest (MQTT thread — pure CPU, no storage) ---------------
 
     def ingest_status(self, mac: Any, online: Any) -> None:
         """Apply a retained ``speakers/<mac6>/status`` message (online/offline).
@@ -679,7 +696,7 @@ class AudioEngine:
     def ingest_announce(self, mac: Any, room: Any = None) -> None:
         """Apply a ``speakers/announce`` discovery beacon.
 
-        The Pi agent publishes this (qos 0, NOT retained) on connect and in
+        The speaker agent publishes this (qos 0, NOT retained) on connect and in
         reply to ``speakers/ping`` — it carries ``{mac, room, topic, version,
         features}``. Unlike status/state this is how the hub learns a speaker
         *exists* before it is enrolled, so the add-speaker flow can list it.
@@ -707,7 +724,7 @@ class AudioEngine:
         older than ``ttl`` seconds is dropped, so a speaker that announced once
         then died stops cluttering the add list. ``ttl=None`` disables the
         filter (returns everything ever seen). An entry with no ``last_seen``
-        is kept (it predates the stamp / can't be judged stale).
+        is kept, since it can't be judged stale.
         """
         with self._lock:
             now = self._clock()
@@ -726,6 +743,7 @@ class AudioEngine:
             return result
 
     def live_status(self, mac: Any) -> dict[str, Any]:
+        """One speaker's live status (``{"online": False}`` if never heard)."""
         mac6 = normalize_mac6(mac)
         with self._lock:
             return dict(self._live.get(mac6, {"online": False}))
@@ -790,7 +808,8 @@ class AudioEngine:
         ``mac`` None -> the broadcast topic (all speakers); otherwise the named
         speaker's command topic. Exactly one of ``url`` / ``file`` is required
         (the agent reads ``file`` or ``url``). ``volume`` optionally overrides
-        playback level for this clip.
+        playback level for this clip, and ``priority`` ranks it against what
+        the speaker is already playing.
         """
         if (url is None) == (file is None):
             raise AudioError("play requires exactly one of url / file")
