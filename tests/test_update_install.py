@@ -336,6 +336,9 @@ class PerformInstallTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InstallError) as ctx:
             await update_install.perform_install(hass, _Checker())
         self.assertIn("already in progress", str(ctx.exception))
+        # The restart may have been refused (a config check failure), so the
+        # message asks for one rather than claiming it is under way.
+        self.assertIn("restart Home Assistant to finish", str(ctx.exception))
         self.assertEqual(self.swaps, ["9.9.9"])
         self.assertEqual(self.restarts, [True])
 
