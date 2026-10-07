@@ -1,4 +1,22 @@
-"""Authenticated REST surface and discovery for Energy Saving."""
+"""Authenticated REST surface and discovery for Energy Saving.
+
+All under ``/api/casasmart/energy``:
+
+- ``GET  /state`` (``energy.read``) — the live state. Only an admin also
+  gets the releases, issues and stats; a room-scoped token sees its own
+  rooms' occupancy only.
+- ``GET  /discovery`` (``energy.manage``) — the wizard's inventory of
+  rooms, gangs, lights, plugs, heaters, covers, ACs and sensors.
+- ``GET/PATCH/DELETE /config/{level}`` (``energy.manage``) — read, merge
+  a wizard step into, or reset one level's configuration. A PATCH is
+  validated against the live discovery before it is stored.
+- ``POST /activate``, ``/deactivate``, ``/reapply`` (``energy.control``) —
+  run through ``EnergyController``.
+
+Engine errors map to 409 (``setup_required``, ``already_active``,
+``energy_inactive``), 404 for an unknown level and 400 for a bad
+configuration.
+"""
 
 from __future__ import annotations
 
@@ -28,17 +46,23 @@ if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
 
 
+# -- discovery helpers --------------------------------------------------------
+
+
 def _runtime(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
+    """The loaded entry's runtime data, or None while the hub isn't loaded."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
 
 
 def _entity_name(entity: Any) -> str:
+    """The friendly name, else the entity id."""
     value = entity.attributes.get("friendly_name")
     return value if isinstance(value, str) and value else entity.entity_id
 
 
 def _dimmable(entity: Any) -> bool:
+    """True when a light reports a brightness or a color mode beyond on/off."""
     if entity.brightness is not None:
         return True
     modes = entity.attributes.get("supported_color_modes")
@@ -49,6 +73,7 @@ def _dimmable(entity: Any) -> bool:
 
 
 def _candidate(entity: Any, *, dimmable: bool | None = None) -> dict[str, Any]:
+    """One wizard candidate: id, name, state and availability."""
     value = {
         "entity_id": entity.entity_id,
         "name": _entity_name(entity),
@@ -61,7 +86,11 @@ def _candidate(entity: Any, *, dimmable: bool | None = None) -> dict[str, Any]:
 
 
 def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None:
-    """Find a plug's physical-device power sensor, if HA exposes one."""
+    """Find a plug's physical-device power sensor, if HA exposes one.
+
+    The first sensor of the same HA device, by entity id, whose device class
+    is ``power`` or whose entity id mentions power.
+    """
     registry = er.async_get(hass)
     entry = registry.async_get(entity_id)
     if entry is None or entry.device_id is None:
@@ -95,7 +124,12 @@ def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None
 async def async_energy_discovery(
     hass: HomeAssistant, runtime: CasaSmartRuntimeData
 ) -> dict[str, Any]:
-    """Build deterministic wizard inventory grouped by registry floor/room."""
+    """Build deterministic wizard inventory grouped by registry floor/room.
+
+    Rooms come from the registry plus any room the inventory found devices
+    in. Gangs are the registry devices that carry gang metadata; plugs and
+    heaters are switches classified by their gang type or HA device class.
+    """
     builder = EnergyInventoryBuilder(hass, runtime.registry)
     inventory = await builder.async_build()
 
@@ -127,6 +161,10 @@ async def async_energy_discovery(
             for item in device.get("control_entity_ids", [])
             if isinstance(item, str)
         ]
+        # Per-entity gang metadata lives in ``gangs``. Older registry records
+        # instead carry ``gang_types``/``gang_names`` keyed by a gang name
+        # such as "left" or "l1"; those are matched below by entity-id
+        # suffix, else by position.
         nested = device.get("gangs")
         nested = nested if isinstance(nested, dict) else {}
         legacy_types = device.get("gang_types")
@@ -280,13 +318,19 @@ async def async_energy_discovery(
     }
 
 
+# -- views --------------------------------------------------------------------
+
+
 class _EnergyView(HomeAssistantView):
-    requires_auth = False
+    """Shared plumbing for the Energy Saving views."""
+
+    requires_auth = False  # CasaSmart JWT gate
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     def _ready(self) -> tuple[CasaSmartRuntimeData | None, web.Response | None]:
+        """The runtime data, or a 503 until Energy Saving has started."""
         runtime = _runtime(self._hass)
         if runtime is None or runtime.energy_controller is None:
             return None, self.json_message(
@@ -295,6 +339,7 @@ class _EnergyView(HomeAssistantView):
         return runtime, None
 
     def _energy_error(self, err: Exception) -> web.Response:
+        """Map an engine error to its HTTP answer."""
         if isinstance(err, EnergySetupRequiredError):
             return self.json(
                 {"error": "setup_required", "level": err.level},
@@ -310,6 +355,8 @@ class _EnergyView(HomeAssistantView):
 
 
 class CasaSmartEnergyStateView(_EnergyView):
+    """GET /api/casasmart/energy/state."""
+
     url = f"/api/{DOMAIN}/energy/state"
     name = f"api:{DOMAIN}:energy:state"
 
@@ -344,6 +391,8 @@ class CasaSmartEnergyStateView(_EnergyView):
 
 
 class CasaSmartEnergyDiscoveryView(_EnergyView):
+    """GET /api/casasmart/energy/discovery."""
+
     url = f"/api/{DOMAIN}/energy/discovery"
     name = f"api:{DOMAIN}:energy:discovery"
 
@@ -358,6 +407,8 @@ class CasaSmartEnergyDiscoveryView(_EnergyView):
 
 
 class CasaSmartEnergyConfigView(_EnergyView):
+    """GET/PATCH/DELETE /api/casasmart/energy/config/{level}."""
+
     url = f"/api/{DOMAIN}/energy/config/{{level}}"
     name = f"api:{DOMAIN}:energy:config"
 
@@ -395,6 +446,8 @@ class CasaSmartEnergyConfigView(_EnergyView):
                 "lockout_enabled must be a boolean", HTTPStatus.BAD_REQUEST
             )
         try:
+            # Validate the merged result, including against the live
+            # discovery, before the engine stores the step.
             preview = await self._hass.async_add_executor_job(
                 runtime.energy.get_config, level
             )
@@ -430,6 +483,8 @@ class CasaSmartEnergyConfigView(_EnergyView):
 
 
 class CasaSmartEnergyActivateView(_EnergyView):
+    """POST /api/casasmart/energy/activate with ``{level, lockout_enabled?}``."""
+
     url = f"/api/{DOMAIN}/energy/activate"
     name = f"api:{DOMAIN}:energy:activate"
 
@@ -470,6 +525,8 @@ class CasaSmartEnergyActivateView(_EnergyView):
 
 
 class CasaSmartEnergyDeactivateView(_EnergyView):
+    """POST /api/casasmart/energy/deactivate."""
+
     url = f"/api/{DOMAIN}/energy/deactivate"
     name = f"api:{DOMAIN}:energy:deactivate"
 
@@ -486,6 +543,8 @@ class CasaSmartEnergyDeactivateView(_EnergyView):
 
 
 class CasaSmartEnergyReapplyView(_EnergyView):
+    """POST /api/casasmart/energy/reapply."""
+
     url = f"/api/{DOMAIN}/energy/reapply"
     name = f"api:{DOMAIN}:energy:reapply"
 

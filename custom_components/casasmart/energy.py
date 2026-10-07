@@ -5,10 +5,14 @@ Energy Saving levels. It deliberately contains no Home Assistant imports,
 service calls, timers, device inventory, or role checks:
 
 * this module validates/stores configuration, active state, releases, room
-  occupancy, factual event history, and stats-lite;
+  occupancy, factual event history, and simple operational counts;
 * ``energy_adapter`` executes rules and drives occupancy/temperature/sun edges;
 * ``energy_runtime`` and ``energy_api`` expose the engine through authenticated
   REST/WS surfaces and enforce lockout in command paths.
+
+A *release* is a device the household changed by hand while a level was
+active; the adapter leaves it alone until the level is re-applied (or, in
+Smart, until its room has been empty for the grace period).
 
 Storage methods are synchronous and must be called through Home Assistant's
 executor. An ``RLock`` protects the in-memory mirrors and their
@@ -44,8 +48,12 @@ EVENT_RELEASED = "released"
 EVENT_RELEASES_CLEARED = "releases_cleared"
 EVENT_OCCUPANCY_CHANGED = "occupancy_changed"
 
+# The one key of the state table.
 _STATE_KEY = "current"
+# Event history older than this is pruned at boot.
 _EVENT_RETENTION_SECONDS = 180 * 24 * 3600
+# Size bounds on stored ids and lists, so a request cannot grow the stored
+# documents without limit.
 _MAX_ID_LENGTH = 255
 _MAX_SOURCE_LENGTH = 64
 _MAX_LIST_ITEMS = 1024
@@ -63,6 +71,7 @@ _COMMON_CONFIG_FIELDS = frozenset(
         "setup_complete",
     }
 )
+# Low and Medium always lock family controls; only Smart makes it a choice.
 _SMART_CONFIG_FIELDS = _COMMON_CONFIG_FIELDS | {"lockout_enabled"}
 
 
@@ -94,7 +103,11 @@ class EnergyInactiveError(EnergyError):
     """An active-level-only operation was requested while inactive."""
 
 
+# -- validation helpers -------------------------------------------------------
+
+
 def _validate_level(level: Any) -> str:
+    """Return ``level`` if it is one of the three levels, else raise."""
     if level not in ENERGY_LEVELS:
         raise UnknownEnergyLevelError(
             f"Unknown energy level {level!r} (expected one of {ENERGY_LEVELS})"
@@ -103,6 +116,7 @@ def _validate_level(level: Any) -> str:
 
 
 def _clean_id(value: Any, field: str) -> str:
+    """A stripped, non-empty, bounded string id."""
     if not isinstance(value, str) or not value.strip():
         raise EnergyConfigError(f"{field} must be a non-empty string")
     clean = value.strip()
@@ -112,6 +126,7 @@ def _clean_id(value: Any, field: str) -> str:
 
 
 def _clean_entity_id(value: Any, field: str) -> str:
+    """A clean id that is also shaped like ``domain.object_id``."""
     clean = _clean_id(value, field)
     domain, separator, object_id = clean.partition(".")
     if not separator or not domain or not object_id:
@@ -128,6 +143,7 @@ def _clean_unique_list(
     entity_ids: bool,
     allow_empty: bool = True,
 ) -> list[str]:
+    """A bounded list of clean ids (or entity ids) with no duplicates."""
     if not isinstance(value, list):
         raise EnergyConfigError(f"{field} must be an array")
     if len(value) > _MAX_LIST_ITEMS:
@@ -153,6 +169,11 @@ def _clean_pick_map(
     exact_count: int | None,
     allow_empty_picks: bool,
 ) -> dict[str, list[str]]:
+    """A ``{group or room id: [entity ids]}`` keeper map.
+
+    ``exact_count``, when set, is the number of keepers every group must
+    name.
+    """
     if not isinstance(value, dict):
         raise EnergyConfigError(f"{field} must be an object")
     if len(value) > _MAX_PICK_GROUPS:
@@ -178,6 +199,7 @@ def _clean_pick_map(
 
 
 def _clean_heaters(value: Any) -> list[dict[str, Any]]:
+    """The heater list: ``{entity_id, turn_off}`` items, one per entity."""
     if not isinstance(value, list):
         raise EnergyConfigError("heaters must be an array")
     if len(value) > _MAX_LIST_ITEMS:
@@ -205,6 +227,9 @@ def _clean_heaters(value: Any) -> list[dict[str, Any]]:
     return clean
 
 
+# -- level configuration ------------------------------------------------------
+
+
 def default_level_config(level: str) -> dict[str, Any]:
     """Return a fresh canonical configuration document for ``level``."""
     level = _validate_level(level)
@@ -226,7 +251,7 @@ def default_level_config(level: str) -> dict[str, Any]:
 def validate_level_config(level: str, value: Any) -> dict[str, Any]:
     """Validate and normalize a complete per-level configuration document.
 
-    Keeper counts that are knowable from the blob are enforced here:
+    Keeper counts that are knowable from the document are enforced here:
     Low gang groups keep exactly two, Medium/Smart groups keep exactly one,
     and Medium multi-AC groups keep exactly one. The discovery/API layer
     (``energy_validation``) additionally cross-checks picks against the live
@@ -315,11 +340,18 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
     return normalized
 
 
+# -- engine -------------------------------------------------------------------
+
+
 class EnergyEngine:
     """Persistent Energy Saving configuration/state model.
 
     ``config_table`` stores one JSON document per level. ``state_table`` stores
     one ``current`` document. ``events`` is ``storage.energy_events()``.
+    ``clock`` returns wall-clock seconds and is injectable for tests.
+
+    The engine never touches devices: activation, deactivation and re-apply
+    only record state, and ``EnergyController`` runs the adapter around them.
     """
 
     def __init__(
@@ -341,7 +373,11 @@ class EnergyEngine:
     # -- lifecycle ---------------------------------------------------------
 
     def warm_up(self) -> None:
-        """Load and validate persisted mirrors; fail safe on malformed blobs."""
+        """Load and validate the stored documents into memory.
+
+        A malformed level config falls back to that level's defaults, and a
+        malformed state document keeps only what still validates.
+        """
         with self._lock:
             for level in ENERGY_LEVELS:
                 stored = self._config_table.get(level)
@@ -366,6 +402,7 @@ class EnergyEngine:
     # -- configuration -----------------------------------------------------
 
     def get_config(self, level: str) -> dict[str, Any]:
+        """A copy of one level's configuration."""
         level = _validate_level(level)
         with self._lock:
             return copy.deepcopy(self._configs[level])
@@ -465,6 +502,7 @@ class EnergyEngine:
 
     @property
     def active_level(self) -> str | None:
+        """The active level, or None when Energy Saving is off."""
         with self._lock:
             return self._state["active_level"]
 
@@ -583,6 +621,7 @@ class EnergyEngine:
     # -- release ledger ----------------------------------------------------
 
     def is_released(self, entity_id: str) -> bool:
+        """True when the household has taken this device back by hand."""
         entity_id = _clean_entity_id(entity_id, "entity_id")
         with self._lock:
             return entity_id in self._state["release_details"]
@@ -635,7 +674,10 @@ class EnergyEngine:
     def clear_room_releases(
         self, room_id: str, *, reason: str = "room_empty"
     ) -> list[str]:
-        """Clear one room's Smart releases after the adapter's empty grace completes."""
+        """Clear one room's Smart releases once the adapter finds it empty.
+
+        Returns the entity ids that were cleared.
+        """
         room_id = _clean_id(room_id, "room_id")
         reason = _clean_id(reason, "reason")
         with self._lock:
@@ -676,7 +718,8 @@ class EnergyEngine:
 
         ``occupied=None`` is the unavailable/unknown state and requires
         ``sensors_available=False``. The adapter owns the 45-second empty
-        debounce and calls this only after the edge is accepted.
+        debounce and calls this only after the edge is accepted. Returns
+        whether anything changed.
         """
         room_id = _clean_id(room_id, "room_id")
         if not isinstance(sensors_available, bool):
@@ -751,6 +794,7 @@ class EnergyEngine:
         since_t: int | None = None,
         kinds: list[str] | tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
+        """The newest events first, optionally since a time or of some kinds."""
         return self._events.recent(limit=limit, since_t=since_t, kinds=kinds)
 
     def stats(self, *, since_t: int | None = None) -> dict[str, Any]:
@@ -796,6 +840,11 @@ class EnergyEngine:
         }
 
     def _coerce_state(self, stored: Any) -> dict[str, Any]:
+        """Rebuild a valid state document from what was stored.
+
+        Fields that fail validation fall back to their defaults one by one,
+        so a damaged record never blocks startup.
+        """
         state = self._default_state()
         if not isinstance(stored, dict):
             return state
@@ -929,6 +978,7 @@ class EnergyEngine:
         )
 
     def _now(self) -> int:
+        """The injected clock as whole seconds; refuses a nonsense value."""
         value = self._clock()
         if (
             isinstance(value, bool)
