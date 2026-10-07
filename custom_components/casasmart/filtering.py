@@ -93,6 +93,9 @@ def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bo
 
 
 def is_visible(hass: HomeAssistant, entity_id: str) -> bool:
+    """Registry visibility: hidden entities stay private, and an entity with
+    an entity_category is served only as ``is_category_served`` allows.
+    Entities with no registry entry are visible."""
     entry = er.async_get(hass).async_get(entity_id)
     if entry is None:
         return True
@@ -164,6 +167,13 @@ def is_openweathermap_measurement(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 def is_served(hass: HomeAssistant, entity_id: str) -> bool:
+    """The one read gate: may the app see this entity at all?
+
+    Exposed domain, visible, and not a weather service's forecast sensor
+    (OpenWeatherMap's live temperature/humidity excepted). Device lists, the
+    WebSocket pushes, commands, history and scene writes all use it, so they
+    can never disagree about what exists.
+    """
     weather_measurement = is_openweathermap_measurement(hass, entity_id)
     return (
         is_exposed(entity_id)
@@ -179,12 +189,11 @@ def is_assignable(hass: HomeAssistant, entity_id: str) -> bool:
     uncurated diagnostics, but organizing is a different surface. A device
     the integration has HIDDEN (e.g. a secondary gang switch with
     ``hidden_by='integration'``), or a diagnostic row, can still legitimately
-    hold a room assignment and have it edited or cleared. Gating writes on
-    ``is_served`` 404'd those legitimate edits — the device was assignable
-    when first imported, then the integration hid it, and the hub then
-    refused to let the app move or clear it. Requires only that the entity is
-    REAL (a registry entry or a live state) and that its domain is exposed.
-    Reads/feeds keep using ``is_served``."""
+    hold a room assignment and have it edited or cleared; gating these writes
+    on ``is_served`` would 404 a device the integration hid after it was
+    imported, leaving the app unable to move or clear it. Requires only that
+    the entity is REAL (a registry entry or a live state) and that its domain
+    is exposed. Reads/feeds keep using ``is_served``."""
     if not is_exposed(entity_id):
         return False
     if er.async_get(hass).async_get(entity_id) is not None:

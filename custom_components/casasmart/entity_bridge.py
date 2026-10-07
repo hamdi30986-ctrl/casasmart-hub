@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+# The domains the app can see at all. Anything else (remote, script, ...)
+# never leaves the hub through the device API.
 EXPOSED_DOMAINS: frozenset[str] = frozenset(
     {
         "light",
@@ -28,6 +30,7 @@ EXPOSED_DOMAINS: frozenset[str] = frozenset(
 )
 
 
+# Per domain, the state attributes passed to the app; all others are stripped.
 _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
     "light": frozenset(
         {
@@ -92,6 +95,9 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
 }
 
 
+# Per domain: app action -> (HA service, data keys the action may carry). Only
+# these commands reach Home Assistant; the values are left to the service's own
+# schema.
 _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "light": {
         "turn_on": (
@@ -173,9 +179,12 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
 }
 
 
+# Exposed for reading, never commandable.
 READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor", "camera"})
 
-
+# Diagnostic-category sensors and binary sensors the app shows anyway, by
+# device_class: measurements and device-status flags. Other diagnostic entities
+# stay hidden, except an air purifier's filter life (is_filter_life_entity).
 DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
     {
         "power",
