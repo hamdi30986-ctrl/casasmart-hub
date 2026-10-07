@@ -14,6 +14,14 @@ import json
 import math
 from datetime import UTC, datetime
 
+_WINDOW_SECONDS = 2 * 60 * 60
+# The eco plan's light cap (of 255) and its AC target in each unit.
+_ECO_BRIGHTNESS = 128
+_ECO_TARGETS = {"°C": 24, "C": 24, "°F": 75.2, "F": 75.2}
+# Home Assistant's ClimateEntityFeature bits.
+_SUPPORT_TARGET_TEMPERATURE = 1
+_SUPPORT_FAN_MODE = 8
+
 
 def digest(value):
     """A stable SHA-256 of a JSON-serializable value."""
@@ -22,8 +30,8 @@ def digest(value):
 
 def window(now):
     """The two-hour UTC window holding now: (start epoch, end datetime)."""
-    start = int(now.timestamp()) // 7200 * 7200
-    return start, datetime.fromtimestamp(start + 7200, UTC)
+    start = int(now.timestamp()) // _WINDOW_SECONDS * _WINDOW_SECONDS
+    return start, datetime.fromtimestamp(start + _WINDOW_SECONDS, UTC)
 
 
 def number(value):
@@ -87,8 +95,8 @@ def room_actions(states, kind, *, temperature_unit="°C"):
         attrs = state.attributes
         modes = set(attrs.get("supported_color_modes", [])) - {"onoff", "unknown"}
         if modes and number(attrs.get("brightness")):
-            if attrs["brightness"] > 128:
-                add(state, "turn_on", {"brightness": 128})
+            if attrs["brightness"] > _ECO_BRIGHTNESS:
+                add(state, "turn_on", {"brightness": _ECO_BRIGHTNESS})
         else:
             nondimmable.append(state)
     for state in nondimmable[: min(len(lights) // 2, max(0, len(lights) - 1))]:
@@ -98,7 +106,7 @@ def room_actions(states, kind, *, temperature_unit="°C"):
         if state.state != "cool":
             continue  # never change the mode, or a heat or auto target
         unit = attrs.get("temperature_unit", temperature_unit)
-        target = 24 if unit in {"°C", "C"} else 75.2 if unit in {"°F", "F"} else None
+        target = _ECO_TARGETS.get(unit)
         current = attrs.get("temperature")
         minimum, maximum = attrs.get("min_temp"), attrs.get("max_temp")
         step = attrs.get("target_temp_step", 1 if unit in {"°C", "C"} else 0.1)
@@ -114,14 +122,14 @@ def room_actions(states, kind, *, temperature_unit="°C"):
             and current < target
             and (not number(minimum) or minimum <= target)
             and (not number(maximum) or maximum >= target)
-            and int(attrs.get("supported_features", 0)) & 1
+            and int(attrs.get("supported_features", 0)) & _SUPPORT_TARGET_TEMPERATURE
         ):
             add(state, "set_temperature", {"temperature": target})
         if (
             # fan_modes is null while a fan-capable AC has reported none.
             "low" in (attrs.get("fan_modes") or [])
             and attrs.get("fan_mode") != "low"
-            and int(attrs.get("supported_features", 0)) & 8
+            and int(attrs.get("supported_features", 0)) & _SUPPORT_FAN_MODE
         ):
             add(state, "set_fan_mode", {"fan_mode": "low"})
     return actions
