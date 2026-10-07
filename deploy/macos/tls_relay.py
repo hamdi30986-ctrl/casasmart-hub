@@ -22,9 +22,11 @@ _BUFFER_SIZE = 64 * 1024
 
 
 def is_lan_peer(peer: object) -> bool:
-    """True for a socket peer in a private, link-local or loopback range.
+    """True for a socket peer in a private or link-local range.
 
-    A zone suffix (fe80::1%en0) is ignored.
+    Loopback is refused: the hub counts whatever enters the relay as LAN,
+    and a tunnel on the Mac itself (ngrok, ssh -R) would enter from
+    loopback. A zone suffix (fe80::1%en0) is ignored.
     """
     if not isinstance(peer, tuple) or not peer or not isinstance(peer[0], str):
         return False
@@ -37,7 +39,9 @@ def is_lan_peer(peer: object) -> bool:
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
         address = mapped
-    return address.is_private or address.is_link_local or address.is_loopback
+    if address.is_loopback:
+        return False
+    return address.is_private or address.is_link_local
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

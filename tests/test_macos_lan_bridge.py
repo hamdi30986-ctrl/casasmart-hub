@@ -92,10 +92,17 @@ class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
     def test_only_local_address_ranges_are_accepted(self) -> None:
         self.assertTrue(RELAY.is_lan_peer(("192.168.1.25", 12345)))
         self.assertTrue(RELAY.is_lan_peer(("10.0.0.8", 12345)))
-        self.assertTrue(RELAY.is_lan_peer(("127.0.0.1", 12345)))
         self.assertTrue(RELAY.is_lan_peer(("fe80::1%en0", 12345, 0, 4)))
         self.assertFalse(RELAY.is_lan_peer(("8.8.8.8", 12345)))
         self.assertFalse(RELAY.is_lan_peer(None))
+
+    def test_loopback_peers_are_refused(self) -> None:
+        # With lan_relay_ingress on, whatever enters the relay counts as LAN
+        # to the hub. A tunnel on the Mac itself (ngrok, ssh -R, Tailscale
+        # Funnel) would enter from loopback.
+        self.assertFalse(RELAY.is_lan_peer(("127.0.0.1", 12345)))
+        self.assertFalse(RELAY.is_lan_peer(("127.0.0.5", 12345)))
+        self.assertFalse(RELAY.is_lan_peer(("::1", 12345, 0, 0)))
 
     def test_ipv4_mapped_addresses_are_judged_as_ipv4(self) -> None:
         # A dual-stack listener (--listen-host ::) sees IPv4 clients as
@@ -104,7 +111,18 @@ class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(RELAY.is_lan_peer(("::ffff:8.8.8.8", 12345, 0, 0)))
         self.assertFalse(RELAY.is_lan_peer(("::ffff:1.1.1.1", 12345, 0, 0)))
         self.assertTrue(RELAY.is_lan_peer(("::ffff:192.168.1.25", 12345, 0, 0)))
-        self.assertTrue(RELAY.is_lan_peer(("::ffff:127.0.0.1", 12345, 0, 0)))
+        self.assertFalse(RELAY.is_lan_peer(("::ffff:127.0.0.1", 12345, 0, 0)))
+
+    async def test_a_loopback_client_is_closed_without_dialling_upstream(
+        self,
+    ) -> None:
+        client = _ClientWriter(("127.0.0.1", 50000))
+        with self.assertLogs("casasmart.tls_relay", level="WARNING") as logs:
+            await RELAY.relay_connection(
+                None, client, upstream_host="127.0.0.1", upstream_port=18443
+            )
+        self.assertTrue(client.closed)
+        self.assertIn("refusing non-LAN client", logs.output[0])
 
     async def test_upstream_timeout_closes_the_client_on_older_pythons(self) -> None:
         client = _ClientWriter(("192.168.1.25", 50000))
@@ -125,10 +143,12 @@ class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
         upstream_port = upstream.sockets[0].getsockname()[1]
         relay = await RELAY.start_relay("127.0.0.1", 0, "127.0.0.1", upstream_port)
         relay_port = relay.sockets[0].getsockname()[1]
-        reader, writer = await asyncio.open_connection("127.0.0.1", relay_port)
-        writer.write(b"CasaTest")
-        await writer.drain()
-        self.assertEqual(await reader.readexactly(8), b"CasaTest")
+        # The test can only reach the relay over loopback, which it refuses.
+        with mock.patch.object(RELAY, "is_lan_peer", return_value=True):
+            reader, writer = await asyncio.open_connection("127.0.0.1", relay_port)
+            writer.write(b"CasaTest")
+            await writer.drain()
+            self.assertEqual(await reader.readexactly(8), b"CasaTest")
         writer.close()
         await writer.wait_closed()
         relay.close()
