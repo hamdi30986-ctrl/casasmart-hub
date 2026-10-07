@@ -34,7 +34,7 @@ from .auth_api import (
     ready_or_503,
 )
 from .const import DOMAIN
-from .energy_runtime import energy_lockout_applies
+from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .filtering import area_id_of, in_scope, is_served, serialize_device
 from .now_data import (
     NowDataEngine,
@@ -627,15 +627,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             and runtime_data.energy is not None
             and energy_lockout_applies(runtime_data.energy, claims)
         ):
-            return self.json(
-                {
-                    "error": "energy_lockout",
-                    "message": "Energy saving is active — controls are locked by the admin",
-                    # The phone reads code on a 403: this isn't an expired login.
-                    "code": "energy_lockout",
-                },
-                HTTPStatus.FORBIDDEN,
-            )
+            return self.json(energy_lockout_refusal(), HTTPStatus.FORBIDDEN)
         payload, error = await read_json_object(self, request)
         if error is not None:
             return error

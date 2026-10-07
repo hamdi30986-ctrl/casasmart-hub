@@ -60,7 +60,11 @@ def load_api():
     module(
         "room_api_fixture.entity_bridge", CommandError=Exception, validate_command=None
     )
-    module("room_api_fixture.energy_runtime", energy_lockout_applies=None)
+    module(
+        "room_api_fixture.energy_runtime",
+        energy_lockout_applies=None,
+        energy_lockout_refusal=None,
+    )
     module(
         "room_api_fixture.filtering",
         **dict.fromkeys(

@@ -5,7 +5,8 @@ time around the engine (energy) and the device adapter (energy_adapter).
 EnergyAutomationManager switches unflagged HA automations off while a level
 is active and back on afterwards; EnergyFlags stores the flags and which
 automations the hub switched off. energy_lockout_applies is the check that
-stops non-admins overriding an active level from any command path.
+stops non-admins overriding an active level from any command path, and
+energy_lockout_refusal the body of that 403.
 """
 
 from __future__ import annotations
@@ -55,6 +56,18 @@ def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool
         and state["lockout_enabled"]
         and claims.get("role") != ROLE_ADMIN
     )
+
+
+def energy_lockout_refusal() -> dict[str, str]:
+    """The 403 body for a command the lockout refuses.
+
+    The phone reads code on a 403: this isn't an expired login.
+    """
+    return {
+        "error": "energy_lockout",
+        "message": "Energy saving is active — controls are locked by the admin",
+        "code": "energy_lockout",
+    }
 
 
 class EnergyFlags:

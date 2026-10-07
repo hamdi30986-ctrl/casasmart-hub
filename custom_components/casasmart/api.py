@@ -95,7 +95,7 @@ from .energy_api import (
     CasaSmartEnergyReapplyView,
     CasaSmartEnergyStateView,
 )
-from .energy_runtime import energy_lockout_applies
+from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .entity_bridge import CommandError, validate_command
 from .filtering import in_scope, is_served, serialize_device
 from .history import (
@@ -480,17 +480,7 @@ class CasaSmartCommandView(HomeAssistantView):
         runtime_data = loaded_runtime_data(self._hass)
         energy = getattr(runtime_data, "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
-            return self.json(
-                {
-                    "error": "energy_lockout",
-                    "message": (
-                        "Energy saving is active — controls are locked by the admin"
-                    ),
-                    # The phone reads code on a 403: this isn't an expired login.
-                    "code": "energy_lockout",
-                },
-                HTTPStatus.FORBIDDEN,
-            )
+            return self.json(energy_lockout_refusal(), HTTPStatus.FORBIDDEN)
 
         try:
             payload = await request.json()

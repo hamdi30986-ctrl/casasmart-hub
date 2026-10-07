@@ -76,6 +76,7 @@ def _load_now_api():
     const.DOMAIN = "casasmart"
     energy = _module("casasmart.energy_runtime")
     energy.energy_lockout_applies = lambda *args: False
+    energy.energy_lockout_refusal = dict
     filtering = _module("casasmart.filtering")
     filtering.area_id_of = lambda hass, entity_id: hass.states.get(
         entity_id
@@ -433,15 +434,16 @@ class MemberLookupTest(unittest.TestCase):
         self.assertEqual(self.lookups, [True])
         self.assertEqual([o["entity_id"] for o in result["outcomes"]], ["light.a"])
 
-    def test_energy_lockout_refusal_carries_its_code(self) -> None:
-        # The phone keeps "code" on a 403: it tells the lockout apart from a
-        # credential that a re-login would fix.
+    def test_energy_lockout_refuses_before_switching_anything(self) -> None:
+        refusal = {"error": "energy_lockout", "code": "energy_lockout"}
         self.runtime.energy = object()
-        with patch.object(_API, "energy_lockout_applies", lambda *args: True):
+        with patch.multiple(
+            _API,
+            energy_lockout_applies=lambda *args: True,
+            energy_lockout_refusal=lambda: refusal,
+        ):
             result = self._room_command(self._lookup)
-        self.assertEqual(result["error"], "energy_lockout")
-        self.assertEqual(result["code"], "energy_lockout")
-        self.assertIsInstance(result["message"], str)
+        self.assertEqual(result, refusal)
         self.assertEqual(self.hass.services.calls, [])
 
     def test_room_command_storage_error_is_a_clean_500(self) -> None:
