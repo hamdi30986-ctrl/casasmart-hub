@@ -1,10 +1,9 @@
 """SQLite storage behind the hub's engines.
 
-``HubStorage`` owns the hub's one SQLite connection, in WAL mode, shared by
-every executor thread under a re-entrant lock. Engines get dict-like
-``KeyValueTable`` views (one namespace each, all in a single ``kv`` table) and
-two append-only tables for data that grows row by row: tank readings and
-Energy Saving events. All SQL stays inside this package.
+HubStorage owns the hub's one SQLite connection (WAL mode), shared by every
+executor thread under a re-entrant lock. Engines get dict-like KeyValueTable
+views, one namespace each in a single kv table, plus two append-only tables
+for tank readings and Energy Saving events.
 """
 
 from __future__ import annotations
@@ -30,20 +29,17 @@ _VALID_NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # file before it fails with "database is locked".
 _BUSY_TIMEOUT_MS = 5000
 
-# Checkpoint after every commit, so the main database file holds every
-# acknowledged write on its own: losing the -wal sidecar (an unclean host
-# restart can) then loses nothing. Hub writes are small and infrequent, so the
-# extra I/O is cheap.
+# Checkpoint after every commit so the main file holds every acknowledged write
+# and losing the -wal sidecar in an unclean restart loses nothing. Hub writes
+# are small and rare, so the extra I/O is cheap.
 _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
 class HubStorage:
     """The hub's SQLite database: one connection, shared under a lock.
 
-    ``open()`` runs any pending migrations, then connects; ``close()``
-    checkpoints and disconnects. Every method is synchronous and blocking, so
-    Home Assistant code calls them through the executor. A write commits at
-    once unless it runs inside ``transaction()``.
+    Every method blocks, so HA code calls them through the executor. A write
+    commits at once unless it runs inside transaction().
     """
 
     def __init__(self, db_path: Path, backup_dir: Path | None = None) -> None:
@@ -73,12 +69,9 @@ class HubStorage:
                     f"Could not enable WAL (journal_mode={journal_mode!r}). "
                     "Is the database on a filesystem that supports it?"
                 )
-            # synchronous=FULL: every COMMIT fsyncs the WAL, so a host power cut
-            # can't drop an acknowledged write (a pairing, a registry edit, a
-            # tank reading). NORMAL fsyncs only at checkpoint, which on a
-            # low-write hub can lag far behind. Affordable because writes are
-            # small and infrequent: even tank telemetry, the busiest writer,
-            # appends one small row per reading.
+            # FULL fsyncs the WAL on every commit, so a power cut can't drop an
+            # acknowledged write; NORMAL only syncs at checkpoint. Hub writes
+            # are small and rare enough to afford it.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
@@ -115,7 +108,7 @@ class HubStorage:
             return get_user_version(self._connection)
 
     def table(self, namespace: str) -> KeyValueTable:
-        """Return the dict-like view for ``namespace`` (created lazily)."""
+        """The dict-like view for namespace, created on first use."""
         if not _VALID_NAMESPACE.match(namespace):
             raise ValueError(
                 f"Invalid table namespace {namespace!r}: must match "
@@ -150,10 +143,10 @@ class HubStorage:
 
     @contextmanager
     def transaction(self):
-        """Commit all KV writes together; nested callers use savepoints.
+        """Commit the enclosed writes together; nested calls use savepoints.
 
-        Hold the connection lock throughout: another executor job must never
-        accidentally commit a partially applied logical operation.
+        The lock is held throughout, so no other executor job can commit a
+        half-applied operation.
         """
         with self._lock:
             name = f"casasmart_tx_{self._transaction_depth}"
@@ -169,10 +162,8 @@ class HubStorage:
             finally:
                 self._transaction_depth -= 1
 
-    # Reads are executed AND consumed under the lock. HA calls storage from many
-    # executor threads over this one connection; a cursor stepped outside the
-    # lock while another thread writes comes back torn or empty (an enrolled
-    # device reads as missing). Never hand a live read cursor to a caller.
+    # Reads are executed and consumed under the lock: a cursor stepped outside
+    # it while another thread writes can come back torn or empty.
     def _fetchone(self, sql: str, params: tuple = ()) -> tuple | None:
         """Execute and consume a single-row read while holding the lock."""
         with self._lock:
@@ -185,11 +176,10 @@ class HubStorage:
 
 
 class KeyValueTable(MutableMapping):
-    """Dict-like view over one namespace in the ``kv`` table.
+    """Dict-like view over one namespace of the kv table.
 
-    Keys are strings; values are anything ``json.dumps`` accepts. Reads
-    return fresh deserialized copies — mutating a returned value does NOT
-    write back; assign it again to persist.
+    Keys are strings and values anything json.dumps accepts. Reads return
+    fresh copies, so a changed value must be assigned again to persist.
     """
 
     def __init__(self, storage: HubStorage, namespace: str) -> None:
@@ -211,9 +201,8 @@ class KeyValueTable(MutableMapping):
     def __setitem__(self, key: str, value: Any) -> None:
         self._check_key(key)
         try:
-            # allow_nan=False: a NaN/Infinity would serialize to a bare
-            # NaN/Infinity token that strict JSON parsers (the app) reject,
-            # poisoning the whole row — reject it at the write instead.
+            # NaN and Infinity aren't valid JSON; the app's parser would reject
+            # the whole row.
             payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as err:
             raise TypeError(
@@ -253,11 +242,10 @@ class KeyValueTable(MutableMapping):
         return int(row[0])
 
     def items(self) -> list[tuple[str, Any]]:
-        """Return one consistent key/value snapshot.
+        """Every key/value pair, read in one query.
 
-        MutableMapping's default view iterates keys and then fetches each value
-        separately. A concurrent delete between those operations raises a
-        spurious KeyError in read paths such as tank/device listings.
+        The MutableMapping default fetches each value separately, so a
+        concurrent delete could raise KeyError mid-listing.
         """
         rows = self._storage._fetchall(
             "SELECT key, value FROM kv WHERE namespace = ? ORDER BY key",
@@ -266,11 +254,8 @@ class KeyValueTable(MutableMapping):
         return [(key, json.loads(value)) for key, value in rows]
 
     def __contains__(self, key: object) -> bool:
-        # MutableMapping's default __contains__ probes __getitem__, whose
-        # _check_key raises TypeError for non-string keys. Membership is a
-        # question, not a write — `None in table` is legitimate (optional
-        # foreign ids like a room's floor_id) and the dict answer is False,
-        # not a crash. Also saves fetching + JSON-parsing the whole value.
+        # The default probes __getitem__, which raises TypeError for a
+        # non-string key; `None in table` (an unset floor_id) should be False.
         if not isinstance(key, str) or not key:
             return False
         row = self._storage._fetchone(
@@ -308,20 +293,17 @@ class KeyValueTable(MutableMapping):
 
 
 class TankReadingsTable:
-    """Append-only per-row store for tank readings (the ``tank_readings`` table).
+    """Append-only tank readings, one row per reading.
 
-    A time series doesn't fit KeyValueTable, which rewrites a whole value per
-    write: at one reading every few minutes that would re-serialize a device's
-    entire history each time. Here an ingest is a single-row INSERT and
-    retention is a bounded DELETE, and callers still never touch SQL.
+    KeyValueTable rewrites a whole value per write, which for a time series
+    means re-serializing a device's history every few minutes.
     """
 
     def __init__(self, storage: HubStorage) -> None:
         self._storage = storage
 
     def append(self, device_id: str, t: int, v: float) -> None:
-        """Record one reading. (device_id, t) is unique — a repeated second
-        replaces rather than doubles the row."""
+        """Record one reading; a second reading at the same t replaces it."""
         self._storage._execute_write(
             """
             INSERT INTO tank_readings (device_id, t, v) VALUES (?, ?, ?)
@@ -331,8 +313,10 @@ class TankReadingsTable:
         )
 
     def latest_t(self, device_id: str) -> int | None:
-        """The newest reading's timestamp, or None — lets ingest keep t
-        monotonic across a clock step-back (an NTP correction after reboot)."""
+        """The newest reading's timestamp, or None.
+
+        Ingest uses it to keep t monotonic across a clock step-back.
+        """
         row = self._storage._fetchone(
             "SELECT MAX(t) FROM tank_readings WHERE device_id = ?",
             (device_id,),
@@ -340,7 +324,7 @@ class TankReadingsTable:
         return int(row[0]) if row and row[0] is not None else None
 
     def last(self, device_id: str) -> dict[str, Any] | None:
-        """The newest reading as ``{"t":..., "v":...}``, or None."""
+        """The newest reading as {"t": ..., "v": ...}, or None."""
         row = self._storage._fetchone(
             "SELECT t, v FROM tank_readings WHERE device_id = ? "
             "ORDER BY t DESC LIMIT 1",
@@ -349,9 +333,7 @@ class TankReadingsTable:
         return {"t": int(row[0]), "v": float(row[1])} if row else None
 
     def recent(self, device_id: str, since_t: int) -> list[dict[str, Any]]:
-        """Readings at/after ``since_t``, NEWEST first (the app's history shape).
-
-        ORDER BY t makes 'newest first' robust to an out-of-order ingest t."""
+        """Readings at or after since_t, newest first."""
         rows = self._storage._fetchall(
             "SELECT t, v FROM tank_readings WHERE device_id = ? AND t >= ? "
             "ORDER BY t DESC",
@@ -360,8 +342,7 @@ class TankReadingsTable:
         return [{"t": int(t), "v": float(v)} for t, v in rows]
 
     def prune(self, device_id: str, before_t: int) -> int:
-        """Drop readings older than ``before_t`` (age-based retention); returns
-        the count removed. Cheap + indexed — usually 0-1 rows once steady."""
+        """Drop readings older than before_t and return how many went."""
         cursor = self._storage._execute_write(
             "DELETE FROM tank_readings WHERE device_id = ? AND t < ?",
             (device_id, int(before_t)),
@@ -369,18 +350,17 @@ class TankReadingsTable:
         return cursor.rowcount
 
     def delete_device(self, device_id: str) -> None:
-        """Drop all readings for a device (when the device record is deleted)."""
+        """Drop all of a device's readings."""
         self._storage._execute_write(
             "DELETE FROM tank_readings WHERE device_id = ?", (device_id,)
         )
 
 
 class EnergyEventsTable:
-    """Row-per-event Energy Saving audit history.
+    """Energy Saving audit events, one row each (migration v4).
 
-    State/config remain in ``KeyValueTable`` namespaces. Events need ordered,
-    bounded queries and aggregate counts, so they use migration v4's dedicated
-    table while still keeping all SQL inside the storage layer.
+    Energy state and config live in KeyValueTable namespaces; events need
+    ordered, bounded queries and counts.
     """
 
     _MAX_QUERY_LIMIT = 1000
@@ -473,7 +453,7 @@ class EnergyEventsTable:
         return [self._row(row) for row in rows]
 
     def summary(self, *, since_t: int | None = None) -> dict[str, Any]:
-        """Small factual aggregates only—never estimated energy or money."""
+        """Event counts and first/last times; no energy or cost estimates."""
         params: tuple[Any, ...] = ()
         where = ""
         if since_t is not None:
@@ -500,7 +480,7 @@ class EnergyEventsTable:
         }
 
     def prune(self, *, before_t: int) -> int:
-        """Delete events older than ``before_t``; return the number removed."""
+        """Delete events older than before_t and return how many went."""
         if isinstance(before_t, bool) or not isinstance(before_t, int) or before_t < 0:
             raise ValueError("before_t must be a non-negative integer")
         cursor = self._storage._execute_write(
@@ -509,7 +489,7 @@ class EnergyEventsTable:
         return cursor.rowcount
 
     def clear(self) -> None:
-        """Delete the complete Energy Saving event history."""
+        """Delete every event."""
         self._storage._execute_write("DELETE FROM energy_events")
 
     @staticmethod

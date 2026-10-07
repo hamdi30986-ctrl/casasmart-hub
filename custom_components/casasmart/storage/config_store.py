@@ -1,18 +1,11 @@
-"""JsonConfigStore — JSON file for rarely changed hub config.
+"""JSON file store for rarely changed hub config (hub_config.json).
 
-Holds the small, near-static settings and secrets in ``hub_config.json``: hub
-identity, pairing and recovery code hashes, network and relay settings (the
-README's "Hub settings"). Per-user or frequently written data belongs in
-HubStorage (SQLite), not here.
+Holds hub identity, pairing and recovery code hashes, and network and relay
+settings. Per-user or frequently written data belongs in HubStorage.
 
-Writes are atomic: serialize to a temp file in the same directory, fsync,
-then ``os.replace`` over the target — a crash mid-write can never leave a
-half-written config behind.
-
-Writes are also copy-on-write: each change is made to a candidate copy, and the
-in-memory config only becomes that copy once the replace has put it on disk. A
-write that raises therefore changes nothing, in memory or on disk, and a
-rejected value cannot ride along with a later, unrelated write.
+Writes go to a temp file that is fsynced and then renamed over the target.
+The in-memory config only changes after that rename, so a failed write
+changes nothing in memory or on disk.
 """
 
 from __future__ import annotations
@@ -60,7 +53,7 @@ class JsonConfigStore:
     # -- access ----------------------------------------------------------------
 
     def get(self, key: str, default: Any = None) -> Any:
-        """The stored value, or ``default`` when the key is unset."""
+        """The stored value, or default when the key is unset."""
         with self._lock:
             return self._data.get(key, default)
 
@@ -89,14 +82,14 @@ class JsonConfigStore:
             self._data = candidate
 
     def as_dict(self) -> dict[str, Any]:
-        """Snapshot copy — mutating it does not touch the store."""
+        """A shallow copy of the whole config."""
         with self._lock:
             return dict(self._data)
 
     # -- persistence -------------------------------------------------------------
 
     def _save(self, data: dict[str, Any]) -> None:
-        """Atomically replace the file with ``data``; ConfigError on failure."""
+        """Atomically replace the file with data; ConfigError on failure."""
         try:
             payload = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError) as err:
@@ -122,11 +115,8 @@ class JsonConfigStore:
                 pass
             raise ConfigError(f"Cannot write config {self._path}: {err}") from err
 
-        # The replace is the commit point: from here on every reader, and the
-        # next start, sees the new config, so it is not reported as failed.
-        # fsync the directory so the rename itself is durable: without it a
-        # power cut just after replace() can lose the rename — and with it
-        # the permanent pairing/recovery code hashes this file holds.
+        # The rename is the commit point, so a failed directory fsync is only
+        # logged. The fsync makes the rename survive a power cut.
         try:
             dir_fd = os.open(self._path.parent, os.O_RDONLY)
             try:

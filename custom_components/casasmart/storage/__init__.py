@@ -1,14 +1,13 @@
 """CasaSmart hub storage layer.
 
 Public surface:
-- HubStorage / KeyValueTable / EnergyEventsTable — the SQLite (WAL) database
+- HubStorage, KeyValueTable, EnergyEventsTable: the SQLite database (WAL)
   and its table views
-- JsonConfigStore — atomic JSON file for rarely changed config
-- Migration / MIGRATIONS / LATEST_VERSION — forward-only schema migrations
-- StorageError / MigrationError / ConfigError — exception hierarchy
+- JsonConfigStore: an atomic JSON file for rarely changed config
+- Migration, MIGRATIONS, LATEST_VERSION: forward-only schema migrations
+- StorageError, MigrationError, ConfigError: the exceptions
 
-Nothing above this package touches SQLite directly. The interface is the
-contract; the engine is swappable.
+Nothing outside this package touches SQLite directly.
 """
 
 from .config_store import JsonConfigStore
