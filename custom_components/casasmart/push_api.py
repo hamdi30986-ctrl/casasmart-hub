@@ -56,7 +56,9 @@ class CasaSmartPushTokenView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Register or refresh an FCM push token."""
-        claims, err = authenticate_request(self._hass, request, "devices.read")
+        # session.manage, not devices.read: a widget token must not repoint
+        # where its owner's notifications go.
+        claims, err = authenticate_request(self._hass, request, "session.manage")
         if err is not None:
             return err
 
@@ -112,7 +114,7 @@ class CasaSmartPushTokenView(HomeAssistantView):
 
     async def delete(self, request: web.Request) -> web.Response:
         """Unregister the calling device's push token (logout)."""
-        claims, err = authenticate_request(self._hass, request, "devices.read")
+        claims, err = authenticate_request(self._hass, request, "session.manage")
         if err is not None:
             return err
 

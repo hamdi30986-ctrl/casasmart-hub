@@ -868,9 +868,10 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
-        # Every role may leave; the permission is the weakest one every
-        # enrolled device holds, so the gate is really "a valid session".
-        claims, error = authenticate_request(self._hass, request, "devices.read")
+        # Every role may leave, so the gate is really "a valid session" — and a
+        # SESSION: session.manage is outside the widget cap, so a home-screen
+        # widget's token can't unpair the device that minted it.
+        claims, error = authenticate_request(self._hass, request, "session.manage")
         if error is not None:
             return error
         engine = get_engine(self._hass)
