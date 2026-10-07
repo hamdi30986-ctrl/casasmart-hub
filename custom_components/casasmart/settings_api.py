@@ -10,6 +10,7 @@ overwrite each other.
 from __future__ import annotations
 
 import logging
+import re
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,9 @@ _LOGGER = logging.getLogger(__name__)
 # Tile types whose entityId is an HA entity, so the served and scope checks
 # apply. Other tiles (tank, scene, security) pass through unchecked.
 _ENTITY_TILE_TYPES = frozenset({"toggle", "power", "climate"})
+# The shape of an HA entity id. A toggle tile may also hold an id of the apps'
+# own, such as light_group:<id>, which names no entity and passes through.
+_ENTITY_ID = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 
 
 def get_user_settings(hass: HomeAssistant) -> UserSettingsEngine | None:
@@ -80,6 +84,8 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
             return True
         eid = tile.get("entityId")
+        if isinstance(eid, str) and not _ENTITY_ID.fullmatch(eid):
+            return True
         return (
             isinstance(eid, str)
             and self._hass.states.get(eid) is not None

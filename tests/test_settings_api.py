@@ -331,6 +331,47 @@ class WidgetTileFilter(SettingsViewTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(body["widget_tiles"]), 2)
 
+    async def test_light_group_tiles_pass_through(self) -> None:
+        # The apps' widget editor offers light groups as toggle tiles with the
+        # id light_group:<id>; it names no HA entity, so there is nothing to
+        # check, and refusing it stopped the whole layout from syncing.
+        _, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
+        self.hass.states.add("light.a")
+        tiles = [
+            {"type": "toggle", "entityId": "light.a", "name": "A"},
+            {"type": "toggle", "entityId": "light_group:g1", "name": "Downstairs"},
+        ]
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for(["light.a"]),
+            in_scope=H.in_scope_for({"room1": {"light.a"}}),
+        ):
+            status, body = await self._put(hdr, {"widget_tiles": tiles})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["widget_tiles"], tiles)
+            status, body = await self._get(hdr)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["widget_tiles"], tiles)
+
+    async def test_entity_shaped_ids_are_still_checked(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        with mock.patch.multiple(
+            "casasmart.settings_api",
+            is_served=H.is_served_for([]),
+            in_scope=H.in_scope_for(),
+        ):
+            for entity_id in ("light.gone", "light_group.g1"):
+                with self.subTest(entity_id=entity_id):
+                    status, _ = await self._put(
+                        hdr,
+                        {
+                            "widget_tiles": [
+                                {"type": "toggle", "entityId": entity_id, "name": "X"}
+                            ]
+                        },
+                    )
+                    self.assertEqual(status, 400)
+
 
 if __name__ == "__main__":
     unittest.main()
