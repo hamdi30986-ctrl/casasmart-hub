@@ -5,6 +5,7 @@ Run from the repo root:
 """
 
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Import the storage subpackage directly — the casasmart package __init__
 # imports homeassistant, which isn't installed in the test environment.
@@ -27,6 +29,7 @@ from storage import (
     Migration,
     MigrationError,
     StorageError,
+    config_store,
 )
 from storage.migrations import (
     MIGRATIONS,
@@ -433,6 +436,119 @@ class TestJsonConfigStore(unittest.TestCase):
             store.set(f"k{i}", i)
         leftovers = [p for p in self.path.parent.iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftovers, [])
+
+
+class TestJsonConfigStoreFailedWrites(unittest.TestCase):
+    """A write that raises must leave both memory and disk as they were.
+
+    Otherwise ``get`` reports a value the caller was told was rejected, and
+    the next successful write of any key persists it after all.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "hub_config.json"
+        self.store = JsonConfigStore(self.path)
+        self.store.update({"setting": "old", "kept": 1})
+        self.on_disk = self.path.read_bytes()
+
+    def _replace_fails(self):
+        return mock.patch.object(
+            config_store.os,
+            "replace",
+            side_effect=OSError(28, "No space left on device"),
+        )
+
+    def _assert_unchanged(self):
+        self.assertEqual(self.store.as_dict(), {"setting": "old", "kept": 1})
+        self.assertEqual(self.path.read_bytes(), self.on_disk)
+        leftovers = [p for p in self.path.parent.iterdir() if p.suffix == ".tmp"]
+        self.assertEqual(leftovers, [])
+        # The rejected change must not ride along with a later write.
+        self.store.set("unrelated", True)
+        self.assertEqual(
+            json.loads(self.path.read_text()),
+            {"setting": "old", "kept": 1, "unrelated": True},
+        )
+
+    def test_failed_set_is_not_applied(self):
+        with self._replace_fails(), self.assertRaises(ConfigError):
+            self.store.set("setting", "rejected")
+        self.assertEqual(self.store.get("setting"), "old")
+        self._assert_unchanged()
+
+    def test_failed_set_of_new_key_is_not_applied(self):
+        with self._replace_fails(), self.assertRaises(ConfigError):
+            self.store.set("added", "rejected")
+        self.assertIsNone(self.store.get("added"))
+        self._assert_unchanged()
+
+    def test_failed_delete_is_not_applied(self):
+        with self._replace_fails(), self.assertRaises(ConfigError):
+            self.store.delete("setting")
+        self.assertEqual(self.store.get("setting"), "old")
+        self._assert_unchanged()
+
+    def test_failed_update_is_not_applied(self):
+        with self._replace_fails(), self.assertRaises(ConfigError):
+            self.store.update({"setting": "rejected", "added": 2})
+        self._assert_unchanged()
+
+    def test_failure_writing_temp_file_is_not_applied(self):
+        with (
+            mock.patch.object(
+                config_store.os, "fsync", side_effect=OSError(5, "I/O error")
+            ),
+            self.assertRaises(ConfigError),
+        ):
+            self.store.set("setting", "rejected")
+        self._assert_unchanged()
+
+    def test_serialization_failure_is_not_applied(self):
+        with (
+            mock.patch.object(
+                config_store.json, "dumps", side_effect=ValueError("boom")
+            ),
+            self.assertRaises(ConfigError),
+        ):
+            self.store.set("setting", "rejected")
+        self._assert_unchanged()
+
+    def test_non_json_values_rejected_cleanly(self):
+        circular = []
+        circular.append(circular)
+        for bad in (object(), {1, 2}, circular):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ConfigError):
+                    self.store.set("bad", bad)
+                with self.assertRaises(ConfigError):
+                    self.store.update({"setting": "new", "bad": bad})
+                self.assertNotIn("bad", self.store.as_dict())
+                self.assertEqual(self.store.get("setting"), "old")
+                self.assertEqual(self.path.read_bytes(), self.on_disk)
+        self._assert_unchanged()
+
+    def test_directory_fsync_failure_after_replace_keeps_the_write(self):
+        # Once os.replace has run the file holds the new config, so memory must
+        # match it: a later write would otherwise silently undo it.
+        real_fsync = os.fsync
+        calls = []
+
+        def fsync(fd):
+            calls.append(fd)
+            if len(calls) == 2:  # the directory, after the replace
+                raise OSError(5, "I/O error")
+            real_fsync(fd)
+
+        with (
+            mock.patch.object(config_store.os, "fsync", side_effect=fsync),
+            self.assertLogs(config_store.__name__, "WARNING"),
+        ):
+            self.store.set("setting", "new")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.store.get("setting"), "new")
+        self.assertEqual(json.loads(self.path.read_text())["setting"], "new")
 
 
 if __name__ == "__main__":
