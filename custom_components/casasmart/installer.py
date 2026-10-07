@@ -133,15 +133,12 @@ def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(payload) - {"name"}
     if unknown:
         raise InstallerError(f"Unknown field(s): {', '.join(sorted(unknown))}")
-    changes: dict[str, Any] = {}
-    if "name" in payload:
-        name = payload["name"]
-        if name is not None and not isinstance(name, str):
-            raise InstallerError("name must be a string or null")
-        changes["name"] = name
-    if not changes:
+    if "name" not in payload:
         raise InstallerError("Nothing to update")
-    return changes
+    name = payload["name"]
+    if name is not None and not isinstance(name, str):
+        raise InstallerError("name must be a string or null")
+    return {"name": name}
 
 
 def parse_remote_command(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
