@@ -32,6 +32,7 @@ from homeassistant.core import HomeAssistant
 
 from .auth_api import (
     authenticate_request,
+    client_address,
     read_json_object,
     ready_or_503,
 )
@@ -102,17 +103,6 @@ def _is_lan_target(ip: str) -> bool:
         and not parsed.is_loopback
         and not parsed.is_unspecified
     )
-
-
-def _client_ip(request: web.Request) -> str:
-    """Client address for throttling and logs.
-
-    HA has already resolved request.remote from X-Forwarded-For for its
-    trusted proxies, so behind the tunnel it is the real client. The raw
-    headers aren't read: any peer can send them, and they would let a client
-    pick a new throttle bucket for every request.
-    """
-    return request.remote or "unknown"
 
 
 # -- Shelly Gen2 RPC ----------------------------------------------------------
@@ -431,7 +421,7 @@ class CasaSmartTankReadingView(_TankView):
         if error is not None:
             return error
 
-        source = _client_ip(request)
+        source = client_address(request)
         try:
             _INGEST_THROTTLE.check(source)
         except ThrottledError as err:

@@ -222,6 +222,36 @@ class HqNotificationViewTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.rt.push_dispatcher.sent, [])
 
+    async def test_rate_limit_is_per_tunnel_client(self) -> None:
+        # Every tunnel request reaches the hub from cloudflared's address, so
+        # the limit keys on the client address Cloudflare reports instead.
+        def via_cloudflare(request: _HqRequest, client_ip: str) -> _HqRequest:
+            request.remote = "127.0.0.1"
+            request.headers["CF-Connecting-IP"] = client_ip
+            request.headers["CF-Ray"] = "8a1b2c3d4e5f0000-DXB"
+            return request
+
+        view = CasaSmartHqNotificationView(self.hass)
+        for _ in range(30):
+            request = via_cloudflare(
+                self._request("hq-reminder:00000001", "a" * 24), "203.0.113.50"
+            )
+            request.content_type = "text/plain"  # answered after the limit check
+            response = await view.post(request)
+            self.assertEqual(H.read_response(response)[0], 400)
+        response = await view.post(
+            via_cloudflare(
+                self._request("hq-reminder:00000001", "b" * 24), "203.0.113.50"
+            )
+        )
+        self.assertEqual(H.read_response(response)[0], 429)
+        response = await view.post(
+            via_cloudflare(
+                self._request("hq-reminder:00000002", "c" * 24), "203.0.113.51"
+            )
+        )
+        self.assertEqual(H.read_response(response)[0], 202)
+
     async def test_different_events_are_each_delivered(self) -> None:
         plain = CasaSmartHqNotificationView(self.hass)
         tls = CasaSmartHqNotificationView(self.hass)
