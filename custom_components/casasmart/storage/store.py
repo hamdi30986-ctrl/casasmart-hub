@@ -29,9 +29,8 @@ _VALID_NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # file before it fails with "database is locked".
 _BUSY_TIMEOUT_MS = 5000
 
-# Checkpoint after every commit so the main file holds every acknowledged write
-# and losing the -wal sidecar in an unclean restart loses nothing. Hub writes
-# are small and rare, so the extra I/O is cheap.
+# Checkpoint after every commit, so losing the -wal file in an unclean restart
+# loses no acknowledged write. Hub writes are small, so this is cheap.
 _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
@@ -69,9 +68,8 @@ class HubStorage:
                     f"Could not enable WAL (journal_mode={journal_mode!r}). "
                     "Is the database on a filesystem that supports it?"
                 )
-            # FULL fsyncs the WAL on every commit, so a power cut can't drop an
-            # acknowledged write; NORMAL only syncs at checkpoint. Hub writes
-            # are small and rare enough to afford it.
+            # FULL fsyncs on every commit (NORMAL only at checkpoint), so a
+            # power cut can't lose an acknowledged write.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
@@ -270,7 +268,7 @@ class KeyValueTable(MutableMapping):
     # -- extras ----------------------------------------------------------------
 
     def clear(self) -> None:
-        """Delete every key in this namespace (single statement, not per-key)."""
+        """Delete every key in this namespace in one statement."""
         self._storage._execute_write(
             "DELETE FROM kv WHERE namespace = ?", (self._namespace,)
         )

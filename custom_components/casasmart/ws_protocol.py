@@ -1,30 +1,18 @@
-"""WebSocket wire protocol: frame parsing + building.
+"""WebSocket protocol for /api/casasmart/ws: frame parsing and building.
 
-Pure protocol layer for the CasaSmart WebSocket server. Like
-``entity_bridge``, this module imports nothing from Home Assistant so the
-protocol rules are unit-testable without an HA install.
+No HA imports, so the rules are testable without Home Assistant.
 
-Client -> server frames (JSON objects, ``type`` discriminator):
+Client frames are JSON objects with a "type":
+- auth {"token": ...}: the first frame, and the answer to auth_required. The
+  token never goes in the URL, which ends up in logs.
+- subscribe {"entity_ids": [...]}: replaces the subscription; null or omitted
+  means everything the connection may see.
+- ping: keep-alive (over the tunnel the app pings every 30 s).
 
-- ``{"type": "auth", "token": "<jwt>"}`` — MUST be the first frame after
-  connect (token never in the URL — URLs leak into logs). Also the
-  answer to a mid-connection ``auth_required``.
-- ``{"type": "subscribe", "entity_ids": [...]}`` — start receiving state
-  pushes. ``entity_ids`` omitted or null = everything the connection is
-  allowed to see. Replaces any previous subscription.
-- ``{"type": "ping"}`` — app-level keep-alive (in tunnel mode the app pings
-  every 30s to stop Cloudflare dropping idle connections).
-
-Server -> client frames:
-
-- ``auth_ok`` / ``auth_failed`` / ``auth_required``
-- ``subscribed`` — subscription acknowledged, with device snapshot
-- ``state_changed`` — one device changed (same wire shape as REST)
-- ``entity_removed`` — a subscribed entity is gone (id only)
-- ``registry_changed`` / ``tank_changed`` / ``alarm_changed`` /
-  ``audio_changed`` / ``energy_changed`` / ``suggestions_changed`` —
-  content-free nudges: the app re-fetches through the matching REST endpoint
-- ``pong`` / ``error``
+Server frames: auth_ok, auth_failed, auth_required, subscribed (with a
+snapshot), state_changed, entity_removed, pong and error, plus content-free
+nudges (registry_changed, tank_changed, alarm_changed, audio_changed,
+energy_changed, suggestions_changed) that make the app re-fetch over REST.
 """
 
 from __future__ import annotations
@@ -38,15 +26,11 @@ CLIENT_FRAME_TYPES: frozenset[str] = frozenset({"auth", "subscribe", "ping"})
 
 
 class ProtocolError(Exception):
-    """A client frame failed validation (server replies ``error`` or closes)."""
+    """A client frame failed validation."""
 
 
 def parse_client_frame(message: dict[str, Any] | Any) -> str:
-    """Validate the basic shape of a client frame, return its type.
-
-    Raises ``ProtocolError`` unless the frame is a JSON object whose
-    ``type`` is a known client frame type.
-    """
+    """Return the frame's type, or raise ProtocolError if it isn't a known one."""
     if not isinstance(message, dict):
         raise ProtocolError("Frame must be a JSON object")
     frame_type = message.get("type")
@@ -59,7 +43,7 @@ def parse_client_frame(message: dict[str, Any] | Any) -> str:
 
 
 def auth_token(message: dict[str, Any]) -> str:
-    """Extract the token from an ``auth`` frame, or raise ``ProtocolError``."""
+    """The token from an auth frame; ProtocolError if it is missing."""
     token = message.get("token")
     if not isinstance(token, str) or not token:
         raise ProtocolError("'auth' frame requires a non-empty string 'token'")
@@ -67,12 +51,7 @@ def auth_token(message: dict[str, Any]) -> str:
 
 
 def subscribe_entity_ids(message: dict[str, Any]) -> frozenset[str] | None:
-    """Extract the entity filter from a ``subscribe`` frame.
-
-    Returns ``None`` for "everything visible to this connection" (key
-    omitted or null), else a frozenset of entity_ids. Raises
-    ``ProtocolError`` on anything malformed.
-    """
+    """The entity filter of a subscribe frame; None means everything visible."""
     entity_ids = message.get("entity_ids")
     if entity_ids is None:
         return None
@@ -84,11 +63,7 @@ def subscribe_entity_ids(message: dict[str, Any]) -> frozenset[str] | None:
 
 
 class Subscription:
-    """What one connection has asked to receive.
-
-    Starts empty: nothing is pushed until the client sends ``subscribe``
-    (pushes go to subscribed entities only).
-    """
+    """What one connection has asked to receive; nothing until it subscribes."""
 
     def __init__(self) -> None:
         self._active = False
@@ -125,63 +100,47 @@ def frame_auth_failed(reason: str) -> dict[str, Any]:
 
 
 def frame_auth_required(grace_seconds: int) -> dict[str, Any]:
-    """Token no longer valid mid-connection; fresh auth frame expected
-    within the grace window or the server closes."""
+    """The token is no longer valid; a new auth frame is due within the grace."""
     return {"type": "auth_required", "grace_seconds": grace_seconds}
 
 
 def frame_subscribed(devices: list[dict[str, Any]]) -> dict[str, Any]:
-    """Subscription acknowledged + current snapshot of the subscribed set,
-    so the app starts from known state instead of waiting for changes."""
+    """Subscription acknowledged, with a snapshot of the subscribed devices."""
     return {"type": "subscribed", "count": len(devices), "devices": devices}
 
 
 def frame_state_changed(device: dict[str, Any]) -> dict[str, Any]:
-    """One device changed state — same device shape as the REST API."""
+    """One device changed state (same device shape as the REST API)."""
     return {"type": "state_changed", "device": device}
 
 
 def frame_entity_removed(entity_id: str) -> dict[str, Any]:
-    """A subscribed entity was removed (unpaired / integration drop / registry
-    delete). Carries only the id so the app drops the tile instead of leaving a
-    dead card until the next reconnect — no state to scope, just the id."""
+    """A subscribed entity was removed, so the app can drop its tile."""
     return {"type": "entity_removed", "entity_id": entity_id}
 
 
 def frame_registry_changed(kind: str) -> dict[str, Any]:
-    """The home's organization changed (floors/rooms/devices/scenes).
-    Deliberately content-free — the app re-fetches through its own scoped
-    registry GET, so the push can never leak what REST would hide."""
+    """Floors, rooms, devices or scenes changed; the app re-fetches the registry."""
     return {"type": "registry_changed", "kind": kind}
 
 
 def frame_alarm_changed() -> dict[str, Any]:
-    """The arm state changed (arm/disarm/pending/triggered/tamper).
-    Content-free like ``registry_changed`` — the app re-fetches through the
-    permission-gated alarm state GET, so the push leaks nothing even though
-    the socket authorized only on ``devices.read``. The server additionally
-    only sends this to connections whose role carries ``alarm.read``."""
+    """The alarm state changed; the app re-fetches it over REST."""
     return {"type": "alarm_changed"}
 
 
 def frame_audio_changed() -> dict[str, Any]:
-    """The hub's speaker view changed (enroll/rename/drop or a live
-    status/state ingest off the bus). Content-free like ``alarm_changed`` —
-    the app re-fetches through the ``audio.read`` gated speakers GET, so the
-    push leaks nothing. The server only sends this to connections whose role
-    carries ``audio.read``."""
+    """The speakers or their state changed; the app re-fetches them over REST."""
     return {"type": "audio_changed"}
 
 
 def frame_energy_changed() -> dict[str, Any]:
-    """Energy Saving state/config changed; REST remains the data authority."""
+    """Energy Saving state or config changed; the app re-fetches it over REST."""
     return {"type": "energy_changed"}
 
 
 def frame_tank_changed(device_id: str) -> dict[str, Any]:
-    """A tank reading landed. Carries only the device id —
-    content-free like ``registry_changed``; the app re-fetches the calibrated
-    level through its tank GET, so the push leaks nothing REST would hide."""
+    """A tank reading arrived; the app re-fetches the level over REST."""
     return {"type": "tank_changed", "device_id": device_id}
 
 
@@ -196,20 +155,11 @@ def frame_error(message: str) -> dict[str, Any]:
 
 
 # -- Outbound backpressure -----------------------------------------------------
-# On a congested tunnel (LTE, weak WiFi) a burst of state changes — a scene
-# flipping 20 lights, a re-sync fan-out — can arrive faster than the socket
-# drains. Closing the socket (4003 "too slow") at a fixed cap would kill a
-# perfectly healthy app that would have caught up in a second.
-#
-# These "push" frames are loss-tolerant: only the LATEST state of an entity
-# matters, and a nudge (registry/tank/alarm/audio) just says "re-fetch", so a
-# duplicate is pure redundancy. So under pressure we COALESCE (newer frame
-# replaces the older for the same entity/nudge) and, only if still over the cap,
-# DROP THE OLDEST push frame — never the socket. Protocol frames (auth_ok,
-# subscribed, auth_required/failed, error, pong) are loss-INTOLERANT: dropping
-# one corrupts the session, so they are always admitted and never evicted.
+# A burst of pushes can outrun a slow tunnel. Rather than closing the socket,
+# a newer push replaces a queued one with the same key and a full queue drops
+# its oldest push. Protocol frames are never dropped.
 
-# Push frame types whose older copies are safe to coalesce/drop under pressure.
+# Push frame types that may be coalesced or dropped.
 _COALESCEABLE_TYPES = frozenset(
     {
         "state_changed",
@@ -223,28 +173,23 @@ _COALESCEABLE_TYPES = frozenset(
 )
 
 
-# Frames that carry no home data: the auth dialogue, keep-alive and frame-level
-# errors. A connection whose token failed revalidation gets ONLY these until it
-# re-authenticates — an allow-list, so a new data frame type is held back too.
+# Frames without home data, the only ones a connection awaiting re-auth gets.
+# Being an allow-list, it holds back any new frame type by default.
 CONTROL_FRAME_TYPES = frozenset(
     {"auth_ok", "auth_failed", "auth_required", "pong", "error"}
 )
 
 
 def coalesce_key(frame: dict[str, Any]) -> tuple[Any, ...] | None:
-    """Identity under which two frames are redundant, or None to never drop.
+    """The key under which a newer push replaces a queued one.
 
-    Two queued frames with the same key mean the same thing to the app — the
-    newer one fully supersedes the older (latest entity state, or an identical
-    "re-fetch" nudge). None marks a loss-intolerant protocol frame that must
-    never be coalesced or dropped.
+    None means the frame is never coalesced or dropped.
     """
     ftype = frame.get("type")
     if ftype not in _COALESCEABLE_TYPES:
         return None
-    # A change and a removal of the same entity share one key: only the
-    # newest of them still describes the entity, and coalescing them keeps an
-    # older frame from reaching the app after it.
+    # A change and a removal of one entity share a key, so the app never gets
+    # the older of the two after the newer.
     if ftype == "state_changed":
         device = frame.get("device")
         entity_id = device.get("entity_id") if isinstance(device, dict) else None
@@ -260,17 +205,10 @@ def coalesce_key(frame: dict[str, Any]) -> tuple[Any, ...] | None:
 
 
 class CoalescingSendQueue:
-    """Order-preserving single-consumer outbound queue with backpressure relief.
+    """Ordered outbound queue for one socket, with coalescing under pressure.
 
-    One writer drains it via :meth:`get`; the HA event-loop callbacks feed it.
-    Both run on the same loop, so no lock is needed — the only ``await`` is in
-    :meth:`get`, and nothing mutates the queue across it except synchronous
-    producer callbacks.
-
-    Protocol frames go in via :meth:`put_protocol` (always admitted). Push
-    frames go in via :meth:`offer`, which returns ``False`` only when the queue
-    is full of undroppable protocol frames — the genuine "hopeless consumer"
-    case where the caller should close the socket.
+    Event-loop callbacks feed it and one writer drains it with get(), all on
+    the same loop, so no lock is needed.
     """
 
     def __init__(self, maxsize: int) -> None:
@@ -285,24 +223,20 @@ class CoalescingSendQueue:
         self._event.set()
 
     def put_protocol(self, frame: dict[str, Any]) -> None:
-        """Admit a loss-intolerant protocol frame unconditionally (never
-        coalesced, never dropped — the cap does not apply to it)."""
+        """Queue a protocol frame; the cap doesn't apply and it is never dropped."""
         self._items.append(frame)
         self._wake()
 
     def offer(self, frame: dict[str, Any]) -> bool:
-        """Admit a push frame, coalescing/dropping under pressure.
+        """Queue a push frame, coalescing or evicting older pushes when full.
 
-        Returns True when the frame (or a newer equivalent) is queued, False
-        only when the queue is full of undroppable protocol frames — then the
-        caller closes the socket. A frame without a coalesce key (the
-        suggestions nudge is one) is admitted like any push but, once queued,
-        is never coalesced or evicted.
+        Returns False only when the queue is full of protocol frames; the
+        caller then closes the socket. A frame without a coalesce key
+        (suggestions_changed) is queued normally but never replaced or evicted.
         """
         key = coalesce_key(frame)
         if key is not None:
-            # Coalesce: a newer frame for the same entity/nudge replaces the
-            # queued one in place — no growth, no reorder across other entities.
+            # Replace the queued frame in place, keeping its position.
             for i, existing in enumerate(self._items):
                 if coalesce_key(existing) == key:
                     self._items[i] = frame
@@ -312,22 +246,21 @@ class CoalescingSendQueue:
             self._items.append(frame)
             self._wake()
             return True
-        # Over the cap: evict the OLDEST droppable frame to admit this one.
+        # Full: evict the oldest droppable frame.
         for i, existing in enumerate(self._items):
             if coalesce_key(existing) is not None:
                 del self._items[i]
                 self._items.append(frame)
                 self._wake()
                 return True
-        # Nothing droppable — the whole backlog is protocol frames the consumer
-        # isn't draining. That IS a dead/hopeless link; let the caller close.
+        # Only protocol frames are queued: the consumer has stopped draining.
         return False
 
     def drop_data(self) -> None:
-        """Discard every queued frame but the control frames, order kept.
+        """Discard every queued frame except control frames.
 
-        For a token that just failed revalidation: what is still queued was
-        built under claims that no longer hold, so none of it may be written.
+        Called when the token fails revalidation: the queued frames were built
+        under claims that no longer hold.
         """
         self._items = deque(
             frame for frame in self._items if frame.get("type") in CONTROL_FRAME_TYPES

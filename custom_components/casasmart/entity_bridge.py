@@ -96,9 +96,8 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
 }
 
 
-# Per domain: app action -> (HA service, data keys the action may carry). Only
-# these commands reach Home Assistant; the values are left to the service's own
-# schema.
+# Per domain, app action -> (HA service, allowed data keys). The values are
+# left to the service's own schema.
 _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
     "light": {
         "turn_on": (
@@ -183,9 +182,8 @@ _COMMAND_WHITELIST: dict[str, dict[str, tuple[str, frozenset[str]]]] = {
 # Exposed for reading, never commandable.
 READ_ONLY_DOMAINS: frozenset[str] = frozenset({"sensor", "binary_sensor", "camera"})
 
-# Diagnostic-category sensors and binary sensors the app shows anyway, by
-# device_class: measurements and device-status flags. Other diagnostic entities
-# stay hidden, except an air purifier's filter life (is_filter_life_entity).
+# Diagnostic sensors the app shows anyway, by device_class. Other diagnostic
+# entities stay hidden, except filter life (is_filter_life_entity).
 DIAGNOSTIC_SENSOR_CLASSES: frozenset[str] = frozenset(
     {
         "power",
@@ -210,11 +208,9 @@ DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
 )
 
 
-# Colour temperature. Both apps work in mireds (color_temp, min_mireds,
-# max_mireds); Home Assistant takes and reports kelvin, and from 2026.1 kelvin
-# only. A mired command is sent as color_temp_kelvin on every release, clamped
-# to 100-1000 mireds (10000-1000 K, wider than any white light). Kelvin-only
-# lights also get the mired attributes, as HA itself computed them before.
+# The apps work in mireds, while HA uses kelvin (only kelvin from 2026.1). A
+# mired command is sent as color_temp_kelvin, clamped to 100-1000 mireds, and
+# kelvin-only lights also get the mired attributes HA used to compute.
 _MIRED_MIN = 100
 _MIRED_MAX = 1000
 _MIRED_FROM_KELVIN = (
@@ -241,28 +237,23 @@ def is_exposed(entity_id: str) -> bool:
 def is_filter_life_entity(entity_id: str) -> bool:
     """True for an air purifier's remaining-filter-life sensor.
 
-    Matched by entity_id because HA publishes no device_class for it — brands
-    name it ``filter_lifetime``, ``filter_life_remaining``, ``filter_remaining``.
-    The app matches with the same rule.
+    Matched by entity_id because it has no device_class (brands use names like
+    filter_lifetime, filter_life_remaining and filter_remaining). The app
+    uses the same rule.
     """
     name = entity_id.lower()
     return "filter" in name and ("life" in name or "remain" in name)
 
 
 def is_category_served(category: str, entity_id: str, device_class: str | None) -> bool:
-    """Category-entity exposure policy. Pure — unit-testable.
-
-    ``category`` is the registry entity_category value (``"config"`` /
-    ``"diagnostic"``); callers handle the no-category case themselves.
-    """
+    """Whether an entity in this category ("config" or "diagnostic") is served."""
     if category == "config":
         return True
     if category == "diagnostic":
         domain = entity_domain(entity_id)
         if domain == "sensor":
-            # An air purifier's filter life is the one thing about the device
-            # its owner has to act on, and HA files it under diagnostics with
-            # no device_class — so the class whitelist alone would hide it.
+            # Filter life is diagnostic with no device_class, but the owner has
+            # to act on it.
             if is_filter_life_entity(entity_id):
                 return True
             return device_class in DIAGNOSTIC_SENSOR_CLASSES
@@ -306,10 +297,10 @@ def _mired_to_kelvin(mireds: Any) -> int:
 def serialize_state(
     state: Any, area: str | None = None, entity_category: str | None = None
 ) -> dict[str, Any]:
-    """Serialize one HA state object into the CasaSmart device dict.
+    """One HA state as the app's device dict.
 
-    ``state`` is duck-typed: needs ``entity_id``, ``state``, ``attributes``
-    (mapping) and ``last_updated`` (datetime or None).
+    state is duck-typed: it needs entity_id, state, attributes and
+    last_updated (a datetime or None).
     """
     domain = entity_domain(state.entity_id)
     allowed = _ATTRIBUTE_ALLOWLIST.get(domain, frozenset())
@@ -327,8 +318,8 @@ def serialize_state(
         "area": area,
         "attributes": attributes,
         "last_updated": last_updated.isoformat() if last_updated else None,
-        # The app classifies config entities (settings sheets) and
-        # diagnostic sensors (energy panel) by this — None for primaries.
+        # The app puts config entities in settings and diagnostic sensors in
+        # the energy panel; None for primary entities.
         "entity_category": entity_category,
     }
 
@@ -338,10 +329,9 @@ def validate_command(
 ) -> tuple[str, str, dict[str, Any]]:
     """Validate an app command against the whitelist.
 
-    Returns ``(ha_domain, ha_service, service_data)`` ready for
-    ``hass.services.async_call``; a light's mired ``color_temp`` comes back as
-    ``color_temp_kelvin``. Raises ``CommandError`` (HTTP 400 territory) on
-    anything outside the whitelist.
+    Returns (domain, service, service_data) for hass.services.async_call, with
+    a light's mired color_temp converted to color_temp_kelvin. Raises
+    CommandError for anything outside the whitelist.
     """
     domain = entity_domain(entity_id)
     if domain not in EXPOSED_DOMAINS:

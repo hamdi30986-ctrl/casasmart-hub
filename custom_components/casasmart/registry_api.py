@@ -1,12 +1,11 @@
-"""CasaSmart registry REST endpoints: floors, rooms, devices, scenes, favorites.
+"""Registry REST endpoints over RegistryEngine.
 
-The app's thin-client surface over ``RegistryEngine``: floors, rooms, room
-tags, entity assignments, room moves, user devices and their gangs, scenes
-and per-member favorites. Reads are room-scoped; writes fire
-``EVENT_REGISTRY_CHANGED`` so connected apps re-fetch.
+Floors, rooms, room tags, entity assignments, room moves, user devices and
+their gangs, scenes and per-member favorites. Reads are room-scoped, and
+writes fire EVENT_REGISTRY_CHANGED so connected apps re-fetch.
 
-``async_execute_registry_scene`` runs a scene for the activate endpoint, the
-``casasmart.activate_scene`` service and suggestion actions.
+async_execute_registry_scene runs a scene for the activate endpoint, the
+casasmart.activate_scene service and suggestion actions.
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
 
 
 def _scene_entity_ids(entities: Any) -> list[str]:
-    """The entity_ids referenced by a scene's entities payload (str ids only)."""
+    """The string entity_ids in a scene's entities payload."""
     if not isinstance(entities, list):
         return []
     return [
@@ -88,11 +87,9 @@ async def async_execute_registry_scene(
     """
     scene_id = scene["scene_id"]
 
-    # A saved scene turns an AC on with one set_temperature carrying the mode.
-    # IR air conditioners take every climate call as a full-state IR burst, and
-    # a second burst right behind the first collides with the unit while it
-    # powers on, so a separate fan-mode step for the same AC is skipped.
-    # Generated room scenes run every step.
+    # An IR AC takes every climate call as a full-state burst, and a second one
+    # right after the mode is set collides with it, so saved scenes (not
+    # generated ones) skip the fan-mode step for an AC whose mode they set.
     _climate_with_state = {
         item["entity_id"]
         for item in scene["entities"]
@@ -115,9 +112,8 @@ async def async_execute_registry_scene(
         entity_id = item["entity_id"]
 
         if scene.get("generated_room_v1"):
-            # Each service call yields: a room move or another scene can occur
-            # between commands. Never brighten/re-enable an interveningly off
-            # light, cool harder, or continue controlling a moved device.
+            # Each call yields to the event loop, so check again that the step
+            # still applies: the device may have moved or been switched off.
             from .generated_suggestions import room_actions
 
             state = hass.states.get(entity_id)
@@ -231,16 +227,14 @@ class _RegistryView(HomeAssistantView):
         return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
     def _storage_failure(self, err: Exception) -> web.Response:
-        """SQLite trouble is a hub problem, not a client one — log the
-        cause, hand the app a clean 500 instead of an aiohttp stack."""
+        """Log a storage error and return a plain 500."""
         _LOGGER.error("Registry storage failure: %s", err)
         return self.json_message("Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _energy_flag_reject(
         self, claims: dict[str, Any], payload: dict[str, Any]
     ) -> web.Response | None:
-        """403 when the body sets a scene's Energy Saving flag without
-        ``energy.manage`` (admin only); None to proceed."""
+        """403 when the body sets the Energy Saving flag without energy.manage."""
         if "works_during_energy_saving" in payload and not AuthEngine.authorize(
             claims, "energy.manage"
         ):
@@ -251,11 +245,11 @@ class _RegistryView(HomeAssistantView):
         return None
 
     def _unserved_scene_entity(self, entities: Any) -> web.Response | None:
-        """The is_served gate for scene WRITES — same rule as the single
-        command endpoint: a scene must not be able to store a command
-        against an entity the app can't target directly (the one-filter
-        doctrine in ``filtering``). Shape errors fall through — the
-        engine 400s those with a precise message."""
+        """404 when a scene step names an entity that isn't served.
+
+        A scene can't store a command the app couldn't send directly. Shape
+        errors are left to the engine.
+        """
         if not isinstance(entities, list):
             return None
         for item in entities:
@@ -273,14 +267,12 @@ class _RegistryView(HomeAssistantView):
         return None
 
     def _scope_reject(self, claims, *entity_lists):
-        """Reject a write touching an entity outside the caller's scope — same
-        no-enumeration message as the favorites/assignment writes. An admin
-        (rooms=None) passes the scope test. Assignability is NOT checked:
-        a gang's type is presentation metadata, so a grouped/typed
-        record must stay writable even when its underlying entities aren't
-        individually servable (a dead/hidden relay, an all-dead device on DELETE,
-        a presentation flip that writes no HA entity). Returns an error response,
-        or None to proceed."""
+        """400 when a write touches an entity outside the caller's rooms.
+
+        Unknown and out-of-scope entities get the same message. Entities are not
+        required to be served, so a device whose relays are dead or hidden can
+        still be edited or deleted.
+        """
         scope = claims.get("rooms")
         for entity_ids in entity_lists:
             if not isinstance(entity_ids, list):
@@ -296,7 +288,7 @@ class _RegistryView(HomeAssistantView):
 
 
 class CasaSmartRegistryView(_RegistryView):
-    """GET /api/casasmart/registry — the home's organization for the caller.
+    """GET /api/casasmart/registry: the home's layout as the caller may see it.
 
     Floors, rooms, room tags, scenes and user devices, plus one entry per
     served entity with its resolved room and display name. A room-scoped
@@ -393,8 +385,7 @@ class CasaSmartRegistryView(_RegistryView):
                 key=lambda item: (item.get("sort_order", 0), item.get("name", ""))
             )
 
-        # A user device shows while at least one of its control entities is
-        # still a real entity the registry can organize (is_assignable).
+        # A user device shows while one of its control entities still exists.
         user_devices = [
             device
             for device in user_devices
@@ -428,7 +419,7 @@ class CasaSmartRegistryView(_RegistryView):
 
 
 class CasaSmartFloorsView(_RegistryView):
-    """POST /api/casasmart/registry/floors — create a floor."""
+    """POST /api/casasmart/registry/floors: create a floor."""
 
     url = f"/api/{DOMAIN}/registry/floors"
     name = f"api:{DOMAIN}:registry:floors"
@@ -510,7 +501,7 @@ class CasaSmartFloorView(_RegistryView):
 
 
 class CasaSmartRoomsView(_RegistryView):
-    """POST /api/casasmart/registry/rooms — create a room."""
+    """POST /api/casasmart/registry/rooms: create a room."""
 
     url = f"/api/{DOMAIN}/registry/rooms"
     name = f"api:{DOMAIN}:registry:rooms"
@@ -586,12 +577,8 @@ class CasaSmartRoomView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        # Imported rooms share their id with an HA area that lives on
-        # after this delete. Entities with no registry record would
-        # quietly fall back to it — the room would be dead in the app
-        # but alive for room-scoped tokens. Pin every such entity to an
-        # explicit Unassigned so deleting a room MEANS it (event-loop
-        # reads only; the writes happen in the executor job below).
+        # An imported room's id is also an HA area that outlives it, so pin the
+        # area's unrecorded entities to Unassigned or they'd stay in the room.
         ha_orphans = [
             state.entity_id
             for state in self._hass.states.async_all()
@@ -617,7 +604,7 @@ class CasaSmartRoomView(_RegistryView):
 
 
 class CasaSmartRoomTagsView(_RegistryView):
-    """POST /api/casasmart/registry/tags — create a multi-room tag."""
+    """POST /api/casasmart/registry/tags: create a room tag."""
 
     url = f"/api/{DOMAIN}/registry/tags"
     name = f"api:{DOMAIN}:registry:tags"
@@ -701,7 +688,7 @@ class CasaSmartRoomTagView(_RegistryView):
 
 
 class CasaSmartRoomMoveView(_RegistryView):
-    """POST /api/casasmart/registry/room-moves — move a device to a room.
+    """POST /api/casasmart/registry/room-moves: move a device to a room.
 
     Atomic and compare-and-set: the move applies only if the device's entities
     and their rooms still match what the client reviewed, and a retry with the
@@ -732,8 +719,8 @@ class CasaSmartRoomMoveView(_RegistryView):
         runtime = _runtime_data(self._hass)
         if runtime is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        # HA registry/state APIs are read on the event loop. The engine checks
-        # exact saved membership and room scope again under its lock.
+        # HA's registries are read here on the event loop; the engine checks
+        # membership and scope again under its lock.
         expected = payload.get("expected_rooms")
         ids = list(expected) if isinstance(expected, dict) else []
         if len(ids) > 100 or any(not isinstance(eid, str) for eid in ids):
@@ -776,9 +763,9 @@ class CasaSmartRoomMoveView(_RegistryView):
 class CasaSmartDeviceAssignmentView(_RegistryView):
     """PATCH/DELETE /api/casasmart/registry/devices/{entity_id}.
 
-    PATCH assigns/renames/reorders; ``room_id: null`` pins the entity to
-    the Unassigned pool. DELETE drops the record — the entity reverts to
-    HA's own area.
+    PATCH sets the room, display name or sort order (room_id null means
+    Unassigned). DELETE drops the record so the entity falls back to its HA
+    area.
     """
 
     url = f"/api/{DOMAIN}/registry/devices/{{entity_id}}"
@@ -791,17 +778,12 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        # ORGANIZE surface (not the feed): a device the integration has since
-        # hidden (e.g. a secondary gang switch, hidden_by='integration') must
-        # still be re-assignable/clearable. is_served would 404 it — see
-        # is_assignable.
+        # is_assignable lets through a device hidden after import, which must
+        # stay movable.
         if not is_assignable(self._hass, entity_id):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        # A room-scoped caller may only (re)assign entities inside its own
-        # rooms — mirror the in_scope guard every sibling write enforces, so a
-        # scoped sub-admin can't move a device in a room it doesn't own.
         scope = claims.get("rooms") if claims else None
         if scope is not None and not in_scope(self._hass, entity_id, scope):
             return self.json_message(
@@ -855,10 +837,9 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
 class CasaSmartUserDeviceView(_RegistryView):
     """PUT/PATCH/DELETE /api/casasmart/registry/user-devices/{ha_device_id}.
 
-    The grouped physical-device record — gang types/names, config entities,
-    device type, custom name/icon. PUT upserts the whole record (import /
-    re-import); PATCH edits named fields (rename, re-type a gang, set an icon);
-    DELETE un-grabs the device so its entities return to the add-devices list.
+    A physical device grouping entities, with its gangs, config entities,
+    type, name and icon. PUT replaces the whole record, PATCH edits fields and
+    DELETE releases its entities back to the add-devices list.
     """
 
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}"
@@ -955,10 +936,8 @@ class CasaSmartUserDeviceView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        # A scoped caller may only un-grab a device whose entities are all in
-        # its scope; load the record first so an out-of-scope delete is refused
-        # (admin passes). Assignability isn't checked — a dead-entity device must
-        # stay removable.
+        # Load the record first: a scoped caller may only delete a device whose
+        # entities are all in its rooms.
         try:
             existing = await self._hass.async_add_executor_job(
                 registry.get_user_device, ha_device_id
@@ -989,13 +968,9 @@ class CasaSmartUserDeviceView(_RegistryView):
 class CasaSmartUserDeviceGangView(_RegistryView):
     """PATCH /api/casasmart/registry/user-devices/{ha_device_id}/gangs/{gang}.
 
-    Flip ONE gang's presentation model — promote/hide/un-hide (``presentation``),
-    re-type (``type``), relabel (``name``/``icon``) or give it its own room
-    (``room_id``). Pure presentation metadata: it never touches the device's
-    entities or HA. The body carries any of
-    ``{presentation, type, name, icon, room_id}`` and each provided field is
-    applied; the exactly-one-of {grouped, solo, hidden} invariant is the
-    engine's. The gang path segment IS the gang's control entity_id.
+    Sets any of presentation, type, name, icon and room_id on one gang. The
+    gang path segment is the gang's control entity_id. Only registry metadata
+    changes; HA is not touched.
     """
 
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}/gangs/{{gang}}"
@@ -1008,9 +983,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         gang: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Apply each provided field via its dedicated engine command. A body
-        with none of presentation/type/name/icon/room_id is a 400 — a no-op
-        PATCH is a client mistake, not a silent success."""
+        """Apply each field in payload; RegistryError if there are none."""
         device = None
         if "presentation" in payload:
             device = registry.set_gang_presentation(
@@ -1047,9 +1020,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
             return self.json_message(
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
-        # A scoped caller may only flip a gang whose control entity_id is in its
-        # scope (admin passes). Assignability isn't checked — a presentation flip
-        # writes no HA entity, so a hidden/dead relay must stay flippable.
+        # The gang's entity must be in the caller's rooms; it needn't be served.
         reject = self._scope_reject(claims, [gang])
         if reject is not None:
             return reject
@@ -1066,7 +1037,7 @@ class CasaSmartUserDeviceGangView(_RegistryView):
 
 
 class CasaSmartScenesView(_RegistryView):
-    """POST /api/casasmart/registry/scenes — create a scene."""
+    """POST /api/casasmart/registry/scenes: create a scene."""
 
     url = f"/api/{DOMAIN}/registry/scenes"
     name = f"api:{DOMAIN}:registry:scenes"
@@ -1088,9 +1059,8 @@ class CasaSmartScenesView(_RegistryView):
         unserved = self._unserved_scene_entity(payload.get("entities"))
         if unserved is not None:
             return unserved
-        # Scope re-check — the same defense-in-depth the favorites/user-device
-        # writes do. Pairing gives room scope only to the user role, which lacks
-        # registry.manage, so this normally passes.
+        # Only the user role can be room-scoped and it lacks registry.manage,
+        # so this is defense in depth.
         reject = self._scope_reject(claims, _scene_entity_ids(payload.get("entities")))
         if reject is not None:
             return reject
@@ -1178,10 +1148,8 @@ class CasaSmartSceneView(_RegistryView):
 class CasaSmartSceneActivateView(_RegistryView):
     """POST /api/casasmart/registry/scenes/{scene_id}/activate.
 
-    Runs every command in the scene through the SAME whitelist validation
-    as the single-device command endpoint. Partial failures don't abort
-    the rest — the response reports per-entity results ("turn the house
-    to movie mode" shouldn't die because one bulb is unplugged).
+    Each step passes the same whitelist as a single-device command. A failed
+    step doesn't stop the rest; the reply has a result per entity.
     """
 
     url = f"/api/{DOMAIN}/registry/scenes/{{scene_id}}/activate"
@@ -1207,7 +1175,6 @@ class CasaSmartSceneActivateView(_RegistryView):
         if scope is not None and not all(
             in_scope(self._hass, item["entity_id"], scope) for item in scene["entities"]
         ):
-            # Same 404 as nonexistent — out-of-scope scenes are invisible.
             return self.json_message("Unknown scene", HTTPStatus.NOT_FOUND)
 
         runtime = _runtime_data(self._hass)
@@ -1236,16 +1203,10 @@ class CasaSmartSceneActivateView(_RegistryView):
 
 
 class CasaSmartFavoritesView(_RegistryView):
-    """GET/PUT /api/casasmart/me/favorites — the caller's own list.
+    """GET/PUT /api/casasmart/me/favorites: the caller's favorite devices.
 
-    Keyed by ``member_id`` (the PERSON, resolved from the request's device
-    ``sub``), so a member's devices share one list. PUT replaces the
-    whole list; order is the display order. GET drops gone/unserved + out-of-
-    scope ids for the response without mutating storage — the ONE source of
-    truth for device favorites. A GET must remain read-only because
-    integrations are still populating HA states while the hub starts; treating
-    a temporarily absent state as a deletion would erase favorites on every
-    restart.
+    Favorites belong to the member, so a member's devices share one list. PUT
+    replaces the list in display order.
     """
 
     url = f"/api/{DOMAIN}/me/favorites"
@@ -1258,9 +1219,7 @@ class CasaSmartFavoritesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        # Favorites roam per PERSON: resolve the request's device sub to its
-        # member_id inside the executor — a legacy device is its own
-        # one-device member, so it falls back to the sub.
+        # A legacy device with no member is its own member.
         engine = get_engine(self._hass)
         sub = claims["sub"]
         scope = claims.get("rooms")
@@ -1273,24 +1232,18 @@ class CasaSmartFavoritesView(_RegistryView):
             _member_id, stored = await self._hass.async_add_executor_job(_load)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # Do not paint a currently absent/unserved entity, but never persist
-        # that filtering from a GET. During HA startup an integration may not
-        # have populated its states yet; a read-time "self-heal" would mistake
-        # that normal transient for deletion and permanently wipe favorites.
-        # An explicit PUT remains the authoritative cleanup/edit path.
+        # Filter for the reply only: during HA startup states are still
+        # arriving, and saving the filtered list would erase favorites.
         served = [
             eid
             for eid in stored
             if self._hass.states.get(eid) is not None and is_served(self._hass, eid)
         ]
-        # Scope to the caller — a room-scoped user only sees its own rooms.
         favorites = [eid for eid in served if in_scope(self._hass, eid, scope)]
         return self.json({"entity_ids": favorites})
 
     async def put(self, request: web.Request) -> web.Response:
-        # session.manage, not devices.*: it's a write to the person's own
-        # list, not device control. Every role's session may favorite; a
-        # home-screen widget's token may not.
+        # session.manage: every session may edit its favorites, a widget may not.
         claims, error = authenticate_request(self._hass, request, "session.manage")
         if error is not None:
             return error
@@ -1315,7 +1268,6 @@ class CasaSmartFavoritesView(_RegistryView):
                 or not is_served(self._hass, entity_id)
                 or not in_scope(self._hass, entity_id, scope)
             ):
-                # Same wording for unknown and out-of-scope — no enumeration.
                 return self.json_message(
                     f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
                 )
@@ -1332,10 +1284,8 @@ class CasaSmartFavoritesView(_RegistryView):
             )
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # A room-scoped caller only SEES + submits its in-scope slice (the GET
-        # filters out-of-scope). A plain replace would silently delete the
-        # member's favorites in rooms it can't see — preserve those,
-        # appended after the caller's now-authoritative in-scope list.
+        # A scoped caller only sees its rooms' favorites, so keep the others,
+        # after its new list.
         out_of_scope = [eid for eid in stored if not in_scope(self._hass, eid, scope)]
         try:
             saved = await self._hass.async_add_executor_job(
@@ -1345,11 +1295,8 @@ class CasaSmartFavoritesView(_RegistryView):
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # Nudge the member's other devices to re-pull. The app re-fetches
-        # favorites + settings on any registry_changed, so the shared list
-        # reaches the member's other phones.
+        # The member's other phones re-fetch favorites on registry_changed.
         self._notify_change("favorites")
-        # Echo only the caller's in-scope view — never leak out-of-scope ids.
         return self.json(
             {"entity_ids": [eid for eid in saved if in_scope(self._hass, eid, scope)]}
         )

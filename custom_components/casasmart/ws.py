@@ -1,7 +1,7 @@
-"""CasaSmart WebSocket server (``/api/casasmart/ws``).
+"""CasaSmart WebSocket server (/api/casasmart/ws).
 
-Authenticates in-band with the first frame, then pushes room-scoped state
-changes and content-free change nudges. Frame shapes live in ``ws_protocol``.
+Authenticates with the first frame, then pushes room-scoped state changes and
+content-free change nudges. Frame shapes live in ws_protocol.
 """
 
 from __future__ import annotations
@@ -43,11 +43,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class CasaSmartWebSocketView(HomeAssistantView):
-    """GET /api/casasmart/ws — the real-time push channel."""
+    """GET /api/casasmart/ws: the real-time push channel."""
 
     url = f"/api/{DOMAIN}/ws"
     name = f"api:{DOMAIN}:ws"
-    # Auth happens in-band (first frame), not via HA's bearer middleware.
+    # The token arrives in the first frame.
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant, hub_version: str) -> None:
@@ -102,8 +102,7 @@ class WsConnection:
         self._reauth_deadline_task: asyncio.Task | None = None
 
     async def run(self) -> None:
-        """Authenticate, listen for the hub's events, then serve client frames
-        until the socket closes."""
+        """Authenticate, then serve the connection until the socket closes."""
         if not await self._authenticate_first_frame():
             return
 
@@ -208,11 +207,9 @@ class WsConnection:
         return True
 
     async def _async_validate_token(self, token: str) -> bool:
-        """Validate a CasaSmart JWT and refresh the connection's claims.
+        """Check a token and keep its claims; False unless valid with devices.read.
 
-        The auth engine checks the signature, the expiry and that the device is
-        still enrolled at the token's version, all in memory (no executor hop);
-        the socket then needs ``devices.read``. Returns False (never raises).
+        The auth engine checks everything in memory, so this needs no executor.
         """
         from .auth_api import get_engine  # local: auth_api is sibling glue
 
@@ -229,30 +226,20 @@ class WsConnection:
         return True
 
     async def _token_recheck_loop(self) -> None:
-        """Catch mid-connection revocation/expiry (auth_required + grace window).
-
-        Keeps running after a successful re-auth so a renewed token is
-        itself re-checked on the same cadence.
-        """
+        """Re-check the token periodically, including any renewed token."""
         while not self._ws.closed:
             await asyncio.sleep(WS_TOKEN_RECHECK)
             if self._token and await self._async_validate_token(self._token):
                 continue
-            # Token died mid-connection: announce once, arm the grace
-            # deadline. A fresh valid `auth` frame in the receive loop
-            # disarms it; don't re-announce while a grace window is open.
+            # Announce once per grace period; a valid auth frame cancels it.
             if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
                 await self._require_reauth()
 
     async def _require_reauth(self) -> None:
-        """The token failed revalidation: no more data until a fresh one lands.
+        """Send no more data until a new token arrives.
 
-        The old claims go with the token, and everything still queued under
-        them is dropped. Until ``_handle_reauth`` accepts a new token the
-        connection gets only control frames (``auth_*``, ``pong``, ``error``)
-        and, at the deadline, the close. The subscription is kept, so a
-        successful re-auth resumes it — fresh snapshot first — under the NEW
-        claims.
+        Frames queued under the old claims are dropped. The subscription is
+        kept, so a successful re-auth resumes it with a fresh snapshot.
         """
         self._token = None
         self._claims = None
@@ -268,17 +255,15 @@ class WsConnection:
 
     @callback
     def _on_auth_changed(self, event: Event) -> None:
-        """Some device's privileges changed (content-free event). Recheck OUR
-        token now: a connection whose device was untouched revalidates cleanly
-        (a no-op), a revoked/re-scoped one gets `auth_required` at once."""
+        """Some device's access changed; re-check this connection's token now."""
         self._hass.async_create_task(self._recheck_now())
 
     async def _recheck_now(self) -> None:
-        """Immediate, single-shot version of the recheck loop's body."""
+        """Re-check the token once, as the recheck loop does."""
         if self._ws.closed or not self._token:
             return
         if await self._async_validate_token(self._token):
-            return  # still valid — our device wasn't the one that changed
+            return
         if self._reauth_deadline_task is None or self._reauth_deadline_task.done():
             await self._require_reauth()
 
@@ -313,10 +298,10 @@ class WsConnection:
         await self._emit_snapshot()
 
     async def _emit_snapshot(self) -> None:
-        """Send the `subscribed` frame: the current scoped + served snapshot of
-        the subscribed set. Re-emitted after a scope-changing re-auth so the
-        live view reflects the new rooms at once. Nothing while awaiting
-        re-auth (no claims): the re-auth sends it instead."""
+        """Send the subscribed frame with the served, in-scope subscribed devices.
+
+        Skipped while re-auth is pending; the re-auth sends it instead.
+        """
         if self._claims is None:
             return
         rooms = (self._claims or {}).get("rooms")
@@ -331,7 +316,7 @@ class WsConnection:
         await self._enqueue(ws_protocol.frame_subscribed(devices))
 
     async def _handle_reauth(self, frame: dict[str, Any]) -> None:
-        """A mid-connection auth frame — answers `auth_required`."""
+        """Handle an auth frame sent after the first one."""
         try:
             token = ws_protocol.auth_token(frame)
         except ws_protocol.ProtocolError as err:
@@ -347,36 +332,27 @@ class WsConnection:
             self._reauth_deadline_task.cancel()
             self._reauth_deadline_task = None
         await self._enqueue(ws_protocol.frame_auth_ok(self._hub_version, API_VERSION))
-        # Re-send the snapshot after EVERY re-auth. The app gates data frames
-        # while it re-authenticates (auth_required -> auth_ok), and the hub
-        # sends none in that window, so tiles would otherwise freeze until the
-        # next reconnect. A fresh snapshot reconciles the missed state, and
-        # drops or gains rooms at once when an admin re-scoped this user
-        # mid-connection.
+        # Nothing was sent while re-auth was pending, so resync the app (and
+        # apply any change of rooms) with a fresh snapshot.
         if self._subscribed:
             await self._emit_snapshot()
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        """HA event-loop callback: queue a push if subscribed AND served.
+        """Push a subscribed, served, in-scope state change.
 
-        Runs for every state change in HA, so the cheap checks come first
-        and serialization only happens for entities actually being pushed.
+        Runs for every state change in HA, so the cheap checks come first.
         """
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         if new_state is None:
-            # Entity removed (unpair / integration drop / registry delete). Tell
-            # a subscribed app to drop the tile — otherwise a dead card lingers
-            # for the connection's lifetime. The frame is just the id,
-            # so there is no state to room-scope.
+            # The entity was removed; tell the app to drop its tile.
             if entity_id and self._subscription.matches(entity_id):
                 self._offer_or_close(ws_protocol.frame_entity_removed(entity_id))
             return
         if (
             not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
-            # Room scope: scoped tokens only get their rooms' pushes.
             or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
         ):
             return
@@ -385,39 +361,28 @@ class WsConnection:
 
     @callback
     def _on_registry_changed(self, event: Event) -> None:
-        """The home's organization changed — nudge the app to re-fetch.
-
-        The frame carries only the change kind, never content, so there
-        is nothing to room-scope here: the app's follow-up registry GET
-        is filtered to its own slice like every other read.
-        """
+        """Nudge the app to re-fetch the registry (the GET is room-scoped)."""
         kind = event.data.get("kind", "registry")
         self._offer_or_close(ws_protocol.frame_registry_changed(kind))
 
     @callback
     def _on_suggestions_changed(self, event: Event) -> None:
-        """Suggestions changed — a content-free nudge to subscribed sockets;
-        the app re-reads its suggestions GET."""
+        """Nudge subscribed apps to re-read their suggestions."""
         if self._subscribed:
             self._offer_or_close({"type": "suggestions_changed", "version": 1})
 
     @callback
     def _on_tank_changed(self, event: Event) -> None:
-        """A tank reading landed — nudge the app to re-fetch its
-        calibrated level. Content-free beyond the device id, like the registry
-        nudge; the app's tank GET stays the authorization boundary."""
+        """Nudge the app to re-fetch a tank's level (the GET checks access)."""
         device_id = event.data.get("device_id", "")
         self._offer_or_close(ws_protocol.frame_tank_changed(device_id))
 
     @callback
     def _on_alarm_changed(self, event: Event) -> None:
-        """Arm state changed — nudge alarm-authorized apps to re-fetch.
+        """Nudge apps with alarm.read to re-fetch the alarm state.
 
-        Gated by role: the socket only authorized on ``devices.read``, but a
-        plain user has NO alarm access. Pushing even a
-        content-free nudge to them would leak the timing of alarm activity,
-        so connections whose claims lack ``alarm.read`` are skipped entirely.
-        The frame carries no state — the app re-reads the gated state GET.
+        Even an empty nudge would reveal when the alarm is used, so other
+        connections get nothing.
         """
         if not AuthEngine.authorize(self._claims or {}, "alarm.read"):
             return
@@ -425,35 +390,27 @@ class WsConnection:
 
     @callback
     def _on_audio_changed(self, event: Event) -> None:
-        """The hub's speaker view changed — nudge audio-authorized apps
-        to re-fetch. Gated like ``_on_alarm_changed``: the socket authorized on
-        ``devices.read``, but only connections whose claims carry ``audio.read``
-        get the (content-free) nudge. The app re-reads the gated speakers GET.
-        """
+        """Nudge apps with audio.read to re-fetch the speakers."""
         if not AuthEngine.authorize(self._claims or {}, "audio.read"):
             return
         self._offer_or_close(ws_protocol.frame_audio_changed())
 
     @callback
     def _on_energy_changed(self, event: Event) -> None:
-        """Energy Saving changed — only status-authorized sockets get nudged."""
+        """Nudge apps with energy.read to re-fetch Energy Saving."""
         if not AuthEngine.authorize(self._claims or {}, "energy.read"):
             return
         self._offer_or_close(ws_protocol.frame_energy_changed())
 
     async def _enqueue(self, frame: dict[str, Any]) -> None:
-        """Route protocol replies through the same queue as pushes, preserving
-        send order on the single writer. Protocol frames are loss-intolerant, so
-        they are always admitted (never coalesced/dropped like pushes)."""
+        """Queue a protocol frame behind pending pushes, keeping send order."""
         self._send_queue.put_protocol(frame)
 
     def _offer_or_close(self, frame: dict[str, Any]) -> None:
-        """Queue a push frame, coalescing/dropping under backpressure. Only a
-        queue full of undrained protocol frames — a genuinely dead consumer —
-        closes the socket (a burst never kills a healthy app).
+        """Queue a push frame, or close the socket if the app stopped reading.
 
-        Every push carries home data, so none is queued while the connection
-        awaits re-auth (``_require_reauth`` cleared the claims)."""
+        Nothing is queued while re-auth is pending.
+        """
         if self._claims is None:
             return
         if self._send_queue.offer(frame):
@@ -464,7 +421,7 @@ class WsConnection:
         )
 
     async def _sender_loop(self) -> None:
-        """The single socket writer — drains the queue in order."""
+        """The single socket writer: drains the queue in order."""
         try:
             while not self._ws.closed:
                 frame = await self._send_queue.get()
