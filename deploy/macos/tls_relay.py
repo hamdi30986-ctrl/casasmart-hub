@@ -63,7 +63,9 @@ async def relay_connection(
         upstream_reader, upstream_writer = await asyncio.wait_for(
             asyncio.open_connection(upstream_host, upstream_port), timeout=5
         )
-    except (OSError, TimeoutError) as err:
+    # asyncio.TimeoutError, not the builtin: before Python 3.11 they are
+    # different classes, and macOS's own python3 is 3.9.
+    except (OSError, asyncio.TimeoutError) as err:
         _LOGGER.warning("upstream unavailable for %s: %s", peer, err)
         client_writer.close()
         with contextlib.suppress(Exception):

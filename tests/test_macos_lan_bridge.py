@@ -11,6 +11,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,6 +57,37 @@ class MdnsPublisherTest(unittest.TestCase):
             )
 
 
+class _Pre311Asyncio:
+    """``asyncio`` as the relay sees it on Python 3.9 and 3.10, where wait_for
+    times out with asyncio.TimeoutError, a different class from the builtin
+    TimeoutError (3.11 merged them). macOS's own python3 is 3.9."""
+
+    class TimeoutError(Exception):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def wait_for(self, awaitable, timeout):
+        awaitable.close()
+        raise self.TimeoutError()
+
+
+class _ClientWriter:
+    def __init__(self, peer) -> None:
+        self._peer = peer
+        self.closed = False
+
+    def get_extra_info(self, name):
+        return self._peer if name == "peername" else None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        pass
+
+
 class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
     def test_only_local_address_ranges_are_accepted(self) -> None:
         self.assertTrue(RELAY.is_lan_peer(("192.168.1.25", 12345)))
@@ -64,6 +96,14 @@ class TlsRelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(RELAY.is_lan_peer(("fe80::1%en0", 12345, 0, 4)))
         self.assertFalse(RELAY.is_lan_peer(("8.8.8.8", 12345)))
         self.assertFalse(RELAY.is_lan_peer(None))
+
+    async def test_upstream_timeout_closes_the_client_on_older_pythons(self) -> None:
+        client = _ClientWriter(("192.168.1.25", 50000))
+        with mock.patch.object(RELAY, "asyncio", _Pre311Asyncio()):
+            await RELAY.relay_connection(
+                None, client, upstream_host="127.0.0.1", upstream_port=18443
+            )
+        self.assertTrue(client.closed)
 
     async def test_relay_is_byte_for_byte(self) -> None:
         async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
