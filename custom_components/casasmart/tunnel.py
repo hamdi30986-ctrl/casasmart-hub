@@ -1,13 +1,14 @@
-"""Remote-access tunnel formalization.
+"""Remote access through a Cloudflare tunnel: the pure rules.
 
-The hub itself does not run the tunnel — ``cloudflared`` runs as its own
-service on the box, configured at onboarding (one-time install, per-hub
-subdomain, ingress routed at the CasaSmart TLS port only — never bare HA).
-What the integration formalizes is the *contract*: the hub's public tunnel
-URL lives in ``hub_config.json`` (key ``tunnel_url``) — set by the installer
-or derived from the options-flow Cloudflare domain — and the handshake
-advertises it so the app captures the remote path AT PAIRING — exactly like
-the TLS pin. No manual URL entry on the phone.
+The hub itself does not run the tunnel. ``cloudflared`` runs on its own (on
+Home Assistant OS, the Cloudflare Tunnel add-on, which ``tunnel_control``
+starts and stops) and carries remote requests to Home Assistant's own HTTP
+port, where the CasaSmart API is served too. What the integration owns is
+the contract: the hub's public tunnel URL lives in ``hub_config.json`` (key
+``tunnel_url``), set by ``casasmart.set_tunnel_url`` or derived from the
+Cloudflare domain in the integration's options, and the handshake and the
+pairing payload hand it to the app, which captures the remote path at
+pairing, like the TLS pin. Nobody types a URL on the phone.
 
 This module is the pure half (stdlib only, flat-importable by the unit
 tests like ``discovery.py``/``ws_protocol.py``): tunnel URL and domain
@@ -20,9 +21,10 @@ Validation doctrine — **fail closed, never publish garbage**:
   ``http://`` tunnel URL handed to phones would carry credentials in the
   clear, so it is rejected here rather than trusted downstream (the app
   side independently refuses non-https too — defense in both layers).
-- Host required, no userinfo/query/fragment — a tunnel URL is an origin
-  (plus optional path prefix), not an arbitrary link. Anything else is a
-  config typo and gets logged + dropped, not "cleaned up" silently.
+- Host required, a readable port, no whitespace, no userinfo/query/fragment
+  — a tunnel URL is an origin (plus optional path prefix), not an arbitrary
+  link. Anything else is a config typo and gets dropped (the handshake logs
+  it once), not "cleaned up" silently.
 - Trailing slash normalized away so the app's path concatenation
   (``{base}/api/casasmart/...``) can't produce double slashes.
 """
@@ -32,17 +34,16 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
-# hub_config.json key the installer sets at onboarding.
+# hub_config.json key of the advertised tunnel URL.
 TUNNEL_URL_CONFIG_KEY = "tunnel_url"
 
 # One DNS label: 1-63 chars of [a-z0-9-], no leading/trailing hyphen.
 # (Hostnames only — underscores are legal in some DNS records but not in
 # hostnames, and a Cloudflare tunnel hostname is a hostname.)
 _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-# Add-on slugs are `<repo-hash>_cloudflared` and the hash is NOT stable across
-# add-on repos (observed `9074a9fa_cloudflared`; the repo just migrated to
-# homeassistant-apps/app-cloudflared, so future installs may differ again).
-# Match on the suffix — never a hardcoded slug.
+# Add-on slugs are `<repo-hash>_cloudflared`, and the hash differs between
+# add-on repositories (one is `9074a9fa_cloudflared`), so match on the
+# suffix, never a fixed slug.
 _CLOUDFLARED_SLUG_SUFFIX = "_cloudflared"
 # Add-on states that count as "running" when picking among multiple matches
 # (mirrors aiohasupervisor AddonState values — kept as strings so this module
@@ -53,8 +54,9 @@ _RUNNING_ADDON_STATES = frozenset({"started", "startup"})
 def normalize_tunnel_url(value: object) -> str | None:
     """Return the publishable tunnel URL, or None if unusable.
 
-    None means "don't advertise a tunnel" — the caller logs the reason;
-    a misconfigured URL must degrade to LAN-only, never reach a phone.
+    None means "don't advertise a tunnel": a misconfigured URL must degrade
+    to LAN-only, never reach a phone. The result keeps the input's case and
+    path prefix, without a trailing slash.
     """
     if not isinstance(value, str):
         return None
@@ -171,7 +173,7 @@ def pick_cloudflared_slug(addons: object) -> str | None:
     Input is ``[(slug, name, state), ...]`` (plain strings — the HA-coupled
     controller flattens the aiohasupervisor models so this stays pure and
     unit-testable). Matching is by slug suffix ``_cloudflared`` (repo-hash
-    prefixes are not stable) plus the locally-built ``cloudflared``. With
+    prefixes differ) or the bare slug ``cloudflared``. With
     several matches, prefer a running one, else first sorted — deterministic
     so the reconciler always targets the same add-on; the caller logs the
     choice.
@@ -199,10 +201,10 @@ def pick_cloudflared_slug(addons: object) -> str | None:
 
 # --- Edge-liveness watchdog -------------------------------------------------
 # Cloudflare returns these statuses from its EDGE when the edge is reachable but
-# it cannot reach the origin tunnel — i.e. cloudflared is running yet its edge
-# connection is dead. That is the exact "running but offline" case the add-on's
-# own state can't see, and the exact signal to restart. 521 web-server-down,
-# 522 conn-timed-out, 523 origin-unreachable, 530 (Argo/1033 tunnel error).
+# it cannot reach the origin tunnel, i.e. cloudflared is running yet its edge
+# connection is dead. That is the "running but offline" case the add-on's own
+# state can't see, and the signal to restart. 521 web server down, 522
+# connection timed out, 523 origin unreachable, 530 (error 1033: tunnel down).
 _EDGE_ORIGIN_DOWN_STATUSES = frozenset({521, 522, 523, 530})
 # Never restart more than once per this window: a real flap gets one restart; a
 # persistent failure (bad creds, Cloudflare outage) is logged, not hammered.
@@ -210,9 +212,12 @@ EDGE_RESTART_COOLDOWN_SECONDS = 900.0  # 15 min
 
 
 def is_edge_origin_down(status: int) -> bool:
-    """True when an HTTP status from the tunnel URL means Cloudflare's edge is
-    up but the origin tunnel is unreachable (restart cloudflared). Any other
-    status means the request reached the origin, so the tunnel is alive."""
+    """True when a status from the tunnel URL means the edge can't reach us.
+
+    Cloudflare's edge is up but the origin tunnel is unreachable (restart
+    cloudflared). Any other status means the request reached the origin, so
+    the tunnel is alive.
+    """
     return status in _EDGE_ORIGIN_DOWN_STATUSES
 
 
@@ -224,7 +229,7 @@ def edge_watchdog_decision(
 ) -> str:
     """Pure watchdog verdict from a probe result + restart history.
 
-    [alive] is the tri-state from the controller's edge probe:
+    ``alive`` is the tri-state from the controller's edge probe:
     True (edge+origin up) / False (edge up, origin down) / None (no response —
     the hub's OWN internet is likely down, NOT the tunnel).
 

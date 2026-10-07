@@ -12,16 +12,19 @@ not resurrect a tunnel the owner turned off for pairing — the Supervisor
 itself keeps it down, not just our reconciler.
 
 Only the Supervisor backend exists, deliberately: the supported setup is
-HAOS + the cloudflared add-on, and a Container/Core install cannot reach
-host systemd from inside HA anyway. On those installs ``available()`` is
-False and every caller degrades gracefully — domain storage + handshake
-advertising keep working, the options toggle is inert with a clear message
-(same doctrine as mDNS/push: one feature degrades, the hub stays up).
+HAOS (or Supervised) + the cloudflared add-on, and a Container/Core install
+cannot reach host systemd from inside HA anyway. On those installs
+``available()`` is False and every caller degrades gracefully — domain
+storage + handshake advertising keep working, the options toggle is inert
+with a clear message (same doctrine as mDNS/push: one feature degrades, the
+hub stays up).
 
-The add-on slug is repo-hash-prefixed and NOT stable across add-on repos
-(observed ``9074a9fa_cloudflared``; the add-on just migrated repos, so
-future installs may differ again) — it is discovered at runtime from the
-live add-on listing, never hardcoded.
+The add-on slug is prefixed with a hash of the add-on repository, so it
+differs between repositories (one is ``9074a9fa_cloudflared``). It is found
+at runtime in the live add-on listing, never hardcoded.
+
+The edge watchdog (``async_watchdog_check``) covers what the add-on's own
+state can't show: cloudflared running but disconnected from Cloudflare.
 """
 
 from __future__ import annotations
@@ -60,10 +63,9 @@ _LOGGER = logging.getLogger(__name__)
 # reconciler makes (against .value strings) is explicit at the usage site.
 _RUNNING_STATES = frozenset({"started", "startup"})
 
-# --- Edge-liveness watchdog -------------------------------------------------
-# The pure logic (which statuses mean origin-down, and the probe/restart
-# decision) lives in tunnel.py so it's unit-testable without HA. Only the
-# HTTP-probe timeout is glue and stays here.
+# The edge watchdog's pure logic (which statuses mean origin-down, and the
+# restart decision) lives in tunnel.py so it's unit-testable without HA. Only
+# the HTTP-probe timeout is glue and stays here.
 _EDGE_PROBE_TIMEOUT_SECONDS = 10.0
 
 
@@ -221,9 +223,10 @@ class CloudflaredController:
     async def async_watchdog_check(self, slug: str, tunnel_url: str, now: float) -> str:
         """One edge-liveness cycle: probe, decide, and restart if warranted.
 
-        [now] is a monotonic timestamp (injected for testability). Returns the
-        [edge_watchdog_decision] verdict; on ``"restart"`` the add-on is
-        restarted and the cooldown clock is stamped.
+        ``now`` is a monotonic timestamp (injected for testability). Returns
+        the ``edge_watchdog_decision`` verdict; on ``"restart"`` the add-on is
+        restarted and the cooldown clock is stamped. A failed restart raises
+        ``TunnelControlError`` without stamping it, so the next cycle retries.
         """
         alive = await self.async_edge_alive(tunnel_url)
         decision = edge_watchdog_decision(alive, self._last_edge_restart, now)
@@ -233,11 +236,13 @@ class CloudflaredController:
         return decision
 
     async def async_restore_boot_auto(self, slug: str) -> None:
-        """Hand auto-boot back to the Supervisor (domain cleared, or
-        integration removal).
+        """Set boot=auto again when the hub stops managing the add-on.
 
-        Deliberately does NOT start the add-on — giving up control is not
-        consent to open remote access right now, only to stop pinning it down.
+        Called when the Cloudflare domain is cleared or the integration is
+        removed, so a tunnel-OFF's boot=manual doesn't outlive the hub's
+        control. Deliberately does NOT start the add-on — giving up control is
+        not consent to open remote access right now, only to stop pinning it
+        down.
         """
         try:
             await self._addons().set_addon_options(
