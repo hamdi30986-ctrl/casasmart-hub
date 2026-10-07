@@ -1,45 +1,48 @@
 """CasaSmart audio REST endpoints.
 
 The app's thin-client surface over the hub-side ``AudioEngine`` +
-``AudioAdapter``. The phone never holds broker creds or opens its own MQTT
-connection; it reads hub state + fires commands here. The hub is the only
-MQTT client (the adapter), the only place the broker/PA creds live (the
-engine), and — through ``GET /audio/provision`` — the cred source the Pi
-pulls on boot.
+``AudioAdapter``. The phone never holds broker credentials or opens its own
+MQTT connection; it reads hub state and sends commands here. The hub is the
+only MQTT client (the adapter), the only place the broker credentials live
+(the engine), and — through ``GET /audio/provision`` — where a speaker gets
+them on boot.
 
 Matches the established API pattern (``alarm_api`` / ``tank_api``): plain views
-served on both HA's port and the dedicated TLS port, every handler gates in-band with
-``authenticate_request``, storage-touching engine calls hop the executor, and
-pure in-memory reads (the live mirror) do not.
+served on both HA's port and the dedicated TLS port, every handler gates
+in-band with ``authenticate_request``, storage-touching engine calls hop the
+executor, and pure in-memory reads (the live mirror) do not.
 
-Endpoints (roles in parens — see ``auth_engine.PERMISSIONS``):
+Endpoints, under ``/api/casasmart`` (permissions in parens — see
+``auth_engine.PERMISSIONS``):
 
 App-facing — speaker registry + live status:
-- ``GET    /audio/speakers``               — enrolled speakers + live status (``audio.read``)
-- ``GET    /audio/discover``               — un-enrolled speakers seen on the bus (``audio.manage``)
-- ``POST   /audio/speakers``               — enroll a discovered speaker (``audio.manage``)
-- ``PUT    /audio/speakers/{mac6}``        — rename / re-room (``audio.manage``)
-- ``DELETE /audio/speakers/{mac6}``        — drop the speaker (``audio.manage``)
+- ``GET    /audio/speakers``                — enrolled speakers + live status (``audio.read``)
+- ``GET    /audio/discover``                — un-enrolled speakers seen on the bus (``audio.manage``)
+- ``POST   /audio/speakers``                — enroll a discovered speaker (``audio.manage``)
+- ``PUT    /audio/speakers/{mac6}``         — rename / re-room / re-icon (``audio.manage``)
+- ``DELETE /audio/speakers/{mac6}``         — drop and reset the speaker (``audio.manage``)
 
 App-facing — control:
-- ``POST   /audio/speakers/{mac6}/command``— volume/stop/pause/resume/reset (``audio.control``)
-- ``POST   /audio/broadcast``              — play a URL/file to all speakers (``audio.control``)
-- ``POST   /audio/pa``                     — proxy a PA audio upload to the PA service (``audio.control``)
+- ``POST   /audio/speakers/{mac6}/command`` — volume/stop/pause/resume/reset/status (``audio.control``)
+- ``POST   /audio/speakers/{mac6}/airplay`` — AirPlay transport via DACP (``audio.control``)
+- ``POST   /audio/broadcast``               — play a URL/file on every speaker (``audio.control``)
+- ``POST   /audio/pa``                      — host an uploaded PA clip and play it (``audio.control``)
 
 Control honours the caller's room scope exactly as the speaker list does
 (``_controllable_speakers``): a room-scoped token reaches only the speakers it
 can see, and "all speakers" means all of those.
 
 App-facing — athan config:
-- ``GET    /audio/athan``                  — the stored athan config (``audio.read``)
-- ``PUT    /audio/athan``                  — replace it + relay retained (``audio.manage``)
+- ``GET    /audio/athan``                   — the stored config + schedule (``audio.read``)
+- ``PUT    /audio/athan``                   — replace it and re-arm the scheduler (``audio.manage``)
 
-Installer — broker / PA credentials:
-- ``GET/PUT /audio/broker``                — broker host/port/tls/user/pass (``audio.manage``)
-- ``GET/PUT /audio/pa-config``             — PA service host/port/api-key (``audio.manage``)
+Installer — broker / PA settings:
+- ``GET/PUT /audio/broker``                 — broker host/port/tls/user/pass (``audio.manage``)
+- ``GET/PUT /audio/pa-config``              — PA service host/port/api-key (``audio.manage``)
 
-Device-facing — the Pi pulls its broker creds on boot:
-- ``GET    /audio/provision``              — broker coordinates, provisioning key (or LAN, opt-in)
+Device-facing, no user token:
+- ``GET    /audio/provision``               — broker coordinates; provisioning key (or LAN, opt-in)
+- ``GET    /audio/pa-clip/{token}``         — a hosted PA clip; the unguessable token is the access
 
 Mutations that move the hub's view of the speakers (enroll/remove/update) fire
 ``EVENT_AUDIO_CHANGED`` so the WS server nudges connected apps to re-fetch —
@@ -107,9 +110,9 @@ class PaClipStore:
     The app uploads a recorded clip; the hub keeps the bytes here under a random
     token and hands the speakers a token URL to fetch (presigned-URL pattern —
     the token + short TTL are the access control, so the fetch endpoint needs no
-    JWT, which also side-steps the Docker LAN-gate that would otherwise reject
-    the speakers). One event loop → no locking; expired entries are evicted
-    lazily on access, so there is no background task.
+    JWT and no LAN check, which behind Docker's NAT would reject the speakers).
+    One event loop → no locking; expired entries are evicted lazily on access,
+    so there is no background task.
     """
 
     def __init__(
@@ -122,9 +125,11 @@ class PaClipStore:
 
     @property
     def ttl(self) -> float:
+        """Seconds a stored clip stays fetchable."""
         return self._ttl
 
     def _evict_expired(self) -> None:
+        """Drop every clip whose TTL has passed."""
         now = time.monotonic()
         for token in [t for t, (_d, _c, exp) in self._clips.items() if exp <= now]:
             del self._clips[token]
@@ -187,12 +192,13 @@ def get_athan_scheduler(hass: HomeAssistant):
 class _AudioView(HomeAssistantView):
     """Shared plumbing for the audio views."""
 
-    requires_auth = False  # CasaSmart JWT gate in-handler
+    requires_auth = False  # each handler gates in-band (see module docstring)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     def _audio_or_503(self) -> tuple[AudioEngine | None, web.Response | None]:
+        """``(engine, None)``, or ``(None, 503)`` while the hub is loading."""
         audio = get_audio(self._hass)
         if audio is None:
             return None, self.json_message(
@@ -201,6 +207,7 @@ class _AudioView(HomeAssistantView):
         return audio, None
 
     def _adapter_or_503(self) -> tuple[AudioAdapter | None, web.Response | None]:
+        """``(adapter, None)``, or ``(None, 503)`` before the adapter exists."""
         adapter = get_audio_adapter(self._hass)
         if adapter is None:
             return None, self.json_message(
@@ -215,7 +222,7 @@ class _AudioView(HomeAssistantView):
     def _publish_or_503(
         self, adapter: AudioAdapter, topic: str, payload: Any, *, retain: bool = False
     ) -> web.Response | None:
-        """Publish through the adapter; map a dead bus to a clean 503."""
+        """Publish through the adapter; a client that isn't running is a 503."""
         try:
             adapter.publish(topic, payload, qos=1, retain=retain)
         except AudioAdapterNotReady as err:
@@ -244,9 +251,9 @@ def _speaker_in_scope(
 ) -> bool:
     """Whether a room-scoped caller may see this speaker.
 
-    Exact ``area_id`` membership first (the modern, robust path); then the
-    legacy free-text ``room`` name-match for enrolments made before speakers
-    carried an area id; then shared (no room at all) → visible to everyone.
+    Exact ``area_id`` membership first; then, for a speaker enrolled without
+    an area id, its free-text ``room`` matched against the scoped areas'
+    names; then shared (no room at all) → visible to everyone.
     """
     area_id = speaker.get("area_id")
     if area_id:
@@ -314,13 +321,12 @@ class CasaSmartAudioSpeakersView(_AudioView):
         scope = claims.get("rooms")
         if scope is not None:
             # A room-scoped user (e.g. a guest/kids phone) sees only its rooms'
-            # speakers. Preferred path: the speaker's ``area_id`` (==
-            # the app's room_id / HA area id) is matched EXACTLY against the
-            # caller's room scope — robust, no name-string fuzziness. Legacy
-            # fallback: a speaker with no area_id but a free-text ``room`` label
-            # is matched by casefolded area NAME (older enrolments). A speaker
-            # with neither is shared house infra, visible to all. Fail-closed: a
-            # scoped speaker matching nothing is hidden, never leaked.
+            # speakers. A speaker's ``area_id`` (the app's room_id / HA area id)
+            # is matched exactly against the caller's room scope. A speaker
+            # with no area_id but a free-text ``room`` label is matched by
+            # casefolded area name. A speaker with neither is shared house
+            # infra, visible to all. Fail-closed: a speaker with a room that
+            # matches nothing in scope is hidden, never leaked.
             allowed_ids = set(scope)
             allowed_names = _scoped_area_names(self._hass, scope)
             speakers = [
@@ -436,8 +442,8 @@ class CasaSmartAudioDiscoverView(_AudioView):
     """GET /audio/discover — speakers heard on the bus but not yet enrolled.
 
     Provokes a fresh announce round (the adapter pings the bus) and returns the
-    un-enrolled set — the source for the app's add-speaker list. Admin-only
-    (it is the install/onboarding surface, not a household action).
+    un-enrolled set — the source for the app's add-speaker list. Needs
+    ``audio.manage`` (it is the install surface, not a household action).
     """
 
     url = f"/api/{DOMAIN}/audio/discover"
@@ -465,7 +471,7 @@ class CasaSmartAudioCommandView(_AudioView):
 
     Body: ``{"cmd": "volume", "value": 40}`` or ``{"cmd": "stop"}`` etc. The
     engine validates the command vocabulary + value and builds the exact wire
-    payload the Pi agent speaks; the adapter publishes it.
+    payload the speaker agent speaks; the adapter publishes it.
     """
 
     url = f"/api/{DOMAIN}/audio/speakers/{{mac6}}/command"
@@ -507,10 +513,10 @@ class CasaSmartAudioAirplayView(_AudioView):
     """POST /audio/speakers/{mac6}/airplay — AirPlay transport (DACP remote).
 
     Body: ``{"action": "playpause"}`` (also play/pause/next/previous/stop). The
-    engine maps the action to shairport-sync's remote verb; we publish it as a
-    **raw, non-retained** string to ``speakers/<mac6>/airplay/remote`` and
+    engine maps the action to shairport-sync's remote verb; it is published as
+    a **raw, non-retained** string to ``speakers/<mac6>/airplay/remote`` and
     shairport relays it as a DACP command to the AirPlay *source* — so the
-    phone's own playback actually pauses/skips. A no-op if nothing is currently
+    phone's own playback pauses/skips. A no-op if nothing is currently
     AirPlaying to that speaker.
     """
 
@@ -790,7 +796,7 @@ class CasaSmartAudioPaClipView(_AudioView):
     No JWT: access is gated by the unguessable token + short TTL (presigned-URL
     pattern). Deliberately NOT LAN-gated — the speakers fetch this and, behind
     Docker, every inbound source is rewritten to a non-LAN peer, so a LAN gate
-    would reject them. Plain HTTP so the Pi's ``wget`` needs no TLS.
+    would reject them. Plain HTTP, so the speaker's ``wget`` needs no TLS.
     """
 
     url = f"/api/{DOMAIN}/audio/pa-clip/{{token}}"
@@ -810,9 +816,11 @@ class CasaSmartAudioPaClipView(_AudioView):
 class CasaSmartAudioAthanView(_AudioView):
     """GET/PUT /audio/athan — the hub-owned athan config.
 
-    GET (``audio.read``) renders the app's athan settings screen. PUT
-    (``audio.manage``) replaces it and relays it RETAINED to ``athan/config``
-    so the scheduler picks it up immediately and on every reconnect.
+    GET (``audio.read``) renders the app's athan settings screen, with the
+    effective location and the scheduler's current schedule. PUT
+    (``audio.manage``) replaces the config, re-arms the hub's athan scheduler
+    and publishes the config retained to ``athan/config`` for any other
+    listener on the bus.
     """
 
     url = f"/api/{DOMAIN}/audio/athan"
@@ -827,9 +835,8 @@ class CasaSmartAudioAthanView(_AudioView):
             return not_ready
         athan = audio.get_athan()
         # The effective location the scheduler will use: the app's pinned coords
-        # if any, else the hub's own home location (hass.config). The app renders
-        # this read-only ("Location follows your home · <timezone>") now that it
-        # no longer pins a city itself.
+        # if any, else the hub's own home location (hass.config). The app shows
+        # it read-only ("Location follows your home · <timezone>").
         cfg = self._hass.config
         pinned = athan.get("lat") is not None and athan.get("lon") is not None
         location = {
@@ -862,9 +869,10 @@ class CasaSmartAudioAthanView(_AudioView):
             stored = await self._hass.async_add_executor_job(audio.set_athan, config)
         except AudioError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-        # Relay retained so the scheduler gets it now and on every reconnect.
-        # A dead bus is non-fatal here: the config is persisted, the next
-        # adapter (re)connect does not re-push stored athan, so surface it.
+        # Publish retained for other listeners on athan/config. A client that
+        # isn't running is non-fatal: the config is saved, the adapter
+        # re-publishes it on its next connect, and ``relayed`` tells the app it
+        # hasn't gone out yet.
         adapter = get_audio_adapter(self._hass)
         relayed = False
         if adapter is not None:
@@ -875,9 +883,8 @@ class CasaSmartAudioAthanView(_AudioView):
                 _LOGGER.warning(
                     "Athan config stored but not relayed — MQTT bus is down"
                 )
-        # Re-arm the hub's own scheduler off the new config immediately (the
-        # retained relay above is now vestigial — kept for any external listener
-        # — but the hub itself is the scheduler and reschedules in-process).
+        # The hub's own scheduler reads the engine, not the bus: re-arm it from
+        # the new config now.
         scheduler = get_athan_scheduler(self._hass)
         if scheduler is not None:
             scheduler.reschedule()
@@ -888,11 +895,12 @@ class CasaSmartAudioAthanView(_AudioView):
 
 
 class CasaSmartAudioBrokerView(_AudioView):
-    """GET/PUT /audio/broker — the MQTT broker credentials (admin only).
+    """GET/PUT /audio/broker — the MQTT broker credentials (``audio.manage``).
 
-    PUT cycles the adapter so the hub reconnects with the new creds. Body
-    fields are all optional (omitted = unchanged): ``host``, ``port``,
-    ``tls``, ``username``, ``password``.
+    PUT cycles the adapter so the hub reconnects with the new credentials.
+    Body fields are all optional (omitted = unchanged): ``host``, ``port``,
+    ``tls``, ``username``, ``password``. Responses report ``password_set``,
+    never the password.
     """
 
     url = f"/api/{DOMAIN}/audio/broker"
@@ -933,7 +941,10 @@ class CasaSmartAudioBrokerView(_AudioView):
 
 
 class CasaSmartAudioPaConfigView(_AudioView):
-    """GET/PUT /audio/pa-config — the PA service host/port/api-key (admin)."""
+    """GET/PUT /audio/pa-config — the PA service host/port/api-key.
+
+    ``audio.manage``. Responses report ``api_key_set``, never the key.
+    """
 
     url = f"/api/{DOMAIN}/audio/pa-config"
     name = f"api:{DOMAIN}:audio:pa-config"
@@ -966,18 +977,18 @@ class CasaSmartAudioPaConfigView(_AudioView):
         return self.json({"pa": _redact_secret(pa, "api_key")})
 
 
-# -- device-facing: the Pi pulls its broker creds on boot ---------------------
+# -- device-facing: a speaker fetches its broker credentials on boot ----------
 
 
 class CasaSmartAudioProvisionView(_AudioView):
-    """GET /audio/provision — broker coordinates for the Pi speaker agent.
+    """GET /audio/provision — broker coordinates for the speaker agent.
 
     Auth is the shared provisioning secret (header ``X-CasaSmart-Provision-Key``,
-    baked into the Pi image). It works from any source — so a Docker-NAT'd hub,
-    whose LAN check sees a rewritten peer IP, still provisions. Keyless LAN
-    access is opt-in (hub_config ``keyless_speaker_provisioning: true``): the
-    response is the broker password, so by default no LAN device gets it
-    without the key.
+    set to ``provision_secret`` from ``hub_config.json`` on the speaker). It
+    works from any source — so a Docker-NAT'd hub, whose LAN check sees a
+    rewritten peer IP, still provisions. Keyless LAN access is opt-in
+    (hub_config ``keyless_speaker_provisioning: true``): the response is the
+    broker password, so by default no LAN device gets it without the key.
     """
 
     url = f"/api/{DOMAIN}/audio/provision"
@@ -987,10 +998,8 @@ class CasaSmartAudioProvisionView(_AudioView):
         audio, not_ready = self._audio_or_503()
         if not_ready is not None:
             return not_ready
-        # Auth = the shared provisioning secret (header). The secret path is
-        # what a Pi uses: it works from any source, so a Docker-NAT'd hub
-        # (whose LAN check sees a rewritten peer IP) still provisions. The LAN
-        # gate admits a keyless client only when the operator opted in.
+        # A valid key is enough from any source. Without one, the LAN gate
+        # admits a keyless client only when the operator opted in.
         secret = get_provision_secret(self._hass)
         presented = request.headers.get("X-CasaSmart-Provision-Key", "")
         # Compared as bytes: compare_digest refuses non-ASCII str, and aiohttp
@@ -1077,7 +1086,7 @@ def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
 
 # -- executor jobs (storage-touching engine calls) ----------------------------
 # Plain module-level callables so async_add_executor_job gets a function, not a
-# closure capturing request state.
+# closure capturing request state; they only map positional args to keywords.
 
 
 def _enroll_job(audio: AudioEngine, mac, name, room, icon, area_id):

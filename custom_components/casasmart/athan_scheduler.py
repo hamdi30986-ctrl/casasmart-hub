@@ -1,18 +1,20 @@
 """Hub-native athan (prayer-call) scheduler.
 
-Computes the five daily prayer times locally via ``prayer-times-calculator-offline``
-(the same offline, no-network library Home Assistant's *Islamic Prayer Times*
-integration uses) from the athan config the app stores through ``PUT /audio/athan``
-(``lat``/``lon``/``timezone``/``method``/``school``), falling back to the hub's own
-configured location (``hass.config.latitude/longitude/time_zone``). It arms one HA
-timer per prayer and, at prayer time, publishes a broadcast ``play`` command
-(priority ``athan``) through the audio adapter — the same play path PA uses.
+Computes the five daily prayer times locally via
+``prayer-times-calculator-offline`` (the same offline, no-network library Home
+Assistant's *Islamic Prayer Times* integration uses) from the athan config the
+app stores through ``PUT /audio/athan`` (``lat``/``lon``/``timezone``/
+``method``/``school``), falling back to the hub's own configured location
+(``hass.config.latitude/longitude/time_zone``). It arms one HA timer per
+prayer and, at prayer time, publishes a ``play`` command (priority
+``athan``) through the audio adapter — the same play path PA uses: one
+broadcast, or one command per selected speaker when the config names some.
 
 The hub owns audio, so it owns athan scheduling too — no separate scheduler
 daemon. The library returns UTC timestamps, so DST/offset handling is inherent
-(no fixed table), and it adds Hanafi/Shafi Asr, high-latitude rules and ~24
-regional calculation methods — correct in any region, with no cloud lookup, no
-hardcoded home id and no separate broker credentials.
+(no fixed table), and it supports Hanafi/Shafi Asr, high-latitude rules and
+~24 regional calculation methods — correct in any region, with no cloud
+lookup.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from .audio import AudioError, normalize_mac6
 
 _LOGGER = logging.getLogger(__name__)
 
-# Prayer-call MP3s are baked onto each Pi speaker image at this path.
+# Prayer-call MP3s ship on each speaker's image at this path.
 ATHAN_DIR = "/var/lib/speaker/athans"
 PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 
@@ -45,8 +47,10 @@ PRAYER_NAMES = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
 # wake — skip anything already more than this many seconds past.
 _GRACE_SEC = 120
 
-# The library's accepted calculation methods (lower-case). The app historically
-# sends "egyptian"; the library calls it "egypt", so alias it.
+# The library's accepted calculation methods (lower-case). The app may send
+# "egyptian" (the library's "egypt") or "umalqura"/"umm_al_qura" (the
+# library's "makkah"), so those are aliased. Anything unknown falls back to
+# _DEFAULT_METHOD.
 _LIB_METHODS = frozenset(
     {
         "mwl",
@@ -151,10 +155,10 @@ class AthanScheduler:
         """Arm today's prayers and a self-healing hourly recompute.
 
         The hourly tick (at :01) both rolls the day over at 00:01 AND re-arms
-        every hour — so a missed trigger (a slept host, a dropped timer, a
-        toggle that raced setup) self-corrects within the hour instead of
-        silently missing a whole day. reschedule() is idempotent, so re-running
-        it costs one offline prayer-time calc and cancel/re-arm.
+        every hour — so timers lost to a slept host, a dropped timer or a toggle
+        that raced setup are back within the hour for the prayers still ahead,
+        instead of a whole day going silent. Re-running reschedule() costs one
+        offline prayer-time calc and a cancel/re-arm.
         """
         self._unsub_recompute = async_track_time_change(
             self._hass, self._handle_recompute, minute=1, second=0
@@ -178,6 +182,7 @@ class AthanScheduler:
         return dict(self._schedule)
 
     def _cancel_prayers(self) -> None:
+        """Cancel every armed prayer timer."""
         for unsub in self._unsub_prayers:
             unsub()
         self._unsub_prayers = []
@@ -186,9 +191,11 @@ class AthanScheduler:
     def reschedule(self, *_: Any) -> None:
         """(Re)compute today's times and arm timers for the prayers still ahead.
 
-        Safe to call any time — from setup, the midnight tick, or a config PUT.
-        A no-op (all timers cleared) when athan is disabled or no location is
-        resolvable.
+        Safe to call any time — from setup, the hourly tick, or a config PUT.
+        "Ahead" means not yet fired today and at most ``_GRACE_SEC`` past, so a
+        hub that restarts just after a prayer still calls it, once. A no-op
+        (all timers cleared) when athan is disabled or no location or timezone
+        is resolvable.
         """
         self._cancel_prayers()
         resolved = self._resolve_config()
@@ -272,7 +279,7 @@ class AthanScheduler:
 
         # A configured selection that resolves to zero enrolled speakers means
         # athan is ENABLED but would fire NOWHERE — surface it loudly (visible
-        # even at the hub's default:warning level); it's a real misconfiguration.
+        # even when the hub logs at WARNING); it's a real misconfiguration.
         if has_sel and not targets:
             _LOGGER.warning(
                 "Athan enabled for %s but its selected speakers are all un-enrolled — "
@@ -325,6 +332,8 @@ class AthanScheduler:
         return True, targets
 
     def _make_fire(self, prayer: str, day: str) -> Any:
+        """The timer callback for one prayer on ``day`` (records it as fired)."""
+
         @callback
         def _fire(_now: datetime) -> None:
             self._fired.add((day, prayer))
@@ -333,6 +342,7 @@ class AthanScheduler:
         return _fire
 
     def _fire_athan(self, prayer: str) -> None:
+        """Publish the athan play for ``prayer`` to its target speakers."""
         # Re-check at fire time: the config may have been disabled since arming.
         if self._resolve_config() is None:
             _LOGGER.info(
@@ -387,6 +397,7 @@ class AthanScheduler:
 
         Location and timezone fall back to the hub's own HA config so a hub
         configured with the home's location works with no app-side setup.
+        Each coordinate falls back on its own.
         """
         try:
             athan = self._engine.get_athan()

@@ -22,14 +22,17 @@ What it does:
   ``EVENT_AUDIO_CHANGED`` on the HA loop (the ingest itself runs on paho's
   network thread; the engine is ``RLock``-guarded so that's safe, but the bus
   fire must hop to the loop thread).
-- Provides ``publish`` for the REST API (``audio_api``) to send the topic+payload
-  the engine's ``build_command`` / ``build_play`` produced, and ``async_discover``
-  to provoke a fresh round of announces (publishes ``speakers/ping``).
+- Provides ``publish`` for the REST API (``audio_api``) and the athan
+  scheduler to send the topic+payload the engine's ``build_command`` /
+  ``build_play`` produced, and ``async_discover`` to provoke a fresh round of
+  announces (publishes ``speakers/ping``).
+- Re-publishes the stored athan config, retained, on every connect.
 
-Discovery is MQTT, NOT an HTTP subnet sweep: the real Pi agent has no HTTP
-health endpoint — it announces over the broker (on connect + on ``ping``). So
-the hub, being the only MQTT client, is also the only thing that needs to do
-discovery, and it does it by listening for announces + pinging.
+Discovery runs over MQTT, not an HTTP subnet sweep: the speaker agent has no
+HTTP endpoint to probe — it announces over the broker (on connect + on
+``ping``). So the hub, being the only MQTT client, is also the only thing
+that needs to do discovery, and it does it by listening for announces +
+pinging.
 
 Graceful when unconfigured: a hub with no broker host set (fresh install,
 before the installer provisions the broker) starts inert and logs it — setup
@@ -60,8 +63,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class AudioAdapterNotReady(RuntimeError):
-    """Raised when a publish is attempted with no live MQTT connection.
+    """Raised when a publish is attempted while the MQTT client isn't running.
 
+    That is: no broker configured yet, a start that failed, or after stop.
     The REST API maps this to a 503 — the control was rejected, not silently
     dropped, so the app can tell the user the speaker bus is unreachable.
     """
@@ -116,8 +120,8 @@ class AudioAdapter:
         self._engine = engine
         self._client_factory = client_factory
         self._client: Any | None = None
-        # True between a successful connect-attempt setup and stop; lets
-        # publish/ discover fail fast (and loudly) when audio isn't wired.
+        # True while a client is running (start to stop); lets publish and
+        # discover fail fast (and loudly) when audio isn't wired.
         self._started = False
         # Serializes reconfigures. Stopping awaits an executor hop, and a
         # second reconfigure running in that gap would start a client of its
@@ -184,6 +188,7 @@ class AudioAdapter:
 
     @staticmethod
     def _teardown_client(client: Any) -> None:
+        """Stop paho's network thread and disconnect (blocking; executor)."""
         try:
             client.loop_stop()
             client.disconnect()
@@ -211,11 +216,9 @@ class AudioAdapter:
             return
         client.subscribe([(_TOPIC_ANNOUNCE, 0), (_SUB_STATUS, 1), (_SUB_STATE, 0)])
         client.publish(_TOPIC_PING, "", qos=0)
-        # Re-push the stored athan config retained on every (re)connect.
-        # The PUT relays it once when the bus is up, but a config saved while
-        # the bus was down — or a scheduler that restarted and lost its retained
-        # copy — would otherwise silently never see it. Re-publishing here makes
-        # the hub the durable source of truth: connect == scheduler is current.
+        # Re-publish the stored athan config, retained, on every (re)connect:
+        # a config saved while the bus was down, or a broker that lost its
+        # retained copy, still reaches athan/config listeners.
         self._republish_athan(client)
         _LOGGER.info("CasaSmart audio: MQTT connected, subscribed to speaker topics")
 
@@ -231,8 +234,8 @@ class AudioAdapter:
             _LOGGER.exception("CasaSmart audio: failed to re-publish athan config")
 
     def _on_disconnect(self, _client: Any, _userdata: Any, rc: Any) -> None:
-        # rc 0 = our own disconnect(); anything else = unexpected drop, paho's
-        # loop will auto-reconnect on the backoff schedule.
+        """Log an unexpected drop; paho reconnects on the backoff schedule."""
+        # rc 0 = our own disconnect(); anything else = unexpected drop.
         if rc not in (0, None):
             _LOGGER.warning("CasaSmart audio: MQTT dropped (rc=%s), reconnecting", rc)
 
@@ -282,6 +285,7 @@ class AudioAdapter:
 
     @staticmethod
     def _loads(text: Any) -> Any:
+        """Parse a JSON payload, or None when it is empty or malformed."""
         if not isinstance(text, str) or not text.strip():
             return None
         try:
@@ -291,6 +295,7 @@ class AudioAdapter:
 
     @callback
     def _fire_changed(self) -> None:
+        """Fire EVENT_AUDIO_CHANGED (loop thread only)."""
         self._hass.bus.async_fire(EVENT_AUDIO_CHANGED, None)
 
     def _nudge_changed(self) -> None:
@@ -304,9 +309,12 @@ class AudioAdapter:
     ) -> None:
         """Publish a command/PA/athan message the engine built.
 
-        ``payload`` may be a dict (JSON-encoded) or a raw string. Raises if the
-        client isn't connected so the API can surface a clean 503 instead of
-        silently dropping a control the user thinks went through.
+        ``payload`` may be a dict (JSON-encoded) or a raw string. Raises
+        ``AudioAdapterNotReady`` when the client isn't running, so the API can
+        answer 503 instead of silently dropping a control the user thinks went
+        through. While the client runs but the broker link is down, paho takes
+        the message: QoS 1 is queued and sent after the reconnect, QoS 0 is
+        dropped.
         """
         if not self._started or self._client is None:
             raise AudioAdapterNotReady("Audio MQTT client is not connected")
@@ -319,8 +327,8 @@ class AudioAdapter:
         Publishing an empty retained payload tells the broker to drop the
         retained message, so a deleted speaker can't resurrect as a discovery
         ghost the next time the hub reconnects and the broker replays retained
-        state. Raises ``AudioAdapterNotReady`` if the bus is down — the DELETE
-        handler treats that as a non-fatal best-effort cleanup.
+        state. Raises ``AudioAdapterNotReady`` if the client isn't running —
+        the DELETE handler treats that as a non-fatal best-effort cleanup.
         """
         if not self._started or self._client is None:
             raise AudioAdapterNotReady("Audio MQTT client is not connected")
