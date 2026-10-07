@@ -327,6 +327,51 @@ class RepeatedRoomOffTest(unittest.TestCase):
         self.assertEqual(self.engine.restore_set(self.ROOM), [])
 
 
+class NowConfigSceneValidationTest(unittest.TestCase):
+    """PUT /now/config answers malformed scene fields with 400, never 500."""
+
+    def put(self, payload: dict) -> dict:
+        engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        registry = type(
+            "Registry", (), {"list_scenes": lambda self: [{"scene_id": "scene-a"}]}
+        )()
+        view = _API.CasaSmartNowConfigView(_Hass(_States([])))
+
+        async def body(request):
+            return payload
+
+        with (
+            patch.multiple(
+                _API,
+                authenticate_request=lambda *args: ({"sub": "admin"}, None),
+                json_body=body,
+                get_now_data=lambda hass: engine,
+            ),
+            patch.object(view, "_registry", lambda: registry),
+        ):
+            return asyncio.run(view.put(None))
+
+    def test_known_scenes_are_accepted(self) -> None:
+        stored = self.put(
+            {"suggested_scene_id": "scene-a", "pinned_scene_ids": ["scene-a"]}
+        )
+        self.assertEqual(stored["suggested_scene_id"], "scene-a")
+        self.assertEqual(stored["pinned_scene_ids"], ["scene-a"])
+
+    def test_malformed_scene_fields_are_bad_requests(self) -> None:
+        for payload in (
+            {"suggested_scene_id": ["scene-a"]},
+            {"suggested_scene_id": {"id": "scene-a"}},
+            {"pinned_scene_ids": 5},
+            {"pinned_scene_ids": [["scene-a"]]},
+            {"pinned_scene_ids": "scene-a"},
+            {"pinned_scene_ids": ["scene-missing"]},
+        ):
+            with self.subTest(payload=payload):
+                response = self.put(payload)
+                self.assertEqual(response["status"].value, 400)
+
+
 class _SteppedServices(_Services):
     async def async_call(self, domain, action, data, blocking=True):
         await asyncio.sleep(0)

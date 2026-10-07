@@ -449,11 +449,14 @@ class CasaSmartNowConfigView(_NowView):
                     registry.list_scenes
                 )
             }
+            # Only existence is checked here; NowDataEngine.configure rejects
+            # values of the wrong type with its own 400.
+            pinned = payload.get("pinned_scene_ids")
             for scene_id in [
                 payload.get("suggested_scene_id"),
-                *(payload.get("pinned_scene_ids") or []),
+                *(pinned if isinstance(pinned, list) else []),
             ]:
-                if scene_id is not None and scene_id not in known_scenes:
+                if isinstance(scene_id, str) and scene_id not in known_scenes:
                     return self.json_message(
                         f"Configured scene {scene_id!r} not found",
                         HTTPStatus.BAD_REQUEST,
