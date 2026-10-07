@@ -1,7 +1,7 @@
-"""Self-update execution — the install action.
+"""Self-update execution: the install action.
 
-``POST /api/casasmart/update/install`` (owner/admin-only, ``update.install``)
-turns the "update available" state update_api reports into an actual upgrade:
+``POST /api/casasmart/update/install`` (owner only, ``update.install``) turns
+the "update available" state ``update_api`` reports into an actual upgrade:
 
     1. Re-check the latest release; refuse (409) if nothing is newer.
     2. Download the release's ``casasmart.zip`` asset (the file HACS
@@ -15,8 +15,8 @@ turns the "update available" state update_api reports into an actual upgrade:
     5. Atomically swap the live integration dir for the new tree, keeping a
        ``.bak`` rollback.
     6. Schedule an HA restart *after* the HTTP response flushes, so the app
-       gets a clean "installing" reply before the connection drops; the
-       container's restart policy brings HA back on the new code.
+       gets a clean "installing" reply before the connection drops; Home
+       Assistant comes back up on the new code.
 
 Only one install runs at a time, and none once a swap is waiting for its
 restart: a second request gets a 409 "update already in progress".
@@ -26,8 +26,8 @@ the files without HACS knowing, so HACS keeps reporting the old version.
 
 The filesystem mechanics (locate / version-match / atomic swap) are pure and
 live in ``update.py`` so they unit-test with temp dirs. This module owns the
-network download, the zip extraction, and the HA restart — the parts that
-need a running hub and are proven live rather than in unit tests.
+download, the zip extraction and the restart. All file work runs in the
+executor: Home Assistant flags blocking calls made on its event loop.
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ from .update_api import UpdateChecker
 
 _LOGGER = logging.getLogger(__name__)
 
-# Downloading a release tarball is heavier than the status poll — give it
-# room, but still bounded so a wedged transfer can't hang forever.
+# Downloading the release zip is heavier than the status poll: give it room,
+# but still bounded so a wedged transfer can't hang forever.
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120)
 # ``browser_download_url`` asset downloads ignore Accept; a GitHub media type is
 # kept so the request looks like every other GitHub API call the hub makes.
@@ -68,15 +68,15 @@ _DOWNLOAD_HEADERS = {
 }
 # An Ed25519 signature is 64 bytes; anything much larger is not one.
 _MAX_SIGNATURE_BYTES = 1024
-# Seconds to let the HTTP response flush to the app before we pull the rug.
+# Seconds to let the HTTP response reach the app before HA restarts.
 _RESTART_GRACE_SECONDS = 2.0
 # hass.data[DOMAIN] keys, shared by both listeners' install views: the lock one
 # install holds from status check to scheduled restart, and the version a
 # finished swap is waiting to restart into.
 _INSTALL_LOCK_KEY = "update_install_lock"
 _SWAPPED_VERSION_KEY = "update_swapped_version"
-# The phone app shows "Update already in progress" for a 409 whose error
-# contains this phrase (update_provider.dart, _looksLikeInstallAlreadyRunning).
+# The CasaSmart app shows "Update already in progress" for a 409 whose error
+# contains this phrase, so it must not change.
 _IN_PROGRESS = "update already in progress"
 
 
