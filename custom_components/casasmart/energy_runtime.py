@@ -36,6 +36,17 @@ EVENT_AUTOMATION_DISABLE_FAILED = "automation_disable_failed"
 EVENT_AUTOMATION_RESTORE_FAILED = "automation_restore_failed"
 
 
+def _clean_automation_ids(items: Any) -> list[str]:
+    """The stripped automation entity ids among the items, sorted, each once."""
+    return sorted(
+        {
+            item.strip()
+            for item in items
+            if isinstance(item, str) and item.strip().startswith("automation.")
+        }
+    )
+
+
 def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool:
     """True when the caller is non-admin and the active level locks control."""
     state = engine.snapshot()
@@ -93,23 +104,11 @@ class EnergyFlags:
         value = self._table.get(_DISABLED_KEY)
         if not isinstance(value, dict) or not isinstance(value.get("entity_ids"), list):
             return []
-        return sorted(
-            {
-                item.strip()
-                for item in value["entity_ids"]
-                if isinstance(item, str) and item.strip().startswith("automation.")
-            }
-        )
+        return _clean_automation_ids(value["entity_ids"])
 
     def set_disabled_automations(self, entity_ids: list[str]) -> None:
         """Replace the remembered set; an empty set removes the row."""
-        clean = sorted(
-            {
-                item.strip()
-                for item in entity_ids
-                if isinstance(item, str) and item.strip().startswith("automation.")
-            }
-        )
+        clean = _clean_automation_ids(entity_ids)
         if clean:
             self._table[_DISABLED_KEY] = {"entity_ids": clean}
         else:
