@@ -151,7 +151,8 @@ none of them.
 **To change one:**
 1. Stop Home Assistant. The hub keeps this file in memory and rewrites it, so
    edits made while it runs can be lost.
-2. Edit the JSON.
+2. Edit the JSON. It must stay a valid JSON object: if the hub can't read it,
+   the integration doesn't start, and Home Assistant retries until it is fixed.
 3. Start Home Assistant.
 
 | Key | Value | Effect |
@@ -161,7 +162,7 @@ none of them.
 | `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Let invited members pair from outside the network (default `false`) |
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
-| `tank_ingest_url` | full URL | Where tank sensors post readings, e.g. `http://192.168.1.20:8123/api/casasmart/tank/reading`. The default uses the hub's own LAN address and HA's port; set this when that address isn't reachable from the LAN (Docker Desktop, bridge networking). |
+| `tank_ingest_url` | full URL | Where tank sensors post readings, e.g. `http://192.168.1.20:8123/api/casasmart/tank/reading`. The default uses the hub's own LAN address and HA's port; set this when that address isn't reachable from the LAN (Docker Desktop, bridge networking). A tank keeps the address it was given at setup until it is set up again. |
 | `keyless_speaker_provisioning` | `true` / `false` | Let speakers on the local network fetch their broker settings without the provisioning key (default `false`). Only for speakers that don't send the key; the hub logs a warning while it is on. |
 | `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
 
