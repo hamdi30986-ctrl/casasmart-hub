@@ -1,36 +1,10 @@
-"""Owner recovery codes: the metal-card tier.
+"""Owner recovery code: the engraved card that gets the owner back in.
 
-Recovery tiers:
-
-- Cloud keychain restore is tier 1 and lives entirely app-side — the
-  restored key just logs in. THIS module is tier 2: the laser-engraved
-  metal card for when digital recovery is gone (lost phone + no backup
-  + new Apple ID).
-- The code is **permanent and reusable** — the printed metal card keeps
-  working. Redeeming it does NOT consume it, and its hash is persisted in
-  hub_config so the same card survives restarts and reinstalls. A factory
-  reset rotates it: the reset deletes the hash and a fresh code is minted
-  on reload. Security rests on LAN presence + the escalating throttle +
-  the card's physical secrecy, not on single-use.
-- Redemption **requires LAN presence** (enforced at the API layer, same
-  check as pairing) — a photo taken remotely is useless.
-- Redemption replaces the hub's single admin: the old admin device is
-  unenrolled (its outstanding JWTs die instantly via the ``ver``
-  revocation) and the new phone's keypair becomes the admin. Tier 3
-  (a factory reset through Home Assistant, on-site or over remote Home
-  Assistant access) is the ``casasmart.factory_reset`` HA service — see
-  ``__init__.py``.
-
-Code format: 10 characters from an unambiguous alphabet (no 0/O, 1/I/L),
-grouped ``XXXXX-XXXXX`` for engraving. ~49 bits — unguessable through
-the escalating throttle, and like the bootstrap pairing code it never
-expires. Stored SHA-256-hashed (plaintext exists exactly once, at mint;
-re-installed from the stored hash on every boot). Redemption input is
-normalized (case, dashes, spaces) so reading the card aloud can't fail
-on formatting.
-
-No HA imports — storage-table contract only, unit-testable on a temp
-SQLite file. Storage-touching methods are synchronous: call via executor.
+Redeeming the code lets a new phone replace the hub's admin when the old phone
+and its key backup are gone. The code is permanent and reusable: its hash is
+kept in hub_config so the card survives restarts, and a factory reset rotates
+it. Redemption is LAN-only (checked in auth_api) and throttled per source.
+Storage methods block, so call them in the executor.
 """
 
 from __future__ import annotations
@@ -51,12 +25,11 @@ except ImportError:  # top-level import in the test env (no HA package init)
 
 _LOGGER = logging.getLogger(__name__)
 
-# No 0/O, 1/I/L — the card is read by humans, possibly engraved, possibly
-# over the phone to the operator. Every character must be unambiguous.
+# No 0/O or 1/I/L: people read the card aloud and engrave it.
 CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LENGTH = 10
-CODE_GROUP = 5  # display as XXXXX-XXXXX
-# Storage key for the one recovery code (there is only ever one per hub).
+CODE_GROUP = 5  # characters per dash-separated group
+# Storage key of the hub's single recovery code.
 RECOVERY_CODE_ID = "owner-recovery"
 
 
@@ -65,7 +38,7 @@ class RecoveryError(Exception):
 
 
 class CodeInvalidError(RecoveryError):
-    """Wrong code, or none armed — deliberately one bucket."""
+    """Wrong code or no code armed; callers can't tell which."""
 
 
 def _hash_code(code: str) -> str:
@@ -74,32 +47,27 @@ def _hash_code(code: str) -> str:
 
 
 def _new_code() -> str:
-    """A fresh random ``XXXXX-XXXXX`` code from ``CODE_ALPHABET``."""
+    """A fresh random code from CODE_ALPHABET, grouped for engraving."""
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     return "-".join(raw[i : i + CODE_GROUP] for i in range(0, CODE_LENGTH, CODE_GROUP))
 
 
 def normalize_code(code: str) -> str:
-    """Canonical form: uppercase ASCII letters and digits only.
+    """Uppercase ASCII letters and digits only; everything else is dropped.
 
-    Dashes and spaces are dropped. Non-ASCII is dropped before upper-casing,
-    as in pairing, so it fails as an ordinary wrong code instead of crashing
-    the ASCII hash.
+    Non-ASCII goes before upper-casing, so it fails as a wrong code instead of
+    breaking the ASCII hash.
     """
     return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
 
 
 def hash_code(code: str) -> str:
-    """SHA-256 hex of the normalized code.
-
-    One hashing path for mint, redeem and the stored permanent-code hash, so
-    all three always agree.
-    """
+    """SHA-256 hex of the normalized code; mint, redeem and hub_config use it."""
     return _hash_code(normalize_code(code))
 
 
 class RecoveryManager:
-    """Mint / redeem the hub's single owner-recovery code."""
+    """Mints and redeems the hub's single owner recovery code."""
 
     def __init__(
         self,
@@ -110,20 +78,16 @@ class RecoveryManager:
         self._codes = codes_table
         self._admin_exists = admin_exists
         self.throttle = throttle or FailureThrottle("recovery")
-        # Storage writes happen on executor threads; arm + redeem both
-        # read-modify-write the table, so serialize them.
+        # Callers run on executor threads and read-modify-write the table.
         self._lock = threading.Lock()
 
     def ensure_armed(self) -> str | None:
-        """Make sure a claimed hub has an active recovery code.
+        """Make sure a claimed hub has a recovery code; return a new one.
 
-        Returns the plaintext (dashed) code when a NEW one was just
-        minted — the ONLY time it exists in plaintext — so the caller can
-        surface it for engraving. None when already armed, or when the
-        hub has no admin yet; on such a hub an installed code is DROPPED,
-        so call this only once an admin exists. A code minted here is not
-        written to hub_config: the stored hash, reinstalled at every boot
-        by :meth:`install_recovery_hash`, stays the permanent card.
+        Returns the plaintext only when the code was minted here, else None.
+        On a hub without an admin it drops any installed code, so call it only
+        once an admin exists. A code minted here isn't saved to hub_config; the
+        stored hash reinstalled at boot stays the permanent card.
         """
         with self._lock:
             if not self._admin_exists():
@@ -142,15 +106,11 @@ class RecoveryManager:
         return code
 
     def install_recovery_hash(self, code_hash: str) -> None:
-        """Install the hub's PERMANENT recovery code from a stored hash.
+        """Install the permanent recovery code from its hash in hub_config.
 
-        Like the bootstrap admin code, the recovery code is engraved once and
-        must survive restarts and reinstalls, so its hash is persisted in
-        hub_config and re-installed here on every boot (a factory reset
-        deletes the hash, so a fresh code is minted instead). Idempotent;
-        always armed (even on an unclaimed hub) — redeem is inert until an
-        admin exists (replace_admin needs one), so the printed card is ready
-        the moment the owner claims.
+        Called at every boot, even on an unclaimed hub: redeeming does nothing
+        until replace_admin has an admin to replace, and the card then works
+        as soon as the owner claims the hub.
         """
         with self._lock:
             self._codes[RECOVERY_CODE_ID] = {
@@ -159,12 +119,11 @@ class RecoveryManager:
             }
 
     def mint_permanent(self) -> str:
-        """Mint and install a fresh permanent recovery code; return it.
+        """Mint and install a new permanent recovery code; return it.
 
-        This is the ONLY time the code exists in the clear: the caller saves
-        its hash in hub_config and shows it once for engraving. Used at first
-        start (and after a factory reset); thereafter the stored hash is
-        re-installed via :meth:`install_recovery_hash`.
+        The only time the code exists in plaintext: the caller saves its hash
+        in hub_config and shows the code once for engraving. Used at first
+        start and after a factory reset.
         """
         code = _new_code()
         with self._lock:
@@ -181,13 +140,11 @@ class RecoveryManager:
             return RECOVERY_CODE_ID in self._codes
 
     def redeem(self, code: str, source_key: str) -> None:
-        """Verify the recovery code, or raise.
+        """Check the recovery code; raise CodeInvalidError when it doesn't match.
 
-        ``source_key`` is the request's remote IP — every failure counts
-        against it through the escalating throttle. Failures are one
-        generic bucket: wrong code and not-armed are indistinguishable.
-        A match is NOT consumed — the engraved card stays valid — and
-        clears the source's throttle counter.
+        source_key is the request's remote address, and each failure counts
+        against it in the throttle. A match leaves the code in place and
+        clears the source's counter.
         """
         self.throttle.check(source_key)
         if not isinstance(code, str) or not code.strip():
@@ -202,10 +159,8 @@ class RecoveryManager:
             ):
                 self.throttle.record_failure(source_key)
                 raise CodeInvalidError("Invalid recovery code")
-            # PERMANENT: NOT deleted — the engraved card stays valid.
-            # The guard is LAN-only presence + the escalating throttle + the
-            # card's physical secrecy; replace_admin (the caller) additionally
-            # requires an existing admin, so the code is inert on an unclaimed hub.
+            # Not deleted: the card is permanent. LAN-only access, the throttle
+            # and replace_admin's need for an existing admin protect it.
 
         self.throttle.clear(source_key)
         _LOGGER.info("Owner recovery code redeemed (permanent — card stays valid)")
