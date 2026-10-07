@@ -106,6 +106,19 @@ class TestParseHistoryQuery(unittest.TestCase):
         with self.assertRaises(HistoryQueryError):
             self.parse(entities="sensor.a", start="yesterday")
 
+    def test_timestamp_out_of_range_in_utc_rejected(self):
+        # Valid ISO-8601, but past datetime's range once moved to UTC.
+        for start, end in (
+            ("0001-01-01T00:00:00+14:00", None),
+            ("2026-06-11T11:00:00+00:00", "9999-12-31T23:59:59-14:00"),
+        ):
+            params = {"entities": "sensor.a", "start": start}
+            if end is not None:
+                params["end"] = end
+            with self.subTest(start=start, end=end):
+                with self.assertRaises(HistoryQueryError):
+                    parse_history_query(params, now=NOW)
+
     def test_start_after_end_rejected(self):
         with self.assertRaises(HistoryQueryError):
             self.parse(
