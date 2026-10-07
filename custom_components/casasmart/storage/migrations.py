@@ -101,8 +101,8 @@ def _migration_v2(conn: sqlite3.Connection) -> None:
 # registry._KNOWN_GANG_TYPES). A folded type outside it falls back to 'switch'.
 _V3_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
-# The gang-suffix labels the app keyed legacy gang_types/gang_names by (mirrors
-# the app's kGangSuffixLabels). Used to map a suffix-keyed legacy map back to the
+# The gang-suffix labels the app keyed legacy gang_types/gang_names by (the
+# same list the app uses). Used to map a suffix-keyed legacy map back to the
 # control entity_id that carries that suffix.
 _V3_GANG_SUFFIX_KEYS = (
     "left",
@@ -121,7 +121,7 @@ _V3_GANG_SUFFIX_KEYS = (
 
 
 def _v3_suffix_token(entity_id: str) -> str | None:
-    """The app's ``entitySuffixToken``: the gang suffix an entity_id ends with
+    """The gang suffix an entity_id ends with, by the app's rule
     (``switch.kitchen_left`` -> ``left``), or None when it carries none."""
     local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
     for key in _V3_GANG_SUFFIX_KEYS:
@@ -283,9 +283,9 @@ def run_migrations(
 ) -> int:
     """Bring the database at ``db_path`` up to the latest schema version.
 
-    Returns the resulting schema version. Raises MigrationError on failure;
-    in that case the database file has already been restored from the backup
-    taken before the run.
+    Returns the resulting schema version. Raises MigrationError when the
+    database is newer than this code (nothing is touched), or when a step
+    fails, after restoring the backup taken before the run.
     """
     target = max(m.version for m in migrations)
 
@@ -317,6 +317,8 @@ def run_migrations(
             )
             try:
                 with conn:  # one transaction per migration step
+                    # Explicit: sqlite3 opens a transaction on its own only
+                    # before DML, so DDL would otherwise commit as it runs.
                     conn.execute("BEGIN")
                     migration.apply(conn)
                     conn.execute(f"PRAGMA user_version = {migration.version}")

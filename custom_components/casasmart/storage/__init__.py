@@ -1,8 +1,9 @@
-"""CasaSmart hub storage layer (Track B — B1.1).
+"""CasaSmart hub storage layer.
 
 Public surface:
-- HubStorage / KeyValueTable / EnergyEventsTable — SQLite+WAL views
-- JsonConfigStore — atomic JSON file for rarely-changed config
+- HubStorage / KeyValueTable / EnergyEventsTable — the SQLite (WAL) database
+  and its table views
+- JsonConfigStore — atomic JSON file for rarely changed config
 - Migration / MIGRATIONS / LATEST_VERSION — forward-only schema migrations
 - StorageError / MigrationError / ConfigError — exception hierarchy
 

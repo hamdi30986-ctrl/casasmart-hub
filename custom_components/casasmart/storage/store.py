@@ -1,3 +1,12 @@
+"""SQLite storage behind the hub's engines.
+
+``HubStorage`` owns the hub's one SQLite connection, in WAL mode, shared by
+every executor thread under a re-entrant lock. Engines get dict-like
+``KeyValueTable`` views (one namespace each, all in a single ``kv`` table) and
+two append-only tables for data that grows row by row: tank readings and
+Energy Saving events. All SQL stays inside this package.
+"""
+
 from __future__ import annotations
 
 import json
@@ -17,14 +26,26 @@ _LOGGER = logging.getLogger(__name__)
 
 _VALID_NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
-
+# How long a statement waits for a lock held by another connection to the
+# file before it fails with "database is locked".
 _BUSY_TIMEOUT_MS = 5000
 
-
+# Checkpoint after every commit, so the main database file holds every
+# acknowledged write on its own: losing the -wal sidecar (an unclean host
+# restart can) then loses nothing. Hub writes are small and infrequent, so the
+# extra I/O is cheap.
 _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
 class HubStorage:
+    """The hub's SQLite database: one connection, shared under a lock.
+
+    ``open()`` runs any pending migrations, then connects; ``close()``
+    checkpoints and disconnects. Every method is synchronous and blocking, so
+    Home Assistant code calls them through the executor. A write commits at
+    once unless it runs inside ``transaction()``.
+    """
+
     def __init__(self, db_path: Path, backup_dir: Path | None = None) -> None:
         self._db_path = Path(db_path)
         self._backup_dir = (
@@ -55,9 +76,9 @@ class HubStorage:
             # synchronous=FULL: every COMMIT fsyncs the WAL, so a host power cut
             # can't drop an acknowledged write (a pairing, a registry edit, a
             # tank reading). NORMAL fsyncs only at checkpoint, which on a
-            # low-write hub can lag far behind. Affordable here because writes
-            # are small + infrequent — the tank readings table turned the one
-            # high-frequency writer into a one-row INSERT, not a 270 KB blob.
+            # low-write hub can lag far behind. Affordable because writes are
+            # small and infrequent: even tank telemetry, the busiest writer,
+            # appends one small row per reading.
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
@@ -89,6 +110,7 @@ class HubStorage:
 
     @property
     def schema_version(self) -> int:
+        """The schema version recorded in the database (a real read)."""
         with self._lock:
             return get_user_version(self._connection)
 
@@ -113,11 +135,13 @@ class HubStorage:
 
     @property
     def _connection(self) -> sqlite3.Connection:
+        """The open connection; StorageError before open() or after close()."""
         if self._conn is None:
             raise StorageError("Storage is not open — call open() first")
         return self._conn
 
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Run one write; it commits at once unless a transaction() is open."""
         with self._lock:
             if self._transaction_depth:
                 return self._connection.execute(sql, params)
@@ -286,10 +310,10 @@ class KeyValueTable(MutableMapping):
 class TankReadingsTable:
     """Append-only per-row store for tank readings (the ``tank_readings`` table).
 
-    A high-frequency time series doesn't fit the rewrite-the-whole-value
-    KeyValueTable shape — at a 5-minute cadence that re-serialized a ~270 KB
-    blob every reading. Here an ingest is a single-row INSERT and retention is a
-    bounded DELETE. Stays inside the storage layer so callers never touch SQL.
+    A time series doesn't fit KeyValueTable, which rewrites a whole value per
+    write: at one reading every few minutes that would re-serialize a device's
+    entire history each time. Here an ingest is a single-row INSERT and
+    retention is a bounded DELETE, and callers still never touch SQL.
     """
 
     def __init__(self, storage: HubStorage) -> None:
