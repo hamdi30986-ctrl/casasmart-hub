@@ -1,7 +1,12 @@
 """CasaSmart registry REST endpoints: floors, rooms, devices, scenes, favorites.
 
-The app's thin-client surface over ``RegistryEngine``. Reads are room-scoped;
-writes fire ``EVENT_REGISTRY_CHANGED`` so connected apps re-fetch.
+The app's thin-client surface over ``RegistryEngine``: floors, rooms, room
+tags, entity assignments, room moves, user devices and their gangs, scenes
+and per-member favorites. Reads are room-scoped; writes fire
+``EVENT_REGISTRY_CHANGED`` so connected apps re-fetch.
+
+``async_execute_registry_scene`` runs a scene for the activate endpoint, the
+``casasmart.activate_scene`` service and suggestion actions.
 """
 
 from __future__ import annotations
@@ -40,6 +45,8 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Per-step ceiling on a scene's service call: one stuck device must not hold
+# up the rest of the scene.
 _SCENE_CALL_TIMEOUT = 10.0
 
 
@@ -53,6 +60,7 @@ def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
 
 
 def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
+    """The loaded entry's runtime data, or None when not set up."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     return entries[0].runtime_data if entries else None
 
@@ -71,8 +79,20 @@ def _scene_entity_ids(entities: Any) -> list[str]:
 async def async_execute_registry_scene(
     hass: HomeAssistant, scene: dict[str, Any]
 ) -> dict[str, Any]:
+    """Run a scene's commands in order and report a result per entity.
+
+    Each step is checked again as it runs: the entity must exist and be served,
+    and its command passes the same whitelist as a single-device command. A
+    failing or timed-out step is reported and the rest still run. Callers own
+    the scope and Energy Saving checks.
+    """
     scene_id = scene["scene_id"]
 
+    # A saved scene turns an AC on with one set_temperature carrying the mode.
+    # IR air conditioners take every climate call as a full-state IR burst, and
+    # a second burst right behind the first collides with the unit while it
+    # powers on, so a separate fan-mode step for the same AC is skipped.
+    # Generated room scenes run every step.
     _climate_with_state = {
         item["entity_id"]
         for item in scene["entities"]
@@ -190,6 +210,7 @@ class _RegistryView(HomeAssistantView):
     def _registry_or_503(
         self,
     ) -> tuple[RegistryEngine | None, web.Response | None]:
+        """The registry engine, or a 503 response while the hub isn't set up."""
         registry = get_registry(self._hass)
         if registry is None:
             return None, self.json_message(
@@ -202,6 +223,7 @@ class _RegistryView(HomeAssistantView):
         self._hass.bus.async_fire(EVENT_REGISTRY_CHANGED, {"kind": kind})
 
     def _error_response(self, err: RegistryError) -> web.Response:
+        """Map a registry error to 404 (unknown item), 409 (in use) or 400."""
         if isinstance(err, UnknownItemError):
             return self.json_message(str(err), HTTPStatus.NOT_FOUND)
         if isinstance(err, InUseError):
@@ -217,6 +239,8 @@ class _RegistryView(HomeAssistantView):
     def _energy_flag_reject(
         self, claims: dict[str, Any], payload: dict[str, Any]
     ) -> web.Response | None:
+        """403 when the body sets a scene's Energy Saving flag without
+        ``energy.manage`` (admin only); None to proceed."""
         if "works_during_energy_saving" in payload and not AuthEngine.authorize(
             claims, "energy.manage"
         ):
@@ -272,6 +296,14 @@ class _RegistryView(HomeAssistantView):
 
 
 class CasaSmartRegistryView(_RegistryView):
+    """GET /api/casasmart/registry — the home's organization for the caller.
+
+    Floors, rooms, room tags, scenes and user devices, plus one entry per
+    served entity with its resolved room and display name. A room-scoped
+    caller gets only its rooms, the floors and tags they use, and the scenes
+    and user devices whose entities are all in scope.
+    """
+
     url = f"/api/{DOMAIN}/registry"
     name = f"api:{DOMAIN}:registry"
 
@@ -361,6 +393,8 @@ class CasaSmartRegistryView(_RegistryView):
                 key=lambda item: (item.get("sort_order", 0), item.get("name", ""))
             )
 
+        # A user device shows while at least one of its control entities is
+        # still a real entity the registry can organize (is_assignable).
         user_devices = [
             device
             for device in user_devices
@@ -667,7 +701,12 @@ class CasaSmartRoomTagView(_RegistryView):
 
 
 class CasaSmartRoomMoveView(_RegistryView):
-    """Atomic, compare-and-set logical room move; never controls hardware."""
+    """POST /api/casasmart/registry/room-moves — move a device to a room.
+
+    Atomic and compare-and-set: the move applies only if the device's entities
+    and their rooms still match what the client reviewed, and a retry with the
+    same idempotency key replays the first result. Never controls hardware.
+    """
 
     url = f"/api/{DOMAIN}/registry/room-moves"
     name = f"api:{DOMAIN}:registry:room-move"
@@ -951,11 +990,12 @@ class CasaSmartUserDeviceGangView(_RegistryView):
     """PATCH /api/casasmart/registry/user-devices/{ha_device_id}/gangs/{gang}.
 
     Flip ONE gang's presentation model — promote/hide/un-hide (``presentation``),
-    re-type (``type``), or relabel (``name``/``icon``). Pure presentation
-    metadata: it never touches the device's entities or HA. The body carries any
-    of ``{presentation, type, name, icon}`` and each provided field is applied;
-    the exactly-one-of {grouped, solo, hidden} invariant is the engine's. The
-    gang path segment IS the gang's control entity_id.
+    re-type (``type``), relabel (``name``/``icon``) or give it its own room
+    (``room_id``). Pure presentation metadata: it never touches the device's
+    entities or HA. The body carries any of
+    ``{presentation, type, name, icon, room_id}`` and each provided field is
+    applied; the exactly-one-of {grouped, solo, hidden} invariant is the
+    engine's. The gang path segment IS the gang's control entity_id.
     """
 
     url = f"/api/{DOMAIN}/registry/user-devices/{{ha_device_id}}/gangs/{{gang}}"
@@ -968,9 +1008,9 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         gang: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Apply each provided field via its dedicated engine command. An empty
-        body (no presentation/type/name/icon) is a 400 — a no-op PATCH is a
-        client mistake, not a silent success."""
+        """Apply each provided field via its dedicated engine command. A body
+        with none of presentation/type/name/icon/room_id is a 400 — a no-op
+        PATCH is a client mistake, not a silent success."""
         device = None
         if "presentation" in payload:
             device = registry.set_gang_presentation(
@@ -1049,8 +1089,8 @@ class CasaSmartScenesView(_RegistryView):
         if unserved is not None:
             return unserved
         # Scope re-check — the same defense-in-depth the favorites/user-device
-        # writes do. Unreachable today (every registry.manage caller is unscoped),
-        # but consistent if a scoped non-user role is ever introduced.
+        # writes do. Pairing gives room scope only to the user role, which lacks
+        # registry.manage, so this normally passes.
         reject = self._scope_reject(claims, _scene_entity_ids(payload.get("entities")))
         if reject is not None:
             return reject
@@ -1204,8 +1244,8 @@ class CasaSmartFavoritesView(_RegistryView):
     scope ids for the response without mutating storage — the ONE source of
     truth for device favorites. A GET must remain read-only because
     integrations are still populating HA states while the hub starts; treating
-    a temporarily absent state as a permanent deletion erased favorites during
-    host restarts.
+    a temporarily absent state as a deletion would erase favorites on every
+    restart.
     """
 
     url = f"/api/{DOMAIN}/me/favorites"
@@ -1305,9 +1345,9 @@ class CasaSmartFavoritesView(_RegistryView):
             return self._error_response(err)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # Nudge the member's other devices to re-pull. The app
-        # re-fetches favorites + settings on any registry_changed, so under
-        # per-account keying the shared change lands on the sibling phone.
+        # Nudge the member's other devices to re-pull. The app re-fetches
+        # favorites + settings on any registry_changed, so the shared list
+        # reaches the member's other phones.
         self._notify_change("favorites")
         # Echo only the caller's in-scope view — never leak out-of-scope ids.
         return self.json(
