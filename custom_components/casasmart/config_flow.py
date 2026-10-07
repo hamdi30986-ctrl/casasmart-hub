@@ -104,24 +104,19 @@ class CasaSmartConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_RELAY_ACTIVATION_CODE] = "invalid_activation_code"
 
             raw = (user_input.get(CONF_CLOUDFLARE_DOMAIN) or "").strip()
-            if not raw and not errors:
+            options: dict[str, Any] = {CONF_PUSH_RELAY_URL: relay_base}
+            if raw:
+                domain = normalize_cloudflare_domain(raw)
+                if domain is None:
+                    errors[CONF_CLOUDFLARE_DOMAIN] = "invalid_domain"
+                else:
+                    options[CONF_CLOUDFLARE_DOMAIN] = domain
+                    options[CONF_TUNNEL_ENABLED] = True
+            if not errors:
                 return self.async_create_entry(
                     title="CasaSmart Hub",
                     data={CONF_RELAY_ACTIVATION_CODE: activation_code},
-                    options={CONF_PUSH_RELAY_URL: relay_base},
-                )
-            domain = normalize_cloudflare_domain(raw)
-            if raw and domain is None:
-                errors[CONF_CLOUDFLARE_DOMAIN] = "invalid_domain"
-            elif raw and not errors:
-                return self.async_create_entry(
-                    title="CasaSmart Hub",
-                    data={CONF_RELAY_ACTIVATION_CODE: activation_code},
-                    options={
-                        CONF_PUSH_RELAY_URL: relay_base,
-                        CONF_CLOUDFLARE_DOMAIN: domain,
-                        CONF_TUNNEL_ENABLED: True,
-                    },
+                    options=options,
                 )
 
         return self.async_show_form(
