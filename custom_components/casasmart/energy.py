@@ -215,6 +215,16 @@ def _clean_heaters(value: Any) -> list[dict[str, Any]]:
     return clean
 
 
+def _reject_unknown_fields(level: str, value: dict[str, Any]) -> None:
+    """Raise if the document names a field this level does not have."""
+    allowed = _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
+    unknown = set(value) - allowed
+    if unknown:
+        raise EnergyConfigError(
+            f"{level} configuration has unknown fields: {sorted(unknown)}"
+        )
+
+
 # -- level configuration ------------------------------------------------------
 
 
@@ -247,12 +257,7 @@ def validate_level_config(level: str, value: Any) -> dict[str, Any]:
     level = _validate_level(level)
     if not isinstance(value, dict):
         raise EnergyConfigError("configuration must be an object")
-    allowed = _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
-    unknown = set(value) - allowed
-    if unknown:
-        raise EnergyConfigError(
-            f"{level} configuration has unknown fields: {sorted(unknown)}"
-        )
+    _reject_unknown_fields(level, value)
 
     schema_version = value.get("schema_version", CONFIG_SCHEMA_VERSION)
     if (
@@ -428,14 +433,7 @@ class EnergyEngine:
         level = _validate_level(level)
         if not isinstance(patch, dict):
             raise EnergyConfigError("configuration patch must be an object")
-        allowed = (
-            _SMART_CONFIG_FIELDS if level == LEVEL_SMART else _COMMON_CONFIG_FIELDS
-        )
-        unknown = set(patch) - allowed
-        if unknown:
-            raise EnergyConfigError(
-                f"{level} configuration has unknown fields: {sorted(unknown)}"
-            )
+        _reject_unknown_fields(level, patch)
         clean_actor = self._optional_actor(actor)
         now = self._now()
         with self._lock:
