@@ -337,7 +337,8 @@ class AthanScheduler:
         The prayer counts as played once its play is published. While the
         bus refuses it, the callback re-arms itself every _RETRY_SEC until
         the grace window ends, so a short broker outage doesn't silence the
-        prayer and it still never plays late.
+        prayer and it still never plays late. The clock decides staleness,
+        not the timer's time: a host waking from sleep fires overdue timers.
         """
         deadline = fire_at + timedelta(seconds=_GRACE_SEC)
 
@@ -345,10 +346,11 @@ class AthanScheduler:
         def _fire(_now: datetime) -> None:
             if (day, prayer) in self._fired:
                 return
-            if self._fire_athan(prayer):
+            now = dt_util.utcnow()
+            if now <= deadline and self._fire_athan(prayer):
                 self._fired.add((day, prayer))
                 return
-            retry_at = dt_util.utcnow() + timedelta(seconds=_RETRY_SEC)
+            retry_at = now + timedelta(seconds=_RETRY_SEC)
             if retry_at > deadline:
                 _LOGGER.warning(
                     "Athan: %s not delivered within %d s of its time; giving up",
