@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import zipfile
+from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 
@@ -129,9 +131,14 @@ async def _async_install(
 
     # Stage everything under one temp dir we always clean up. The new tree is
     # copied into the live (same-filesystem) config dir by swap_integration_dir,
-    # so a cross-filesystem temp location is fine here.
-    with tempfile.TemporaryDirectory(prefix="casasmart-update-") as staging:
-        staging_path = Path(staging)
+    # so a cross-filesystem temp location is fine here. Creating and removing
+    # it is file work too, so it runs in the executor like the rest.
+    staging_path = Path(
+        await hass.async_add_executor_job(
+            partial(tempfile.mkdtemp, prefix="casasmart-update-")
+        )
+    )
+    try:
         archive = staging_path / "release.zip"
         await _download_archive(hass, download_url, archive)
         signature = staging_path / "release.zip.sig"
@@ -143,6 +150,8 @@ async def _async_install(
         )
         # The new tree is live on disk now: no other install until the restart.
         domain_data[_SWAPPED_VERSION_KEY] = target_version
+    finally:
+        await hass.async_add_executor_job(shutil.rmtree, staging_path, True)
 
     _LOGGER.warning(
         "Self-update: integration swapped to %s (backup at %s); restarting HA",
@@ -154,7 +163,11 @@ async def _async_install(
 
 
 async def _download_archive(hass: HomeAssistant, url: str, dest: Path) -> None:
-    """Stream a release archive to ``dest`` in chunks (never load it whole)."""
+    """Stream a release archive to ``dest`` in chunks (never load it whole).
+
+    The network reads stay on the event loop; opening, writing and closing
+    the file run in the executor.
+    """
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
     session = async_get_clientsession(hass)
@@ -166,9 +179,12 @@ async def _download_archive(hass: HomeAssistant, url: str, dest: Path) -> None:
                 raise InstallError(
                     f"download failed: GitHub returned {response.status}"
                 )
-            with dest.open("wb") as handle:
+            handle = await hass.async_add_executor_job(dest.open, "wb")
+            try:
                 async for chunk in response.content.iter_chunked(65536):
-                    handle.write(chunk)
+                    await hass.async_add_executor_job(handle.write, chunk)
+            finally:
+                await hass.async_add_executor_job(handle.close)
     except (TimeoutError, aiohttp.ClientError) as err:
         raise InstallError(f"download failed: {err}") from err
 
