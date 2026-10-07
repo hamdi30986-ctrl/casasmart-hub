@@ -64,6 +64,7 @@ _ATTRIBUTE_ALLOWLIST: dict[str, frozenset[str]] = {
             "fan_modes",
             "min_temp",
             "max_temp",
+            "target_temp_step",
         }
     ),
     "cover": frozenset(
