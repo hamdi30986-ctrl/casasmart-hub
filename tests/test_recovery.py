@@ -5,10 +5,12 @@ Run from the repo root:
 """
 
 import hashlib
+import hmac
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
@@ -131,6 +133,18 @@ class RecoveryManagerTests(unittest.TestCase):
                 with self.assertRaises(ThrottledError):
                     self.manager.redeem(text, f"ip-{label}")
         self.manager.redeem("STARS-23456", "ip-1")  # the card still works
+
+    def test_redeem_compares_hashes_in_constant_time(self):
+        # As in pairing: the stored hash is checked with hmac.compare_digest,
+        # so how long a wrong guess takes says nothing about the stored hash.
+        stored = hash_code("STARS-23456")
+        self.manager.install_recovery_hash(stored)
+        with mock.patch("hmac.compare_digest", wraps=hmac.compare_digest) as spy:
+            with self.assertRaises(CodeInvalidError):
+                self.manager.redeem("WRONG-GUESS", "ip-1")
+            spy.assert_called_with(stored, hash_code("WRONG-GUESS"))
+            self.manager.redeem("STARS-23456", "ip-1")
+            spy.assert_called_with(stored, stored)
 
     def test_hash_of_a_valid_code_is_unchanged(self):
         # The engraved card's stored hash must keep matching.

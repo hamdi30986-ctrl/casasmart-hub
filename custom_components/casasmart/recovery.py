@@ -36,6 +36,7 @@ SQLite file. Storage-touching methods are synchronous: call via executor.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -196,7 +197,9 @@ class RecoveryManager:
 
         with self._lock:
             record = self._codes.get(RECOVERY_CODE_ID)
-            if record is None or record["code_hash"] != code_hash:
+            if record is None or not hmac.compare_digest(
+                record["code_hash"], code_hash
+            ):
                 self.throttle.record_failure(source_key)
                 raise CodeInvalidError("Invalid recovery code")
             # PERMANENT: NOT deleted — the engraved card stays valid.
