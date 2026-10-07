@@ -24,7 +24,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 
 class KeyError_(Exception):
-    """The supplied public key is not a usable P-256 key."""
+    """The supplied public key is not a usable P-256 key.
+
+    The trailing underscore keeps it from shadowing the builtin ``KeyError``.
+    """
 
 
 def validate_public_key(public_key_pem: str) -> str:

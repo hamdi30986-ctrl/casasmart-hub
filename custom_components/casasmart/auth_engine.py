@@ -1,7 +1,13 @@
 """Auth engine: device enrollment, challenge-response login and JWT checks.
 
-Owns the paired-device records and the role permission table. No Home
-Assistant imports; storage-touching methods are synchronous (call via executor).
+Owns the paired-device records and the role permission table. Every device
+has its own P-256 keypair; it logs in by signing a one-time nonce and gets a
+short-lived hub-signed JWT (``auth_tokens``). An in-memory mirror of each
+device's role, rooms and auth version lets token checks run on the event loop
+and makes unpairing or editing a device revoke its tokens instantly.
+
+No Home Assistant imports; storage-touching methods are synchronous (call via
+executor).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ try:
         TokenError,
     )
     from .throttle import FailureThrottle, ThrottledError
-except ImportError:
+except ImportError:  # top-level import in the test env (no HA package init)
     import auth_keys
     import auth_tokens
     from auth_tokens import (
@@ -38,19 +44,25 @@ except ImportError:
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# Session token lifetime (seconds); the app logs in again when one expires.
 TOKEN_TTL = 45 * 60
 
-
+# Widget tokens can't log in again on their own, so they live long. They still
+# die early with the device's next unpair or role/room edit.
 WIDGET_TOKEN_TTL = 30 * 24 * 3600
 
+# A login nonce must come back signed within this many seconds.
 CHALLENGE_TTL = 60.0
+# Outstanding nonces per device; past it the oldest is dropped.
 MAX_CHALLENGES_PER_DEVICE = 8
 
-
+# A device's name arrives with its pairing request, before it has
+# authenticated, so the stored name is capped. Longer names are truncated,
+# never refused, so a long phone name can't fail a pairing.
 MAX_DEVICE_NAME_LENGTH = 64
 
-
+# Permission -> the roles that hold it. Every protected view names exactly one
+# permission (``auth_api.authenticate_request``); an unknown name is refused.
 PERMISSIONS: dict[str, tuple[str, ...]] = {
     "devices.read": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
     "devices.control": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
@@ -82,7 +94,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "session.manage": (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER),
 }
 
-
+# The only permissions a ``scope: widget`` token can use, whatever its role.
 WIDGET_SCOPE_PERMISSIONS: frozenset[str] = frozenset(
     {"devices.read", "devices.control"}
 )
@@ -175,14 +187,15 @@ class AuthEngine:
         """Store a device's identity; returns the new device id.
 
         ``enrolled_via`` records the pairing code id the device redeemed (None
-        for paths that don't go through one), retained on the device record for
-        potential per-code revocation.
+        for paths that don't go through one); ``list_devices`` reports it.
+        ``code_hash`` is the hash of that code, which the idempotent re-pair
+        path keeps accepting for this device.
         """
         if not isinstance(name, str) or not name.strip():
             raise EnrollError("Device name is required")
         # Pre-auth input — cap the stored length (truncate, never reject; see
-        # MAX_DEVICE_NAME_LENGTH). strip() again below so the cap can't leave a
-        # trailing space.
+        # MAX_DEVICE_NAME_LENGTH). The second strip() keeps the cap from
+        # leaving a trailing space.
         name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
@@ -215,7 +228,7 @@ class AuthEngine:
                 # re-pair path accepts it forever, so a double-submit — or a
                 # retry after a mid-redeem timeout — still works once that path
                 # checks the code, even though the code itself was consumed on
-                # the first pass. None on records enrolled before this existed.
+                # the first pass. Older records don't have it.
                 "enrolled_code_hash": code_hash,
                 # The PERSON this device belongs to. An "add device to member"
                 # pairing code carries an existing member_id (the device joins
@@ -318,8 +331,8 @@ class AuthEngine:
         """Swap the hub's admin for a new device (owner recovery).
 
         The ONE sanctioned path around "the admin record is immutable":
-        the caller has already proven ownership by redeeming the
-        single-use recovery code (LAN-only, throttled). Atomic under the
+        the caller has already proven ownership by redeeming the owner
+        recovery code (LAN-only, throttled). Atomic under the
         lock — the old admin device is unenrolled (its outstanding JWTs
         die instantly via the ``ver`` cache, same as unpair) and the new
         keypair becomes the admin. Inputs are validated BEFORE the old
@@ -414,8 +427,9 @@ class AuthEngine:
     def get_device(self, device_id: str) -> dict[str, Any] | None:
         """Public fields for one enrolled device, or None when not enrolled.
 
-        Cheap DB + cache read (call via executor). Used by ``/auth/whoami`` to
-        report the device's CURRENT role/name and by the sensor platform.
+        Cheap DB + cache read (call via executor). ``/auth/whoami`` uses it
+        (through :meth:`device_for_token`) to report the device's CURRENT
+        role and name.
         """
         record = self._devices.get(device_id)
         if record is None:
@@ -462,19 +476,24 @@ class AuthEngine:
         return None
 
     def member_id_for(self, device_id: str) -> str:
-        """The PERSON id this device belongs to — the key favorites +
-        user_settings roam by. Falls back to the device id for a legacy record
-        enrolled before member_id existed (it is then its own one-device
-        member), so no data migration is needed."""
+        """The PERSON id this device belongs to.
+
+        Favorites and user settings are keyed by it, so they follow the person
+        across their devices. A record without a member_id (older records, and
+        devices from owner recovery or the dev manifest) is its own one-device
+        member, keyed by its device id.
+        """
         record = self._devices.get(device_id)
         if record is None:
             return device_id
         return record.get("member_id") or device_id
 
     def member_device_count(self, member_id: str) -> int:
-        """How many enrolled devices belong to ``member_id`` — the caller
-        prunes a member's personal data only when this hits zero (the last
-        device unpaired)."""
+        """How many enrolled devices belong to ``member_id``.
+
+        Callers prune a member's personal data only when this reaches zero
+        (their last device unpaired).
+        """
         return sum(
             1
             for device_id, record in self._devices.items()
@@ -482,10 +501,12 @@ class AuthEngine:
         )
 
     def list_members(self) -> list[dict[str, Any]]:
-        """Distinct members (people) with a device count — the family-share
-        'add a device to [member]' picker. Name/role/rooms come from the
-        member's most-recently-paired device (set consistently per member at
-        pairing)."""
+        """Distinct members (people), each with a device count.
+
+        Feeds the family-share "add a device to <member>" picker. Name, role
+        and rooms come from the member's most recently paired device (they are
+        set consistently per member at pairing).
+        """
         members: dict[str, dict[str, Any]] = {}
         for device_id, record in self._devices.items():
             mid = record.get("member_id") or device_id
@@ -627,13 +648,13 @@ class AuthEngine:
         somebody else, which is not what is happening here — the caller proved
         possession of this device's private key to get the token that names it.
 
-        Without this, "Remove Hub" on the owner's phone was unrecoverable. The
-        hub kept the phone enrolled as its one admin, and a hub that HAS an
-        admin refuses to enroll another, only ever issues sub-admin/user codes,
-        and kills the bootstrap owner code — so nobody could become admin
-        again short of the engraved recovery card or physically holding the
-        reset button. Letting the owner hand the hub back makes it re-claimable
-        with the sticker code that shipped with it.
+        This is what lets "Remove Hub" on the owner's phone hand the hub back.
+        Otherwise the hub would keep the phone enrolled as its one admin, and a
+        hub that HAS an admin refuses to enroll another, only ever issues
+        sub-admin/user codes and drops the bootstrap owner code, so nobody
+        could become admin again short of the recovery card or a reset from
+        Home Assistant. Once handed back, the hub is re-claimable with the
+        sticker code that shipped with it.
 
         Returns the departing device's ``member_id`` so the caller can prune
         that person's rows if this was their last device — same contract as
@@ -790,8 +811,11 @@ class AuthEngine:
         return claims
 
     def is_owner_device(self, device_id: str) -> bool:
-        """True when [device_id] is the enrolled ADMIN (owner) — for owner-only
-        push (alarm/lock/tank). Unknown or room-scoped devices return False."""
+        """True when ``device_id`` is the enrolled ADMIN (owner).
+
+        Decides who gets owner-only pushes (alarm, lock, tank). Unknown devices
+        and every other role return False.
+        """
         with self._lock:
             cached = self._device_cache.get(device_id)
             return bool(cached and cached.get("role") == ROLE_ADMIN)
