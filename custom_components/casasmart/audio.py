@@ -530,12 +530,9 @@ class AudioEngine:
 
         Omitted fields are unchanged; an empty icon or area_id clears it.
         """
-        mac6 = normalize_mac6(mac)
         with self._lock:
-            existing = self._speakers.get(mac6)
-            if existing is None:
-                raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
-            record = dict(existing)
+            mac6 = self._enrolled_mac6(mac)
+            record = dict(self._speakers[mac6])
             if name is not None:
                 record["name"] = _clean_name(name)
             if room is not None:
@@ -550,12 +547,10 @@ class AudioEngine:
 
     def remove_speaker(self, mac: Any) -> None:
         """Drop an enrolled speaker and its live status."""
-        mac6 = normalize_mac6(mac)
         with self._lock:
-            if mac6 not in self._speakers:
-                raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+            mac6 = self._enrolled_mac6(mac)
             del self._speakers_table[mac6]
-            self._speakers.pop(mac6, None)
+            del self._speakers[mac6]
             self._live.pop(mac6, None)
 
     def is_enrolled(self, mac: Any) -> bool:
@@ -565,6 +560,13 @@ class AudioEngine:
         except AudioError:
             return False
         return mac6 in self._speakers
+
+    def _enrolled_mac6(self, mac: Any) -> str:
+        """Normalise mac; raise UnknownSpeakerError unless it is enrolled."""
+        mac6 = normalize_mac6(mac)
+        if mac6 not in self._speakers:
+            raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+        return mac6
 
     def speakers(self) -> list[dict[str, Any]]:
         """Enrolled speakers sorted by id, each with a live status block.
@@ -694,9 +696,7 @@ class AudioEngine:
         stale-command check. Raises UnknownSpeakerError for an un-enrolled
         speaker and AudioError for a bad command or value.
         """
-        mac6 = normalize_mac6(mac)
-        if mac6 not in self._speakers:
-            raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+        mac6 = self._enrolled_mac6(mac)
         # isinstance first: an unhashable JSON value can't be looked up in a set.
         if not isinstance(cmd, str) or cmd not in CONTROL_COMMANDS:
             raise AudioError(
@@ -715,9 +715,7 @@ class AudioEngine:
         UnknownSpeakerError for an un-enrolled speaker and AudioError for an
         unknown action.
         """
-        mac6 = normalize_mac6(mac)
-        if mac6 not in self._speakers:
-            raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
+        mac6 = self._enrolled_mac6(mac)
         verb = AIRPLAY_ACTIONS.get(action) if isinstance(action, str) else None
         if verb is None:
             raise AudioError(
@@ -757,7 +755,4 @@ class AudioEngine:
         payload["ts"] = self._clock() if now is None else now
         if mac is None:
             return TOPIC_BROADCAST, payload
-        mac6 = normalize_mac6(mac)
-        if mac6 not in self._speakers:
-            raise UnknownSpeakerError(f"No speaker enrolled under {mac6!r}")
-        return speaker_command_topic(mac6), payload
+        return speaker_command_topic(self._enrolled_mac6(mac)), payload
