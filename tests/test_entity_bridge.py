@@ -605,5 +605,24 @@ class TestColourTemperatureBridge(unittest.TestCase):
         self.assertEqual(attrs, {"color_temp_kelvin": None})
 
 
+class TestHugeIntegers(unittest.TestCase):
+    """An integer too large for a float is not a usable number, never a crash."""
+
+    def test_kelvin_too_large_for_a_float_is_ignored(self) -> None:
+        huge = 10**400
+        self.assertEqual(
+            light_data_with_mireds({"color_temp_kelvin": huge}),
+            {"color_temp_kelvin": huge},
+        )
+        state = FakeState(
+            "light.huge",
+            "on",
+            {"color_temp_kelvin": huge, "min_color_temp_kelvin": huge},
+        )
+        attributes = serialize_state(state)["attributes"]
+        self.assertNotIn("color_temp", attributes)
+        self.assertNotIn("max_mireds", attributes)
+
+
 if __name__ == "__main__":
     unittest.main()

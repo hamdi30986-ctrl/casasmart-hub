@@ -265,13 +265,16 @@ def is_category_served(category: str, entity_id: str, device_class: str | None) 
 
 
 def _positive_number(value: Any) -> bool:
-    """A finite number above zero (bool excluded)."""
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-        and value > 0
-    )
+    """A finite number above zero (bool excluded).
+
+    An integer too large for a float doesn't count: it can't be converted.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 def _add_mired_attributes(attributes: dict[str, Any]) -> None:
