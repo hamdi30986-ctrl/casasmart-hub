@@ -708,3 +708,88 @@ class NonAsciiCodeTests(EnrollGateTests):
         status, body = await self._recover(f"  {card.lower().replace('-', ' ')} ")
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "admin")
+
+
+class OwnerRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """The recovery card at the wire seam, wired like ``__init__.py``: the
+    card's hash is installed at every boot, whether or not the hub is claimed,
+    and the push-token store is real."""
+
+    CARD = "STARS-23456"
+
+    async def asyncSetUp(self) -> None:
+        from casasmart.push import PushTokenStore
+        from casasmart.recovery import RecoveryManager
+        from casasmart.recovery import hash_code as recovery_hash_code
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.storage = HubStorage(db_path=Path(self._tmp.name) / "hub.db")
+        self.storage.open()
+        self.addCleanup(self.storage.close)
+        self.auth = AuthEngine(self.storage.table("auth_devices"), H.FakeHubConfig())
+        self.auth.warm_up()
+        self.pairing = PairingManager(
+            self.storage.table("pairing_codes"), self.auth.has_admin
+        )
+        self.recovery = RecoveryManager(
+            self.storage.table("recovery_codes"), self.auth.has_admin
+        )
+        self.recovery.install_recovery_hash(recovery_hash_code(self.CARD))
+        self.push = PushTokenStore(self.storage.table("push_tokens"))
+        self.hass = H.FakeHass(
+            types.SimpleNamespace(
+                auth=self.auth,
+                pairing=self.pairing,
+                recovery=self.recovery,
+                hub_config=H.FakeHubConfig(),
+                push=self.push,
+                push_dispatcher=None,
+            )
+        )
+        # arm_recovery hands a newly minted code to the HA notification on
+        # the event loop; record what it would have shown.
+        self.announced: list[str] = []
+        self.hass.loop = types.SimpleNamespace(
+            call_soon_threadsafe=lambda func, *args: self.announced.append(args[-1])
+        )
+
+    async def _recover(self, card: str):
+        from casasmart.auth_api import CasaSmartRecoverView
+
+        resp = await CasaSmartRecoverView(self.hass).post(
+            H.FakeRequest(
+                body={
+                    "recovery_code": card,
+                    "public_key": make_public_pem(),
+                    "name": "New phone",
+                },
+                remote=LAN_IP,
+            )
+        )
+        return H.read_response(resp)
+
+    async def test_card_tried_on_an_unclaimed_hub_stays_valid(self) -> None:
+        # No admin to replace yet (never claimed, or the owner handed it back):
+        # the card is refused...
+        status, body = await self._recover(self.CARD)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["message"], "This hub has no admin to recover")
+        # ...but it stays armed, so claiming the hub announces no new
+        # "permanent" code (one the next restart would replace with this card).
+        self.assertTrue(self.recovery.is_armed())
+        resp = await CasaSmartEnrollView(self.hass).post(
+            H.FakeRequest(
+                body={
+                    "pairing_code": self.pairing.ensure_bootstrap_code(),
+                    "public_key": make_public_pem(),
+                    "name": "Owner phone",
+                },
+                remote=LAN_IP,
+            )
+        )
+        self.assertEqual(H.read_response(resp)[0], 201)
+        self.assertEqual(self.announced, [])
+        status, body = await self._recover(self.CARD)
+        self.assertEqual(status, 201)
+        self.assertEqual(body["role"], "admin")
