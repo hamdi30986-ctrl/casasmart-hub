@@ -278,6 +278,26 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
         A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter()).reschedule()
         self.assertEqual(armed, [])
 
+    def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
+        # zoneinfo raises ValueError, not "not found", for keys like these. The
+        # stored athan config is an opaque blob and reschedule() runs during
+        # setup, so a bad key must read as an unknown timezone, not raise.
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append(when) or (lambda: None)
+        )
+        A.compute_prayer_times_utc = _future_times()
+        for tz_name in ("../etc", "/UTC", "Asia//Riyadh"):
+            with self.subTest(timezone=tz_name):
+                s = A.AthanScheduler(
+                    _Hass(), _Engine({"enabled": True, "timezone": tz_name}), _Adapter()
+                )
+                s.reschedule()
+                self.assertEqual(armed, [])
+                snap = s.schedule_snapshot()
+                self.assertTrue(snap["enabled"])
+                self.assertIn("unknown timezone", snap["error"])
+
 
 class TestTargeting(unittest.TestCase):
     """Per-speaker athan targeting and the all / subset / none rule."""

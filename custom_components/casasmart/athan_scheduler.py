@@ -194,7 +194,12 @@ class AthanScheduler:
             return
         lat, lon, tz_name, method, school = resolved
 
-        tz = dt_util.get_time_zone(tz_name)
+        try:
+            tz = dt_util.get_time_zone(tz_name)
+        except ValueError:
+            # zoneinfo raises (rather than "not found") for a malformed key
+            # such as "../x". This runs during setup, so it must not raise.
+            tz = None
         if tz is None:
             _LOGGER.warning("Athan: unknown timezone %r — nothing scheduled", tz_name)
             self._schedule = {"enabled": True, "error": f"unknown timezone {tz_name!r}"}
