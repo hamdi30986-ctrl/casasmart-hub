@@ -5,8 +5,9 @@ household or installer dashboard. An HA admin registers its Ed25519 key
 (casasmart.configure_hq_notifications). Each accepted request becomes one
 generic "private update" push to the owner. The request, served by push_api:
 
-- POST /api/casasmart/notifications/hq with exactly {"event_id": ...,
-  "source_type": "reminder", "target": "today"}, at most 2 KiB;
+- POST /api/casasmart/notifications/hq with the body {"event_id": ...,
+  "source_type": "reminder", "target": "today"} and no other keys, at most
+  2 KiB;
 - X-CasaSmart-HQ-Timestamp: Unix seconds, within 60 s of the hub's clock;
 - X-CasaSmart-HQ-Nonce: single-use, remembered for 5 minutes;
 - X-CasaSmart-HQ-Signature: base64 Ed25519 signature of canonical_request.

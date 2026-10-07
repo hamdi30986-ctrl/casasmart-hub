@@ -296,8 +296,8 @@ class PushDispatcher:
     ) -> None:
         """Tell the owner a new device was paired; never raises.
 
-        The enroll view calls this for each new device (not for a phone
-        pairing again with the same key). It is a notice, not an approval.
+        The enroll view calls this for each new device, but not for a phone
+        pairing again with the same key. The device is already paired.
         """
         await self._dispatch(
             {
@@ -432,7 +432,7 @@ class PushDispatcher:
             return None
 
     async def _cleanup_dead_tokens(self, payload: Any) -> None:
-        """Drop the tokens the relay flags remove_token (app uninstalled, say)."""
+        """Drop the tokens the relay flags remove_token, such as an uninstalled app's."""
         if not isinstance(payload, dict):
             return
         errors = payload.get("errors")
@@ -566,7 +566,7 @@ class TankPushMonitor:
             if self._low_pushed_day.get(device_id) == day:
                 continue
             last = device.get("last_reading")
-            # A stale reading is the offline watchdog's business, not a low alert.
+            # A stale reading is for the offline watchdog to report.
             if not last or now - last.get("t", 0) >= TANK_OFFLINE_TIMEOUT_SECONDS:
                 continue
             try:
@@ -591,7 +591,7 @@ class TankPushMonitor:
             if not device_id:
                 continue
             last = device.get("last_reading")
-            # A tank that has never reported is new, not offline.
+            # A tank that has never reported is still waiting for its first reading.
             if not last:
                 continue
             if now - last.get("t", 0) < TANK_OFFLINE_TIMEOUT_SECONDS:

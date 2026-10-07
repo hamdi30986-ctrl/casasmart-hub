@@ -27,7 +27,7 @@ from .const import (
 
 # One DNS label: 1-63 chars of [a-z0-9-], no leading or trailing hyphen.
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-# Names that only resolve on a private network, never a production relay.
+# Suffixes of names that resolve only on a private network.
 _NON_PRODUCTION_SUFFIXES = (".internal", ".local", ".localhost")
 
 

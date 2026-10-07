@@ -101,7 +101,7 @@ def normalize_cloudflare_domain(value: object) -> str | None:
         return None
     if not all(_DOMAIN_LABEL_RE.fullmatch(label) for label in labels):
         return None
-    # An all-digit last label means an IPv4 literal, never a tunnel hostname.
+    # An all-digit last label means an IPv4 literal.
     if labels[-1].isdigit():
         return None
     return host
