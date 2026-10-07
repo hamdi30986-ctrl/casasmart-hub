@@ -557,18 +557,9 @@ class EnergyEngine:
                 return self.snapshot()
             now = self._now()
             released_count = len(self._state["released_entities"])
-            self._commit_state(
-                {
-                    "active_level": None,
-                    "activated_at": None,
-                    "last_applied_at": None,
-                    "lockout_enabled": False,
-                    "released_entities": [],
-                    "release_details": {},
-                    "room_occupancy": {},
-                    "revision": self._state["revision"] + 1,
-                }
-            )
+            state = self._default_state()
+            state["revision"] = self._state["revision"] + 1
+            self._commit_state(state)
             self._record_event(
                 EVENT_DEACTIVATED,
                 level=level,
