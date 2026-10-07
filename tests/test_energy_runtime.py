@@ -90,6 +90,12 @@ class _Hass:
     async def async_add_executor_job(self, func, *args):
         return func(*args)
 
+    def async_create_background_task(self, target, name, eager_start=True):
+        # Eager by default, as in HA: the coroutine runs to its first await.
+        return asyncio.Task(
+            target, loop=asyncio.get_running_loop(), name=name, eager_start=eager_start
+        )
+
 
 class _Adapter:
     def __init__(self) -> None:
@@ -399,19 +405,62 @@ class EnergyRuntimeTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assert_deactivate_won(controller, hass, flags, state, late)
                 self.assertIsInstance(outcome, EnergyInactiveError)
 
+    @staticmethod
+    async def started(controller):
+        """Start the controller and wait for its background startup pass."""
+        await controller.async_start()
+        await controller._startup
+
     async def test_deactivate_wins_over_startup_apply_at_every_awaited_step(self):
         dry, dry_hass, _flags = self.home()
         dry.engine.activate(LEVEL_LOW)
-        await dry.async_start()
+        await self.started(dry)
         for offset, label in enumerate(dry_hass.steps.labels):
             with self.subTest(step=offset, call=label):
                 controller, hass, flags = self.home()
                 controller.engine.activate(LEVEL_LOW)
                 state, outcome, late = await self.deactivate_while_held(
-                    controller, hass, controller.async_start(), offset
+                    controller, hass, self.started(controller), offset
                 )
                 self.assert_deactivate_won(controller, hass, flags, state, late)
                 self.assertIsNone(outcome)
+
+    async def test_setup_does_not_wait_for_the_startup_apply(self):
+        dry, dry_hass, _flags = self.home()
+        dry.engine.activate(LEVEL_LOW)
+        await self.started(dry)
+        controller, hass, _flags = self.home()
+        controller.engine.activate(LEVEL_LOW)
+        hass.steps.hold(dry_hass.steps.labels.index("switch.turn_off switch.plug"))
+
+        # The plug never answers; setup must finish anyway.
+        await asyncio.wait_for(controller.async_start(), 1)
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+        await asyncio.wait_for(controller.async_stop(), 1)
+        self.assertTrue(controller._startup.done())
+
+    async def test_stop_cancels_the_device_pass_in_flight(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        controller, hass, flags = self.home()
+        hass.steps.hold(dry_hass.steps.labels.index("switch.turn_off switch.plug"))
+        activating = asyncio.create_task(
+            controller.async_activate(LEVEL_LOW, actor="owner")
+        )
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+        done = len(hass.services.calls)
+
+        # An unload or reload must not leave the old pass running.
+        await asyncio.wait_for(controller.async_stop(), 1)
+        with self.assertRaises(EnergyInactiveError):
+            await asyncio.wait_for(activating, 1)
+        hass.steps.release.set()
+        await asyncio.sleep(0)
+        self.assertEqual(hass.services.calls[done:], [])
+        self.assertEqual(hass.states.state_of("switch.plug"), "on")
+        # The level stays active, so the next start applies it again.
+        self.assertEqual(controller.engine.active_level, LEVEL_LOW)
+        self.assertEqual(flags.disabled_automations(), ["automation.a", "automation.b"])
 
     async def test_deactivate_does_not_wait_for_a_hung_device_command(self):
         dry, dry_hass, _flags = self.home()

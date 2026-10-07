@@ -272,16 +272,28 @@ class EnergyController:
         self._lock = asyncio.Lock()
         self._generation = 0
         self._apply_task: asyncio.Task[dict[str, Any]] | None = None
+        self._startup: asyncio.Task[None] | None = None
 
     def notify_changed(self) -> None:
         """Tell WebSocket clients, the sensor and suggestions to re-read state."""
         self._hass.bus.async_fire(EVENT_ENERGY_CHANGED)
 
     async def async_start(self) -> None:
-        """Start listening and re-apply a level that was active at shutdown."""
+        """Start listening, and re-apply a level that was active at shutdown.
+
+        The re-apply runs in the background: one slow device must not keep
+        the hub in setup.
+        """
         self.adapter.async_start()
-        generation = self._generation
+        self._startup = self._hass.async_create_background_task(
+            self._async_resume(self._generation), name="casasmart_energy_startup"
+        )
+
+    async def _async_resume(self, generation: int) -> None:
+        """Re-apply the active level, or retry a failed automation restore."""
         async with self._lock:
+            if generation != self._generation:
+                return
             if self.engine.active_level is None:
                 # A deactivation may have left a failed automation restore.
                 await self.automations.async_restore()
@@ -290,9 +302,17 @@ class EnergyController:
                 return
             self.notify_changed()
 
-    def async_stop(self) -> None:
-        """Stop listeners/timers without changing durable active state."""
-        self.adapter.async_stop()
+    async def async_stop(self) -> None:
+        """Stop listeners and timers once any transition in flight has ended.
+
+        The device pass is cancelled, as a deactivate does. The active level
+        is kept, so the next start applies it again.
+        """
+        self._generation += 1
+        if self._apply_task is not None:
+            self._apply_task.cancel()
+        async with self._lock:
+            self.adapter.async_stop()
 
     async def async_state(self) -> dict[str, Any]:
         """The engine snapshot plus the adapter's current issues and stats."""
