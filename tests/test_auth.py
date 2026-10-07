@@ -112,6 +112,23 @@ class TokenTests(unittest.TestCase):
             with self.assertRaises(TokenError):
                 auth_tokens.validate_token(SECRET, garbage)
 
+    def test_non_ascii_token_is_an_ordinary_bad_token(self):
+        # An Authorization header or WebSocket auth frame can carry any text.
+        # A non-ASCII token must fail like any other garbage (401, or a
+        # refused socket), not escape as UnicodeEncodeError (an HTTP 500).
+        token = auth_tokens.issue_token(SECRET, "dev-1", "admin", None, ttl=3600)
+        header, claims, signature = token.split(".")
+        for bad in (
+            f"é{header}.{claims}.{signature}",
+            f"{header}.{claims}é.{signature}",
+            f"{header}.{claims}.{signature}é",
+            f"{header}.\udcff.{signature}",
+        ):
+            with self.subTest(bad=bad[:12]):
+                with self.assertRaises(TokenError):
+                    auth_tokens.validate_token(SECRET, bad)
+                self.assertIsNone(auth_tokens.unverified_subject(SECRET, bad))
+
     def test_alg_none_rejected(self):
         # Classic JWT attack: re-sign nothing, claim alg none.
         import base64

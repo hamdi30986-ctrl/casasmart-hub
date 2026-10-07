@@ -151,6 +151,8 @@ def validate_token(
         raise TokenError("Empty signing secret")
     if not isinstance(token, str):
         raise TokenError("Token must be a string")
+    if not token.isascii():
+        raise TokenError("Token must be ASCII")
     parts = token.split(".")
     if len(parts) != 3:
         raise TokenError("Token must have exactly 3 segments")
@@ -214,7 +216,7 @@ def unverified_subject(secret: bytes, token: str) -> str | None:
     to refresh it is a separate question the app handles via re-auth). It is
     NOT an authorization gate — never grant access off this.
     """
-    if not secret or not isinstance(token, str):
+    if not secret or not isinstance(token, str) or not token.isascii():
         return None
     parts = token.split(".")
     if len(parts) != 3:
