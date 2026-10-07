@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""Publish the CasaSmart hub's real handshake identity through macOS Bonjour.
+"""Advertise a CasaSmart hub in Docker Desktop through macOS Bonjour.
 
-A hub inside Docker Desktop can't announce itself on the LAN over multicast
-DNS, so this helper does it from the Mac. It reads the hub's handshake over
-loopback, takes the TLS identity fingerprint and API version from it, and
-runs ``dns-sd -P`` to advertise ``_casasmart._tcp`` at the Mac's LAN address,
-with the TXT records the hub itself would publish (``id``, ``api``, ``v``,
-``name``). Every ``--refresh`` seconds it reads the handshake again and
-re-registers if anything changed or ``dns-sd`` exited; a failed refresh
-keeps the last good advertisement.
-
-Standard library only, and kept runnable by macOS's own python3 (3.9).
+A container can't announce itself on the LAN over multicast DNS, so this
+reads the hub's handshake over loopback and runs dns-sd -P to advertise
+_casasmart._tcp at the Mac's LAN address, with the TXT records the hub would
+publish itself. It re-reads the handshake every --refresh seconds and
+re-registers when anything changed; a failed refresh keeps the last good
+advertisement. Standard library only, for macOS's own python3 (3.9).
 """
 
 from __future__ import annotations
@@ -34,7 +30,7 @@ _SERVICE_TYPE = "_casasmart._tcp"
 
 @dataclass(frozen=True)
 class Advertisement:
-    """One Bonjour registration: what ``dns-sd -P`` is given."""
+    """One Bonjour registration: what dns-sd -P is given."""
 
     instance: str
     hostname: str
@@ -126,7 +122,7 @@ def advertisement_from_handshake(
 
 
 def dns_sd_command(advertisement: Advertisement, executable: str) -> list[str]:
-    """The ``dns-sd -P`` (proxy registration) command line for ``advertisement``."""
+    """The dns-sd -P (proxy registration) command line for an advertisement."""
     return [
         executable,
         "-P",

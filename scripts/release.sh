@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# CasaSmart Hub release script — the only supported way to cut a release.
+# CasaSmart Hub release script: the only supported way to cut a release.
 #
-# HACS installs a release by its TAG and extracts the release asset named in
-# hacs.json (casasmart.zip) into custom_components/casasmart; Home Assistant and
-# the hub handshake report manifest.json's "version". These must never disagree,
-# so every step below refuses to continue on any mismatch.
+# HACS installs a release by its tag and extracts the asset named in hacs.json
+# (casasmart.zip) into custom_components/casasmart; Home Assistant and the hub
+# handshake report manifest.json's "version". These must agree, so each step
+# stops on any mismatch.
 #
 #   scripts/release.sh check   X.Y.Z   gates only (clean tree at origin/main, manifest
 #                                      version, dated CHANGELOG section, tests); no changes
-#   scripts/release.sh tag     X.Y.Z   gates + build/sign/verify dist/, then the annotated tag (local)
-#   scripts/release.sh publish X.Y.Z   push the tag + create the GitHub release as a PRERELEASE
+#   scripts/release.sh tag     X.Y.Z   gates, build/sign/verify dist/, then the annotated tag (local)
+#   scripts/release.sh publish X.Y.Z   push the tag and create the GitHub release as a prerelease
 #   scripts/release.sh promote X.Y.Z   mark the prerelease as the latest release (same tag/asset)
 #
 # Needs: git, python3 (or uv), unzip, OpenSSL 3 (for `pkeyutl -rawin`; macOS's
@@ -48,8 +48,7 @@ run_python() {
 gates() {
   step "gates for $tag"
   [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
-  # Any branch or worktree may release, as long as HEAD is exactly what is on
-  # GitHub's main.
+  # Any branch or worktree may release, as long as HEAD is origin/main.
   git fetch --quiet origin main --tags
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "HEAD is not origin/main (push it first: git push origin HEAD:main)"
   local mv
@@ -71,7 +70,7 @@ build_and_verify() {
   openssl pkeyutl -help 2>&1 | grep -q -- '-rawin' \
     || die "openssl must be OpenSSL 3 (pkeyutl -rawin); found: $(openssl version)"
   rm -rf "$dist" && mkdir -p "$dist"
-  # Files at the zip root, exactly the integration tree (the layout HACS expects).
+  # The integration's files at the zip root: the layout HACS expects.
   git archive --format=zip -o "$dist/casasmart.zip" "$commit:custom_components/casasmart"
   local zv
   zv="$(unzip -p "$dist/casasmart.zip" manifest.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')"
