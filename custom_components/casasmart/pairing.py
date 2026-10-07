@@ -98,12 +98,6 @@ THROTTLE_PURPOSE_LAN = "lan"
 THROTTLE_PURPOSE_REMOTE = "remote"
 
 
-def _throttle_key(source_key: str, remote_source: bool) -> str:
-    """The (source, purpose)-composed key for the redeem failure throttle."""
-    purpose = THROTTLE_PURPOSE_REMOTE if remote_source else THROTTLE_PURPOSE_LAN
-    return f"{purpose}:{source_key}"
-
-
 class PairingError(Exception):
     """Pairing input rejected (bad role, bad expiry, bad rooms...)."""
 
@@ -166,6 +160,12 @@ def _code_class(code_id: str, record: dict[str, Any]) -> str:
     ):
         return CODE_CLASS_BOOTSTRAP
     return CODE_CLASS_MEMBER
+
+
+def _throttle_key(source_key: str, remote_source: bool) -> str:
+    """The (source, purpose)-composed key for the redeem failure throttle."""
+    purpose = THROTTLE_PURPOSE_REMOTE if remote_source else THROTTLE_PURPOSE_LAN
+    return f"{purpose}:{source_key}"
 
 
 class PairingManager:
