@@ -13,6 +13,7 @@ import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
+import voluptuous as vol
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -1175,7 +1176,7 @@ async def async_execute_registry_scene(
                 "Scene %s: %s on %s timed out", scene_id, item["action"], entity_id
             )
             results.append({"entity_id": entity_id, "ok": False, "error": "Timed out"})
-        except (CommandError, HomeAssistantError) as err:
+        except (CommandError, HomeAssistantError, vol.Invalid) as err:
             _LOGGER.warning(
                 "Scene %s: %s on %s failed: %s",
                 scene_id,
