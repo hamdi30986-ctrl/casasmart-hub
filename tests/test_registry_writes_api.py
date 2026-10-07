@@ -20,6 +20,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import voluptuous as vol
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
@@ -32,6 +34,7 @@ try:
         CasaSmartRegistryView,
         CasaSmartRoomsView,
         CasaSmartRoomView,
+        CasaSmartSceneActivateView,
         CasaSmartScenesView,
         CasaSmartSceneView,
         CasaSmartUserDeviceGangView,
@@ -44,6 +47,7 @@ except Exception as err:
     CasaSmartRoomsView = CasaSmartRoomView = CasaSmartDeviceAssignmentView = None
     CasaSmartScenesView = CasaSmartSceneView = EVENT_REGISTRY_CHANGED = None
     CasaSmartUserDeviceGangView = CasaSmartUserDeviceView = None
+    CasaSmartSceneActivateView = None
     _ERR = err
 
 _SKIP = H.IMPORT_ERROR or _ERR
@@ -390,6 +394,52 @@ class ScenesCrud(RegistryWritesTestCase):
         )
         status, _ = H.read_response(resp)
         self.assertEqual(status, 404)
+
+
+class SceneActivation(RegistryWritesTestCase):
+    async def test_step_rejected_by_the_service_schema_does_not_stop_the_rest(
+        self,
+    ) -> None:
+        # HA raises vol.Invalid (not HomeAssistantError) when a service's own
+        # schema rejects the data, e.g. light.turn_on with a key it no longer
+        # accepts. That step fails; the later steps still run.
+        _, hdr = H.session(self.rt.auth, role="admin")
+        self.hass.states.add("light.a")
+        self.hass.states.add("switch.b", state="off")
+        scene = self.rt.registry.create_scene(
+            "Evening",
+            [
+                {
+                    "entity_id": "light.a",
+                    "action": "turn_on",
+                    "data": {"color_temp": 300},
+                },
+                {"entity_id": "switch.b", "action": "turn_on"},
+            ],
+        )
+        called = []
+
+        async def async_call(domain, service, data, *, blocking=False):
+            called.append(data["entity_id"])
+            if domain == "light":
+                raise vol.Invalid("extra keys not allowed")
+
+        self.hass.services.async_call = async_call
+        with mock.patch(
+            "casasmart.registry_api.is_served",
+            H.is_served_for(["light.a", "switch.b"]),
+        ):
+            resp = await CasaSmartSceneActivateView(self.hass).post(
+                H.FakeRequest(headers=hdr), scene["scene_id"]
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(called, ["light.a", "switch.b"])
+        self.assertFalse(body["ok"])
+        self.assertEqual(
+            [(r["entity_id"], r["ok"]) for r in body["results"]],
+            [("light.a", False), ("switch.b", True)],
+        )
 
 
 # --------------------------------------------------------------------------- #
