@@ -29,7 +29,7 @@ from .const import (
     UPDATE_CHECK_TTL_SECONDS,
     UPDATE_REPO_CONFIG_KEY,
 )
-from .update import ReleaseInfo, is_newer, parse_release
+from .update import InstallError, ReleaseInfo, is_newer, parse_release
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -213,7 +213,6 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
             return error
 
         # update_install imports this module, so it is imported at call time.
-        from .update import InstallError
         from .update_install import perform_install
 
         try:
