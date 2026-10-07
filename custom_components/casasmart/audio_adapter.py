@@ -39,6 +39,7 @@ brings the connection up (or cycles it) once the creds are written.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -118,6 +119,11 @@ class AudioAdapter:
         # True between a successful connect-attempt setup and stop; lets
         # publish/ discover fail fast (and loudly) when audio isn't wired.
         self._started = False
+        # Serializes reconfigures. Stopping awaits an executor hop, and a
+        # second reconfigure running in that gap would start a client of its
+        # own: two live clients with one client id knock each other off the
+        # broker in a reconnect loop.
+        self._reconfigure_lock = asyncio.Lock()
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -186,8 +192,9 @@ class AudioAdapter:
 
     async def async_reconfigure(self) -> None:
         """Cycle the connection to pick up changed broker creds (API hook)."""
-        await self.async_stop()
-        await self.async_start()
+        async with self._reconfigure_lock:
+            await self.async_stop()
+            await self.async_start()
 
     # -- MQTT callbacks (run on paho's network thread) -------------------------
 
