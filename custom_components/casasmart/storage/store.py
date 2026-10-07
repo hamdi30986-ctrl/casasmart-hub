@@ -34,6 +34,11 @@ _BUSY_TIMEOUT_MS = 5000
 _WAL_AUTOCHECKPOINT_PAGES = 1
 
 
+def _is_non_negative_int(value: Any) -> bool:
+    """True for an int >= 0 (bool excluded)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 class HubStorage:
     """The hub's SQLite database: one connection, shared under a lock.
 
@@ -377,7 +382,7 @@ class EnergyEventsTable:
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append one event and return its public record."""
-        if isinstance(t, bool) or not isinstance(t, int) or t < 0:
+        if not _is_non_negative_int(t):
             raise ValueError("t must be a non-negative integer timestamp")
         kind = self._required_text(kind, "kind", max_length=64)
         level = self._optional_text(level, "level", max_length=16)
@@ -427,7 +432,7 @@ class EnergyEventsTable:
         clauses: list[str] = []
         params: list[Any] = []
         if since_t is not None:
-            if isinstance(since_t, bool) or not isinstance(since_t, int) or since_t < 0:
+            if not _is_non_negative_int(since_t):
                 raise ValueError("since_t must be a non-negative integer")
             clauses.append("t >= ?")
             params.append(since_t)
@@ -455,7 +460,7 @@ class EnergyEventsTable:
         params: tuple[Any, ...] = ()
         where = ""
         if since_t is not None:
-            if isinstance(since_t, bool) or not isinstance(since_t, int) or since_t < 0:
+            if not _is_non_negative_int(since_t):
                 raise ValueError("since_t must be a non-negative integer")
             where = "WHERE t >= ?"
             params = (since_t,)
@@ -479,7 +484,7 @@ class EnergyEventsTable:
 
     def prune(self, *, before_t: int) -> int:
         """Delete events older than before_t and return how many went."""
-        if isinstance(before_t, bool) or not isinstance(before_t, int) or before_t < 0:
+        if not _is_non_negative_int(before_t):
             raise ValueError("before_t must be a non-negative integer")
         cursor = self._storage._execute_write(
             "DELETE FROM energy_events WHERE t < ?", (before_t,)
