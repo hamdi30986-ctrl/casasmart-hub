@@ -1,9 +1,8 @@
-"""Versioned, additive feature-capability contract for CasaSmart clients.
+"""Feature capabilities the hub advertises in the handshake.
 
-The handshake remains API v1.  Clients must treat a missing capability block,
-an unknown capability, or ``available: false`` as unavailable.  This lets old
-Hubs and clients interoperate, and a feature whose server side isn't complete
-fails closed.
+The handshake stays at API v1. Apps treat a missing capability block, an
+unknown feature or "available: false" as unavailable, so old hubs and apps
+interoperate and a feature whose server side is incomplete fails closed.
 """
 
 from __future__ import annotations
@@ -12,14 +11,12 @@ from typing import Final
 
 CAPABILITY_CONTRACT_VERSION: Final = 1
 
-# All foundation features are defined against the existing v1 transport.  The
-# number is explicit so a future feature can require a newer transport without
-# clients having to infer support from a Hub release string.
+# Every feature so far runs on the v1 transport. The number is explicit so a
+# later feature can require a newer one without apps parsing the hub version.
 _FOUNDATION_MINIMUM_API_VERSION: Final = 1
 
-# These names are part of the public, stable handshake contract.  A feature is
-# deliberately not enabled merely because a Hub advertises its name: it is
-# ``available`` only once the complete server-side policy enforces it.
+# Feature names are part of the stable handshake contract. Listing a name
+# does not make it available; see _IMPLEMENTED_CAPABILITIES.
 ORBIT_CAPABILITIES: Final = (
     "admin_password_v1",
     "room_activity_bulk_v1",
@@ -30,9 +27,8 @@ ORBIT_CAPABILITIES: Final = (
     "push_relay_optional_v1",
 )
 
-# These capability values are an endpoint-completeness gate, not a roadmap.
-# Keep protected admin-password and optional-relay support fail-closed until
-# their own server-side enforcement exists.
+# Features whose server-side enforcement is complete. admin_password_v1 and
+# push_relay_optional_v1 stay unavailable until theirs exists.
 _IMPLEMENTED_CAPABILITIES: Final = frozenset(
     {
         "room_activity_bulk_v1",
@@ -45,11 +41,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
 
 
 def handshake_capabilities() -> dict[str, object]:
-    """Return the safe baseline capability block for ``/handshake``.
-
-    Only complete server endpoints are available.  Clients must not infer
-    security or relay support from the Hub API version alone.
-    """
+    """Return the capability block served by /handshake."""
 
     return {
         "contract_version": CAPABILITY_CONTRACT_VERSION,

@@ -1,12 +1,12 @@
 """Hub TLS identity and the dedicated HTTPS listener.
 
 A permanent P-256 identity key (what paired phones pin) signs a renewable leaf
-certificate; ``CasaSmartTlsServer`` serves the CasaSmart views behind it.
+certificate; CasaSmartTlsServer serves the CasaSmart views behind it.
 
-Phones trust the hub by pinning the identity key's SHA-256 SPKI fingerprint at
-first contact, not through a certificate authority, so the leaf can be
-re-minted whenever it nears expiry without disturbing any phone. The identity
-key is never replaced automatically: losing it unpairs every phone.
+Phones pin the identity key's SHA-256 SPKI fingerprint at first contact
+instead of trusting a certificate authority, so the leaf can be re-minted near
+expiry without affecting any phone. The identity key is never replaced
+automatically: losing it unpairs every phone.
 """
 
 from __future__ import annotations
@@ -48,21 +48,19 @@ _SAN_DNS = "casasmart-hub.local"
 _BACKDATE = timedelta(hours=1)
 
 
-# Set on the TLS listener's aiohttp app: True when this listener is trusted as
-# LAN ingress (see lan_ingress.py). auth_api.is_lan_request reads it from
-# request.app; requests served by HA's own HTTP server never carry it.
+# Set on the TLS listener's aiohttp app when it is trusted as LAN ingress
+# (lan_ingress.py). Requests served by HA's own HTTP server never carry it.
 TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
 
 
 class IdentityError(Exception):
-    """The permanent identity key is unusable — never auto-recovered."""
+    """The permanent identity key is unusable; it is never replaced automatically."""
 
 
 class TlsIdentitySigner:
-    """Signs with the identity key on behalf of the push relay registration.
+    """Signs push relay registration requests with the identity key.
 
-    Exposes only the public key and a sign operation, so callers never hold
-    the private key itself.
+    Callers get the public key and a sign operation, never the private key.
     """
 
     _SCALAR_BYTES = 32
@@ -79,10 +77,9 @@ class TlsIdentitySigner:
         return self._public_spki_der
 
     def sign(self, message: bytes) -> bytes:
-        """ECDSA-SHA256 signature as raw ``r || s`` (64 bytes, IEEE P1363).
+        """ECDSA-SHA256 signature as raw r || s (64 bytes, IEEE P1363).
 
-        The format WebCrypto verifies, unlike the DER that ``cryptography``
-        produces.
+        WebCrypto verifies this format; the cryptography package produces DER.
         """
         der_signature = self._private_key.sign(message, ec.ECDSA(hashes.SHA256()))
         r, s = decode_dss_signature(der_signature)
@@ -95,9 +92,9 @@ class TlsIdentitySigner:
 class TlsMaterial:
     """Everything the listener and its callers need from one TLS check.
 
-    ``identity_fingerprint`` is what phones pin, mDNS advertises and the
-    handshake serves; ``leaf_rotated`` says a new leaf was just minted and
-    the listener must restart to serve it.
+    identity_fingerprint is the value phones pin; mDNS and the handshake
+    publish it too. leaf_rotated means a new leaf was minted and the listener
+    must restart to serve it.
     """
 
     identity_public_pem: str
@@ -122,7 +119,7 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
                 key_path.read_bytes(), password=None
             )
         except (ValueError, TypeError) as err:
-            # NEVER silently re-key: every paired phone pins this key.
+            # Never re-key silently: every paired phone pins this key.
             raise IdentityError(
                 f"Identity key at {key_path} is unreadable ({err}). "
                 "Restore it from backup, or delete the file to re-key — "
@@ -143,7 +140,7 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    # 0600 from the first byte — never world-readable, even briefly.
+    # Created with mode 0600 so the key is never readable by others, even briefly.
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(pem)
@@ -178,11 +175,11 @@ def _leaf_is_valid(
     key_path: Path,
     identity: ec.EllipticCurvePrivateKey,
 ) -> datetime | None:
-    """The stored leaf's expiry when it's still good to serve, else None.
+    """The stored leaf's expiry while it can still be served, else None.
 
-    "Good" = parseable, key matches cert, signed by OUR identity key, and
-    not inside the renewal margin. Anything off -> None (caller re-mints;
-    leaves are disposable).
+    Servable means it parses, its key matches the certificate, our identity
+    key signed it and it is outside the renewal margin. On None the caller
+    mints a new leaf.
     """
     if not cert_path.exists() or not key_path.exists():
         return None
@@ -215,8 +212,8 @@ def _leaf_is_valid(
             ec.ECDSA(hashes.SHA256()),
         )
     except InvalidSignature:
-        # Signed by some other identity (restored from the wrong backup?)
-        # — a phone pinning OUR identity would reject it. Re-mint.
+        # Signed by another identity (restored from the wrong backup?), so
+        # phones pinning ours would reject it.
         return None
 
     not_after = cert.not_valid_after_utc
@@ -232,11 +229,11 @@ def _mint_leaf(
     identity: ec.EllipticCurvePrivateKey,
     validity_days: int,
 ) -> datetime:
-    """Mint a fresh leaf keypair + cert signed by the identity key."""
+    """Mint a leaf key and certificate signed by the identity key."""
     leaf_key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.now(UTC)
-    # X.509 time has whole-second resolution — truncate up front so the
-    # value we report always equals what the cert actually says.
+    # X.509 times have whole-second resolution; truncating here keeps the
+    # reported expiry equal to the certificate's.
     not_after = (now + timedelta(days=validity_days)).replace(microsecond=0)
     cert = (
         x509.CertificateBuilder()
@@ -304,10 +301,9 @@ def ensure_tls_material(
 class CasaSmartTlsServer:
     """The CasaSmart API on its own HTTPS port.
 
-    Serves the same views as the plain HA-port API (both come from
-    ``api.build_views``: one code path, same auth gates, same filtering),
-    just behind TLS with the hub-issued leaf. Restarting the site (not the
-    runner) is how a rotated leaf goes live.
+    Serves the same views as the HA port (both come from api.build_views)
+    behind the hub-issued leaf. A rotated leaf goes live by restarting the
+    site; the runner is kept.
     """
 
     def __init__(
@@ -370,11 +366,11 @@ class CasaSmartTlsServer:
         return True
 
     async def async_refresh(self, material: TlsMaterial, views) -> None:
-        """Adopt re-checked material; restart the site only when needed.
+        """Adopt re-checked material from the daily check.
 
-        Called from the daily tick. A rotated leaf (or a listener that
-        never bound) restarts the TCP site with a fresh SSL context —
-        phones reconnect transparently because the pin didn't change.
+        A rotated leaf, or a listener that never bound, restarts the TCP site
+        with a fresh SSL context. Phones reconnect without noticing because
+        the pinned identity is unchanged.
         """
         rotated = material.leaf_rotated
         self._material = material

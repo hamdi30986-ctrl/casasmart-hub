@@ -1,12 +1,9 @@
-"""Installer-surface helpers: the pure logic behind the admin endpoints.
+"""Validation and serialization behind the installer endpoints in admin_api.py.
 
-Covers the installer screens in the app (Zigbee permit-join, entity rename,
-IR wizard, discovered devices). The app reaches these only through hub
-endpoints gated by ``installer.manage``, never with a Home Assistant token.
-
-No HA imports — unit-testable without an HA install, exactly like
-``entity_bridge``, ``camera_streams`` and ``pairing``. The views in
-``admin_api.py`` are thin wrappers over these functions.
+These back the app's installer screens: Zigbee permit-join, entity rename, the
+IR wizard and discovered devices. The app reaches them only through hub
+endpoints gated by installer.manage, never with a Home Assistant token. No HA
+imports, so the tests run without Home Assistant.
 """
 
 from __future__ import annotations
@@ -15,32 +12,23 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-# zigbee2mqtt's default base topic and permit-join request topic. The hub
-# publishes permit-join itself, behind ``installer.manage``.
+# zigbee2mqtt defaults, and the permit-join window the app may ask for (seconds).
 DEFAULT_ZIGBEE_BASE_TOPIC = "zigbee2mqtt"
 PERMIT_JOIN_TOPIC = f"{DEFAULT_ZIGBEE_BASE_TOPIC}/bridge/request/permit_join"
 DEFAULT_PERMIT_JOIN_SECONDS = 120
 MIN_PERMIT_JOIN_SECONDS = 10
 MAX_PERMIT_JOIN_SECONDS = 600
 
-# Config-flow handlers the proxy will drive — and the COMPLETE list of
-# them. The IR wizard accepts DHCP-discovered Broadlink remotes and
-# creates EasyIR climate entities; nothing else on the hub may be
-# config-flowed from a phone (a flow can install integrations).
+# The only config flows a phone may drive, for the IR wizard (Broadlink remotes
+# and EasyIR climate entities). Other flows could install integrations.
 ALLOWED_FLOW_HANDLERS = frozenset({"broadlink", "easy_ir"})
 
-# State attributes that never cross the API boundary, even on the
-# admin-only raw dump: ``entity_picture`` embeds an HA-signed camera
-# token and ``access_token``/``token`` are exactly
-# what they say. Same reasoning as the entity-bridge allowlist, applied
-# as a denylist because installer flows need everything else verbatim.
+# Token-bearing attributes, stripped even for admins (entity_picture embeds a
+# signed camera token). A denylist, because installer flows need the rest.
 STRIPPED_STATE_ATTRS = frozenset({"entity_picture", "access_token", "token"})
 
-# FlowResult keys that are JSON-safe AND that the installer wizards
-# read. Deliberately excludes ``data_schema`` (voluptuous objects),
-# ``context``, ``data``/``result`` (config-entry internals) and
-# ``preview`` — the app drives known flows blind, it never renders
-# schemas.
+# JSON-safe FlowResult keys the wizards read. The app drives known flows
+# without rendering schemas, so data_schema and entry internals are left out.
 _FLOW_RESULT_KEYS = (
     "type",
     "flow_id",
@@ -55,14 +43,14 @@ _FLOW_RESULT_KEYS = (
 
 
 class InstallerError(Exception):
-    """Installer input rejected — message is safe to return verbatim."""
+    """Installer input rejected; the message is safe to return to the app."""
 
 
 def parse_permit_join(payload: Mapping[str, Any]) -> tuple[bool, int]:
-    """Validate a permit-join request body into ``(enable, duration)``.
+    """Validate a permit-join body into (enable, duration).
 
-    ``duration`` only matters when enabling; it is clamped to a sane
-    window so a typo can't leave the Zigbee network open for hours.
+    A duration outside the permit-join window is refused, so a typo can't
+    leave the Zigbee network open for hours.
     """
     enable = payload.get("enable")
     if not isinstance(enable, bool):
@@ -79,7 +67,7 @@ def parse_permit_join(payload: Mapping[str, Any]) -> tuple[bool, int]:
 
 
 def permit_join_payload(enable: bool, duration: int) -> str:
-    """The exact MQTT payload zigbee2mqtt's permit-join request expects."""
+    """The MQTT payload for a zigbee2mqtt permit-join request."""
     if enable:
         return json.dumps({"value": True, "time": duration})
     return json.dumps({"value": False})
@@ -91,14 +79,12 @@ def permit_join_topic(base_topic: str) -> str:
 
 
 def _valid_base_topic(value: Any) -> str | None:
-    """A usable z2m ``base_topic``, or None when it isn't one.
+    """A usable zigbee2mqtt base topic, or None.
 
-    Deliberately strict. The value ends up as an MQTT publish topic, and the
-    caller is a phone (admin/sub-admin) or hub config — so wildcards (``+``,
-    ``#``), empty segments and leading/trailing slashes are refused rather
-    than normalised, and a segment may hold only letters, digits, ``_`` and
-    ``-`` (``str.isalnum``, so non-ASCII letters pass). That keeps a typo (or
-    a hostile value) from turning permit-join into a publish to an arbitrary
+    The value comes from a phone or hub config and becomes an MQTT publish
+    topic, so after trimming whitespace and outer slashes each segment may
+    hold only letters, digits, _ and - (non-ASCII letters pass). Wildcards and
+    empty segments are refused, so permit-join can't publish to an arbitrary
     topic.
     """
     if not isinstance(value, str):
@@ -113,33 +99,18 @@ def _valid_base_topic(value: Any) -> str | None:
 
 
 def _SEGMENT_OK(segment: str) -> bool:
-    """True when a topic segment is only letters, digits, ``_`` and ``-``."""
+    """True when a topic segment holds only letters, digits, _ and -."""
     return all(ch.isalnum() or ch in "_-" for ch in segment)
 
 
 def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[str]:
     """Which zigbee2mqtt instances a permit-join should open.
 
-    A villa commonly runs two or three zigbee2mqtt instances (one coordinator
-    per floor, sometimes per wing). permit_join is per-instance: publishing
-    only to the default ``zigbee2mqtt`` base topic would open floor 1's
-    coordinator and leave every other one shut, so devices on the other floors
-    could never be paired from the app.
-
-    * ``configured`` — the hub's ``zigbee_base_topics`` list. With no request
-      target, EVERY configured instance is opened, so an app that sends no
-      target reaches all the coordinators, not one.
-    * ``requested`` — a single base topic from the request body, for a client
-      that knows which instance it wants (floor -> instance mapping). It must
-      name one of the hub's KNOWN instances: a client may pick among the
-      coordinators the installer declared, never invent a topic. Anything
-      else falls back to opening them all, because the safe failure for
-      "add a device" is every coordinator listening, not none.
-    * Neither -> the single default topic, for a hub that was never
-      configured for multi-instance.
-
-    Order is preserved and duplicates collapse, so the caller publishes once
-    per real instance.
+    A large home may run one instance per floor, and permit-join is per
+    instance. configured is the hub's zigbee_base_topics list (the default
+    topic when it has none). All of them open unless requested names one of
+    them: a client may pick a configured instance but never name a new topic.
+    Order is kept and duplicates are dropped.
     """
     topics: list[str] = []
     if isinstance(configured, (list, tuple)):
@@ -157,12 +128,10 @@ def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[s
 
 
 def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate an entity-registry patch body — a name rename only.
+    """Validate an entity-registry patch, which may only rename.
 
-    The one accepted field is ``name``: a string, or null to clear it back to
-    the device name. The app never changes an entity's domain (a gang's type
-    is presentation metadata, not an HA rename), so anything else is
-    rejected: this endpoint is a scoped proxy, not a general registry editor.
+    name is a string, or null to fall back to the device name. Any other
+    field is refused; this endpoint is a scoped proxy for renames.
     """
     unknown = set(payload) - {"name"}
     if unknown:
@@ -179,11 +148,10 @@ def parse_entity_patch(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def parse_remote_command(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
-    """Validate an IR send body into ``(entity_id, commands)``.
+    """Validate an IR send body into (entity_id, commands).
 
-    Only ``remote.*`` entities are addressable — this endpoint exists
-    solely because the remote domain is (deliberately) not on the
-    entity-bridge whitelist.
+    Only remote.* entities are accepted. The entity bridge does not expose the
+    remote domain, which is why this endpoint exists.
     """
     entity_id = payload.get("entity_id")
     if not isinstance(entity_id, str) or not entity_id.startswith("remote."):
@@ -216,9 +184,9 @@ def serialize_flow_result(result: Mapping[str, Any]) -> dict[str, Any]:
 def serialize_progress_flow(flow: Mapping[str, Any]) -> dict[str, Any]:
     """An in-progress flow reduced to what the discovery screen reads.
 
-    ``title_placeholders`` (set by e.g. Broadlink's DHCP discovery step:
-    name / model / host) is surfaced as ``description_placeholders`` —
-    the key the app already parses from HA's legacy REST shape.
+    title_placeholders (Broadlink's discovery sets name, model and host) is
+    returned as description_placeholders, the key the app reads from HA's
+    older REST shape.
     """
     context = flow.get("context")
     context = context if isinstance(context, Mapping) else {}
@@ -235,7 +203,7 @@ def serialize_progress_flow(flow: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def filter_state_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
-    """A state's attributes minus the token-bearing keys (see above)."""
+    """A state's attributes without the token-bearing keys."""
     return {
         key: value
         for key, value in attributes.items()

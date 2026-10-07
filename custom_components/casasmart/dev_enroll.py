@@ -1,41 +1,12 @@
 """Developer seam: keep trusted test devices enrolled across resets.
 
-Meant for development and test hubs, where automated tooling signs in as a hub
-device. A factory reset or "Regenerate pairing code" unpairs every device, so
-without this seam that tooling would have to be paired again after each reset.
-
-Off unless BOTH are true:
-
-* the ``CASASMART_DEV_ENROLL`` environment variable is set (``__init__.py``
-  checks it and logs a WARNING whenever it is on), and
-* a ``dev_devices.json`` manifest exists, either in the hub's data dir
-  (``/config/casasmart/dev_devices.json``) or in a ``.dev/`` folder next to
-  ``custom_components/`` (an untracked kit in a development checkout). The
-  manifest never ships in the integration.
-
-The manifest is a JSON array. Each entry has a ``public_key`` (PEM, or
-``public_key_pem``) and optionally a ``device_id`` (default: derived from the
-key, so it is still stable), a ``label`` or ``name``, a ``role`` (``sub-admin``
-by default or ``user``; ``admin`` is refused) and a ``rooms`` list for a
-room-scoped user (only a user; a sub-admin entry with rooms is skipped). Every entry is enrolled under its fixed id
-(:meth:`AuthEngine.ensure_enrolled`); already-correct entries are skipped, so
-running on every boot and after every reset is safe. Bad entries are logged
-and skipped, never fatal.
-
-Wired in two places (see ``__init__.py``):
-
-* once at integration **setup** — covers boot and the ``casasmart.factory_reset``
-  service, which wipes then reloads the entry; and
-* on **EVENT_AUTH_CHANGED** — covers the "Regenerate pairing code" BUTTON reset,
-  which wipes the tables in place WITHOUT a reload, plus any accidental unpair.
-
-Because :meth:`AuthEngine.ensure_enrolled` never fires ``EVENT_AUTH_CHANGED``,
-the event listener can't feed itself — no loop.
-
-No Home Assistant imports: pure storage/engine contracts, unit-testable on a
-temp :class:`AuthEngine` exactly like the rest of the auth layer. Storage-touching
-work is blocking — call :func:`ensure_dev_devices` via the executor, same rule as
-the other engine methods.
+For development hubs whose tooling signs in as a hub device. Off unless the
+CASASMART_DEV_ENROLL environment variable is set and a dev_devices.json
+manifest exists in the hub's data dir or in a .dev/ folder next to
+custom_components/; the manifest never ships with the integration. Each entry
+is a public key with an optional device id, label, role (sub-admin or user,
+never admin) and rooms (users only), enrolled under a fixed id. Bad entries
+are logged and skipped.
 """
 
 from __future__ import annotations
@@ -62,27 +33,20 @@ except ImportError:  # flat import in the test env (no HA package init)
 
 _LOGGER = logging.getLogger(__name__)
 
-# The manifest file name. Searched in the hub DATA dir first (it survives a
-# factory reset — reset wipes KV tables, not files) then the repo-side .dev kit.
+# Looked up in the hub's data dir first, which a factory reset leaves alone,
+# then in the .dev kit of a development checkout.
 DEV_DEVICES_FILENAME = "dev_devices.json"
 
-# Default role for a provisioned dev device. Sub-admin sidesteps the
-# single-admin invariant (the real owner / bootstrap admin code is untouched)
-# and already carries automations.manage + cameras.view, which is what test
-# tooling usually needs.
+# Sub-admin leaves the owner and the single-admin rule alone, and already
+# holds the permissions test tooling usually needs.
 DEFAULT_DEV_ROLE = ROLE_SUB_ADMIN
 
 
 def _candidate_paths(data_dir: Path) -> list[Path]:
-    """Where a dev manifest may live, most-authoritative first.
+    """Manifest locations, in lookup order.
 
-    1. ``<data_dir>/dev_devices.json`` — the hub's own persistent data dir
-       (``/config/casasmart`` in the container). Survives every factory reset.
-    2. ``<repo_root>/.dev/dev_devices.json`` — an untracked development kit,
-       resolved RELATIVE to this file so the same code finds it on the host
-       repo AND inside the container (both keep ``custom_components/`` and
-       ``.dev/`` as siblings under one root: the repo root on the host,
-       ``/config`` in the container).
+    The .dev path is resolved from this file, so it works in a checkout and in
+    the container, where custom_components/ and .dev/ share the /config root.
     """
     repo_root = Path(__file__).resolve().parents[2]
     return [
@@ -92,11 +56,10 @@ def _candidate_paths(data_dir: Path) -> list[Path]:
 
 
 def _load_manifest(data_dir: Path) -> tuple[Path, list[dict[str, Any]]] | None:
-    """First existing manifest as ``(path, entries)``, or None if there is none.
+    """The first manifest found as (path, entries), or None.
 
-    A missing manifest is the normal client-hub case and returns None silently.
-    A present-but-malformed manifest is logged and ALSO treated as absent — a
-    typo in a dev-only file must never crash hub setup.
+    A missing manifest is the normal case. A malformed one is logged and
+    treated as missing, so a typo can't break hub setup.
     """
     for path in _candidate_paths(data_dir):
         if not path.is_file():
@@ -114,23 +77,16 @@ def _load_manifest(data_dir: Path) -> tuple[Path, list[dict[str, Any]]] | None:
 
 
 def _deterministic_device_id(canonical_pem: str) -> str:
-    """A stable ``dev-<hash>`` id derived from the canonical public key.
-
-    Used only when a manifest entry omits an explicit ``device_id``, so the id
-    is still fixed across resets (it is a pure function of the key) without
-    forcing every entry to name one.
-    """
+    """A stable dev-<hash> id from the public key, for entries without a device_id."""
     digest = hashlib.sha256(canonical_pem.encode()).hexdigest()
     return f"dev-{digest[:16]}"
 
 
 def _normalize_entry(entry: Any) -> dict[str, Any] | None:
-    """Validate + canonicalize one manifest entry, or None to skip it.
+    """Validate one manifest entry into enroll arguments, or None to skip it.
 
-    Tolerant on field names — ``public_key`` / ``public_key_pem`` and
-    ``label`` / ``name`` are interchangeable — and fail-soft: any bad entry is
-    logged and skipped, never fatal. NEVER yields an admin entry; the dev seam
-    is sub-admin / user only by construction.
+    public_key_pem and name are accepted for public_key and label. Bad
+    entries, admin ones included, are logged and skipped.
     """
     if not isinstance(entry, dict):
         _LOGGER.error(
@@ -171,7 +127,7 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
         )
         return None
     if rooms is not None and role != ROLE_USER:
-        # Product rule: only a user is room-scoped (sub-admins see every room).
+        # Only a user can be room-scoped; sub-admins see every room.
         _LOGGER.error(
             "Dev enroll: entry %s gives a %s a room scope, which only a user "
             "can have — skipped",
@@ -190,13 +146,10 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
 
 
 def ensure_dev_devices(data_dir: Path, auth: AuthEngine) -> list[str]:
-    """Provision every device in the dev manifest; return the ids (re)written.
+    """Enroll the manifest's devices; return the ids whose records changed.
 
-    BLOCKING (storage I/O) — call via the executor, like the rest of the auth
-    engine's storage methods. Returns ``[]`` when no manifest exists, which is
-    the case on a normal hub (so this is a cheap no-op there). Idempotent:
-    only ids whose stored record actually changed are returned, so a
-    steady-state call writes nothing and reports nothing.
+    Blocking storage I/O: run it in the executor. Without a manifest it
+    returns [] at once, and a repeat call writes nothing.
     """
     loaded = _load_manifest(data_dir)
     if loaded is None:
