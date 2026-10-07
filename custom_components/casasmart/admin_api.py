@@ -62,6 +62,11 @@ def _device_entries(dev_reg: Any) -> list[Any]:
     return [devices[item] if isinstance(item, str) else item for item in devices]
 
 
+def _enum_value(member: Any) -> str | None:
+    """A registry enum member's value as a string, or None."""
+    return str(member.value) if member is not None else None
+
+
 class _AdminView(HomeAssistantView):
     """Shared plumbing for the installer admin views."""
 
@@ -172,19 +177,9 @@ class CasaSmartAdminRegistryView(_AdminView):
             {
                 "entity_id": entry.entity_id,
                 "device_id": entry.device_id,
-                "entity_category": (
-                    str(entry.entity_category.value)
-                    if entry.entity_category is not None
-                    else None
-                ),
-                "hidden_by": (
-                    str(entry.hidden_by.value) if entry.hidden_by is not None else None
-                ),
-                "disabled_by": (
-                    str(entry.disabled_by.value)
-                    if entry.disabled_by is not None
-                    else None
-                ),
+                "entity_category": _enum_value(entry.entity_category),
+                "hidden_by": _enum_value(entry.hidden_by),
+                "disabled_by": _enum_value(entry.disabled_by),
             }
             for entry in ent_reg.entities.values()
         ]
@@ -258,11 +253,7 @@ class CasaSmartAdminEntityView(_AdminView):
                     "entity_id": entry.entity_id,
                     "device_id": entry.device_id,
                     "name": entry.name,
-                    "entity_category": (
-                        str(entry.entity_category.value)
-                        if entry.entity_category is not None
-                        else None
-                    ),
+                    "entity_category": _enum_value(entry.entity_category),
                 }
             }
         )
