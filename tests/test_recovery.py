@@ -19,12 +19,12 @@ sys.path.insert(
 
 from auth_engine import MAX_DEVICE_NAME_LENGTH, AuthEngine, EnrollError
 from auth_tokens import TokenError
+from pairing import normalize_code
 from recovery import (
     RECOVERY_CODE_ID,
     CodeInvalidError,
     RecoveryManager,
     hash_code,
-    normalize_code,
 )
 from storage import HubStorage, JsonConfigStore
 from test_auth import SOURCE, make_keypair, sign_nonce

@@ -9,7 +9,6 @@ Storage methods block, so call them in the executor.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 import secrets
@@ -19,14 +18,14 @@ from collections.abc import Callable
 from typing import Any
 
 try:
+    from .pairing import CODE_ALPHABET, hash_code
     from .throttle import FailureThrottle
 except ImportError:  # top-level import in the test env (no HA package init)
+    from pairing import CODE_ALPHABET, hash_code  # type: ignore[no-redef]
     from throttle import FailureThrottle  # type: ignore[no-redef]
 
 _LOGGER = logging.getLogger(__name__)
 
-# No 0/O or 1/I/L: people read the card aloud and engrave it.
-CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LENGTH = 10
 CODE_GROUP = 5  # characters per dash-separated group
 # Storage key of the hub's single recovery code.
@@ -45,20 +44,6 @@ def _new_code() -> str:
     """A fresh random code from CODE_ALPHABET, grouped for engraving."""
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     return "-".join(raw[i : i + CODE_GROUP] for i in range(0, CODE_LENGTH, CODE_GROUP))
-
-
-def normalize_code(code: str) -> str:
-    """Uppercase ASCII letters and digits only; everything else is dropped.
-
-    Non-ASCII goes before upper-casing, so it fails as a wrong code instead of
-    breaking the ASCII hash.
-    """
-    return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
-
-
-def hash_code(code: str) -> str:
-    """SHA-256 hex of the normalized code; mint, redeem and hub_config use it."""
-    return hashlib.sha256(normalize_code(code).encode("ascii")).hexdigest()
 
 
 class RecoveryManager:

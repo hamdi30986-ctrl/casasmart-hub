@@ -41,8 +41,9 @@ DEFAULT_EXPIRY = "1d"
 # Roles an admin can put on a code. The only admin code is the bootstrap code,
 # and the auth engine enforces the single admin either way.
 ISSUABLE_ROLES = (ROLE_SUB_ADMIN, ROLE_USER)
-# No 0/O or 1/I/L: people read the sticker. About 2^39 codes, which the
-# throttle makes unguessable even for the bootstrap code that never expires.
+# No 0/O or 1/I/L: people read the sticker and the recovery card (recovery
+# uses this alphabet and hash_code too). About 2^39 codes, which the throttle
+# makes unguessable even for the bootstrap code that never expires.
 CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LEN = 8
 # Storage key of the hub's single bootstrap code.
