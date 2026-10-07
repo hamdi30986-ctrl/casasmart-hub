@@ -64,10 +64,6 @@ def _disarm_job(alarm, actor):
     return alarm.disarm(actor=actor)
 
 
-def _set_zone_job(alarm, entity_id, zone, name):
-    return alarm.set_zone(entity_id, zone, name)
-
-
 def _set_settings_job(alarm, entry_delay, exit_delay):
     return alarm.set_settings(entry_delay=entry_delay, exit_delay=exit_delay)
 
@@ -209,8 +205,7 @@ class CasaSmartAlarmZoneView(_AlarmView):
             )
         try:
             record = await self._hass.async_add_executor_job(
-                _set_zone_job,
-                alarm,
+                alarm.set_zone,
                 entity_id,
                 payload.get("zone"),
                 payload.get("name"),
