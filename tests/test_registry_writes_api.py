@@ -35,6 +35,7 @@ try:
         CasaSmartScenesView,
         CasaSmartSceneView,
         CasaSmartUserDeviceGangView,
+        CasaSmartUserDeviceView,
     )
 
     _ERR = None
@@ -42,7 +43,7 @@ except Exception as err:
     CasaSmartRegistryView = CasaSmartFloorsView = CasaSmartFloorView = None
     CasaSmartRoomsView = CasaSmartRoomView = CasaSmartDeviceAssignmentView = None
     CasaSmartScenesView = CasaSmartSceneView = EVENT_REGISTRY_CHANGED = None
-    CasaSmartUserDeviceGangView = None
+    CasaSmartUserDeviceGangView = CasaSmartUserDeviceView = None
     _ERR = err
 
 _SKIP = H.IMPORT_ERROR or _ERR
@@ -722,6 +723,29 @@ class UserDeviceGangView(RegistryWritesTestCase):
         )
         status, _ = H.read_response(resp)
         self.assertEqual(status, 401)
+
+
+class UserDeviceOwnership(RegistryWritesTestCase):
+    """PUT and PATCH of a whole user-device keep one owner per entity."""
+
+    async def test_patch_and_put_refuse_an_entity_owned_elsewhere(self) -> None:
+        self.rt.registry.upsert_user_device("dev-a", entity_ids=["switch.first"])
+        self.rt.registry.upsert_user_device("dev-b", entity_ids=["switch.second"])
+        before = self.rt.registry.list_user_devices()
+        _, hdr = H.session(self.rt.auth, role="admin")
+        view = CasaSmartUserDeviceView(self.hass)
+        body = {"entity_ids": ["switch.second", "switch.first"]}
+        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+            for verb in (view.patch, view.put):
+                with self.subTest(verb=verb.__name__):
+                    resp = await verb(
+                        H.FakeRequest(headers=hdr, body=body), ha_device_id="dev-b"
+                    )
+                    status, reply = H.read_response(resp)
+                    self.assertEqual(status, 400)
+                    self.assertIn("already grabbed", reply["message"])
+        self.assertEqual(self.rt.registry.list_user_devices(), before)
+        self.assertEqual(self._kinds("user-devices"), 0)
 
 
 if __name__ == "__main__":

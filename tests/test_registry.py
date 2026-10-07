@@ -258,6 +258,59 @@ class UserDeviceTests(RegistryTestCase):
             self.engine.get_user_device("dev-1")["entity_ids"], ["switch.a"]
         )
 
+    def _two_devices(self):
+        self.engine.upsert_user_device(
+            "dev-a", entity_ids=["switch.first"], config_entity_ids=["switch.first_led"]
+        )
+        self.engine.upsert_user_device("dev-b", entity_ids=["switch.second"])
+
+    def test_patch_rejects_an_entity_grabbed_elsewhere(self):
+        # PATCH holds the same invariant as PUT: one owner per entity, whether
+        # it is claimed as a control or a config entity on either side.
+        self._two_devices()
+        for field, ids in (
+            ("entity_ids", ["switch.second", "switch.first"]),  # control->control
+            ("config_entity_ids", ["switch.first"]),  # control->config
+            ("config_entity_ids", ["switch.first_led"]),  # config->config
+            ("entity_ids", ["switch.second", "switch.first_led"]),  # config->control
+        ):
+            with self.subTest(field=field, ids=ids):
+                with self.assertRaisesRegex(RegistryError, "already grabbed"):
+                    self.engine.patch_user_device("dev-b", **{field: ids})
+                with self.assertRaises(RegistryError):
+                    self.engine.upsert_user_device("dev-b", **{field: ids})
+        self.assertEqual(
+            self.engine.grabbed_entity_ids(),
+            {"switch.first", "switch.first_led", "switch.second"},
+        )
+
+    def test_rejected_patch_writes_nothing(self):
+        self._two_devices()
+        before = {d["ha_device_id"]: d for d in self.engine.list_user_devices()}
+        with self.assertRaises(RegistryError):
+            self.engine.patch_user_device(
+                "dev-b",
+                entity_ids=["switch.second", "switch.first"],
+                custom_name="Renamed",
+            )
+        for engine in (self.engine, make_engine(self.storage)):
+            after = {d["ha_device_id"]: d for d in engine.list_user_devices()}
+            self.assertEqual(after, before)
+
+    def test_patch_may_edit_its_own_entities(self):
+        self._two_devices()
+        patched = self.engine.patch_user_device(
+            "dev-a",
+            entity_ids=["switch.first", "switch.first_extra"],
+            config_entity_ids=["switch.first_led", "switch.first_button"],
+            custom_name="Hall",
+        )
+        self.assertEqual(patched["entity_ids"], ["switch.first", "switch.first_extra"])
+        self.assertEqual(
+            patched["config_entity_ids"], ["switch.first_led", "switch.first_button"]
+        )
+        self.assertEqual(patched["custom_name"], "Hall")
+
 
 class SceneTests(RegistryTestCase):
     GOOD = [
