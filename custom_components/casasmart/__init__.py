@@ -693,13 +693,19 @@ def _warn_keyless_speaker_provisioning(
     )
 
 
+def _lan_gated_features(hub_config: JsonConfigStore) -> str:
+    """What the LAN gate guards, for the startup warnings.
+
+    Speaker provisioning uses the LAN gate only in keyless mode; otherwise
+    it needs the provisioning key from any address.
+    """
+    if hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True:
+        return "pairing, recovery and keyless speaker provisioning"
+    return "pairing and recovery"
+
+
 def _warn_lan_relay_ingress_on(hub_config: JsonConfigStore, port: int) -> None:
     """Log which LAN-gated features the trusted relay listener admits."""
-    # Speaker provisioning uses the LAN gate only in keyless mode; otherwise
-    # it needs the provisioning key from any address.
-    gated = "pairing and recovery"
-    if hub_config.get(KEYLESS_SPEAKER_PROVISIONING_CONFIG_KEY) is True:
-        gated = "pairing, recovery and keyless speaker provisioning"
     # A warning, since HA hides info logs by default and operators need to
     # see that the LAN gate is relaxed.
     _LOGGER.warning(
@@ -707,7 +713,21 @@ def _warn_lan_relay_ingress_on(hub_config: JsonConfigStore, port: int) -> None:
         "LAN for %s. Publish that port to 127.0.0.1 only and reach it through "
         "the CasaSmart LAN relay (deploy/macos), which admits only LAN clients.",
         port,
-        gated,
+        _lan_gated_features(hub_config),
+    )
+
+
+def _warn_relay_ingress_hint(hub_config: JsonConfigStore, data_dir: Path) -> None:
+    """Log the Docker Desktop hint: the client address check is unreliable."""
+    _LOGGER.warning(
+        "Docker Desktop detected: the hub can't see phones' real addresses, "
+        "only one Docker Desktop makes up and changes between restarts, so "
+        "%s will work or be refused unpredictably. If the TLS port is "
+        "published to 127.0.0.1 only and reached through the CasaSmart LAN "
+        'relay (deploy/macos), set "%s": "on" in %s and restart Home Assistant.',
+        _lan_gated_features(hub_config),
+        LAN_RELAY_INGRESS_CONFIG_KEY,
+        data_dir / HUB_CONFIG_FILENAME,
     )
 
 
@@ -787,16 +807,7 @@ async def _async_start_tls(
     elif needs_relay_ingress_hint(
         ingress_setting, await hass.async_add_executor_job(_read_proc_version)
     ):
-        _LOGGER.warning(
-            "Docker Desktop detected: the hub can't see phones' real addresses, "
-            "only one Docker Desktop makes up and changes between restarts, so "
-            "pairing and owner recovery will work or be refused unpredictably. "
-            "If the TLS port is published to 127.0.0.1 only and reached "
-            "through the CasaSmart LAN relay (deploy/macos), set "
-            '"%s": "on" in %s and restart Home Assistant.',
-            LAN_RELAY_INGRESS_CONFIG_KEY,
-            data_dir / HUB_CONFIG_FILENAME,
-        )
+        _warn_relay_ingress_hint(runtime_data.hub_config, data_dir)
     else:
         _LOGGER.debug("LAN relay ingress off: the hub checks client addresses")
 

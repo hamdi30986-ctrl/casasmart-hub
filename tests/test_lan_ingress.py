@@ -117,6 +117,40 @@ class RelayIngressStartupWarningTests(unittest.TestCase):
         )
 
 
+@unittest.skipIf(
+    _INTEGRATION_ERR is not None, f"Home Assistant unavailable: {_INTEGRATION_ERR}"
+)
+class DockerDesktopHintTests(unittest.TestCase):
+    """The Docker Desktop hint names what the unreliable client address breaks,
+    which is the same list the relay warning uses."""
+
+    def _hint(self, keyless=None) -> str:
+        hub_config = H.FakeHubConfig()
+        if keyless is not None:
+            hub_config.set("keyless_speaker_provisioning", keyless)
+        with self.assertLogs("casasmart", level="WARNING") as logs:
+            _INTEGRATION._warn_relay_ingress_hint(hub_config, Path("/config/casasmart"))
+        self.assertEqual(len(logs.records), 1)
+        return logs.records[0].getMessage()
+
+    def test_pairing_and_recovery_only_by_default(self) -> None:
+        for keyless in (None, False, "true", 1):
+            with self.subTest(keyless=keyless):
+                message = self._hint(keyless)
+                self.assertIn(
+                    "so pairing and recovery will work or be refused unpredictably.",
+                    message,
+                )
+                self.assertNotIn("provisioning", message)
+
+    def test_names_speaker_provisioning_when_keyless_is_on(self) -> None:
+        self.assertIn(
+            "so pairing, recovery and keyless speaker provisioning will work or "
+            "be refused unpredictably.",
+            self._hint(True),
+        )
+
+
 class _Hass:
     async def async_add_executor_job(self, func, *args):
         return func(*args)
