@@ -32,7 +32,7 @@ from homeassistant.core import HomeAssistant
 
 from .auth_api import (
     authenticate_request,
-    json_body,
+    read_json_object,
 )
 from .const import DOMAIN, EVENT_TANK_CHANGED
 from .runtime_lookup import loaded_runtime_data
@@ -300,11 +300,9 @@ class CasaSmartTankProvisionView(_TankView):
         tanks, not_ready = self._tanks_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         ip = payload.get("ip")
         if not isinstance(ip, str) or not _is_lan_target(ip.strip()):
             return self.json_message("ip must be a LAN address", HTTPStatus.BAD_REQUEST)
@@ -433,11 +431,9 @@ class CasaSmartTankReadingView(_TankView):
         tanks, not_ready = self._tanks_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
 
         source = _client_ip(request)
         try:
@@ -583,11 +579,9 @@ class CasaSmartTankCalibrationView(_TankView):
         tanks, not_ready = self._tanks_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         kwargs = {key: payload[key] for key in _CALIBRATION_FIELDS if key in payload}
         if not kwargs:
             return self.json_message(

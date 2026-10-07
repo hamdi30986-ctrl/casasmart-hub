@@ -26,7 +26,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .alarm import AlarmEngine, AlarmError, UnknownZoneError
-from .auth_api import authenticate_request, json_body
+from .auth_api import authenticate_request, read_json_object
 from .const import DOMAIN, EVENT_ALARM_CHANGED
 from .runtime_lookup import loaded_runtime_data
 
@@ -122,11 +122,9 @@ class CasaSmartAlarmArmView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             snapshot = await self._hass.async_add_executor_job(
                 _arm_job,
@@ -192,11 +190,9 @@ class CasaSmartAlarmZoneView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             record = await self._hass.async_add_executor_job(
                 alarm.set_zone,
@@ -280,11 +276,9 @@ class CasaSmartAlarmSettingsView(_AlarmView):
         alarm, not_ready = self._alarm_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         try:
             settings = await self._hass.async_add_executor_job(
                 _set_settings_job,

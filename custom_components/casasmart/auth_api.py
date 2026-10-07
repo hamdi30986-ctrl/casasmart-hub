@@ -267,6 +267,18 @@ async def json_body(request: web.Request) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+async def read_json_object(
+    view: HomeAssistantView, request: web.Request
+) -> tuple[dict[str, Any] | None, web.Response | None]:
+    """(body, None) when the body is a JSON object, else (None, the view's 400)."""
+    payload = await json_body(request)
+    if payload is None:
+        return None, view.json_message(
+            "Body must be a JSON object", HTTPStatus.BAD_REQUEST
+        )
+    return payload, None
+
+
 def _throttled_response(err: ThrottledError) -> web.Response:
     """HTTP 429 with the lockout's remaining seconds (body and Retry-After)."""
     return web.json_response(
@@ -356,11 +368,9 @@ class CasaSmartEnrollView(HomeAssistantView):
                 "Pairing is only available on the hub's own network",
                 HTTPStatus.FORBIDDEN,
             )
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
 
         # A paired phone (same key) that re-runs onboarding gets its identity
         # back without redeeming the code; it still has to log in with its
@@ -503,11 +513,9 @@ class CasaSmartRecoverView(HomeAssistantView):
                 "Recovery is only available on the hub's own network",
                 HTTPStatus.FORBIDDEN,
             )
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
 
         source = request.remote or "unknown"
         try:
@@ -601,11 +609,9 @@ class CasaSmartTokenView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         device_id = payload.get("device_id")
         challenge_id = payload.get("challenge_id")
         signature = payload.get("signature")
@@ -810,11 +816,9 @@ class CasaSmartPairingCodesView(HomeAssistantView):
         pairing = get_pairing(self._hass)
         if pairing is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
 
         # "Add a device to <member>": the new device gets that member's current
         # role and rooms, whatever the payload says.
@@ -935,11 +939,9 @@ class CasaSmartUserView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         if "role" not in payload and "rooms" not in payload:
             return self.json_message(
                 "Nothing to change: provide role and/or rooms",

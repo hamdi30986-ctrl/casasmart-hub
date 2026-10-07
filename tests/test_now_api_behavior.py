@@ -60,7 +60,7 @@ def _load_now_api():
     auth = _module("casasmart.auth_api")
     auth.authenticate_request = lambda *args: ({}, None)
     auth.get_engine = lambda hass: None
-    auth.json_body = lambda request: None
+    auth.read_json_object = None
     const = _module("casasmart.const")
     const.DOMAIN = "casasmart"
     energy = _module("casasmart.energy_runtime")
@@ -265,8 +265,8 @@ class RepeatedRoomOffTest(unittest.TestCase):
         self.view = _API.CasaSmartRoomActivityCommandView(self.hass)
 
     def command(self, action: str, key: str, member: str = "member-a") -> dict:
-        async def body(request):
-            return {"action": action, "idempotency_key": key}
+        async def body(view, request):
+            return {"action": action, "idempotency_key": key}, None
 
         async def accessible(room_id, scope):
             return True
@@ -275,7 +275,7 @@ class RepeatedRoomOffTest(unittest.TestCase):
             patch.multiple(
                 _API,
                 authenticate_request=lambda *args: ({"sub": member}, None),
-                json_body=body,
+                read_json_object=body,
                 get_now_data=lambda hass: self.engine,
             ),
             patch.object(self.view, "_room_accessible", accessible),
@@ -389,13 +389,13 @@ class MemberLookupTest(unittest.TestCase):
         raise sqlite3.OperationalError("disk I/O error")
 
     def _patched(self, lookup):
-        async def body(request):
-            return {"action": "turn_off", "idempotency_key": "off-key-0001"}
+        async def body(view, request):
+            return {"action": "turn_off", "idempotency_key": "off-key-0001"}, None
 
         return patch.multiple(
             _API,
             authenticate_request=lambda *args: ({"sub": "dev-1"}, None),
-            json_body=body,
+            read_json_object=body,
             get_now_data=lambda hass: self.engine,
             get_engine=lambda hass: SimpleNamespace(member_id_for=lookup),
         )
@@ -453,14 +453,14 @@ class NowConfigSceneValidationTest(unittest.TestCase):
         )()
         view = _API.CasaSmartNowConfigView(_Hass(_States([])))
 
-        async def body(request):
-            return payload
+        async def body(view, request):
+            return payload, None
 
         with (
             patch.multiple(
                 _API,
                 authenticate_request=lambda *args: ({"sub": "admin"}, None),
-                json_body=body,
+                read_json_object=body,
                 get_now_data=lambda hass: engine,
             ),
             patch.object(view, "_registry", lambda: registry),
@@ -534,8 +534,8 @@ class RoomCommandLockTest(unittest.IsolatedAsyncioTestCase):
         self.engine.set_room_policy("room-k", True, ["light.a", "light.b"])
         self.engine.set_room_policy("room-l", True, ["light.c"])
 
-        async def body(request):
-            return request  # the tests post the JSON payload itself
+        async def body(view, request):
+            return request, None  # the tests post the JSON payload itself
 
         async def accessible(self, room_id, scope):
             return True
@@ -544,7 +544,7 @@ class RoomCommandLockTest(unittest.IsolatedAsyncioTestCase):
             patch.multiple(
                 _API,
                 authenticate_request=lambda *args: ({"sub": "member-a"}, None),
-                json_body=body,
+                read_json_object=body,
                 get_now_data=lambda hass: self.engine,
             ),
             patch.object(

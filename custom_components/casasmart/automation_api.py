@@ -42,7 +42,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.yaml import dump, load_yaml
 
-from .auth_api import authenticate_request, json_body
+from .auth_api import authenticate_request, read_json_object
 from .auth_engine import AuthEngine
 from .automations import (
     CASA_AUTOMATION_PREFIX,
@@ -292,11 +292,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             return error
         if (bad := self._check_key(config_key)) is not None:
             return bad
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
 
         # The Energy Saving flag is the hub's, not part of HA's config.
         payload = dict(payload)

@@ -23,7 +23,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .auth_api import authenticate_request, get_engine, json_body
+from .auth_api import authenticate_request, get_engine, read_json_object
 from .auth_engine import AuthEngine
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .energy_runtime import energy_lockout_applies
@@ -438,11 +438,9 @@ class CasaSmartFloorsView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         floor, failed = await self._call(
             lambda: registry.create_floor(
                 payload.get("name"), payload.get("sort_order")
@@ -467,11 +465,9 @@ class CasaSmartFloorView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         floor, failed = await self._call(
             lambda: registry.update_floor(
                 floor_id,
@@ -511,11 +507,9 @@ class CasaSmartRoomsView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         room, failed = await self._call(
             lambda: registry.create_room(
                 payload.get("name"),
@@ -543,11 +537,9 @@ class CasaSmartRoomView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         room, failed = await self._call(
             lambda: registry.update_room(
                 room_id,
@@ -605,11 +597,9 @@ class CasaSmartRoomTagsView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         tag, failed = await self._call(
             registry.create_room_tag,
             payload.get("name"),
@@ -635,11 +625,9 @@ class CasaSmartRoomTagView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         tag, failed = await self._call(
             lambda: registry.update_room_tag(
                 tag_id,
@@ -685,11 +673,9 @@ class CasaSmartRoomMoveView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if not isinstance(payload, dict):
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         key = payload.get("idempotency_key")
         request_id = (
             key[:12]
@@ -771,11 +757,9 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         assignment, failed = await self._call(
             lambda: registry.assign_device(
                 entity_id,
@@ -826,11 +810,9 @@ class CasaSmartUserDeviceView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         reject = self._scope_reject(
             claims,
             payload.get("control_entity_ids") or payload.get("entity_ids"),
@@ -865,11 +847,9 @@ class CasaSmartUserDeviceView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         reject = self._scope_reject(
             claims,
             payload.get("control_entity_ids") or payload.get("entity_ids"),
@@ -973,11 +953,9 @@ class CasaSmartUserDeviceGangView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         # The gang's entity must be in the caller's rooms; it needn't be served.
         reject = self._scope_reject(claims, [gang])
         if reject is not None:
@@ -1004,11 +982,9 @@ class CasaSmartScenesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         if (reject := self._energy_flag_reject(claims, payload)) is not None:
             return reject
         unserved = self._unserved_scene_entity(payload.get("entities"))
@@ -1046,11 +1022,9 @@ class CasaSmartSceneView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         if (reject := self._energy_flag_reject(claims, payload)) is not None:
             return reject
         if "entities" in payload:
@@ -1205,11 +1179,9 @@ class CasaSmartFavoritesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        payload = await json_body(request)
-        if payload is None:
-            return self.json_message(
-                "Body must be a JSON object", HTTPStatus.BAD_REQUEST
-            )
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
         entity_ids = payload.get("entity_ids")
         if not isinstance(entity_ids, list):
             return self.json_message(
