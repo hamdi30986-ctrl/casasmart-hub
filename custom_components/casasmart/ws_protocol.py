@@ -268,11 +268,9 @@ class CoalescingSendQueue:
 
     async def get(self) -> dict[str, Any]:
         """Pop the oldest frame, waiting until one is available."""
+        # Producers run on the same event loop, so nothing can append between
+        # the emptiness check and the clear.
         while not self._items:
             self._event.clear()
-            # Re-check after clear: a producer that appended between the empty
-            # check and the clear already fired _wake, which the clear would
-            # otherwise swallow — this guard stops a lost-wakeup hang.
-            if not self._items:
-                await self._event.wait()
+            await self._event.wait()
         return self._items.popleft()
