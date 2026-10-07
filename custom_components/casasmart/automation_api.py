@@ -1,40 +1,16 @@
-"""Automation config endpoints.
+"""Automation config endpoint for the app's own automations.
 
-The CasaSmart app creates, edits and deletes its automations through the
-hub, with a CasaSmart token, instead of calling Home Assistant's own
-``/api/config/automation/config/{id}`` with an HA token. The hub does what
-HA's config view does, including the entity-registry cleanup after a
-delete:
+GET, POST and DELETE /api/casasmart/automations/{config_key}/config let the
+app edit its automations with a CasaSmart token instead of calling HA's
+config API with an HA token. Only ids with the casa_automation_ prefix are
+reachable, and callers need automations.manage and an unscoped token
+(automations have no room). A save is checked with HA's own validator
+before automations.yaml is written. Like HA's config view, a delete removes
+the registry entry and does not reload.
 
-- ``GET    /api/casasmart/automations/{config_key}/config`` — one
-  automation's config plus its ``works_during_energy_saving`` flag, for
-  the editor's lazy load.
-- ``POST   /api/casasmart/automations/{config_key}/config`` — create or
-  update; the config is validated with HA's OWN automation validator
-  before a byte is written, then automations.yaml is rewritten
-  atomically and the automation component reloads just that id.
-- ``DELETE /api/casasmart/automations/{config_key}/config`` — remove
-  from automations.yaml and drop the automation's entity-registry entry,
-  which retires the running entity. Like HA's own config view, a delete
-  does not reload.
-
-All three sit behind ``automations.manage`` (admin + sub-admin — family
-members toggle and trigger through the command endpoint, they never
-rewrite configs), and all three refuse room-scoped tokens outright:
-automations have no room, so a scoped grant cannot contain them.
-
-The surface is scoped to the app's own automations — config keys MUST
-carry the ``casa_automation_`` prefix. Hub-internal and installer
-automations are not reachable here, in either direction.
-
-``works_during_energy_saving`` is the hub's own flag, kept in the Energy
-Saving flag store (``energy_runtime.EnergyFlags``) rather than in
-automations.yaml. Setting it needs ``energy.manage``.
-
-Automation STATE (on/off, last_triggered) deliberately does not live
-here: automation is an exposed domain in ``entity_bridge``, so state
-rides the same devices/WS feed as everything else, and enable/disable/
-trigger ride the whitelisted command endpoint.
+works_during_energy_saving is kept in the hub's EnergyFlags store, not in
+automations.yaml, and setting it needs energy.manage. Automation state and
+on/off/trigger go through the devices feed and the command endpoint.
 """
 
 from __future__ import annotations
@@ -89,15 +65,13 @@ class AutomationFileError(Exception):
 def _read_yaml(path: str) -> list[dict[str, Any]]:
     """Load automations.yaml; a missing or empty file is an empty list.
 
-    A present-but-non-list file (hand-edited into a dict/scalar) raises
-    instead of coercing to ``[]`` — silently treating corrupt content as
-    empty would DISCARD it on the next write.
+    Any other non-list content raises, because reading it as empty would
+    erase it on the next write.
     """
     if not os.path.isfile(path):
         return []
     content = load_yaml(path)
     if content is None:
-        # All-comments / empty file — legitimately no automations.
         return []
     if not isinstance(content, list):
         raise AutomationFileError(
@@ -107,17 +81,16 @@ def _read_yaml(path: str) -> list[dict[str, Any]]:
 
 
 def _write_yaml(path: str, data: list[dict[str, Any]]) -> None:
-    """Serialize BEFORE opening the file — a dump error must not truncate."""
+    """Write the list; it is serialized first so a dump error can't truncate."""
     contents = dump(data)
     write_utf8_file_atomic(path, contents)
 
 
 def _shared_mutation_lock(hass: HomeAssistant) -> asyncio.Lock:
-    """The ONE automations.yaml writer lock, shared across view instances.
+    """The automations.yaml writer lock, kept in hass.data.
 
-    ``build_views`` constructs fresh view objects for HA's own HTTP app and
-    the TLS listener (and again on each daily TLS refresh), all writing the
-    same file — so the lock lives in ``hass.data``, never on a view.
+    build_views makes separate view objects for HA's HTTP app and the TLS
+    listener (and again on each TLS refresh), and they all write one file.
     """
     return hass.data.setdefault(DOMAIN, {}).setdefault(
         "automation_mutation_lock", asyncio.Lock()
@@ -136,21 +109,17 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        # One writer at a time — concurrent saves must not interleave the
-        # read-modify-write on automations.yaml (same lock discipline as
-        # HA's own config view), whichever listener they arrive on.
+        # Saves must not interleave their read-modify-write of the file.
         self._mutation_lock = _shared_mutation_lock(hass)
 
     def _gate(
         self, request: web.Request
     ) -> tuple[dict[str, Any] | None, web.Response | None]:
-        """Auth + scope + ownership, shared by all three verbs."""
+        """Authenticate the caller and refuse room-scoped tokens."""
         claims, error = authenticate_request(self._hass, request, "automations.manage")
         if error is not None:
             return None, error
         if claims.get("rooms") is not None:
-            # Room-scoped tokens have no business in config-land, whatever
-            # their role claims — automations don't live in a room.
             return None, self.json_message(
                 "Automation management requires an unscoped token",
                 HTTPStatus.FORBIDDEN,
@@ -171,9 +140,6 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 HTTPStatus.BAD_REQUEST,
             )
         if not is_valid_casa_automation_key(config_key):
-            # Owns the prefix but carries an illegal character — a key the
-            # app would never generate. Refuse before it can reach
-            # automations.yaml.
             return self.json_message(
                 f"Invalid automation id {config_key!r}: only letters, digits "
                 "and underscores are allowed after the "
@@ -196,18 +162,13 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
     async def _load(
         self,
     ) -> tuple[list[dict[str, Any]] | None, web.Response | None]:
-        """Read automations.yaml off the event loop.
-
-        A file that is not a list, or cannot be parsed, is a 500 — never an
-        empty list that the next write would clobber it with.
-        """
+        """Read automations.yaml off the event loop; an unusable file is a 500."""
         try:
             data = await self._hass.async_add_executor_job(
                 _read_yaml, self._config_path
             )
         except (AutomationFileError, HomeAssistantError) as err:
-            # HomeAssistantError is how HA's YAML loader reports a file it
-            # cannot parse.
+            # HA's YAML loader reports a file it cannot parse this way.
             _LOGGER.error("automations.yaml unusable: %s", err)
             return None, self.json_message(
                 f"automations.yaml unusable: {err}",
@@ -240,7 +201,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return self.json({**value, "works_during_energy_saving": enabled})
 
     async def post(self, request: web.Request, config_key: str) -> web.Response:
-        """Create or update — validate with HA's validator, write, reload."""
+        """Create or update: validate with HA's validator, write, reload."""
         claims, error = self._gate(request)
         if error is not None:
             return error
@@ -252,8 +213,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
-        # The Energy Saving flag is the hub's, not part of HA's config: take
-        # it out before HA validates and stores the rest.
+        # The Energy Saving flag is the hub's, not part of HA's config.
         payload = dict(payload)
         energy_flag = payload.pop("works_during_energy_saving", _UNSET)
         if energy_flag is not _UNSET and not isinstance(energy_flag, bool):
@@ -269,9 +229,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 HTTPStatus.FORBIDDEN,
             )
 
-        # HA's own validator — the exact gate its native config API runs.
-        # Invalid configs die here, BEFORE automations.yaml is touched: a
-        # bad write would take every automation down on the next reload.
+        # The validator HA's config API runs. An invalid file would take
+        # every automation down on the next reload.
         try:
             await async_validate_config_item(self._hass, config_key, dict(payload))
         except (vol.Invalid, HomeAssistantError) as err:
@@ -296,8 +255,7 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 )
 
         await self._reload(config_key)
-        # Answer with the stored flag, so an edit that did not send it still
-        # reports the value the automation keeps.
+        # Report the stored flag, even when this edit did not send one.
         flags = self._energy_flags()
         effective_flag = False
         if flags is not None and energy_flag is not _UNSET:
@@ -345,11 +303,9 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                     "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
                 )
 
-        # The cleanup HA's own config view does on delete, and like it no
-        # reload: removing the registry entry (unique_id == config key)
-        # retires the running automation entity. Left alone, the entry
-        # would linger after the config is gone and haunt the entities feed
-        # as "unavailable".
+        # As in HA's config view: no reload. Removing the registry entry
+        # (unique_id is the config key) retires the running entity, which
+        # would otherwise linger in the devices feed as "unavailable".
         ent_reg = er.async_get(self._hass)
         entity_id = ent_reg.async_get_entity_id(
             AUTOMATION_DOMAIN, AUTOMATION_DOMAIN, config_key
@@ -364,13 +320,12 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
         return self.json({"result": "ok", "id": config_key})
 
     async def _reload(self, config_key: str) -> None:
-        """Reload just this automation id (HA 2024.6+ scoped reload)."""
+        """Reload only this automation id (HA 2024.6+ scoped reload)."""
         try:
             await self._hass.services.async_call(
                 AUTOMATION_DOMAIN, SERVICE_RELOAD, {CONF_ID: config_key}
             )
         except HomeAssistantError as err:
-            # The yaml is already written and valid — a reload hiccup
-            # self-heals on the next reload/restart. Log, don't fail the
-            # request that did its job.
+            # The file is already written and valid; the next reload or
+            # restart picks it up.
             _LOGGER.warning("automation reload failed: %s", err)
