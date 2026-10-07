@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -22,8 +23,10 @@ from casasmart.const import EVENT_ENERGY_CHANGED  # noqa: E402
 from casasmart.energy import (  # noqa: E402
     LEVEL_LOW,
     EnergyEngine,
+    EnergyInactiveError,
     default_level_config,
 )
+from casasmart.energy_adapter import EnergyAdapter  # noqa: E402
 from casasmart.energy_runtime import (  # noqa: E402
     EnergyAutomationManager,
     EnergyController,
@@ -42,6 +45,17 @@ class _States:
         if domain is None:
             return list(self.values)
         return [item for item in self.values if item.domain == domain]
+
+    def set(self, entity_id, state):
+        self.values = [
+            State(entity_id, state, dict(item.attributes))
+            if item.entity_id == entity_id
+            else item
+            for item in self.values
+        ]
+
+    def state_of(self, entity_id):
+        return next(item.state for item in self.values if item.entity_id == entity_id)
 
 
 class _Services:
@@ -62,6 +76,9 @@ class _Bus:
 
     def async_fire(self, event_type, data=None):
         self.fired.append((event_type, data))
+
+    def async_listen(self, _event_type, _callback):
+        return lambda: None
 
 
 class _Hass:
@@ -95,6 +112,68 @@ class _Adapter:
         return {"reason": reason, "commands": 0, "failures": 0, "issues": []}
 
     def issues(self):
+        return []
+
+
+class _Steps:
+    """Number every awaited HA call and hold one of them open on request."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.labels: list[str] = []
+        self.hold_at: int | None = None
+        self.held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def hold(self, offset: int) -> None:
+        """Hold the ``offset``-th call from now (0 = the next one)."""
+        self.hold_at = self.count + offset
+
+    async def step(self, label: str) -> None:
+        index = self.count
+        self.count += 1
+        self.labels.append(label)
+        if index == self.hold_at:
+            self.held.set()
+            await self.release.wait()
+
+
+class _SteppedServices(_Services):
+    """Service calls that take effect only once their step completes."""
+
+    def __init__(self, states, steps) -> None:
+        super().__init__()
+        self._states = states
+        self._steps = steps
+
+    async def async_call(self, domain, service, data, blocking=False):
+        entity_id = data["entity_id"]
+        self.calls.append((domain, service, entity_id, blocking))
+        await self._steps.step(f"{domain}.{service} {entity_id}")
+        self._states.set(entity_id, "on" if service == "turn_on" else "off")
+
+
+class _SteppedHass(_Hass):
+    """Executor jobs and service calls both go through one ``_Steps``."""
+
+    def __init__(self, states=()) -> None:
+        super().__init__(states)
+        self.steps = _Steps()
+        self.services = _SteppedServices(self.states, self.steps)
+
+    async def async_add_executor_job(self, func, *args):
+        await self.steps.step(getattr(func, "__name__", "job"))
+        return func(*args)
+
+
+class _Rooms:
+    def __init__(self, rooms) -> None:
+        self.rooms = rooms
+
+    def room_of(self, entity_id):
+        return self.rooms.get(entity_id)
+
+    def list_user_devices(self):
         return []
 
 
@@ -201,6 +280,226 @@ class EnergyRuntimeTestCase(unittest.IsolatedAsyncioTestCase):
             [kind for kind, _data in hass.bus.fired],
             [EVENT_ENERGY_CHANGED, EVENT_ENERGY_CHANGED, EVENT_ENERGY_CHANGED],
         )
+
+    # -- overlapping transitions ------------------------------------------
+
+    def home(self):
+        """A fresh home: real engine, flags, manager and adapter over stepped HA.
+
+        Low turns off two unflagged automations and one configured plug.
+        """
+        storage = HubStorage(Path(tempfile.mkdtemp(dir=self.tmp.name)) / "hub.db")
+        storage.open()
+        self.addCleanup(storage.close)
+        engine = EnergyEngine(
+            storage.table("energy_configs"),
+            storage.table("energy_state"),
+            storage.energy_events(),
+        )
+        engine.warm_up()
+        config = default_level_config(LEVEL_LOW)
+        config.update(setup_complete=True, plug_offs=["switch.plug"])
+        engine.replace_config(LEVEL_LOW, config)
+        flags = EnergyFlags(storage.table("energy_flags"))
+        hass = _SteppedHass(
+            [
+                State("automation.a", "on", {"id": "a"}),
+                State("automation.b", "on", {"id": "b"}),
+                State("switch.plug", "on"),
+            ]
+        )
+        adapter = EnergyAdapter(
+            hass,
+            engine,
+            _Rooms({"switch.plug": "den"}),
+            area_resolver=lambda _hass, _entity_id: None,
+            category_resolver=lambda _hass, _entity_id: None,
+        )
+        manager = EnergyAutomationManager(hass, engine, flags)
+        return EnergyController(hass, engine, adapter, manager), hass, flags
+
+    async def deactivate_while_held(self, controller, hass, transition, offset):
+        """Hold ``transition``'s ``offset``-th HA call, deactivate, then let go.
+
+        Returns the deactivated state, the transition's outcome, and every
+        service call made after the deactivate had returned.
+        """
+        hass.steps.hold(offset)
+        running = asyncio.create_task(transition)
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+        deactivating = asyncio.create_task(controller.async_deactivate(actor="owner"))
+        await asyncio.sleep(0)
+        hass.steps.release.set()
+        state = await asyncio.wait_for(deactivating, 1)
+        done = len(hass.services.calls)
+        (outcome,) = await asyncio.gather(running, return_exceptions=True)
+        await asyncio.sleep(0)
+        return state, outcome, hass.services.calls[done:]
+
+    def assert_deactivate_won(self, controller, hass, flags, state, late):
+        self.assertFalse(state["active"])
+        self.assertIsNone(controller.engine.active_level)
+        self.assertEqual(late, [])
+        self.assertEqual(flags.disabled_automations(), [])
+        self.assertEqual(hass.states.state_of("automation.a"), "on")
+        self.assertEqual(hass.states.state_of("automation.b"), "on")
+
+    async def test_single_activation_is_unaffected(self):
+        controller, hass, flags = self.home()
+        result = await controller.async_activate(LEVEL_LOW, actor="owner")
+        self.assertEqual(result["state"]["active_level"], LEVEL_LOW)
+        self.assertEqual(
+            (result["apply"]["commands"], result["apply"]["failures"]), (1, 0)
+        )
+        self.assertEqual(
+            hass.services.calls,
+            [
+                ("automation", "turn_off", "automation.a", True),
+                ("automation", "turn_off", "automation.b", True),
+                ("switch", "turn_off", "switch.plug", True),
+            ],
+        )
+        self.assertEqual(flags.disabled_automations(), ["automation.a", "automation.b"])
+        self.assertEqual(hass.bus.fired, [(EVENT_ENERGY_CHANGED, None)])
+
+    async def test_activate_then_deactivate_restores_every_automation(self):
+        controller, hass, flags = self.home()
+        await controller.async_activate(LEVEL_LOW, actor="owner")
+        state = await controller.async_deactivate(actor="owner")
+        self.assert_deactivate_won(controller, hass, flags, state, [])
+        self.assertEqual(hass.states.state_of("switch.plug"), "off")
+
+    async def test_deactivate_wins_over_activation_at_every_awaited_step(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        for offset, label in enumerate(dry_hass.steps.labels):
+            with self.subTest(step=offset, call=label):
+                controller, hass, flags = self.home()
+                state, outcome, late = await self.deactivate_while_held(
+                    controller,
+                    hass,
+                    controller.async_activate(LEVEL_LOW, actor="owner"),
+                    offset,
+                )
+                self.assert_deactivate_won(controller, hass, flags, state, late)
+                self.assertIsInstance(outcome, EnergyInactiveError)
+
+    async def test_deactivate_wins_over_reapply_at_every_awaited_step(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        before = dry_hass.steps.count
+        await dry.async_reapply()
+        for offset, label in enumerate(dry_hass.steps.labels[before:]):
+            with self.subTest(step=offset, call=label):
+                controller, hass, flags = self.home()
+                await controller.async_activate(LEVEL_LOW, actor="owner")
+                state, outcome, late = await self.deactivate_while_held(
+                    controller, hass, controller.async_reapply(actor="owner"), offset
+                )
+                self.assert_deactivate_won(controller, hass, flags, state, late)
+                self.assertIsInstance(outcome, EnergyInactiveError)
+
+    async def test_deactivate_wins_over_startup_apply_at_every_awaited_step(self):
+        dry, dry_hass, _flags = self.home()
+        dry.engine.activate(LEVEL_LOW)
+        await dry.async_start()
+        for offset, label in enumerate(dry_hass.steps.labels):
+            with self.subTest(step=offset, call=label):
+                controller, hass, flags = self.home()
+                controller.engine.activate(LEVEL_LOW)
+                state, outcome, late = await self.deactivate_while_held(
+                    controller, hass, controller.async_start(), offset
+                )
+                self.assert_deactivate_won(controller, hass, flags, state, late)
+                self.assertIsNone(outcome)
+
+    async def test_deactivate_does_not_wait_for_a_hung_device_command(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        controller, hass, flags = self.home()
+        hass.steps.hold(dry_hass.steps.labels.index("switch.turn_off switch.plug"))
+        activating = asyncio.create_task(
+            controller.async_activate(LEVEL_LOW, actor="owner")
+        )
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+
+        # The plug never answers; the deactivate must not wait for it.
+        state = await asyncio.wait_for(controller.async_deactivate(actor="owner"), 1)
+        self.assert_deactivate_won(controller, hass, flags, state, [])
+        with self.assertRaises(EnergyInactiveError):
+            await asyncio.wait_for(activating, 1)
+        hass.steps.release.set()
+        await asyncio.sleep(0)
+        self.assertEqual(hass.states.state_of("switch.plug"), "on")
+
+    async def test_deactivate_stops_the_automation_pass_at_the_next_step(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        controller, hass, flags = self.home()
+        state, outcome, late = await self.deactivate_while_held(
+            controller,
+            hass,
+            controller.async_activate(LEVEL_LOW, actor="owner"),
+            dry_hass.steps.labels.index("automation.turn_off automation.a"),
+        )
+        self.assert_deactivate_won(controller, hass, flags, state, late)
+        self.assertIsInstance(outcome, EnergyInactiveError)
+        # The in-flight turn_off finished and was undone; nothing else ran.
+        self.assertEqual(
+            hass.services.calls,
+            [
+                ("automation", "turn_off", "automation.a", True),
+                ("automation", "turn_on", "automation.a", True),
+            ],
+        )
+
+    async def test_activation_queued_behind_a_newer_deactivate_never_starts(self):
+        controller, hass, flags = self.home()
+        hass.steps.hold(0)
+        first = asyncio.create_task(controller.async_deactivate(actor="owner"))
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+        activating = asyncio.create_task(
+            controller.async_activate(LEVEL_LOW, actor="owner")
+        )
+        await asyncio.sleep(0)
+        second = asyncio.create_task(controller.async_deactivate(actor="owner"))
+        await asyncio.sleep(0)
+
+        hass.steps.release.set()
+        await first
+        with self.assertRaises(EnergyInactiveError):
+            await activating
+        state = await second
+        self.assert_deactivate_won(controller, hass, flags, state, [])
+        self.assertEqual(controller.engine.recent_events(kinds=["activated"]), [])
+        self.assertEqual(hass.services.calls, [])
+
+    async def test_reapply_waits_for_the_activation_in_flight(self):
+        dry, dry_hass, _flags = self.home()
+        await dry.async_activate(LEVEL_LOW)
+        controller, hass, flags = self.home()
+        hass.steps.hold(dry_hass.steps.labels.index("automation.turn_off automation.a"))
+        activating = asyncio.create_task(
+            controller.async_activate(LEVEL_LOW, actor="owner")
+        )
+        await asyncio.wait_for(hass.steps.held.wait(), 1)
+        reached = hass.steps.count
+        reapplying = asyncio.create_task(controller.async_reapply(actor="owner"))
+        await asyncio.sleep(0)
+        self.assertEqual(hass.steps.count, reached)
+
+        hass.steps.release.set()
+        await activating
+        result = await reapplying
+        self.assertEqual(result["state"]["active_level"], LEVEL_LOW)
+        self.assertEqual(
+            [call for call in hass.services.calls if call[0] == "automation"],
+            [
+                ("automation", "turn_off", "automation.a", True),
+                ("automation", "turn_off", "automation.b", True),
+            ],
+        )
+        self.assertEqual(flags.disabled_automations(), ["automation.a", "automation.b"])
 
 
 if __name__ == "__main__":

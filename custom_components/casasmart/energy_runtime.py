@@ -7,14 +7,16 @@ transaction ordering around HA automations and the device adapter
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 
 from .auth_tokens import ROLE_ADMIN
 from .const import EVENT_ENERGY_CHANGED
-from .energy import EnergyEngine
+from .energy import EnergyEngine, EnergyInactiveError
 from .energy_adapter import EnergyAdapter
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,11 +127,16 @@ class EnergyAutomationManager:
             return value.strip()
         return str(state.entity_id).partition(".")[2]
 
-    async def async_enforce_active(self) -> None:
+    async def async_enforce_active(
+        self, *, still_wanted: Callable[[], bool] | None = None
+    ) -> None:
         """Turn off every currently-enabled unflagged automation.
 
         The remembered set is updated after every successful call so a process
         crash cannot lose which automations CasaSmart owes the user a restore.
+        ``still_wanted`` is asked before each ``turn_off``; once it says no,
+        the pass stops, and every automation already turned off is remembered
+        for the deactivation that superseded it.
         """
         remembered = set(
             await self._hass.async_add_executor_job(self._flags.disabled_automations)
@@ -150,6 +157,8 @@ class EnergyAutomationManager:
             )
             if allowed:
                 continue
+            if still_wanted is not None and not still_wanted():
+                return
             try:
                 await self._hass.services.async_call(
                     "automation",
@@ -248,20 +257,28 @@ class EnergyController:
         self.engine = engine
         self.adapter = adapter
         self.automations = automations
+        # Startup/recovery, activate, deactivate and reapply run one at a time.
+        # Each deactivate request bumps the generation, so an older transition
+        # still waiting for the lock or part-way through can tell it lost.
+        self._lock = asyncio.Lock()
+        self._generation = 0
+        self._apply_task: asyncio.Task[dict[str, Any]] | None = None
 
     def notify_changed(self) -> None:
         self._hass.bus.async_fire(EVENT_ENERGY_CHANGED)
 
     async def async_start(self) -> None:
         self.adapter.async_start()
-        if self.engine.active_level is None:
-            # Crash recovery: a completed deactivation may have left only a
-            # failed automation restore pending. Retry without touching devices.
-            await self.automations.async_restore()
-            return
-        await self.automations.async_enforce_active()
-        await self.adapter.async_apply(reason="startup")
-        self.notify_changed()
+        generation = self._generation
+        async with self._lock:
+            if self.engine.active_level is None:
+                # Crash recovery: a completed deactivation may have left only a
+                # failed automation restore pending. Retry without touching devices.
+                await self.automations.async_restore()
+                return
+            if await self._async_apply("startup", generation) is None:
+                return
+            self.notify_changed()
 
     def async_stop(self) -> None:
         """Stop listeners/timers without changing durable active state."""
@@ -280,33 +297,77 @@ class EnergyController:
         smart_lockout_enabled: bool | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        state = await self._hass.async_add_executor_job(
-            lambda: self.engine.activate(
-                level,
-                smart_lockout_enabled=smart_lockout_enabled,
-                actor=actor,
+        generation = self._generation
+        async with self._lock:
+            self._raise_if_superseded(generation)
+            state = await self._hass.async_add_executor_job(
+                lambda: self.engine.activate(
+                    level,
+                    smart_lockout_enabled=smart_lockout_enabled,
+                    actor=actor,
+                )
             )
-        )
-        await self.automations.async_enforce_active()
-        applied = await self.adapter.async_apply(reason="activation")
-        self.notify_changed()
-        return {"state": state, "apply": applied}
+            applied = await self._async_apply("activation", generation)
+            self._raise_if_superseded(generation)
+            self.notify_changed()
+            return {"state": state, "apply": applied}
 
     async def async_deactivate(self, *, actor: str | None = None) -> dict[str, Any]:
-        level = self.engine.active_level
-        state = await self._hass.async_add_executor_job(
-            lambda: self.engine.deactivate(actor=actor)
-        )
-        self.adapter.async_mode_stopped()
-        await self.automations.async_restore(level=level)
-        self.notify_changed()
-        return state
+        # The newest request wins. Stop an apply in flight rather than wait
+        # for every device in the home: the tablet gives up after 15 seconds.
+        self._generation += 1
+        if self._apply_task is not None:
+            self._apply_task.cancel()
+        async with self._lock:
+            level = self.engine.active_level
+            state = await self._hass.async_add_executor_job(
+                lambda: self.engine.deactivate(actor=actor)
+            )
+            self.adapter.async_mode_stopped()
+            await self.automations.async_restore(level=level)
+            self.notify_changed()
+            return state
 
     async def async_reapply(self, *, actor: str | None = None) -> dict[str, Any]:
-        state = await self._hass.async_add_executor_job(
-            lambda: self.engine.reapply(actor=actor)
-        )
-        await self.automations.async_enforce_active()
-        applied = await self.adapter.async_apply(reason="reapply")
-        self.notify_changed()
-        return {"state": state, "apply": applied}
+        generation = self._generation
+        async with self._lock:
+            self._raise_if_superseded(generation)
+            state = await self._hass.async_add_executor_job(
+                lambda: self.engine.reapply(actor=actor)
+            )
+            applied = await self._async_apply("reapply", generation)
+            self._raise_if_superseded(generation)
+            self.notify_changed()
+            return {"state": state, "apply": applied}
+
+    def _raise_if_superseded(self, generation: int) -> None:
+        if generation != self._generation:
+            raise EnergyInactiveError("Energy Saving was deactivated meanwhile")
+
+    async def _async_apply(self, reason: str, generation: int) -> dict[str, Any] | None:
+        """Disable automations, then apply devices; ``None`` once superseded.
+
+        The automation pass stops before its next ``turn_off``, never inside
+        one, so each automation it turned off is remembered for the restore.
+        The device pass runs as its own task that a deactivate cancels
+        outright, so a slow or hung device cannot hold the deactivate up and
+        no command from the abandoned pass can land after it.
+        """
+
+        def still_wanted() -> bool:
+            return generation == self._generation
+
+        await self.automations.async_enforce_active(still_wanted=still_wanted)
+        if not still_wanted():
+            return None
+        task = asyncio.create_task(self.adapter.async_apply(reason=reason))
+        self._apply_task = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return None
+        finally:
+            self._apply_task = None

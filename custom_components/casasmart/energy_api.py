@@ -461,6 +461,8 @@ class CasaSmartEnergyActivateView(_EnergyView):
             EnergyConfigError,
             EnergySetupRequiredError,
             EnergyAlreadyActiveError,
+            # A deactivate that arrived while this activation ran wins.
+            EnergyInactiveError,
             UnknownEnergyLevelError,
         ) as err:
             return self._energy_error(err)
