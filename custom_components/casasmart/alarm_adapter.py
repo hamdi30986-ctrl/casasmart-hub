@@ -165,6 +165,12 @@ class AlarmAdapter:
         except Exception:
             _LOGGER.exception("Alarm tick failed")
             return
+        if alarm_event is None:
+            # The timer runs on the loop's monotonic clock and the engine on
+            # wall-clock time, so it can fire just before the deadline. Re-arm
+            # for the remainder (a no-op once the countdown is over).
+            self._sync_pending_timer()
+            return
         self._react(alarm_event)
 
     # -- reactions -------------------------------------------------------------
