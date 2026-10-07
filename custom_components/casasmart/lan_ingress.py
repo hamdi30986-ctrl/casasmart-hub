@@ -5,9 +5,9 @@ hubs the TLS listener (``tls.py``) sees the phone's real address, so the LAN
 gate (``auth_api.is_lan_request``) simply checks that address.
 
 Docker Desktop is different: every connection published into its VM arrives
-with a synthetic source address, and which one is not stable (Docker Desktop
-4.68 hands out arbitrary public addresses after a container restart, where it
-used to show the bridge gateway ``172.18.0.1``). There the documented setup
+with a synthetic source address, and which one is not stable (after a
+container restart Docker Desktop 4.68 can show an arbitrary public address
+instead of the bridge gateway ``172.18.0.1``). There the documented setup
 (``deploy/macos``) publishes the TLS port to ``127.0.0.1`` only and fronts it
 with a byte-for-byte relay that admits only LAN clients, so *arriving on the
 TLS listener* is the LAN proof and the rewritten address is not.
@@ -43,6 +43,7 @@ LAN_RELAY_INGRESS_OFF = "off"
 
 
 def _is_explicit(setting: object) -> bool:
+    """An operator's explicit choice: "on", "off" or a JSON boolean."""
     return isinstance(setting, bool) or setting in (
         LAN_RELAY_INGRESS_ON,
         LAN_RELAY_INGRESS_OFF,
@@ -67,6 +68,7 @@ def resolve_lan_relay_ingress(setting: object) -> bool:
 def needs_relay_ingress_hint(setting: object, proc_version: str | None) -> bool:
     """True on Docker Desktop when the operator hasn't chosen on or off.
 
-    LAN pairing is refused there until the operator opts in, so setup says so.
+    There the address check judges made-up addresses, so LAN pairing works or
+    fails unpredictably until the operator chooses; setup says what to set.
     """
     return is_docker_desktop_kernel(proc_version) and not _is_explicit(setting)

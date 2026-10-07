@@ -2,6 +2,11 @@
 
 A permanent P-256 identity key (what paired phones pin) signs a renewable leaf
 certificate; ``CasaSmartTlsServer`` serves the CasaSmart views behind it.
+
+Phones trust the hub by pinning the identity key's SHA-256 SPKI fingerprint at
+first contact, not through a certificate authority, so the leaf can be
+re-minted whenever it nears expiry without disturbing any phone. The identity
+key is never replaced automatically: losing it unpairs every phone.
 """
 
 from __future__ import annotations
@@ -23,21 +28,23 @@ from cryptography.x509.oid import NameOID
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# Files in the hub's data dir. The identity key is permanent; the leaf key and
+# certificate are disposable and re-minted from it.
 IDENTITY_KEY_FILENAME = "identity_key.pem"
-
 TLS_CERT_FILENAME = "tls_cert.pem"
 TLS_KEY_FILENAME = "tls_key.pem"
 
+# Leaf lifetime, and how close to expiry the daily check re-mints it.
 TLS_CERT_VALIDITY_DAYS = 365
 TLS_CERT_RENEW_MARGIN_DAYS = 30
 
-
+# Names on the leaf. Phones verify the pinned identity, not these.
 _ISSUER_CN = "CasaSmart Hub Identity"
 _SUBJECT_CN = "casasmart-hub"
 _SAN_DNS = "casasmart-hub.local"
 
-
+# A fresh leaf is valid from an hour back, so a client clock running slightly
+# behind the hub's doesn't see a certificate from the future.
 _BACKDATE = timedelta(hours=1)
 
 
@@ -52,6 +59,12 @@ class IdentityError(Exception):
 
 
 class TlsIdentitySigner:
+    """Signs with the identity key on behalf of the push relay registration.
+
+    Exposes only the public key and a sign operation, so callers never hold
+    the private key itself.
+    """
+
     _SCALAR_BYTES = 32
 
     def __init__(self, private_key: ec.EllipticCurvePrivateKey) -> None:
@@ -66,6 +79,11 @@ class TlsIdentitySigner:
         return self._public_spki_der
 
     def sign(self, message: bytes) -> bytes:
+        """ECDSA-SHA256 signature as raw ``r || s`` (64 bytes, IEEE P1363).
+
+        The format WebCrypto verifies, unlike the DER that ``cryptography``
+        produces.
+        """
         der_signature = self._private_key.sign(message, ec.ECDSA(hashes.SHA256()))
         r, s = decode_dss_signature(der_signature)
         return r.to_bytes(self._SCALAR_BYTES, "big") + s.to_bytes(
@@ -75,6 +93,13 @@ class TlsIdentitySigner:
 
 @dataclass(frozen=True)
 class TlsMaterial:
+    """Everything the listener and its callers need from one TLS check.
+
+    ``identity_fingerprint`` is what phones pin, mDNS advertises and the
+    handshake serves; ``leaf_rotated`` says a new leaf was just minted and
+    the listener must restart to serve it.
+    """
+
     identity_public_pem: str
     identity_fingerprint: str
     identity_signer: TlsIdentitySigner
@@ -85,6 +110,11 @@ class TlsMaterial:
 
 
 def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
+    """Load the permanent identity key, creating it on first start only.
+
+    Raises IdentityError when the file exists but can't be used; it is never
+    replaced automatically.
+    """
     key_path = data_dir / IDENTITY_KEY_FILENAME
     if key_path.exists():
         try:
@@ -133,6 +163,7 @@ def _identity_public_pem(key: ec.EllipticCurvePrivateKey) -> str:
 
 
 def _identity_fingerprint(key: ec.EllipticCurvePrivateKey) -> str:
+    """SHA-256 hex of the identity public key's SPKI DER: the pinned value."""
     spki = key.public_key().public_bytes(
         serialization.Encoding.DER,
         serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -228,6 +259,8 @@ def _mint_leaf(
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
+    # Key first, certificate second: a crash in between leaves a mismatched
+    # pair, which the next check rejects and re-mints.
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(key_pem)
@@ -242,6 +275,12 @@ def _mint_leaf(
 def ensure_tls_material(
     data_dir: Path, validity_days: int = TLS_CERT_VALIDITY_DAYS
 ) -> TlsMaterial:
+    """Load the identity, re-mint the leaf if needed, and describe both.
+
+    Blocking (file I/O and key generation): run it in the executor. Called at
+    setup and on the daily check. Raises IdentityError for an unusable
+    identity key.
+    """
     identity = _load_or_create_identity(data_dir)
     cert_path = data_dir / TLS_CERT_FILENAME
     key_path = data_dir / TLS_KEY_FILENAME
@@ -265,9 +304,9 @@ def ensure_tls_material(
 class CasaSmartTlsServer:
     """The CasaSmart API on its own HTTPS port.
 
-    Serves the exact same view instances/registration path as the plain
-    HA-port API (one code path — same auth gates, same filtering), just
-    behind TLS with the hub-issued leaf. Restarting the site (not the
+    Serves the same views as the plain HA-port API (both come from
+    ``api.build_views``: one code path, same auth gates, same filtering),
+    just behind TLS with the hub-issued leaf. Restarting the site (not the
     runner) is how a rotated leaf goes live.
     """
 
@@ -288,17 +327,21 @@ class CasaSmartTlsServer:
 
     @property
     def port(self) -> int:
+        """The configured listening port."""
         return self._port
 
     @property
     def running(self) -> bool:
+        """True while the listener is bound and serving."""
         return self._site is not None
 
     @property
     def material(self) -> TlsMaterial:
+        """The TLS material currently served."""
         return self._material
 
     def _ssl_context(self) -> ssl.SSLContext:
+        """Server context for the current leaf (blocking: reads the files)."""
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(
@@ -348,6 +391,7 @@ class CasaSmartTlsServer:
         await self.async_start(views)
 
     async def async_stop(self) -> None:
+        """Close the listener and release the aiohttp runner."""
         if self._site is not None:
             await self._site.stop()
             self._site = None

@@ -1,7 +1,11 @@
 """CasaSmart Hub integration: config-entry setup, teardown and services.
 
-Opens the hub's storage and engines, registers the REST/WS views and
-``casasmart.*`` services, and starts the TLS, mDNS, push and tunnel runtimes.
+Setup opens the hub's storage and engines, makes sure the owner's pairing and
+recovery codes exist, registers the REST/WebSocket views and the
+``casasmart.*`` services, and starts the runtimes: the hub's own TLS listener,
+mDNS discovery, the push relay leg, the Home Assistant adapters (alarm, energy,
+audio, athan) and the Cloudflare tunnel reconciler. Blocking storage work runs
+in the executor.
 """
 
 from __future__ import annotations
@@ -136,7 +140,7 @@ from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
 
-
+# Persistent-notification ids, so a later run can replace or dismiss each one.
 _NOTIFY_TUNNEL_UNAVAILABLE = f"{DOMAIN}_tunnel_control_unavailable"
 _NOTIFY_TUNNEL_AUTO_DISABLED = f"{DOMAIN}_tunnel_auto_disabled"
 _NOTIFY_TUNNEL_ERROR = f"{DOMAIN}_tunnel_control_error"
@@ -144,8 +148,10 @@ _NOTIFY_TUNNEL_EDGE_DOWN = f"{DOMAIN}_tunnel_edge_down"
 _NOTIFY_RELAY_ACTIVATION = f"{DOMAIN}_relay_activation"
 _NOTIFY_RELAY_CONFIGURATION = f"{DOMAIN}_relay_configuration"
 
+# Developer seam (dev_enroll.py): off unless this environment variable is set.
 _DEV_ENROLL_ENV = "CASASMART_DEV_ENROLL"
 
+# A hub_config key retired in 2.3.0; setup warns while it is still present.
 _RETIRED_EXTRA_LAN_CIDRS_KEY = "pairing_extra_lan_cidrs"
 
 
@@ -160,6 +166,14 @@ type CasaSmartConfigEntry = ConfigEntry[CasaSmartRuntimeData]
 
 @dataclass
 class CasaSmartRuntimeData:
+    """Everything one loaded config entry owns, kept on ``entry.runtime_data``.
+
+    The required fields are the storage-backed engines ``_open_storage``
+    builds. The optional ones are runtimes started later in setup; each stays
+    None while its feature is off or failed to start (no TLS identity, no
+    relay configured), and teardown skips it.
+    """
+
     storage: HubStorage
     hub_config: JsonConfigStore
     auth: AuthEngine
@@ -226,6 +240,15 @@ def _open_storage(
     str | None,
     str | None,
 ]:
+    """Open the database and hub config and build every storage-backed engine.
+
+    Blocking (file and SQLite I/O): run it in the executor. Also makes sure the
+    permanent owner codes exist. The hashes of the pairing sticker and the
+    recovery card live in hub_config and are reinstalled on every boot; a code
+    is minted only when its hash is missing (first start, or after a factory
+    reset deleted it). The last two items returned are those freshly minted
+    plaintext codes, or None: this is the only time they exist in the clear.
+    """
     data_dir.mkdir(parents=True, exist_ok=True)
     storage = HubStorage(
         db_path=data_dir / DB_FILENAME,
@@ -256,6 +279,7 @@ def _open_storage(
         recovery_code = recovery.mint_permanent()
         hub_config.set(RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code))
 
+    # The key speakers present to fetch their broker settings; created once.
     if not hub_config.get(PROVISION_SECRET_CONFIG_KEY):
         hub_config.set(PROVISION_SECRET_CONFIG_KEY, secrets.token_urlsafe(24))
     registry = RegistryEngine(
@@ -323,6 +347,13 @@ def _open_storage(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
+    """Upgrade an older config entry to ``CONFIG_ENTRY_VERSION``.
+
+    Version 3 moved the push relay URL from hub_config into the entry options.
+    A stored URL that isn't a usable production HTTPS origin is not carried
+    over: push stays off, and a notification asks for a relay and a fresh
+    activation code.
+    """
     if entry.version > CONFIG_ENTRY_VERSION:
         _LOGGER.error(
             "Cannot migrate CasaSmart config entry version %s to %s",
@@ -376,6 +407,14 @@ async def async_migrate_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) 
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
+    """Set up the hub from its config entry.
+
+    Storage and the engines come first. The TLS listener starts before mDNS
+    and push, which both need its identity fingerprint. Optional parts (the
+    TLS port, mDNS, push, the tunnel) log their failures and the rest of the
+    hub keeps running; only storage that won't open (retried by Home
+    Assistant) or a corrupt identity key (which needs a person) stops setup.
+    """
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
 
     try:
@@ -419,6 +458,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     )
 
     suggestion_store = SuggestionStore(storage)
+    # Marks suggestion runs a restart interrupted as unknown; never reruns them.
     await hass.async_add_executor_job(suggestion_store.recover)
     entry.runtime_data.suggestions = SuggestionRuntime(
         hass, suggestion_store, registry, now_data=now_data
@@ -426,6 +466,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
 
+    # Home Assistant doesn't unload config entries when it stops, so the
+    # database is checkpointed and closed here instead.
     async def _async_close_storage_on_stop(_event: Event) -> None:
         entry.runtime_data.suggestions.stop()
         await hass.async_add_executor_job(storage.close)
@@ -603,19 +645,18 @@ def _dev_enroll_enabled() -> bool:
 async def _async_setup_dev_enroll(
     hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
 ) -> None:
-    """DEV-ONLY: keep the trusted dev keys enrolled across factory resets.
+    """Keep the developer manifest's devices enrolled (development hubs only).
 
-    Gated behind [_DEV_ENROLL_ENV] (default OFF): without the opt-in the dev
-    manifest never auto-enrolls anyone, so dev/test hubs — and any hub that
-    accidentally ships a manifest — stay clean single-admin by default.
+    Off unless ``CASASMART_DEV_ENROLL`` is set (see ``dev_enroll.py``), so a
+    hub that happens to carry a ``dev_devices.json`` still enrolls nobody.
 
-    When enabled, provisions the ``dev_devices.json`` manifest now (boot /
-    service-reset reload) and re-runs it on every ``EVENT_AUTH_CHANGED`` so the
-    BUTTON reset — which wipes the auth tables in place without reloading the
-    entry — also re-provisions. A no-op on any hub without the manifest. The
-    seam is idempotent and never fires ``EVENT_AUTH_CHANGED``
-    itself, so the listener can't feed itself. The listener is torn down with
-    the entry via ``async_on_unload``.
+    When on, provisions the manifest now (boot, or the reload after
+    ``casasmart.factory_reset``) and again on every ``EVENT_AUTH_CHANGED``, so
+    the "Regenerate pairing code" button, which wipes the devices in place
+    without a reload, re-provisions too. A no-op without a manifest.
+    ``ensure_dev_devices`` is idempotent and never fires
+    ``EVENT_AUTH_CHANGED`` itself, so the listener can't feed itself; it is
+    removed with the entry.
     """
     if not _dev_enroll_enabled():
         return
@@ -695,6 +736,9 @@ async def _async_start_tls(
     break every paired phone's pin — tls.py documents the recovery). A
     port that won't bind does NOT abort: it's logged and retried on the
     daily tick, and the plain views on HA's port keep working meanwhile.
+
+    Also settles whether this listener counts as LAN ingress
+    (``lan_ingress.py``) and logs what that means on this host.
     """
     runtime_data = entry.runtime_data
     try:
@@ -805,6 +849,13 @@ async def _async_start_mdns(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
 async def _async_start_push(
     hass: HomeAssistant, entry: CasaSmartConfigEntry, data_dir: Path
 ) -> None:
+    """Start the push relay leg: dispatcher, relay registration, tank alerts.
+
+    Needs the TLS identity (the relay knows the hub by its fingerprint) and a
+    configured relay URL; without either, push stays off and the rest of the
+    hub runs normally. An activation code left by the config flow goes to the
+    registrar, and is removed from the entry once the relay accepts the hub.
+    """
     runtime_data = entry.runtime_data
     if runtime_data.tls is None:
         _LOGGER.info("Push dispatcher skipped — TLS identity unavailable")
@@ -940,6 +991,18 @@ async def _async_sync_tunnel_url(
 async def _async_options_updated(
     hass: HomeAssistant, entry: CasaSmartConfigEntry
 ) -> None:
+    """React to a change of the entry's options or data (the update listener).
+
+    Checked in order:
+
+    1. An unusable relay update (no valid relay URL, or a malformed activation
+       code) is rolled back to the relay in use, with a notification.
+    2. A relay change or re-registration needs a complete activation code.
+       Without one it is rolled back; with one, the relay leg is stopped and
+       the entry reloaded.
+    3. Otherwise the tunnel settings changed: derive (or stop advertising) the
+       tunnel URL, then reconcile the cloudflared add-on in the background.
+    """
     runtime_data = entry.runtime_data
     applied_relay = runtime_data.relay_config_applied
     configured_relay = normalize_relay_base_url(entry.options.get(CONF_PUSH_RELAY_URL))
@@ -1094,8 +1157,8 @@ async def _async_reconcile_tunnel(
         return
 
     if not controller.available():
-        # Container/Core install (like the dev hub): domain storage and
-        # handshake advertising still work; only add-on control is inert.
+        # Container or Core install: domain storage and handshake advertising
+        # still work; only add-on control is inert.
         _LOGGER.info(
             "Cloudflare domain configured but tunnel control is unavailable "
             "(no add-on Supervisor on this install) — manage cloudflared "
@@ -1226,6 +1289,11 @@ async def _async_tunnel_watchdog(
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
+    """Register the ``casasmart.*`` services, once per Home Assistant run.
+
+    The handlers look up the loaded entry at call time, so they outlive entry
+    reloads and are never unregistered.
+    """
     if all(
         hass.services.has_service(DOMAIN, service)
         for service in (
@@ -1238,6 +1306,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         return
 
     async def _handle_activate_scene(call) -> None:
+        """Run a registry scene, as the app does (Energy Saving rules apply)."""
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
@@ -1265,6 +1334,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
 
     async def _handle_set_tunnel_url(call) -> None:
+        """Store the advertised tunnel URL; a bare origin also sets the domain."""
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
@@ -1302,8 +1372,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
 
     async def _handle_configure_hq_notifications(call) -> None:
-        """Trust one independent HQ signing key after an HA-admin action."""
+        """Trust one HQ signing key and optional sender name (HA admins only).
 
+        Each call replaces the whole trust and clears the stored HQ
+        notifications, so nothing signed under an earlier key lingers.
+        """
         user_id = call.context.user_id
         user = await hass.auth.async_get_user(user_id) if user_id else None
         if user is None or not user.is_admin:
@@ -1347,6 +1420,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
     async def _handle_factory_reset(call) -> None:
+        """Wipe the app layer (``FACTORY_RESET_TABLES``) and reload the entry.
+
+        Energy Saving is stopped first so the automations it disabled come
+        back; if any can't, the reset stops before wiping anything. The owner
+        code hashes are deleted, so the reload mints a new pairing code and
+        recovery card.
+        """
         entries = hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
             raise HomeAssistantError("CasaSmart hub is not loaded")
@@ -1401,6 +1481,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -> bool:
+    """Stop every runtime this entry started, then close storage."""
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
