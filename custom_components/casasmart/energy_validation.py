@@ -1,10 +1,8 @@
-"""HA-free cross-validation of Energy Saving wizard picks and discovery.
+"""Checks Energy Saving wizard picks against the live discovery (no HA imports).
 
-``energy.validate_level_config`` checks a level document on its own. This
-module checks it against the home as it is now: the ``energy_api`` discovery
-payload of rooms, gangs, lights, plugs, heaters and ACs. ``energy_api`` runs
-it on every wizard PATCH, before anything is stored, so a stored document
-never names a device that is not a valid candidate.
+energy.validate_level_config checks a level's document on its own; this
+checks it against the energy_api discovery payload. energy_api runs it on
+every wizard PATCH, before anything is stored.
 """
 
 from __future__ import annotations
@@ -31,9 +29,9 @@ def validate_config_against_discovery(
     Every pick must be a current candidate in a room that is not excluded.
     Low keeps two channels of each three-gang switch, Medium and Smart one of
     each two- or three-gang switch; a room with several lights keeps
-    ``ceil(n/2)`` of them. Once ``setup_complete`` is set, every eligible
-    gang, light room, heater and AC room must also have been answered.
-    Raises ``EnergyConfigError`` naming the first problem found.
+    ceil(n/2) of them. Once setup_complete is set, every eligible gang, light
+    room, heater and AC room must have an answer. Raises EnergyConfigError
+    naming the first problem.
     """
     rooms = {room["room_id"]: room for room in discovery["rooms"]}
     excluded = set(config["excluded_rooms"])
@@ -69,7 +67,7 @@ def validate_config_against_discovery(
     eligible_light_rooms: set[str] = set()
     for room_id, room in rooms.items():
         candidates = {item["entity_id"] for item in room["lights"]}
-        # Smart drives the lights of a room with its own sensors itself.
+        # Smart drives the lights itself in a room with both sensors.
         if (
             room_id not in excluded
             and len(candidates) > 1

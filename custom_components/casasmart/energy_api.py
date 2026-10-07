@@ -1,21 +1,16 @@
-"""Authenticated REST surface and discovery for Energy Saving.
+"""Energy Saving REST endpoints under /api/casasmart/energy, and discovery.
 
-All under ``/api/casasmart/energy``:
+- GET /state (energy.read): the live state. Only admins also get releases,
+  issues and stats; a room-scoped token sees only its rooms' occupancy.
+- GET /discovery (energy.manage): the wizard's inventory of rooms and devices.
+- GET/PATCH/DELETE /config/{level} (energy.manage): read, merge a wizard step
+  into, or reset a level's configuration. A PATCH is checked against the
+  live discovery before it is stored.
+- POST /activate, /deactivate and /reapply (energy.control), through
+  EnergyController.
 
-- ``GET  /state`` (``energy.read``) — the live state. Only an admin also
-  gets the releases, issues and stats; a room-scoped token sees its own
-  rooms' occupancy only.
-- ``GET  /discovery`` (``energy.manage``) — the wizard's inventory of
-  rooms, gangs, lights, plugs, heaters, covers, ACs and sensors.
-- ``GET/PATCH/DELETE /config/{level}`` (``energy.manage``) — read, merge
-  a wizard step into, or reset one level's configuration. A PATCH is
-  validated against the live discovery before it is stored.
-- ``POST /activate``, ``/deactivate``, ``/reapply`` (``energy.control``) —
-  run through ``EnergyController``.
-
-Engine errors map to 409 (``setup_required``, ``already_active``,
-``energy_inactive``), 404 for an unknown level and 400 for a bad
-configuration.
+Engine errors map to 409 (setup_required, already_active, energy_inactive),
+404 for an unknown level and 400 for a bad configuration.
 """
 
 from __future__ import annotations
@@ -86,10 +81,10 @@ def _candidate(entity: Any, *, dimmable: bool | None = None) -> dict[str, Any]:
 
 
 def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None:
-    """Find a plug's physical-device power sensor, if HA exposes one.
+    """The power sensor on the plug's HA device, if there is one.
 
-    The first sensor of the same HA device, by entity id, whose device class
-    is ``power`` or whose entity id mentions power.
+    That is the first sibling sensor, by entity id, with device class power
+    or "power" in its entity id.
     """
     registry = er.async_get(hass)
     entry = registry.async_get(entity_id)
@@ -124,11 +119,11 @@ def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None
 async def async_energy_discovery(
     hass: HomeAssistant, runtime: CasaSmartRuntimeData
 ) -> dict[str, Any]:
-    """Build deterministic wizard inventory grouped by registry floor/room.
+    """The wizard's inventory, grouped by floor and room.
 
-    Rooms come from the registry plus any room the inventory found devices
-    in. Gangs are the registry devices that carry gang metadata; plugs and
-    heaters are switches classified by their gang type or HA device class.
+    Rooms are the registry's plus any room the inventory found devices in.
+    Gangs are registry devices with gang metadata; plugs and heaters are
+    switches classified by their gang type or device class.
     """
     builder = EnergyInventoryBuilder(hass, runtime.registry)
     inventory = await builder.async_build()
@@ -161,10 +156,9 @@ async def async_energy_discovery(
             for item in device.get("control_entity_ids", [])
             if isinstance(item, str)
         ]
-        # Per-entity gang metadata lives in ``gangs``. Older registry records
-        # instead carry ``gang_types``/``gang_names`` keyed by a gang name
-        # such as "left" or "l1"; those are matched below by entity-id
-        # suffix, else by position.
+        # Gang metadata is keyed by entity id in "gangs". Older records use
+        # gang_types/gang_names keyed by a name such as "left" or "l1",
+        # matched by entity-id suffix, else by position.
         nested = device.get("gangs")
         nested = nested if isinstance(nested, dict) else {}
         legacy_types = device.get("gang_types")
@@ -369,8 +363,7 @@ class CasaSmartEnergyStateView(_EnergyView):
             return error
         state = await runtime.energy_controller.async_state()
         if claims.get("role") != ROLE_ADMIN:
-            # Family roles need the active/lockout/occupancy status, not the
-            # admin-only override and skipped-room diagnostic surfaces.
+            # Other roles see the active level, lockout and occupancy only.
             for field in (
                 "released_entities",
                 "release_details",
@@ -446,8 +439,7 @@ class CasaSmartEnergyConfigView(_EnergyView):
                 "lockout_enabled must be a boolean", HTTPStatus.BAD_REQUEST
             )
         try:
-            # Validate the merged result, including against the live
-            # discovery, before the engine stores the step.
+            # Check the merged result, against live discovery too, before storing.
             preview = await self._hass.async_add_executor_job(
                 runtime.energy.get_config, level
             )
@@ -483,7 +475,7 @@ class CasaSmartEnergyConfigView(_EnergyView):
 
 
 class CasaSmartEnergyActivateView(_EnergyView):
-    """POST /api/casasmart/energy/activate with ``{level, lockout_enabled?}``."""
+    """POST /api/casasmart/energy/activate with {level, lockout_enabled?}."""
 
     url = f"/api/{DOMAIN}/energy/activate"
     name = f"api:{DOMAIN}:energy:activate"

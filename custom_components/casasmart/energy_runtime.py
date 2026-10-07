@@ -1,18 +1,11 @@
-"""Runtime coordination for CasaSmart Energy Saving.
+"""Energy Saving runtime: the controller, automations and the lockout check.
 
-The durable engine stays HA-free in :mod:`energy`; this module owns the
-transaction ordering around HA automations and the device adapter
-(:mod:`energy_adapter`):
-
-* ``EnergyFlags`` stores each automation's "works during Energy Saving"
-  flag and the set of automations the hub switched off, so it can switch
-  back on exactly those;
-* ``EnergyAutomationManager`` switches unflagged automations off when a
-  level applies and back on when it stops;
-* ``EnergyController`` is the one entry point for start-up, activate,
-  deactivate and re-apply, and runs them one at a time;
-* ``energy_lockout_applies`` is the check every command path uses to keep
-  non-admins from overriding an active level.
+EnergyController runs start-up, activate, deactivate and re-apply one at a
+time around the engine (energy) and the device adapter (energy_adapter).
+EnergyAutomationManager switches unflagged HA automations off while a level
+is active and back on afterwards; EnergyFlags stores the flags and which
+automations the hub switched off. energy_lockout_applies is the check that
+stops non-admins overriding an active level from any command path.
 """
 
 from __future__ import annotations
@@ -54,10 +47,9 @@ def energy_lockout_applies(engine: EnergyEngine, claims: dict[str, Any]) -> bool
 
 
 class EnergyFlags:
-    """Dedicated KV namespace for automation flags and restore bookkeeping.
+    """Automation flags, and the automations the hub switched off.
 
-    Methods are synchronous because the underlying storage table is SQLite;
-    callers on HA's event loop use ``async_add_executor_job``.
+    Methods are synchronous (the table is SQLite); run them in the executor.
     """
 
     def __init__(self, table: Any) -> None:
@@ -125,7 +117,7 @@ class EnergyFlags:
 
 
 class EnergyAutomationManager:
-    """Disable unflagged HA automations and restore exactly what we changed."""
+    """Switch unflagged automations off, and later back on only those."""
 
     def __init__(
         self,
@@ -139,7 +131,7 @@ class EnergyAutomationManager:
 
     @staticmethod
     def _config_key(state: Any) -> str:
-        """The automation's config ``id``, else its entity object id."""
+        """The automation's config id, else its entity object id."""
         attributes = dict(getattr(state, "attributes", {}) or {})
         value = attributes.get("id")
         if isinstance(value, str) and value.strip():
@@ -149,13 +141,11 @@ class EnergyAutomationManager:
     async def async_enforce_active(
         self, *, still_wanted: Callable[[], bool] | None = None
     ) -> None:
-        """Turn off every currently-enabled unflagged automation.
+        """Turn off every enabled automation that is not flagged.
 
-        The remembered set is updated after every successful call so a process
-        crash cannot lose which automations CasaSmart owes the user a restore.
-        ``still_wanted`` is asked before each ``turn_off``; once it says no,
-        the pass stops, and every automation already turned off is remembered
-        for the deactivation that superseded it.
+        The remembered set is saved after each turn_off, so a crash cannot
+        lose what is owed a restore. still_wanted is asked before each
+        turn_off; once it says no, the pass stops.
         """
         remembered = set(
             await self._hass.async_add_executor_job(self._flags.disabled_automations)
@@ -210,7 +200,7 @@ class EnergyAutomationManager:
             )
 
     async def async_restore(self, *, level: str | None = None) -> None:
-        """Restore only automations disabled by CasaSmart; retain failures."""
+        """Switch back on what the hub switched off; failures stay owed."""
         pending = set(
             await self._hass.async_add_executor_job(self._flags.disabled_automations)
         )
@@ -264,7 +254,7 @@ class EnergyAutomationManager:
 
 
 class EnergyController:
-    """One orchestration seam shared by REST, startup, and factory reset."""
+    """The entry point for start-up, the REST endpoints and factory reset."""
 
     def __init__(
         self,
@@ -294,8 +284,7 @@ class EnergyController:
         generation = self._generation
         async with self._lock:
             if self.engine.active_level is None:
-                # Crash recovery: a completed deactivation may have left only a
-                # failed automation restore pending. Retry without touching devices.
+                # A deactivation may have left a failed automation restore.
                 await self.automations.async_restore()
                 return
             if await self._async_apply("startup", generation) is None:
@@ -322,7 +311,7 @@ class EnergyController:
     ) -> dict[str, Any]:
         """Record the level as active, then apply it.
 
-        Raises ``EnergyInactiveError`` when a deactivate arrives first.
+        Raises EnergyInactiveError when a deactivate arrives first.
         """
         generation = self._generation
         async with self._lock:
@@ -377,13 +366,12 @@ class EnergyController:
             raise EnergyInactiveError("Energy Saving was deactivated meanwhile")
 
     async def _async_apply(self, reason: str, generation: int) -> dict[str, Any] | None:
-        """Disable automations, then apply devices; ``None`` once superseded.
+        """Switch automations off, then apply devices; None once superseded.
 
-        The automation pass stops before its next ``turn_off``, never inside
-        one, so each automation it turned off is remembered for the restore.
-        The device pass runs as its own task that a deactivate cancels
-        outright, so a slow or hung device cannot hold the deactivate up and
-        no command from the abandoned pass can land after it.
+        The automation pass stops only between turn_off calls, so each one is
+        remembered for the restore. The device pass is a task that a
+        deactivate cancels, so a hung device cannot hold the deactivate up
+        and no command from the abandoned pass lands after it.
         """
 
         def still_wanted() -> bool:
