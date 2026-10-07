@@ -152,10 +152,9 @@ class CasaSmartSuggestionRulesView(_SuggestionView):
         ids = {i["entity_id"] for i in scene["entities"]} | {
             c["entity_id"] for c in rule["conditions"]
         }
+        visible = service.visible(claims.get("rooms"))
         if not all(
-            service.visible(claims.get("rooms"))(eid)
-            and service.hass.states.get(eid) is not None
-            for eid in ids
+            visible(eid) and service.hass.states.get(eid) is not None for eid in ids
         ):
             raise SuggestionError("invalid_entity_reference")
         return scene
