@@ -4,13 +4,15 @@ The app plays the HLS fallback in a WebView, which can't send an
 Authorization header. The mint endpoint in camera_api.py checks the token
 and room scope, then issues a short-lived ticket that rides in the URL path,
 as in HA's own /api/hls/<token>/ URLs. A ticket grants one camera's HLS files
-and nothing else.
+and nothing else, and records the device that minted it so the proxy can
+refuse it once that device loses access.
 """
 
 from __future__ import annotations
 
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 # The player mints a ticket each time it opens, so one only has to outlast a
@@ -35,11 +37,18 @@ class TicketError(Exception):
 
 @dataclass(frozen=True)
 class StreamTicket:
-    """A grant to fetch one camera's HLS files until expires_at."""
+    """A grant to fetch one camera's HLS files until expires_at.
+
+    device_id, ver and rooms are the minting device, its auth version and its
+    room scope (None for every room) at mint time.
+    """
 
     ticket_id: str
     entity_id: str
     expires_at: float
+    device_id: str
+    ver: int
+    rooms: tuple[str, ...] | None
 
 
 def is_valid_hls_filename(filename: str) -> bool:
@@ -60,8 +69,16 @@ class StreamTicketStore:
     def __init__(self) -> None:
         self._tickets: dict[str, StreamTicket] = {}
 
-    def mint(self, entity_id: str, *, now: float) -> StreamTicket:
-        """Issue a ticket for entity_id."""
+    def mint(
+        self,
+        entity_id: str,
+        *,
+        now: float,
+        device_id: str,
+        ver: int,
+        rooms: Iterable[str] | None,
+    ) -> StreamTicket:
+        """Issue a ticket for entity_id to the device that asked for it."""
         self._purge(now)
         if len(self._tickets) >= MAX_TICKETS:
             oldest = min(self._tickets.values(), key=lambda t: t.expires_at)
@@ -70,12 +87,15 @@ class StreamTicketStore:
             ticket_id=secrets.token_urlsafe(24),
             entity_id=entity_id,
             expires_at=now + TICKET_TTL,
+            device_id=device_id,
+            ver=ver,
+            rooms=tuple(rooms) if rooms is not None else None,
         )
         self._tickets[ticket.ticket_id] = ticket
         return ticket
 
-    def validate(self, ticket_id: str, entity_id: str, *, now: float) -> None:
-        """Raise TicketError unless the ticket is live and grants entity_id.
+    def validate(self, ticket_id: str, entity_id: str, *, now: float) -> StreamTicket:
+        """Return the ticket if it is live and grants entity_id, else raise TicketError.
 
         A ticket for another camera gets the same error as an unknown one.
         """
@@ -85,6 +105,11 @@ class StreamTicketStore:
         if now >= ticket.expires_at:
             del self._tickets[ticket_id]
             raise TicketError("Stream ticket expired")
+        return ticket
+
+    def discard(self, ticket_id: str) -> None:
+        """Forget a ticket whose device has lost access."""
+        self._tickets.pop(ticket_id, None)
 
     def _purge(self, now: float) -> None:
         expired = [

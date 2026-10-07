@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .auth_api import authenticate_request
+from .auth_api import authenticate_request, get_engine
 from .camera_streams import (
     TICKET_TTL,
     StreamTicketStore,
@@ -37,15 +37,35 @@ SNAPSHOT_TIMEOUT = 10
 # Ceiling on one playlist or segment fetch from Home Assistant's HLS endpoint.
 PROXY_TIMEOUT = ClientTimeout(total=30)
 
+_TICKETS_KEY = "camera_stream_tickets"
 
-def _ticket_store(hass: HomeAssistant) -> StreamTicketStore:
-    """The ticket store shared by every view instance.
+
+def _ticket_store(hass: HomeAssistant) -> StreamTicketStore | None:
+    """The loaded entry's ticket store, or None when the hub isn't set up.
 
     build_views creates separate views for the plain and TLS listeners, and a
-    ticket minted on one must work on the other.
+    ticket minted on one must work on the other, so the store is in
+    hass.data. Unloading the entry drops it with every ticket.
     """
-    return hass.data.setdefault(DOMAIN, {}).setdefault(
-        "camera_stream_tickets", StreamTicketStore()
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        return None
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    store = domain_data.get(_TICKETS_KEY)
+    if store is None:
+        store = domain_data[_TICKETS_KEY] = StreamTicketStore()
+
+        def _drop_tickets() -> None:
+            domain_data.pop(_TICKETS_KEY, None)
+
+        entries[0].async_on_unload(_drop_tickets)
+    return store
+
+
+def _hub_not_ready() -> web.Response:
+    """The 503 authenticate_request also sends while the hub isn't set up."""
+    return web.json_response(
+        {"message": "Hub not ready"}, status=HTTPStatus.SERVICE_UNAVAILABLE
     )
 
 
@@ -115,7 +135,16 @@ class CasaSmartCameraStreamView(HomeAssistantView):
             return self.json_message(
                 f"Stream unavailable: {err}", HTTPStatus.BAD_GATEWAY
             )
-        ticket = _ticket_store(self._hass).mint(entity_id, now=time.time())
+        store = _ticket_store(self._hass)
+        if store is None:
+            return _hub_not_ready()
+        ticket = store.mint(
+            entity_id,
+            now=time.time(),
+            device_id=claims["sub"],
+            ver=claims.get("ver"),
+            rooms=claims.get("rooms"),
+        )
         path = (
             f"/api/{DOMAIN}/camera/{entity_id}"
             f"/hls/{ticket.ticket_id}/master_playlist.m3u8"
@@ -141,9 +170,10 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
     """GET /api/casasmart/camera/{entity_id}/hls/{ticket}/{filename}.
 
     Serves one HLS playlist or segment to the app's player. The stream ticket
-    in the path is the credential; scope was checked when it was minted. Each
-    file is fetched from Home Assistant's own HLS endpoint over loopback, whose
-    stream token is looked up per fetch and never reaches the app.
+    in the path is the credential, and each fetch checks again that its device
+    is still enrolled unchanged and still sees the camera. Each file is fetched
+    from Home Assistant's own HLS endpoint over loopback, whose stream token is
+    looked up per fetch and never reaches the app.
     """
 
     url = f"/api/{DOMAIN}/camera/{{entity_id}}/hls/{{ticket}}/{{filename:[A-Za-z0-9_./]+}}"
@@ -156,12 +186,21 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
     async def get(
         self, request: web.Request, entity_id: str, ticket: str, filename: str
     ) -> web.Response:
+        engine = get_engine(self._hass)
+        store = _ticket_store(self._hass)
+        if engine is None or store is None:
+            return _hub_not_ready()
         try:
-            _ticket_store(self._hass).validate(ticket, entity_id, now=time.time())
+            grant = store.validate(ticket, entity_id, now=time.time())
         except TicketError as err:
             return self.json_message(str(err), HTTPStatus.UNAUTHORIZED)
+        # An unpair, a reset or a role or room edit changes or removes the
+        # device's auth version, which revokes its tickets as it does its tokens.
+        if engine.device_version(grant.device_id) != grant.ver:
+            store.discard(ticket)
+            return self.json_message("Stream ticket revoked", HTTPStatus.UNAUTHORIZED)
 
-        if not _serves_camera(self._hass, entity_id, None):
+        if not _serves_camera(self._hass, entity_id, grant.rooms):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
