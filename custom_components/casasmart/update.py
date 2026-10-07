@@ -302,7 +302,7 @@ def swap_integration_dir(
 
 @dataclass(frozen=True)
 class LegacyDirAction:
-    """What ``clear_legacy_update_dirs`` did with one directory."""
+    """What clear_legacy_update_dirs did with one directory."""
 
     path: Path
     # Where it was moved, or None when it was removed (or not handled).

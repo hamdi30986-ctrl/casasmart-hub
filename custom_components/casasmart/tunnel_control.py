@@ -187,7 +187,7 @@ class CloudflaredController:
         _LOGGER.info("Cloudflare tunnel add-on %s restarted (edge reconnect)", slug)
 
     async def async_watchdog_check(self, slug: str, tunnel_url: str, now: float) -> str:
-        """One watchdog cycle: probe, decide and restart if needed; return the verdict.
+        """One watchdog cycle: probe, decide, restart if needed; returns the verdict.
 
         now is a monotonic time. A failed restart raises TunnelControlError
         without starting the cooldown, so the next cycle retries.
