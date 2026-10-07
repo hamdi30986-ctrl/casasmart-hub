@@ -1,46 +1,12 @@
-"""mDNS advertiser (multi-home network discovery).
+"""Advertise the hub over mDNS (_casasmart._tcp) so the app finds it on the LAN.
 
-The hub broadcasts ``_casasmart._tcp`` on the LAN so the app finds it
-regardless of DHCP — no static IP, no GPS, like AirPlay finding an Apple
-TV.
+The descriptor builders use the stdlib only, so tests import them without HA.
+MdnsAdvertiser registers the record on HA's own zeroconf instance and follows
+the hub's address when DHCP changes it.
 
-Two layers, same split the rest of the integration uses:
-
-* The **pure builder** (this module's top half) turns hub identity +
-  network facts into a transport-neutral :class:`MdnsServiceDescriptor`
-  — instance name, port, TXT records. Stdlib only, zero HA/zeroconf
-  imports, so ``tests/test_discovery.py`` imports it directly (the
-  package ``__init__`` pulls in ``homeassistant``, absent in the test
-  env).
-
-* :class:`MdnsAdvertiser` (bottom half) is the thin lifecycle wrapper:
-  it reuses **HA's own zeroconf instance** (no second mDNS responder
-  fighting the first, no new dependency),
-  registers the service at setup, re-publishes the address when the
-  hub's LAN IP shifts, and unregisters on unload. Its HA/zeroconf
-  imports are lazy (inside methods) so the pure half stays importable
-  without HA.
-
-TXT contract (kept tiny — one UDP packet, forward-compatible):
-
-==========  ====================================================
-key         value
-==========  ====================================================
-``id``      the hub's permanent identity fingerprint (SHA-256 hex
-            over the TLS identity SPKI). The multi-home matching
-            key AND the TLS pin — an attacker can spoof the TXT id
-            but not the TLS identity behind it, so the pin catches
-            a liar. REQUIRED; a record without it is unusable.
-``name``    friendly hub name (display hint only; the app's paired
-            record name wins). Optional.
-``api``     API version the hub speaks (handshake hint, lets the
-            app skip an incompatible hub before connecting).
-``v``       TXT schema version, so adding a field later never
-            breaks an old parser.
-==========  ====================================================
-
-The TXT carries no secret — the identity *public* key and the real
-trust decision happen at the handshake/TLS layer, never here.
+TXT keys: id is the identity fingerprint the app pins, so a spoofed record
+fails the TLS check; name is a display hint; api is the hub's API version; v is
+the TXT schema version. Nothing in the record is secret.
 """
 
 from __future__ import annotations
@@ -50,50 +16,42 @@ from dataclasses import dataclass, field
 
 _LOGGER = logging.getLogger(__name__)
 
-# ── Pure builder (stdlib only — keep it HA/zeroconf-free) ──
+# Descriptor builders: stdlib only, importable without HA.
 
-#: The service type the app browses for.
+# The service type the app browses for.
 SERVICE_TYPE = "_casasmart._tcp.local."
 
-#: TXT schema version — bumped only if the *meaning* of a key changes.
+# Bumped only when the meaning of a TXT key changes.
 TXT_SCHEMA_VERSION = "1"
 
-#: Default friendly name when the installer hasn't set ``hub_name``.
+# Used when hub_config has no hub_name.
 DEFAULT_HUB_NAME = "CasaSmart Hub"
 
 
 @dataclass(frozen=True)
 class MdnsServiceDescriptor:
-    """Everything needed to register the service, transport-neutral.
-
-    The lifecycle wrapper converts this into a ``zeroconf.ServiceInfo``.
-    Neither the descriptor nor its builder import zeroconf, so both stay
-    unit-testable.
-    """
+    """What the advertiser registers, independent of zeroconf."""
 
     service_type: str
-    #: The instance label only (e.g. "CasaSmart Hub (1a2b3c4d)"), NOT the
-    #: fully-qualified "<label>.<service_type>".
+    # The instance label alone, e.g. "CasaSmart Hub (1a2b3c4d)"; see full_name.
     instance_name: str
     port: int
-    #: TXT records as bytes (zeroconf/mDNS values are opaque binary).
+    # TXT values as bytes, as zeroconf expects.
     properties: dict[str, bytes] = field(default_factory=dict)
 
     @property
     def full_name(self) -> str:
-        """Fully-qualified service name ``<label>.<service_type>``."""
+        """Fully qualified service name: <label>.<service_type>."""
         return f"{self.instance_name}.{self.service_type}"
 
 
 def build_instance_name(hub_name: str | None, fingerprint: str) -> str:
-    """A stable, unique-by-construction instance label.
+    """The hub name plus a short fingerprint, unique per hub on the LAN.
 
-    Appending the short fingerprint makes two hubs that share a name
-    (both default "CasaSmart Hub") distinct on one LAN without relying on
-    zeroconf's "(2)"/"(3)" collision rename — and ties the visible label
-    to the crypto identity. DNS caps a label at 63 bytes of UTF-8, and
-    zeroconf refuses the whole record past it, so a long name is shortened
-    (never mid-character) and the fingerprint suffix always survives.
+    The suffix keeps two hubs with the same name apart without zeroconf's
+    collision renaming. DNS caps a label at 63 bytes of UTF-8 and zeroconf
+    refuses longer ones, so a long name is cut at a character boundary and
+    the suffix always survives.
     """
     base = (hub_name or "").strip() or DEFAULT_HUB_NAME
     short = _short_fingerprint(fingerprint)
@@ -109,11 +67,7 @@ def build_txt_records(
     hub_name: str | None,
     api_version: int,
 ) -> dict[str, bytes]:
-    """Encode the TXT contract.
-
-    ``id`` is mandatory; ``name`` is dropped when unset rather than published
-    empty.
-    """
+    """Encode the TXT records; id is required and an empty name is left out."""
     if not hub_id:
         raise ValueError("mDNS TXT 'id' (hub fingerprint) must be non-empty")
     records: dict[str, bytes] = {
@@ -123,8 +77,7 @@ def build_txt_records(
     }
     cleaned_name = (hub_name or "").strip()
     if cleaned_name:
-        # TXT values SHOULD stay small; a pathologically long name can't
-        # bloat the packet.
+        # Keep the record small whatever the configured name.
         records["name"] = cleaned_name[:63].encode("utf-8")
     return records
 
@@ -136,11 +89,7 @@ def build_service_descriptor(
     api_version: int,
     port: int,
 ) -> MdnsServiceDescriptor:
-    """Assemble the full descriptor from hub identity + the LAN port.
-
-    ``port`` is the secure CasaSmart API port (the TLS listener — LAN
-    traffic is pinned-TLS), i.e. what the app should actually dial.
-    """
+    """Assemble the descriptor; port is the hub's TLS listener, which the app dials."""
     if port <= 0 or port > 65535:
         raise ValueError(f"invalid mDNS port {port}")
     return MdnsServiceDescriptor(
@@ -154,27 +103,25 @@ def build_service_descriptor(
 
 
 def _short_fingerprint(fingerprint: str) -> str:
-    """First 8 hex chars of the fingerprint, defensively cleaned."""
+    """First 8 characters of the fingerprint, trimmed and lowercased."""
     return (fingerprint or "").strip().lower()[:8]
 
 
 def _server_hostname(fingerprint: str) -> str:
-    """A unique ``.local.`` hostname for the SRV/A records."""
+    """A unique .local. hostname for the SRV and A records."""
     short = _short_fingerprint(fingerprint) or "hub"
     return f"casasmart-{short}.local."
 
 
-# ── Lifecycle wrapper (HA + zeroconf; lazy imports keep the top half pure) ──
+# The advertiser imports HA and zeroconf lazily, inside its methods.
 
 
 class MdnsAdvertiser:
-    """Registers, refreshes and unregisters the hub's ``_casasmart._tcp``
-    record on HA's shared zeroconf instance.
+    """Keeps the hub's record on HA's shared zeroconf instance.
 
-    Graceful degradation: mDNS is a *discovery convenience*, never
-    load-bearing — the app still reaches the hub via the stored IP and the
-    tunnel. So every failure here is logged and swallowed; it must never take
-    the integration down.
+    Sharing HA's instance avoids a second mDNS responder. Discovery is a
+    convenience (the app also reaches the hub by its stored address or the
+    tunnel), so every failure here is logged and swallowed.
     """
 
     def __init__(
@@ -200,7 +147,7 @@ class MdnsAdvertiser:
         self._current_ip: str | None = None
 
     async def async_start(self) -> None:
-        """Resolve the LAN IP, build the ServiceInfo, register it."""
+        """Register the record under the hub's current LAN address."""
         try:
             from homeassistant.components import zeroconf as ha_zeroconf
 
@@ -234,14 +181,9 @@ class MdnsAdvertiser:
         )
 
     async def async_refresh(self, _now=None) -> None:
-        """Re-publish the address when the hub's LAN IP has shifted.
-
-        DHCP can hand the hub a new IP at any lease renewal, and the mDNS
-        record must follow it. A no-op when the IP is unchanged so the
-        periodic tick is nearly free.
-        """
+        """Re-publish the record when DHCP has given the hub a new address."""
         if self._aiozc is None:
-            # Setup-time zeroconf failure — try a full (re)start instead.
+            # Zeroconf was unavailable at setup; try a full start.
             await self.async_start()
             return
         ip = await self._async_source_ip()
@@ -274,8 +216,6 @@ class MdnsAdvertiser:
             self._info = None
             self._current_ip = None
 
-    # ── internals ──
-
     async def _async_source_ip(self) -> str | None:
         """The hub's LAN-facing IPv4, or None to register hostname-only."""
         try:
@@ -288,7 +228,7 @@ class MdnsAdvertiser:
             return None
 
     def _build_info(self, ip: str | None):
-        """Construct a ``zeroconf.ServiceInfo`` from the descriptor + IP."""
+        """Build the zeroconf ServiceInfo, or None (logged) on failure."""
         try:
             import socket
 
