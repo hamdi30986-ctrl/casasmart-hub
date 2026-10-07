@@ -1,22 +1,11 @@
-"""Server-owned data and command state for the CasaSmart Now surface.
+"""Hub-owned state behind the Now page, and the rules for room commands.
 
-The client never derives this product state from Home Assistant history.  In
-particular, recent controls are recorded only after a CasaSmart command has
-succeeded, and room restore sets are written by the Hub, not reconstructed by
-the client after a restart.
-
-``NowDataEngine`` keeps, each in its own storage table:
-
-* each member's recently controlled devices;
-* each room's activity policy — whether it takes part in the room OFF/ON
-  command, and the admin-approved devices it may switch;
-* the Now configuration (weather, air quality, door/window contacts and
-  featured scenes);
-* the stored answers of recent room commands, for idempotent retries;
-* each room's restore set — what its last OFF switched off, for ON.
-
-The pure helpers decide which devices may ever join a room command.
-Storage methods are synchronous; ``now_api`` runs them in the executor.
+NowDataEngine keeps, each in its own table: each member's recently
+controlled devices (recorded after a command succeeds), each room's activity
+policy, the Now configuration, recent room-command answers for idempotent
+retries, and each room's restore set (what its last off switched off). The
+functions decide which devices may join a room command. Storage methods are
+synchronous; now_api runs them in the executor.
 """
 
 from __future__ import annotations
@@ -34,16 +23,15 @@ _MAX_CONTACTS = 64
 _MAX_IDEMPOTENCY_ENTRIES = 64
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
-# Domains a room OFF/ON command may ever switch.
+# Domains a room command may switch.
 _ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
-# Home Assistant permits a switch to have no device class.  That generic value
-# is not a safety classification, so it must never be admitted to a room bulk
-# operation.  The Hub policy must additionally name every participating entity.
+# A switch without a device class could be anything, so only switches with
+# device class "switch" may join a room command.
 _SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
 
 
 class NowDataError(Exception):
-    """Raised when persisted Now configuration is invalid."""
+    """A Now configuration, policy or command value is invalid."""
 
 
 def _optional_entity_id(value: Any, field: str) -> str | None:
@@ -56,12 +44,12 @@ def _optional_entity_id(value: Any, field: str) -> str | None:
 
 
 def _timestamp(value: datetime | None = None) -> str:
-    """ISO 8601 in UTC, for ``value`` or now."""
+    """The time (default: now) as an ISO 8601 UTC string."""
     return (value or datetime.now(UTC)).astimezone(UTC).isoformat()
 
 
 def _state_value(state: Any, field: str, default: Any = None) -> Any:
-    """Read a field from an HA ``State`` or from a plain dict."""
+    """Read a field from an HA State or from a plain dict."""
     if isinstance(state, dict):
         return state.get(field, default)
     return getattr(state, field, default)
@@ -73,8 +61,7 @@ def _state_attributes(state: Any) -> dict[str, Any]:
 
 
 def is_room_activity_candidate(state: Any) -> bool:
-    """Return whether an entity can be added to the explicit Hub allowlist."""
-
+    """True when an admin may approve this device for room commands."""
     entity_id = _state_value(state, "entity_id", "")
     domain = entity_id.split(".", 1)[0]
     if domain not in _ROOM_ACTIVITY_DOMAINS:
@@ -88,12 +75,7 @@ def is_room_activity_candidate(state: Any) -> bool:
 
 
 def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
-    """Return whether an entity is both a safe candidate and Hub-authorized.
-
-    A client cannot make an entity eligible by sending it in a command.  The
-    entity must appear in the persisted per-room policy selected by an admin.
-    """
-
+    """True for a candidate device that the room's stored policy approves."""
     entity_id = _state_value(state, "entity_id", "")
     return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(
         state
@@ -101,8 +83,7 @@ def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) ->
 
 
 def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
-    """A running room device is an eligible device whose state is ``on``."""
-
+    """True for an eligible device that is on."""
     return (
         is_room_activity_eligible(state, eligible_entity_ids)
         and _state_value(state, "state") == "on"
@@ -112,13 +93,11 @@ def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> 
 def summarize_openings(
     entity_states: Iterable[tuple[str, str | None]],
 ) -> dict[str, str | int]:
-    """Aggregate door/window sensors and locks without inventing closure.
+    """Count the open and unknown doors, windows and locks.
 
-    Binary sensors use Home Assistant's contact convention (on=open,
-    off=closed). Locks are open only when unlocked and closed only when locked.
-    Every transient, error, unavailable, or unknown value remains unknown.
+    A binary sensor is open when on and closed when off; a lock is open when
+    unlocked and closed when locked. Any other state counts as unknown.
     """
-
     opened = 0
     unknown = 0
     for entity_id, state in entity_states:
@@ -142,8 +121,11 @@ def summarize_openings(
 
 
 def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply the fixed 0--4 / 5 / 6+ Now layout contract."""
+    """Lay out the room cards for the Now page.
 
+    Up to four rooms are plain cards. With more, the first is featured, the
+    next four are cards and the rest are counted for "view all".
+    """
     count = len(rooms)
     if count == 0:
         return {"featured_room_id": None, "cards": [], "view_all_count": 0}
@@ -161,10 +143,9 @@ def room_activity_layout(rooms: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class NowDataEngine:
-    """Small persistent store for Now-only user and room state.
+    """Persistent Now state, one key-value table per kind.
 
-    Each argument is a key-value storage table. An ``RLock`` keeps each
-    read-modify-write whole.
+    An RLock keeps each read-modify-write whole.
     """
 
     def __init__(
@@ -185,8 +166,7 @@ class NowDataEngine:
     def record_successful_control(
         self, member_id: str, entity_id: str, at: datetime | None = None
     ) -> None:
-        """Record a successful user-originated command, newest first."""
-
+        """Record a device the member controlled, newest first."""
         if not member_id or not isinstance(entity_id, str) or "." not in entity_id:
             return
         with self._lock:
@@ -217,8 +197,8 @@ class NowDataEngine:
     ) -> dict[str, Any]:
         """Store a room's activity policy and return it.
 
-        ``now_api`` has already checked that every entity is a candidate in
-        this room.
+        now_api has already checked that every entity is a candidate in this
+        room.
         """
         if not isinstance(participates, bool):
             raise NowDataError("participates must be a boolean")
@@ -255,10 +235,10 @@ class NowDataEngine:
         return self.room_policy(room_id)["participates"]
 
     def configure(self, payload: Any) -> dict[str, Any]:
-        """Merge the fields present in ``payload`` into the Now config.
+        """Merge the fields present in the payload into the Now config.
 
-        Checks shapes only; ``now_api`` checks that the entities and scenes
-        exist and are of the right kind. Returns the whole config.
+        Checks shapes only; now_api checks that the entities and scenes exist
+        and are of the right kind. Returns the whole config.
         """
         if not isinstance(payload, dict):
             raise NowDataError("Body must be a JSON object")
@@ -357,13 +337,13 @@ class NowDataEngine:
                 record.get("results") if isinstance(record.get("results"), dict) else {}
             )
             results[f"{room_id}:{action}:{key}"] = result
-            # Deterministic bounded persistence; insertion order is preserved by JSON.
+            # Keep the newest entries; JSON keeps insertion order.
             while len(results) > _MAX_IDEMPOTENCY_ENTRIES:
                 results.pop(next(iter(results)))
             self._idempotency[member_id] = {"results": results}
 
     def restore_set(self, room_id: str) -> list[str]:
-        """What the room's OFF switched off and ON has not yet restored."""
+        """What the room's last off switched off and on has not yet restored."""
         record = self._restores.get(room_id) or {}
         entities = (record.get("entity_ids") or []) if isinstance(record, dict) else []
         return [item for item in entities if isinstance(item, str)]
@@ -381,11 +361,9 @@ class NowDataEngine:
                 self._restores.pop(room_id, None)
 
     def extend_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
-        """Add newly switched-off ids to the room's outstanding capture.
+        """Add newly switched-off ids to the room's restore set and return it.
 
-        A repeated OFF finds nothing still on, or only what was switched on
-        since; replacing the capture with that would forget what the earlier
-        OFF switched off. First-captured order, each id once; ON consumes it.
+        Ids keep their first-captured order, each once.
         """
         with self._lock:
             self.save_restore_set(room_id, [*self.restore_set(room_id), *entity_ids])
