@@ -188,8 +188,6 @@ class MdnsAdvertiser:
     ) -> None:
         self._hass = hass
         self._hub_id = hub_id
-        self._hub_name = hub_name
-        self._api_version = api_version
         self._port = port
         self._descriptor = build_service_descriptor(
             hub_id=hub_id,

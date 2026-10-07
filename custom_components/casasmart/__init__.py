@@ -1080,7 +1080,6 @@ async def _async_options_updated(
             _LOGGER.error(
                 "CasaSmart could not reload after a relay configuration update"
             )
-        if not reloaded:
             persistent_notification.async_create(
                 hass,
                 "The new push relay setting was saved, but CasaSmart could not "
