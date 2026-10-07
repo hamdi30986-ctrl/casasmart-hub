@@ -53,11 +53,8 @@ _SCENE_CALL_TIMEOUT = 10.0
 
 def get_registry(hass: HomeAssistant) -> RegistryEngine | None:
     """The loaded entry's registry engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.registry
+    runtime_data = _runtime_data(hass)
+    return runtime_data.registry if runtime_data is not None else None
 
 
 def _runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
@@ -88,11 +85,12 @@ async def async_execute_registry_scene(
     the scope and Energy Saving checks.
     """
     scene_id = scene["scene_id"]
+    generated = scene.get("generated_room_v1", False)
 
     # An IR AC takes every climate call as a full-state burst, and a second one
     # right after the mode is set collides with it, so saved scenes (not
     # generated ones) skip the fan-mode step for an AC whose mode they set.
-    _climate_with_state = {
+    climate_with_mode = {
         item["entity_id"]
         for item in scene["entities"]
         if item["entity_id"].split(".", 1)[0] == "climate"
@@ -101,11 +99,11 @@ async def async_execute_registry_scene(
     entities_to_run = [
         item
         for item in scene["entities"]
-        if not (
+        if generated
+        or not (
             item["entity_id"].split(".", 1)[0] == "climate"
             and item.get("action") == "set_fan_mode"
-            and item["entity_id"] in _climate_with_state
-            and not scene.get("generated_room_v1", False)
+            and item["entity_id"] in climate_with_mode
         )
     ]
 
@@ -113,7 +111,7 @@ async def async_execute_registry_scene(
     for item in entities_to_run:
         entity_id = item["entity_id"]
 
-        if scene.get("generated_room_v1"):
+        if generated:
             # Each call yields to the event loop, so check again that the step
             # still applies: the device may have moved or been switched off.
             from .generated_suggestions import room_actions
@@ -776,7 +774,7 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
-        scope = claims.get("rooms") if claims else None
+        scope = claims.get("rooms")
         if scope is not None and not in_scope(self._hass, entity_id, scope):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
@@ -806,7 +804,7 @@ class CasaSmartDeviceAssignmentView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        scope = claims.get("rooms") if claims else None
+        scope = claims.get("rooms")
         if scope is not None and not in_scope(self._hass, entity_id, scope):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
@@ -1180,22 +1178,22 @@ class CasaSmartFavoritesView(_RegistryView):
         sub = claims["sub"]
         scope = claims.get("rooms")
 
-        def _load() -> tuple[str, list[str]]:
-            mid = engine.member_id_for(sub) if engine else sub
-            return mid, registry.get_favorites(mid)
+        def _load() -> list[str]:
+            return registry.get_favorites(engine.member_id_for(sub) if engine else sub)
 
         try:
-            _member_id, stored = await self._hass.async_add_executor_job(_load)
+            stored = await self._hass.async_add_executor_job(_load)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         # Filter for the reply only: during HA startup states are still
         # arriving, and saving the filtered list would erase favorites.
-        served = [
+        favorites = [
             eid
             for eid in stored
-            if self._hass.states.get(eid) is not None and is_served(self._hass, eid)
+            if self._hass.states.get(eid) is not None
+            and is_served(self._hass, eid)
+            and in_scope(self._hass, eid, scope)
         ]
-        favorites = [eid for eid in served if in_scope(self._hass, eid, scope)]
         return self.json({"entity_ids": favorites})
 
     async def put(self, request: web.Request) -> web.Response:
