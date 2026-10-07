@@ -18,6 +18,9 @@ turns the "update available" state update_api reports into an actual upgrade:
        gets a clean "installing" reply before the connection drops; the
        container's restart policy brings HA back on the new code.
 
+Only one install runs at a time, and none once a swap is waiting for its
+restart: a second request gets a 409 "update already in progress".
+
 A hub managed by HACS should be updated through HACS: a self-update swaps
 the files without HACS knowing, so HACS keeps reporting the old version.
 
@@ -65,6 +68,14 @@ _DOWNLOAD_HEADERS = {
 _MAX_SIGNATURE_BYTES = 1024
 # Seconds to let the HTTP response flush to the app before we pull the rug.
 _RESTART_GRACE_SECONDS = 2.0
+# hass.data[DOMAIN] keys, shared by both listeners' install views: the lock one
+# install holds from status check to scheduled restart, and the version a
+# finished swap is waiting to restart into.
+_INSTALL_LOCK_KEY = "update_install_lock"
+_SWAPPED_VERSION_KEY = "update_swapped_version"
+# The phone app shows "Update already in progress" for a 409 whose error
+# contains this phrase (update_provider.dart, _looksLikeInstallAlreadyRunning).
+_IN_PROGRESS = "update already in progress"
 
 
 def _integration_dir() -> Path:
@@ -78,7 +89,31 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
     Refuses cleanly (InstallError) if there's nothing newer to install or
     the downloaded payload doesn't match the tag. On success the live
     integration dir has already been swapped and an HA restart is scheduled.
+
+    Also refuses while another install runs, and after a swap until the
+    restart: the running code still reports the old version, so the same
+    release looks new again, and a second swap would replace the rollback
+    with the first one's tree.
     """
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    swapped = domain_data.get(_SWAPPED_VERSION_KEY)
+    if swapped is not None:
+        raise InstallError(
+            f"{_IN_PROGRESS}: {swapped} is installed and Home Assistant is restarting"
+        )
+    lock = domain_data.get(_INSTALL_LOCK_KEY)
+    if lock is None:
+        lock = domain_data[_INSTALL_LOCK_KEY] = asyncio.Lock()
+    if lock.locked():
+        raise InstallError(_IN_PROGRESS)
+    async with lock:
+        return await _async_install(hass, checker, domain_data)
+
+
+async def _async_install(
+    hass: HomeAssistant, checker: UpdateChecker, domain_data: dict
+) -> dict:
+    """The install itself; ``perform_install`` holds the install lock."""
     status = await checker.async_status()
     if not status.get("update_available"):
         raise InstallError("no update available")
@@ -106,6 +141,8 @@ async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
         backup = await hass.async_add_executor_job(
             _stage_and_swap, archive, staging_path / "extracted", target_version
         )
+        # The new tree is live on disk now: no other install until the restart.
+        domain_data[_SWAPPED_VERSION_KEY] = target_version
 
     _LOGGER.warning(
         "Self-update: integration swapped to %s (backup at %s); restarting HA",

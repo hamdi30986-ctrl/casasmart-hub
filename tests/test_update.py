@@ -5,10 +5,13 @@ Run from the repo root:
 """
 
 import json
+import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Import the module directly — the casasmart package __init__ imports
 # homeassistant, which isn't installed in the test environment.
@@ -16,6 +19,7 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "custom_components" / "casasmart")
 )
 
+import update
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from update import (
@@ -275,12 +279,161 @@ class TestSwapIntegrationDir(unittest.TestCase):
             self.assertTrue((backup / "cur.py").exists())
             self.assertFalse((backup / "stale.py").exists())
 
+    def test_swap_keeps_the_previous_backup_until_it_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current, new_source = _swap_fixture(Path(tmp), with_backup=True)
+            backup = swap_integration_dir(current, new_source)
+            self.assertEqual(_tree(current), _tree(new_source))
+            self.assertEqual(_tree(backup), _version_tree("2.3.0"))
+            self.assertEqual(_entries(Path(tmp)), ["casasmart", "casasmart.bak"])
+
     def test_swap_rejects_non_directory_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             current = Path(tmp) / "casasmart"
             current.mkdir()
             with self.assertRaises(InstallError):
                 swap_integration_dir(current, Path(tmp) / "does-not-exist")
+
+
+def _version_tree(version: str) -> dict[str, str]:
+    files = {f"mod{i}.py": f"# {version} {i}" for i in range(20)}
+    files["manifest.json"] = json.dumps({"domain": "casasmart", "version": version})
+    return files
+
+
+def _write_tree(path: Path, version: str) -> Path:
+    path.mkdir(parents=True)
+    for name, content in _version_tree(version).items():
+        (path / name).write_text(content)
+    return path
+
+
+def _tree(path: Path) -> dict[str, str]:
+    return {f.name: f.read_text() for f in path.iterdir()}
+
+
+def _entries(root: Path) -> list[str]:
+    """What sits next to the live dir, minus the release staging dir."""
+    return sorted(p.name for p in root.iterdir() if p.name != "release")
+
+
+def _swap_fixture(root: Path, *, with_backup: bool) -> tuple[Path, Path]:
+    """Live 2.3.0, optionally a 2.2.0 rollback beside it, and a 2.4.0 release."""
+    current = _write_tree(root / "casasmart", "2.3.0")
+    if with_backup:
+        _write_tree(root / "casasmart.bak", "2.2.0")
+    return current, _write_tree(root / "release", "2.4.0")
+
+
+class TestSwapFailures(unittest.TestCase):
+    """A swap that fails at any stage must leave the old live tree in place and
+    must not lose the rollback it found. Every failure is an InstallError."""
+
+    def _new_root(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def _fail_rename(self, nth: int):
+        """Make the nth os.rename of the swap fail (later ones, the undo, work)."""
+        real_rename = update.os.rename
+        calls = []
+
+        def rename(src, dst):
+            calls.append((src, dst))
+            if len(calls) == nth:
+                raise OSError(5, "I/O error")
+            real_rename(src, dst)
+
+        return mock.patch.object(update.os, "rename", side_effect=rename)
+
+    def _fail_copy(self):
+        real_copytree = shutil.copytree
+
+        def copytree(src, dst, **kwargs):
+            # Fail partway, after some files have landed.
+            real_copytree(src, dst, ignore=lambda d, names: names[5:], **kwargs)
+            raise shutil.Error([("x", "y", "No space left on device")])
+
+        return mock.patch.object(update.shutil, "copytree", side_effect=copytree)
+
+    def _assert_untouched(self, current: Path, *, with_backup: bool):
+        self.assertEqual(_tree(current), _version_tree("2.3.0"))
+        expected = ["casasmart"]
+        if with_backup:
+            backup = current.with_name("casasmart.bak")
+            self.assertEqual(_tree(backup), _version_tree("2.2.0"))
+            expected.append("casasmart.bak")
+        # No staging copy or set-aside backup is left behind.
+        self.assertEqual(_entries(current.parent), expected)
+
+    def test_copy_failure(self):
+        for with_backup in (True, False):
+            with self.subTest(with_backup=with_backup):
+                current, new_source = _swap_fixture(
+                    self._new_root(), with_backup=with_backup
+                )
+                with self._fail_copy(), self.assertRaises(InstallError):
+                    swap_integration_dir(current, new_source)
+                self._assert_untouched(current, with_backup=with_backup)
+
+    def test_rename_failure_at_each_stage(self):
+        # With a backup: set the old backup aside, live -> .bak, copy -> live.
+        # Without one the first of those is skipped.
+        for with_backup, renames in ((True, 3), (False, 2)):
+            for nth in range(1, renames + 1):
+                with self.subTest(with_backup=with_backup, rename=nth):
+                    current, new_source = _swap_fixture(
+                        self._new_root(), with_backup=with_backup
+                    )
+                    with self._fail_rename(nth), self.assertRaises(InstallError):
+                        swap_integration_dir(current, new_source)
+                    self._assert_untouched(current, with_backup=with_backup)
+
+    def test_overlapping_swap_is_refused_and_the_rollback_survives(self):
+        # Swap A stops right after moving the live dir to .bak; swap B runs
+        # meanwhile. B used to die on a bare FileNotFoundError, after already
+        # deleting the .bak that A had just made.
+        root = self._new_root()
+        current, new_source = _swap_fixture(root, with_backup=True)
+        real_rename = update.os.rename
+        a_moved_live = threading.Event()
+        b_done = threading.Event()
+
+        def rename(src, dst):
+            real_rename(src, dst)
+            if (
+                threading.current_thread().name == "A"
+                and Path(src) == current
+                and Path(dst).name == "casasmart.bak"
+            ):
+                a_moved_live.set()
+                b_done.wait(5)
+
+        results: dict[str, object] = {}
+
+        def run(name):
+            if name == "B":
+                a_moved_live.wait(5)
+            try:
+                results[name] = swap_integration_dir(current, new_source)
+            except Exception as err:
+                results[name] = err
+            if name == "B":
+                b_done.set()
+
+        with mock.patch.object(update.os, "rename", side_effect=rename):
+            threads = [threading.Thread(target=run, args=(n,), name=n) for n in "AB"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        self.assertEqual(results["A"], root / "casasmart.bak")
+        self.assertIsInstance(results["B"], InstallError)
+        self.assertEqual(_tree(current), _version_tree("2.4.0"))
+        self.assertEqual(_tree(root / "casasmart.bak"), _version_tree("2.3.0"))
+        self.assertEqual(_entries(root), ["casasmart", "casasmart.bak"])
 
 
 if __name__ == "__main__":
