@@ -1230,11 +1230,11 @@ async def _async_reconcile_tunnel(
                 persistent_notification.async_create(
                     hass,
                     f"The Cloudflare tunnel add-on ({slug}) was stopped and "
-                    "set to manual start. Device pairing must happen over the "
-                    "LAN only — an active tunnel can route even local phones "
-                    "through Cloudflare, where the hub's LAN-only gate blocks "
-                    "them. Re-enable the tunnel from the CasaSmart "
-                    "integration options (gear icon) once pairing is done.",
+                    "set to manual start, as set in the CasaSmart integration "
+                    "options. Phones can't reach the hub from outside the "
+                    "home until you turn the tunnel back on there (gear "
+                    "icon). Pairing doesn't need it: phones pair over the "
+                    "local network.",
                     title="CasaSmart — Cloudflare tunnel disabled",
                     notification_id=_NOTIFY_TUNNEL_AUTO_DISABLED,
                 )
