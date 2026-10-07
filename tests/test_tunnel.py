@@ -105,6 +105,27 @@ class TestNormalizeTunnelUrl(unittest.TestCase):
         # urlsplit raises ValueError on this (invalid IPv6 literal).
         self.assertIsNone(normalize_tunnel_url("https://[::1"))
 
+    def test_unusable_port_rejected(self) -> None:
+        # urlsplit accepts these and only complains when .port is read; a
+        # phone can't dial any of them.
+        for url in (
+            "https://host.example:abc",
+            "https://host.example:99999",
+            "https://host.example:0",
+            "https://[2001:db8::1]:x/hub",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(normalize_tunnel_url(url))
+
+    def test_inner_whitespace_rejected(self) -> None:
+        for url in (
+            "https://my hub.example.com",
+            "https://hub.example.com/my hub",
+            "https://hub.example.com\t/x",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(normalize_tunnel_url(url))
+
     def test_config_key_is_the_documented_one(self) -> None:
         self.assertEqual(TUNNEL_URL_CONFIG_KEY, "tunnel_url")
 
