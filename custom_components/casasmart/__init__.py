@@ -1465,7 +1465,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             await hass.async_add_executor_job(_wipe_tables)
         except (StorageError, sqlite3.Error) as err:
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
-        # Every phone was just unpaired; don't leave that to the reload.
+        # Every phone is unpaired now; don't leave closing them to the reload.
         await async_close_connections(hass)
         try:
             await hass.async_add_executor_job(_forget_codes)
