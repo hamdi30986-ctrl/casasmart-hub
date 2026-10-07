@@ -1,40 +1,11 @@
 """Auth, pairing and user-management endpoints, and the request gates.
 
-The login chain:
-
-- ``POST /api/casasmart/auth/enroll`` — store a device's P-256 public key
-  + name. Gated by a **single-use pairing code** (role + room scope
-  are baked into the code at generation — the phone never picks its own
-  privileges) and a **code-class network policy**: with the hub's
-  ``remote_pairing_enabled`` flag OFF (the default) every enroll is
-  LAN-only (a leaked pairing QR is useless remotely); with it ON,
-  admin-minted member codes redeem from any source while the bootstrap
-  owner claim stays LAN-only (physical possession).
-- ``POST /api/casasmart/auth/challenge`` — hand out a one-time nonce.
-- ``POST /api/casasmart/auth/token`` — verify the signed nonce, mint the
-  JWT. Failures are deliberately generic (don't reveal whether the
-  device, the nonce, or the signature was the problem) and throttled
-  (HTTP 429 + Retry-After, escalating walls).
-- ``POST /api/casasmart/auth/recover`` — owner recovery with the recovery
-  card: a new phone replaces the admin (LAN-only).
-- ``POST /api/casasmart/auth/widget-token`` — trade a session token for the
-  long-lived, device-only widget token.
-- ``GET /api/casasmart/auth/whoami`` — is this token's device still paired?
-- ``POST /api/casasmart/auth/unpair-self`` — the calling device leaves.
-
-Management surface (JWT-gated through the same engine):
-
-- ``POST/GET /api/casasmart/pairing/codes`` + ``DELETE .../{code_id}`` —
-  generate / list / revoke pairing codes (``pairing.generate``, admin).
-- ``GET /api/casasmart/users``, ``PATCH/DELETE .../{device_id}`` — list,
-  edit (role/room scope), unpair (``users.manage``, admin). Edits and
-  unpairs invalidate the target's outstanding JWTs instantly.
-
-``authenticate_request`` is the gate every protected view calls: it extracts
-the bearer token, validates it against the engine and checks the named
-permission. Views set ``requires_auth = False`` and call it instead, because
-Home Assistant tokens grant no access to CasaSmart endpoints.
-``is_lan_request`` is the LAN gate for pairing, recovery and keyless speaker
+A device pairs with a pairing code (enroll), then logs in by signing a nonce
+(challenge, token). The owner can recover the hub with the recovery card, and
+the admin mints pairing codes and manages paired devices. authenticate_request
+is the CasaSmart token check every protected view calls; views set
+requires_auth = False because Home Assistant tokens grant no access here.
+is_lan_request is the LAN gate for pairing, recovery and keyless speaker
 provisioning.
 """
 
@@ -89,36 +60,17 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-# Headers Cloudflare adds to every request it proxies to an origin. A LAN client
-# that sends them only makes itself look remote — the safe direction.
+# Headers Cloudflare adds to every request it proxies. A LAN client that sends
+# them only makes itself look remote, which is safe.
 _CLOUDFLARE_HEADERS = ("CF-Connecting-IP", "CF-Ray")
 
 
-# Pairing payload v2. The mint response is what the admin app renders as the
-# QR / deep link, so it also carries what a NEW phone needs to reach and
-# verify this hub without mDNS:
-#
-#   ``identity_fingerprint``  the TLS identity the app pins at first-contact
-#                             TOFU — the SAME value the handshake serves as
-#                             ``tls.identity_fingerprint_sha256`` (SHA-256
-#                             over the identity key's SPKI DER, tls.py).
-#   ``tunnel_url``            the hub's advertised remote path (hub_config
-#                             ``tunnel_url``, same live read as the
-#                             handshake), present only while the options
-#                             toggle says the tunnel is ON.
-#   ``payload_version``       2.
-#   ``qr_payload``            the canonical v2 deep link. A v1 app's scanner
-#                             reads ONLY the ``code`` query param and ignores
-#                             the rest, so a v2 QR still pairs a v1 phone on
-#                             the LAN.
-#
-# Strictly additive: every v1 field is returned unchanged, and v1 clients
-# keep building their own ``casasmart://family?code=`` links from ``code``.
+# Pairing payload version; v2 adds the fields from _payload_v2_fields.
 PAIRING_PAYLOAD_VERSION = 2
 
 
-# Matches the app's deep-link contract ``casasmart://<type>?code=...`` —
-# admin-minted codes are family/member invites.
+# The app's deep links are casasmart://<type>?code=...; admin-minted codes
+# are family invites.
 _DEEP_LINK_BASE = "casasmart://family"
 
 
@@ -138,12 +90,7 @@ def _get_push_store(hass: HomeAssistant):
 
 
 def _get_push_dispatcher(hass: HomeAssistant):
-    """The loaded entry's push dispatcher, or None when not set up.
-
-    None whenever the relay push leg isn't running (no TLS identity /
-    unusable push key — see ``__init__.py``); callers skip the push then,
-    the enroll itself is never blocked on notification plumbing.
-    """
+    """The loaded entry's push dispatcher, or None when push isn't running."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
         return None
@@ -179,10 +126,10 @@ def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
 
 
 def get_provision_secret(hass: HomeAssistant) -> str | None:
-    """The shared speaker-provisioning secret, or None when not set up.
+    """The shared speaker-provisioning key, or None when not set up.
 
-    A speaker presents this (header ``X-CasaSmart-Provision-Key``) on
-    ``GET /audio/provision`` to fetch its broker settings from any address.
+    A speaker sends it in the X-CasaSmart-Provision-Key header on
+    GET /audio/provision to fetch its broker settings from any address.
     """
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
@@ -192,11 +139,10 @@ def get_provision_secret(hass: HomeAssistant) -> str | None:
 
 
 def is_keyless_speaker_provisioning_enabled(hass: HomeAssistant) -> bool:
-    """The hub_config ``keyless_speaker_provisioning`` flag (default False).
+    """Whether keyless speaker provisioning is on in hub config (default off).
 
-    When True, ``GET /audio/provision`` also serves a LAN client that has no
-    provisioning key. Strictly ``is True`` — unset or malformed means the key
-    is required, fail closed.
+    When on, GET /audio/provision also serves a LAN client without the
+    provisioning key. Only a literal true turns it on.
     """
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
@@ -206,10 +152,10 @@ def is_keyless_speaker_provisioning_enabled(hass: HomeAssistant) -> bool:
 
 
 def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
-    """Surface a freshly minted recovery code to the HA admin (the operator).
+    """Show a freshly minted recovery code to the HA admin.
 
-    The plaintext exists exactly once, here: the operator engraves it on the
-    metal card, and dismissing the notification deletes the hub's only copy.
+    The notification is the only plaintext copy: the installer engraves the
+    code on the recovery card, and dismissing the notification deletes it.
     """
     persistent_notification.async_create(
         hass,
@@ -224,11 +170,11 @@ def notify_recovery_code(hass: HomeAssistant, code: str) -> None:
 
 
 def arm_recovery(hass: HomeAssistant) -> None:
-    """Mint the recovery code on a claimed hub (no-op when already armed).
+    """Mint the recovery code on a claimed hub and show it to the HA admin.
 
-    A new code is shown to the HA admin through ``notify_recovery_code``.
-    Blocking storage write — call via executor. Only call it once an admin
-    exists: on a hub without one, ``ensure_armed`` drops the card.
+    No-op when a code is already armed. Blocking: run it in the executor, and
+    only once an admin exists (on a hub without one, ensure_armed drops the
+    code).
     """
     recovery = get_recovery(hass)
     if recovery is None:
@@ -239,7 +185,7 @@ def arm_recovery(hass: HomeAssistant) -> None:
 
 
 def _arrived_on_trusted_lan_ingress(request: web.Request) -> bool:
-    """Served by the hub TLS listener while it is trusted as LAN ingress."""
+    """Whether the TLS listener served the request while trusted as LAN."""
     app = getattr(request, "app", None)
     try:
         return app is not None and app.get(TLS_LISTENER_TRUSTED_LAN) is True
@@ -248,7 +194,7 @@ def _arrived_on_trusted_lan_ingress(request: web.Request) -> bool:
 
 
 def _arrived_through_cloudflare(request: web.Request) -> bool:
-    """True when the request carries any header Cloudflare adds when proxying."""
+    """Whether the request carries a header Cloudflare adds when proxying."""
     headers = request.headers
     if any(name in headers for name in _CLOUDFLARE_HEADERS):
         return True
@@ -256,25 +202,15 @@ def _arrived_through_cloudflare(request: web.Request) -> bool:
 
 
 def is_lan_request(request: web.Request) -> bool:
-    """True when the request came from the hub's own network.
+    """Whether the request came from the hub's own network.
 
     The LAN gate for pairing, owner recovery and keyless speaker provisioning.
-    Loopback is deliberately EXCLUDED — tunnel traffic (cloudflared)
-    reaches HA from localhost, and the whole point is that a leaked
-    pairing QR is useless remotely. Link-local/private = LAN; everything
-    else (public, loopback, unparseable) is refused.
-
-    A request carrying Cloudflare's proxy headers is never LAN, whatever
-    source address the last hop shows: it crossed the internet. HA's own
-    port resolves the real client IP from ``X-Forwarded-For`` when the proxy
-    is trusted, but the hub's TLS listener is a bare aiohttp app — a tunnel
-    pointed at it would arrive from a private Docker/add-on address.
-
-    On Docker Desktop the TLS listener's source addresses are synthetic and
-    unstable. With ``lan_relay_ingress`` on, the listener itself is the LAN
-    proof: it is published to 127.0.0.1 only and fronted by a relay that admits
-    only LAN clients (``lan_ingress.py``, ``deploy/macos``). Cloudflare-proxied
-    requests are still refused first.
+    Private and link-local addresses count. Loopback doesn't, because tunnel
+    traffic (cloudflared) reaches HA from localhost. A request with Cloudflare
+    proxy headers is never LAN, whatever its source address: a tunnel pointed
+    at the TLS listener arrives from a private Docker or add-on address. With
+    lan_relay_ingress on, arriving on the TLS listener is the proof instead
+    (see lan_ingress.py).
     """
     if _arrived_through_cloudflare(request):
         return False
@@ -288,12 +224,11 @@ def is_lan_request(request: web.Request) -> bool:
 
 
 def is_remote_pairing_enabled(hass: HomeAssistant) -> bool:
-    """The hub_config ``remote_pairing_enabled`` flag (default False).
+    """Whether remote pairing is on in hub config (default off).
 
-    When True, the enroll gate lets NON-LAN requests through to
-    ``pairing.redeem``, whose code-class policy still keeps the bootstrap
-    owner claim LAN-only. Strictly ``is True`` — unset or malformed keeps
-    pairing LAN-only, fail closed.
+    When on, the enroll gate lets off-LAN requests through to pairing.redeem,
+    which still keeps the bootstrap owner claim LAN-only. Only a literal true
+    turns it on.
     """
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
@@ -307,9 +242,8 @@ def authenticate_request(
 ) -> tuple[dict[str, Any] | None, web.Response | None]:
     """Validate the CasaSmart JWT on a request and check one permission.
 
-    Returns ``(claims, None)`` on success or ``(None, error_response)``
-    to return as-is. Token validation is pure HMAC math — safe on the
-    event loop, no executor hop per request.
+    Returns (claims, None) on success or (None, error_response) to send back.
+    Validation is in-memory HMAC work, so it runs on the event loop.
     """
     engine = get_engine(hass)
     if engine is None:
@@ -327,11 +261,8 @@ def authenticate_request(
     try:
         claims = engine.validate_token(authorization.removeprefix("Bearer "))
     except TokenError as err:
-        # Same opaque message for every failure (no oracle), but a
-        # machine-readable ``code`` so clients can tell "re-login/re-mint
-        # fixes this" (token_expired/token_stale) apart from "this device
-        # is no longer paired" (unenrolled) — a widget 401 must never be
-        # read as a re-pair signal unless the hub says so explicitly.
+        # One message for every failure; the code tells the app whether a new
+        # login fixes it or the device must pair again (unenrolled).
         return None, web.json_response(
             {"message": "Invalid or expired token", "code": err.code},
             status=HTTPStatus.UNAUTHORIZED,
@@ -364,17 +295,17 @@ def _throttled_response(err: ThrottledError) -> web.Response:
 
 
 def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
-    """The additive pairing-payload-v2 fields for a freshly minted code.
+    """The pairing payload v2 fields added to a freshly minted code.
 
-    Degrades to LESS information, never wrong information: any piece that
-    is not usable right now (no TLS identity, no/unusable tunnel URL,
-    tunnel manually toggled OFF) is simply absent, and the consumer falls
-    back to v1 behavior (LAN-only pairing).
+    They let a new phone find and verify the hub without mDNS:
+    identity_fingerprint is the TLS identity the app pins (the handshake
+    serves the same value) and tunnel_url the remote path. A field that isn't
+    available is left out, and the app falls back to LAN-only pairing. A v1
+    app reads only the code parameter of qr_payload, so a v2 QR still pairs it.
     """
     fields: dict[str, Any] = {"payload_version": PAIRING_PAYLOAD_VERSION}
-    # ``code`` first for parity with the app's v1 link; values are URL-safe
-    # by construction (code = unambiguous alnum alphabet, fp = hex) except
-    # the tunnel URL, which is percent-encoded.
+    # code comes first, as in the app's v1 link. Only the tunnel URL needs
+    # percent-encoding: codes are alphanumeric and the fingerprint is hex.
     params = [("code", code), ("v", str(PAIRING_PAYLOAD_VERSION))]
 
     entry = _get_loaded_entry(hass)
@@ -385,13 +316,8 @@ def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
             fingerprint = tls.material.identity_fingerprint
             fields["identity_fingerprint"] = fingerprint
             params.append(("fp", fingerprint))
-        # The options toggle is the manual emergency OFF: while it says
-        # off, a fresh pairing payload must not send a NEW phone to a
-        # tunnel the owner deliberately parked. (The handshake keeps
-        # advertising the URL to already-paired phones whose fallback chain
-        # tolerates a dead route — different consumer, deliberate
-        # difference.) Absent key = off, same fail-closed read as the
-        # reconciler.
+        # Don't send a new phone to a tunnel the owner switched off (unset
+        # counts as off). Paired phones still get the URL from the handshake.
         tunnel_on = bool(entry.options.get(CONF_TUNNEL_ENABLED, False))
         tunnel_url = normalize_tunnel_url(
             runtime_data.hub_config.get(TUNNEL_URL_CONFIG_KEY)
@@ -406,13 +332,12 @@ def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
 
 
 class CasaSmartEnrollView(HomeAssistantView):
-    """POST /api/casasmart/auth/enroll — pair a device.
+    """POST /api/casasmart/auth/enroll: pair a device with a pairing code.
 
-    The pairing code IS the credential: role + room scope come from the
-    code, never from the request. Network policy is per CODE CLASS:
-    ``remote_pairing_enabled`` off (default) = LAN-only for everything —
-    see ``is_lan_request``; on = member codes redeem from any source, the
-    bootstrap owner claim stays LAN-only (``pairing.redeem`` enforces it).
+    The role and room scope come from the code, never from the request.
+    Pairing is LAN-only unless remote_pairing_enabled is on; then member
+    codes work from anywhere, but the bootstrap owner claim stays LAN-only
+    (pairing.redeem enforces that).
     """
 
     url = f"/api/{DOMAIN}/auth/enroll"
@@ -423,11 +348,10 @@ class CasaSmartEnrollView(HomeAssistantView):
         self._hass = hass
 
     def _sticker_hash(self) -> str | None:
-        """This hub's PERMANENT bootstrap code hash, or None.
+        """The stored hash of this hub's permanent bootstrap code, or None.
 
-        Still this hub's own code after the live entry is dropped on claim,
-        which is what keeps "the owner re-runs onboarding on their own hub"
-        working once the idempotent path checks the code.
+        It still identifies this hub's own code after the live code is
+        dropped on claim, so the owner can re-run onboarding on their hub.
         """
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         if not entries:
@@ -442,9 +366,7 @@ class CasaSmartEnrollView(HomeAssistantView):
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
         lan_source = is_lan_request(request)
         if not lan_source and not is_remote_pairing_enabled(self._hass):
-            # A leaked/photographed pairing QR is useless remotely. With the
-            # flag on the request goes on to redeem, whose code-class policy
-            # still refuses the bootstrap owner claim off-LAN.
+            # A leaked pairing QR is useless remotely unless remote pairing is on.
             _LOGGER.warning(
                 "Pairing attempt refused (non-LAN source: %s)", request.remote
             )
@@ -458,26 +380,16 @@ class CasaSmartEnrollView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
-        # IDEMPOTENT re-pair: the SAME phone (same keypair) re-running onboarding
-        # — a UI glitch, a redundant claim — must be let straight back in, not
-        # bricked on its own already-claimed hub with "invalid code". If this
-        # public key is already enrolled, return its identity WITHOUT re-redeeming
-        # the code; the app then logs in as usual. Safe: the device id grants
-        # nothing — the token still requires the private key (login).
-        #
-        # The code is still checked, just not consumed. Recognising the key is
-        # NOT sufficient on its own: a hub that merely remembers a phone would
-        # otherwise accept a code minted by a DIFFERENT hub. With two hubs on
-        # one LAN (a test hub and the home's real one, both holding the same
-        # key) the app's enroll chain takes the first hub that answers yes, so
-        # typing the RIGHT hub's code would silently pair the phone to the
-        # WRONG hub, with every layer reporting success.
+        # A paired phone (same key) that re-runs onboarding gets its identity
+        # back without redeeming the code; it still has to log in with its
+        # private key. The code must still be this hub's, or a phone known to
+        # two hubs on one LAN could end up paired to the wrong one.
         existing = await self._hass.async_add_executor_job(
             engine.device_for_public_key, payload.get("public_key", "")
         )
         if existing is not None:
-            # Never part of the response — it only decides whether the code
-            # this device originally redeemed still authorises a re-pair.
+            # Kept out of the response: it only lets this device re-pair with
+            # the code it originally redeemed.
             own_code_hash = existing.pop("enrolled_code_hash", None)
             allowed = tuple(h for h in (self._sticker_hash(), own_code_hash) if h)
             try:
@@ -492,15 +404,14 @@ class CasaSmartEnrollView(HomeAssistantView):
             except ThrottledError as err:
                 return _throttled_response(err)
             except CodeInvalidError:
-                # Same generic verdict the redeem path gives — never reveal
-                # whether the key was recognised.
+                # Same answer as redeem gives, so the key's status isn't revealed.
                 return self.json_message(
                     "Invalid pairing code", HTTPStatus.UNAUTHORIZED
                 )
             return self.json(existing, HTTPStatus.CREATED)
 
-        # Refuse a malformed name or key BEFORE redeeming: redeem consumes the
-        # code, and a burnt sticker code stays gone until the next restart.
+        # Check the name and key before redeem consumes the code: a spent
+        # sticker code stays gone until the next restart.
         try:
             engine.check_enrollment(
                 payload.get("name", ""), payload.get("public_key", "")
@@ -520,9 +431,8 @@ class CasaSmartEnrollView(HomeAssistantView):
         except ThrottledError as err:
             return _throttled_response(err)
         except LanOnlyCodeError:
-            # Valid code, LAN-only class (the bootstrap owner claim) from a
-            # remote source — same refusal as the network gate; the code is
-            # NOT consumed, so the legitimate on-LAN claim still works.
+            # The bootstrap owner claim from off the LAN. The code isn't
+            # consumed, so the owner can still claim the hub on the LAN.
             _LOGGER.warning(
                 "Pairing refused: LAN-only code class from remote source %s",
                 request.remote,
@@ -532,11 +442,10 @@ class CasaSmartEnrollView(HomeAssistantView):
                 HTTPStatus.FORBIDDEN,
             )
         except HubAlreadyClaimedError:
-            # Correct owner code, but a DIFFERENT phone on a claimed hub — a
-            # clear, distinct answer, never the generic "invalid".
+            # The right owner code, from another phone, on a claimed hub.
             return self.json_message("This hub is already paired", HTTPStatus.CONFLICT)
         except CodeInvalidError:
-            # One generic bucket: unknown vs expired vs used is not leaked.
+            # Unknown, expired and used codes get the same answer.
             return self.json_message("Invalid pairing code", HTTPStatus.UNAUTHORIZED)
 
         try:
@@ -552,26 +461,20 @@ class CasaSmartEnrollView(HomeAssistantView):
                 )
             )
         except EnrollError as err:
-            # Name and key were checked before redeeming, so this is rare (the
-            # single-admin rule losing a race). The code is spent either way:
-            # single-use is non-negotiable.
+            # Rare, since name and key were checked first (the single-admin
+            # rule losing a race). The code stays spent.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
         if grant["role"] == ROLE_ADMIN:
-            # The hub just got claimed — arm the recovery code so the
-            # installer can engrave the card before leaving the site.
+            # The hub is now claimed: arm the recovery code so the installer
+            # can engrave the card before leaving the site.
             await self._hass.async_add_executor_job(arm_recovery, self._hass)
 
-        # A new device joined — refresh the per-user sensors.
+        # Refresh the per-user sensors.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
-        # Owner visibility — "New device paired: <name> (<role>)" to the
-        # admin's phone on every successful NEW enroll (the idempotent same-key
-        # re-pair above returns early and never gets here). Fired as a task so
-        # the enroll response never waits on the push relay; the dispatcher
-        # swallows its own failures. Notification-only — no approval gate. The
-        # name mirrors the engine's stored normalization (strip + cap) so the
-        # push shows what enrollment kept.
+        # Tell the owner a new device paired, without making the response wait
+        # on the relay. The name is trimmed and capped as the engine stores it.
         dispatcher = _get_push_dispatcher(self._hass)
         if dispatcher is not None:
             stored_name = (
@@ -590,12 +493,11 @@ class CasaSmartEnrollView(HomeAssistantView):
 
 
 class CasaSmartRecoverView(HomeAssistantView):
-    """POST /api/casasmart/auth/recover — metal-card admin recovery.
+    """POST /api/casasmart/auth/recover: owner recovery with the recovery card.
 
-    Lost phone + no cloud backup: the owner presents the recovery code
-    plus a NEW keypair; the hub swaps its admin (old admin's JWTs die
-    instantly) and the card stays valid. Same posture as enroll:
-    the code is the credential, LAN-only, throttled per source.
+    For an owner who lost their phone: the recovery code and a new keypair
+    make the new phone the admin, and the old admin's tokens stop working.
+    The card stays valid. LAN-only, and throttled per source.
     """
 
     url = f"/api/{DOMAIN}/auth/recover"
@@ -633,7 +535,7 @@ class CasaSmartRecoverView(HomeAssistantView):
         except ThrottledError as err:
             return _throttled_response(err)
         except RecoveryCodeInvalidError:
-            # One generic bucket: wrong code vs not-armed is not leaked.
+            # A wrong code and an unarmed hub get the same answer.
             return self.json_message("Invalid recovery code", HTTPStatus.UNAUTHORIZED)
 
         replaced = [
@@ -649,24 +551,21 @@ class CasaSmartRecoverView(HomeAssistantView):
                 )
             )
         except EnrollError as err:
-            # Nothing changed: replace_admin validates before swapping, and the
-            # card just matched, so it is still armed. No arm_recovery here: on
-            # a hub with no admin it would drop the card.
+            # replace_admin validates before swapping, so nothing changed. No
+            # arm_recovery here: on a hub with no admin it would drop the card.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        # The replaced phone is now unpaired: drop its push token like any
-        # unpair does, or it keeps receiving the alerts sent to every
-        # registered device (life-safety alarms).
+        # Drop the replaced phone's push token, as any unpair does, or it keeps
+        # getting the alerts sent to every device (alarms included).
         push = _get_push_store(self._hass)
         if push is not None:
             for old_device_id in replaced:
                 await self._hass.async_add_executor_job(push.unregister, old_device_id)
 
-        # Safety net: mint (and surface to the HA admin) a code only when
-        # none is armed. The swap succeeded, so an admin exists.
+        # Mints a code only if none is armed; the swap left an admin in place.
         await self._hass.async_add_executor_job(arm_recovery, self._hass)
 
-        # The admin device changed identity — refresh the per-user sensors.
+        # The admin device changed: refresh the per-user sensors.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json(
@@ -676,11 +575,11 @@ class CasaSmartRecoverView(HomeAssistantView):
 
 
 class CasaSmartChallengeView(HomeAssistantView):
-    """POST /api/casasmart/auth/challenge — a one-time nonce to sign."""
+    """POST /api/casasmart/auth/challenge: issue a one-time nonce to sign."""
 
     url = f"/api/{DOMAIN}/auth/challenge"
     name = f"api:{DOMAIN}:auth:challenge"
-    requires_auth = False  # this IS the start of authentication
+    requires_auth = False  # this starts authentication
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -707,11 +606,11 @@ class CasaSmartChallengeView(HomeAssistantView):
 
 
 class CasaSmartTokenView(HomeAssistantView):
-    """POST /api/casasmart/auth/token — signed nonce in, JWT out."""
+    """POST /api/casasmart/auth/token: exchange a signed nonce for a token."""
 
     url = f"/api/{DOMAIN}/auth/token"
     name = f"api:{DOMAIN}:auth:token"
-    requires_auth = False  # the signature IS the credential
+    requires_auth = False  # the signature is the credential
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -744,24 +643,20 @@ class CasaSmartTokenView(HomeAssistantView):
         except ThrottledError as err:
             return _throttled_response(err)
         except ChallengeError as err:
-            # Deliberately generic — no hint which part failed.
+            # The message doesn't say which part failed.
             return self.json_message(str(err), HTTPStatus.UNAUTHORIZED)
 
         return self.json(issued)
 
 
 class CasaSmartWidgetTokenView(HomeAssistantView):
-    """POST /api/casasmart/auth/widget-token — mint the widget token.
+    """POST /api/casasmart/auth/widget-token: mint a widget token.
 
     Home-screen widgets can't run the challenge-response login, so the app
-    trades its REGULAR session token for a long-lived ``scope: widget`` token
-    and hands THAT to native widget storage. The widget token can only read
-    and control devices (``WIDGET_SCOPE_PERMISSIONS``), and dies with the
-    device's next unpair or role/room edit.
-
-    ``widget.token`` is outside ``WIDGET_SCOPE_PERMISSIONS``, so a widget
-    token presented here is refused by ``authorize`` — widget tokens
-    cannot self-renew; only a live app session can mint one.
+    trades its session token for a long-lived one that can only read and
+    control devices, and stops working with the device's next unpair or
+    role or room edit. A widget token can't mint another (widget.token is
+    outside WIDGET_SCOPE_PERMISSIONS); only a live app session can.
     """
 
     url = f"/api/{DOMAIN}/auth/widget-token"
@@ -784,8 +679,7 @@ class CasaSmartWidgetTokenView(HomeAssistantView):
                 engine.mint_widget_token, claims["sub"]
             )
         except UnknownDeviceError:
-            # The device vanished between validate and mint — same bucket
-            # as an invalid token, nothing to enumerate.
+            # Unpaired since the token was validated: answer as for a bad token.
             return self.json_message(
                 "Invalid or expired token", HTTPStatus.UNAUTHORIZED
             )
@@ -795,26 +689,18 @@ class CasaSmartWidgetTokenView(HomeAssistantView):
 
 
 class CasaSmartWhoamiView(HomeAssistantView):
-    """GET /api/casasmart/auth/whoami — is this token still a live session?
+    """GET /api/casasmart/auth/whoami: is the caller's device still paired?
 
-    The app calls this on resume to shake off a stale "connected" state. The
-    answer reflects the CALLER's own device only (the bearer token IS the
-    identity — no enumeration), and is freshness-agnostic on purpose: an
-    expired or privilege-bumped token whose device is still paired still
-    reports ``enrolled: true`` with the device's CURRENT role/name, so the
-    app re-authenticates (gets a fresh token) rather than wrongly dropping to
-    re-pairing. ``enrolled: false`` means the token no longer maps to a paired
-    device (unpaired, or forged/garbage) — that, and only that, sends the app
-    back to pairing.
-
-    Always HTTP 200 so the client reads a single boolean; an unreachable hub
-    is a transport-level failure the app already treats as "offline, keep
-    state", never as "not enrolled".
+    The app calls this on resume. It answers only for the device the token
+    names, and ignores expiry and edits: a stale token for a paired device
+    gets enrolled: true with the current role and name, so the app logs in
+    again instead of pairing again. enrolled: false (unpaired or forged)
+    sends the app back to pairing. Always 200, so the app reads one boolean.
     """
 
     url = f"/api/{DOMAIN}/auth/whoami"
     name = f"api:{DOMAIN}:auth:whoami"
-    requires_auth = False  # the bearer token is read + checked in-handler
+    requires_auth = False  # the handler reads the bearer token itself
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -844,26 +730,14 @@ class CasaSmartWhoamiView(HomeAssistantView):
 
 
 class CasaSmartUnpairSelfView(HomeAssistantView):
-    """POST /api/casasmart/auth/unpair-self — this device hands the hub back.
+    """POST /api/casasmart/auth/unpair-self: the calling device leaves the hub.
 
-    "Remove Hub" in the app calls this. Without it the hub would keep the
-    phone enrolled as its one admin, and a hub that HAS an admin enrolls no
-    second one, issues only sub-admin/user codes and drops the bootstrap owner
-    code. No phone could administer it again without the recovery card or a
-    reset from Home Assistant: a site visit, for one tap in Settings.
-
-    The caller's own token is the authority: it proves possession of this
-    device's private key, so any role may remove ITSELF (the admin included —
-    ``leave_hub`` skips the guard that stops an admin being evicted by someone
-    else). No device id is accepted from the body; the subject of the token is
-    the only device that can be unpaired here, so this can never become a way
-    to evict somebody else.
-
-    When the departing device was the last admin, the hub's PERMANENT sticker
-    code is re-armed from its stored hash — not rotated. The code printed on
-    the hub when it shipped starts working again, so the owner re-claims it by
-    typing what is on the box. (The reset buttons rotate it instead, because
-    there the intent is to invalidate the old sticker.)
+    "Remove Hub" in the app calls this, so an owner can hand the hub back
+    without the recovery card or a reset. The token proves possession of the
+    device's private key, so any role, the admin included, may remove itself;
+    only the token's subject is unpaired, never a device named in the body.
+    When the last admin leaves, the permanent sticker code is armed again
+    from its stored hash, so the owner can claim the hub with the printed code.
     """
 
     url = f"/api/{DOMAIN}/auth/unpair-self"
@@ -874,9 +748,8 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
-        # Every role may leave, so the gate is really "a valid session" — and a
-        # SESSION: session.manage is outside the widget cap, so a home-screen
-        # widget's token can't unpair the device that minted it.
+        # Every role holds session.manage but widget tokens don't, so a widget
+        # can't unpair the device that minted it.
         claims, error = authenticate_request(self._hass, request, "session.manage")
         if error is not None:
             return error
@@ -890,8 +763,8 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
                 engine.leave_hub, device_id
             )
         except UnknownDeviceError:
-            # Already gone — the app's teardown is idempotent, and a retry
-            # after a dropped response must not look like a failure.
+            # Already gone: a retry after a lost response must not look like a
+            # failure.
             return self.json({"unpaired": device_id, "hub_unclaimed": False})
 
         push = _get_push_store(self._hass)
@@ -904,20 +777,19 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
         if runtime is not None:
 
             def _finish_leave() -> bool:
-                # Same orphan rule as an admin-driven unpair: a person's
-                # member_id-keyed rows go only when their LAST device leaves.
+                # As with an admin unpair, a member's data goes with their last
+                # device.
                 if engine.member_device_count(member_id) == 0:
                     runtime.registry.delete_favorites(member_id)
                     runtime.user_settings.delete(member_id)
                 if engine.has_admin():
                     return False
-                # Last admin gone: re-arm the PERMANENT sticker code from its
-                # stored hash so the owner can re-claim with the printed code.
+                # Last admin gone: arm the sticker code again from its stored
+                # hash, so the owner can claim the hub with the printed code.
                 code_hash = runtime.hub_config.get(BOOTSTRAP_CODE_HASH_CONFIG_KEY)
                 if not code_hash:
-                    # No stored sticker hash: nothing to reinstall, and minting
-                    # a random code nobody can read would help no one. Say so;
-                    # a reset from Home Assistant re-claims this hub.
+                    # A new random code would be one nobody can read, so only
+                    # log it; a reset from Home Assistant re-claims the hub.
                     _LOGGER.warning(
                         "Last admin left but no stored bootstrap hash — "
                         "re-claim needs the hub's reset button"
@@ -937,7 +809,7 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
 
 
 class CasaSmartPairingCodesView(HomeAssistantView):
-    """POST/GET /api/casasmart/pairing/codes — mint + list pairing codes."""
+    """POST/GET /api/casasmart/pairing/codes: mint and list pairing codes."""
 
     url = f"/api/{DOMAIN}/pairing/codes"
     name = f"api:{DOMAIN}:pairing:codes"
@@ -959,10 +831,8 @@ class CasaSmartPairingCodesView(HomeAssistantView):
                 "Body must be a JSON object", HTTPStatus.BAD_REQUEST
             )
 
-        # "Add a device to [member]": the code joins an EXISTING person, so the
-        # new device inherits that member's CURRENT role/rooms — the admin picks
-        # the member, the hub fills the rest, so a mismatched scope can't be
-        # forged through the payload.
+        # "Add a device to <member>": the new device gets that member's current
+        # role and rooms, whatever the payload says.
         role = payload.get("role", "")
         rooms = payload.get("rooms")
         member_id = payload.get("member_id")
@@ -997,8 +867,7 @@ class CasaSmartPairingCodesView(HomeAssistantView):
             issued["role"],
             " add-device" if member_id else "",
         )
-        # Payload v2: additive discovery + identity fields on top of the
-        # untouched v1 ``issued`` dict.
+        # The v2 fields are added to the unchanged v1 response.
         return self.json(
             {**issued, **_payload_v2_fields(self._hass, issued["code"])},
             HTTPStatus.CREATED,
@@ -1016,7 +885,7 @@ class CasaSmartPairingCodesView(HomeAssistantView):
 
 
 class CasaSmartPairingCodeView(HomeAssistantView):
-    """DELETE /api/casasmart/pairing/codes/{code_id} — revoke a code."""
+    """DELETE /api/casasmart/pairing/codes/{code_id}: revoke a code."""
 
     url = f"/api/{DOMAIN}/pairing/codes/{{code_id}}"
     name = f"api:{DOMAIN}:pairing:code"
@@ -1039,7 +908,7 @@ class CasaSmartPairingCodeView(HomeAssistantView):
 
 
 class CasaSmartUsersView(HomeAssistantView):
-    """GET /api/casasmart/users — every paired device (admin only)."""
+    """GET /api/casasmart/users: every paired device (admin only)."""
 
     url = f"/api/{DOMAIN}/users"
     name = f"api:{DOMAIN}:users"
@@ -1060,12 +929,11 @@ class CasaSmartUsersView(HomeAssistantView):
 
 
 class CasaSmartUserView(HomeAssistantView):
-    """PATCH/DELETE /api/casasmart/users/{device_id} — edit or unpair.
+    """PATCH/DELETE /api/casasmart/users/{device_id}: edit or unpair a device.
 
-    Both paths invalidate the target's outstanding JWTs instantly (the
-    engine bumps/drops the device's auth version). The admin record is
-    untouchable here: the owner's phone leaves only by unpairing itself, by
-    owner recovery, or by a reset from Home Assistant.
+    Either way the device's outstanding tokens stop working at once. The
+    admin can't be edited or unpaired here; the owner's phone leaves only by
+    unpairing itself, by owner recovery, or by a reset from Home Assistant.
     """
 
     url = f"/api/{DOMAIN}/users/{{device_id}}"
@@ -1106,7 +974,7 @@ class CasaSmartUserView(HomeAssistantView):
         except UserManagementError as err:
             return self.json_message(str(err), HTTPStatus.FORBIDDEN)
 
-        # Role/room edit landed — repaint the device's sensor.
+        # Refresh the device's sensor.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json(updated)
@@ -1128,15 +996,12 @@ class CasaSmartUserView(HomeAssistantView):
         except UserManagementError as err:
             return self.json_message(str(err), HTTPStatus.FORBIDDEN)
 
-        # Remove the unpaired device's push token (if any).
         push = _get_push_store(self._hass)
         if push is not None:
             await self._hass.async_add_executor_job(push.unregister, device_id)
 
-        # Prune the person's favorites + settings IFF that was their LAST
-        # device — otherwise the member_id-keyed rows orphan. A member with
-        # another paired device keeps the shared rows. runtime_data is fetched
-        # on the loop; the count + prunes run in the executor.
+        # A member's favorites and settings go with their last device; a
+        # member with another paired device keeps them.
         entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
         runtime = entries[0].runtime_data if entries else None
         if runtime is not None:
@@ -1149,7 +1014,7 @@ class CasaSmartUserView(HomeAssistantView):
 
             await self._hass.async_add_executor_job(_prune_orphaned_member)
 
-        # Device gone — drop its sensor.
+        # Remove the device's sensor.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
 
         return self.json({"unpaired": device_id})

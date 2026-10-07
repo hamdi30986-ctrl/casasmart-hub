@@ -1,42 +1,11 @@
-"""Hub-issued JWT layer: mint + validate, nothing else.
+"""Hub-issued JWTs: mint and validate.
 
-Pure stdlib (hmac/hashlib/base64/json) so the token rules are
-unit-testable without an HA install, exactly like ``ws_protocol`` and
-``entity_bridge``.
-
-Why hand-rolled and not PyJWT: the hub is BOTH the issuer and the only
-validator — there is no third party, no interop, and therefore no reason
-to accept anything but our own narrow format. This module hard-rejects
-everything that isn't ``HS256`` + our issuer + our claim shape, which is
-a smaller attack surface than a general-purpose JWT library with
-algorithm negotiation (the classic ``alg: none`` family of bugs can't
-exist here by construction).
-
-Token shape (claims):
-
-- ``iss`` — always ``casasmart-hub``; anything else is rejected.
-- ``sub`` — the device id the token was issued to.
-- ``role`` — ``admin`` / ``sub-admin`` / ``user`` (3-tier model).
-- ``rooms`` — list of area ids the subject is scoped to, or ``None`` for
-  unrestricted (a per-user toggle).
-- ``iat`` / ``exp`` — issued-at / expiry, epoch seconds. Validation
-  allows ``CLOCK_SKEW`` seconds of slack both ways (JWT expiry math
-  must survive small clock drift).
-- ``ver`` — the device record's auth version at issue time. The
-  engine bumps a device's version on any role/room change and checks
-  ``ver`` on validation, so privilege edits invalidate outstanding
-  tokens immediately instead of riding out the TTL.
-- ``jti`` — random unique token id. Nothing checks it; revocation rides
-  ``ver``.
-- ``scope`` — OPTIONAL. Absent on normal session tokens. ``widget`` marks
-  the home-screen-widget token: long-lived, but the engine's
-  ``authorize`` only honors it for the narrow widget permission set
-  (device read + control), so a leaked widget token can do nothing else:
-  no cameras, history, automations, pairing, user management or session
-  writes.
-  Revocation rides the existing ``ver`` check — unpairing or editing the
-  issuing device kills its widget tokens the same instant as its session
-  tokens.
+The hub is the only issuer and the only validator, so this small stdlib
+module accepts one format (HS256, our issuer, our claim shape) and rejects
+everything else; there is no algorithm negotiation to get wrong. Claims are
+iss, sub (device id), role, rooms (None for all rooms), ver (the device's
+auth version, checked by the engine so edits revoke tokens at once), iat,
+exp, jti, and an optional scope ("widget" for the home-screen widget token).
 """
 
 from __future__ import annotations
@@ -51,7 +20,7 @@ from typing import Any
 
 ISSUER = "casasmart-hub"
 ALGORITHM = "HS256"
-# Seconds of clock slack tolerated on iat/exp checks.
+# Seconds of clock drift tolerated on the iat and exp checks.
 CLOCK_SKEW = 30
 
 ROLE_ADMIN = "admin"
@@ -67,17 +36,10 @@ VALID_SCOPES = (SCOPE_WIDGET,)
 class TokenError(Exception):
     """The token is malformed, forged, expired, or not ours.
 
-    ``code`` is the machine-readable reason clients receive in the 401
-    body, so they can react proportionately instead of guessing from an
-    opaque message:
-
-    - ``token_invalid`` — forged/malformed/wrong secret; a fresh login is
-      the only recovery.
-    - ``token_expired`` — a genuine token past ``exp``; refresh via login.
-    - ``token_stale`` — the device was edited (auth ``ver`` bumped); the
-      device is STILL enrolled — re-auth/re-mint, never re-pair.
-    - ``unenrolled`` — the device record is gone; the one code that
-      legitimately means "pair again".
+    code is the reason sent to the app in the 401 body: token_invalid and
+    token_expired call for a fresh login, token_stale means the device was
+    edited and should log in again, and unenrolled is the only one that means
+    the device must pair again.
     """
 
     def __init__(self, message: str, code: str = "token_invalid") -> None:
@@ -144,11 +106,11 @@ def issue_token(
 def validate_token(
     secret: bytes, token: str, now: float | None = None
 ) -> dict[str, Any]:
-    """Verify signature + claims; return the claims dict or raise TokenError.
+    """Verify the signature and claims; return the claims or raise TokenError.
 
-    Signature is checked FIRST (constant-time) so claim parsing never runs
-    on unauthenticated input. Anything that isn't one of our tokens, a
-    non-ASCII string included, raises TokenError and nothing else.
+    The signature is checked first, in constant time, so claims are never
+    parsed from unauthenticated input. Any other input, non-ASCII strings
+    included, raises TokenError and nothing else.
     """
     if not secret:
         raise TokenError("Empty signing secret")
@@ -190,8 +152,7 @@ def validate_token(
     if not isinstance(claims.get("ver"), int):
         raise TokenError("Missing version claim")
     if "scope" in claims and claims["scope"] not in VALID_SCOPES:
-        # A forged/garbled scope must never validate into "no scope" —
-        # an unknown scope claim is rejected outright, not ignored.
+        # Reject an unknown scope so it can't validate as an unscoped token.
         raise TokenError("Unknown scope claim")
 
     current = now if now is not None else time.time()
@@ -208,16 +169,11 @@ def validate_token(
 
 
 def unverified_subject(secret: bytes, token: str) -> str | None:
-    """Signature-verified device id (``sub``), IGNORING expiry/version.
+    """The device id of a token this hub signed, ignoring expiry and version.
 
-    Returns the subject of a token the hub genuinely issued (HMAC verified,
-    our issuer, well-formed claims), or ``None`` for anything forged or
-    garbled. Unlike :func:`validate_token` it does NOT enforce ``exp`` — the
-    sole caller is the ``/auth/whoami`` enrollment probe, which answers "is
-    this device still paired?" and must treat a merely-stale token the same
-    as a fresh one (a stale token still proves the device's identity; whether
-    to refresh it is a separate question the app handles via re-auth). It is
-    NOT an authorization gate — never grant access off this.
+    Returns None for anything forged or malformed. Only for /auth/whoami,
+    which asks whether the device is still paired: an expired token still
+    proves which device holds it. Never use it to grant access.
     """
     if not secret or not isinstance(token, str) or not token.isascii():
         return None
