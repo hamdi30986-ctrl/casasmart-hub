@@ -418,7 +418,9 @@ class TankEngine:
             cal_v = record.get("calibration_voltage", 0.0) or 0.0
             cal_d = record.get("calibration_depth", 0.0) or 0.0
             height = record.get("max_height", TANK_MAX_HEIGHT_DEFAULT) or 0.0
-            cutoff = int(time.time()) - days * 24 * 3600
+            # Clamped at the epoch: no reading is older, and a huge ``days``
+            # would otherwise overflow SQLite's 64-bit INTEGER.
+            cutoff = max(0, int(time.time()) - days * 24 * 3600)
             entries = self._readings.recent(device_id, cutoff)
         # recent() returns newest-first, already windowed at the cutoff.
         return [
