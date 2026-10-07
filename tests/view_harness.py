@@ -124,7 +124,7 @@ class FakeServices:
     def has_service(self, domain, service):
         return (domain, service) in self.handlers
 
-    def async_register(self, domain, service, handler, **kwargs):
+    def async_register(self, domain, service, handler, *args, **kwargs):
         self.handlers[(domain, service)] = handler
 
     async def async_call(self, domain, service, data, *, blocking=False):
@@ -226,6 +226,10 @@ class FakeHass:
     async def async_add_executor_job(self, func, *args):
         # Engines are sync; run inline (no thread) so tests stay deterministic.
         return func(*args)
+
+    def async_run_hass_job(self, job, *args):
+        # How HA's admin-service wrapper calls the handler it guards.
+        return job.target(*args)
 
     def async_create_task(self, coro):
         # Recorded, not scheduled (same contract as test_push_dispatcher's
