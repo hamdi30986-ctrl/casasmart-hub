@@ -1,32 +1,11 @@
 """Remote access through a Cloudflare tunnel: the pure rules.
 
-The hub itself does not run the tunnel. ``cloudflared`` runs on its own (on
-Home Assistant OS, the Cloudflare Tunnel add-on, which ``tunnel_control``
-starts and stops) and carries remote requests to Home Assistant's own HTTP
-port, where the CasaSmart API is served too. What the integration owns is
-the contract: the hub's public tunnel URL lives in ``hub_config.json`` (key
-``tunnel_url``), set by ``casasmart.set_tunnel_url`` or derived from the
-Cloudflare domain in the integration's options, and the handshake and the
-pairing payload hand it to the app, which captures the remote path at
-pairing, like the TLS pin. Nobody types a URL on the phone.
-
-This module is the pure half (stdlib only, flat-importable by the unit
-tests like ``discovery.py``/``ws_protocol.py``): tunnel URL and domain
-validation, cloudflared add-on slug matching, and the edge-liveness
-watchdog decision.
-
-Validation doctrine — **fail closed, never publish garbage**:
-
-- ``https`` only. The app sends its bearer token on this URL; a plaintext
-  ``http://`` tunnel URL handed to phones would carry credentials in the
-  clear, so it is rejected here rather than trusted downstream (the app
-  side independently refuses non-https too — defense in both layers).
-- Host required, a readable port, no whitespace, no userinfo/query/fragment
-  — a tunnel URL is an origin (plus optional path prefix), not an arbitrary
-  link. Anything else is a config typo and gets dropped (the handshake logs
-  it once), not "cleaned up" silently.
-- Trailing slash normalized away so the app's path concatenation
-  (``{base}/api/casasmart/...``) can't produce double slashes.
+cloudflared runs outside the integration (on Home Assistant OS, as the
+Cloudflare Tunnel add-on that tunnel_control starts and stops) and carries
+remote requests to Home Assistant's HTTP port. The hub's public tunnel URL is
+kept in hub_config.json and given to the app at pairing. This module
+validates tunnel URLs and domains, matches the add-on slug and makes the
+edge watchdog's decision. It is stdlib-only, so unit tests import it directly.
 """
 
 from __future__ import annotations
@@ -37,26 +16,21 @@ from urllib.parse import urlsplit
 # hub_config.json key of the advertised tunnel URL.
 TUNNEL_URL_CONFIG_KEY = "tunnel_url"
 
-# One DNS label: 1-63 chars of [a-z0-9-], no leading/trailing hyphen.
-# (Hostnames only — underscores are legal in some DNS records but not in
-# hostnames, and a Cloudflare tunnel hostname is a hostname.)
+# One hostname label: 1-63 chars of [a-z0-9-], no leading or trailing hyphen.
 _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-# Add-on slugs are `<repo-hash>_cloudflared`, and the hash differs between
-# add-on repositories (one is `9074a9fa_cloudflared`), so match on the
-# suffix, never a fixed slug.
+# Add-on slugs are <repo hash>_cloudflared, and the hash differs between
+# add-on repositories, so match the suffix.
 _CLOUDFLARED_SLUG_SUFFIX = "_cloudflared"
-# Add-on states that count as "running" when picking among multiple matches
-# (mirrors aiohasupervisor AddonState values — kept as strings so this module
-# stays stdlib-only and flat-importable by the unit tests).
+# aiohasupervisor AddonState values that count as running, as plain strings.
 _RUNNING_ADDON_STATES = frozenset({"started", "startup"})
 
 
 def normalize_tunnel_url(value: object) -> str | None:
-    """Return the publishable tunnel URL, or None if unusable.
+    """The tunnel URL to give phones, or None to advertise no tunnel.
 
-    None means "don't advertise a tunnel": a misconfigured URL must degrade
-    to LAN-only, never reach a phone. The result keeps the input's case and
-    path prefix, without a trailing slash.
+    Phones send their bearer token to this URL, so only an https origin with
+    an optional path prefix passes; anything else degrades to LAN-only. The
+    result keeps the input's case and path, without a trailing slash.
     """
     if not isinstance(value, str):
         return None
@@ -64,8 +38,7 @@ def normalize_tunnel_url(value: object) -> str | None:
     if not candidate or any(char.isspace() for char in candidate):
         return None
 
-    # urlsplit only rejects a non-numeric or out-of-range port when .port is
-    # read, so read it here; port 0 can't be dialled either.
+    # urlsplit checks the port only when .port is read; port 0 can't be dialled.
     try:
         parts = urlsplit(candidate)
         port = parts.port
@@ -78,13 +51,9 @@ def normalize_tunnel_url(value: object) -> str | None:
         return None
     if not parts.hostname:
         return None
-    # An origin (+ optional path prefix), nothing else. Userinfo in
-    # particular must never survive into something phones dial.
     if parts.username is not None or parts.password is not None:
         return None
-    # Presence, not emptiness — `https://host?` has an EMPTY query, which
-    # urlsplit reports as falsy; checking the delimiters themselves keeps
-    # a degenerate `?`/`#` from ever being advertised.
+    # urlsplit reports an empty query or fragment ("https://host?") as falsy.
     if "?" in candidate or "#" in candidate:
         return None
 
@@ -92,19 +61,12 @@ def normalize_tunnel_url(value: object) -> str | None:
 
 
 def normalize_cloudflare_domain(value: object) -> str | None:
-    """Return the bare lowercase tunnel hostname, or None if unusable.
+    """The bare lowercase tunnel hostname, or None if unusable.
 
-    The config/options flow field accepts what a human is likely to paste:
-    ``my-ha.example.com`` or a full ``https://my-ha.example.com/``.
-    Anything that is not reducible to a plain FQDN is rejected — same
-    fail-closed doctrine as ``normalize_tunnel_url``:
-
-    - A pasted URL must be an https *origin*. A path prefix (``/myhub``),
-      port, userinfo, query or fragment cannot be expressed as a domain,
-      and silently dropping any of them would change what the value means.
-    - A Cloudflare tunnel hostname is a public DNS name on 443 — no ports,
-      no IP literals, at least two labels.
-    - Trailing root dot (``host.example.``) and case are normalized away.
+    Accepts my-ha.example.com or a pasted https://my-ha.example.com/. A path,
+    port, userinfo, query or fragment can't be expressed as a domain, so it is
+    refused rather than dropped. The host needs at least two labels and can't
+    be an IP literal; a trailing dot is removed.
     """
     if not isinstance(value, str):
         return None
@@ -112,8 +74,7 @@ def normalize_cloudflare_domain(value: object) -> str | None:
     if not candidate:
         return None
 
-    # Pasted-URL form: validate as a tunnel URL first (https-only, no
-    # userinfo/query/fragment), then require it to be a bare origin.
+    # A pasted URL must be a valid tunnel URL and a bare origin.
     if "//" in candidate or ":" in candidate:
         url = normalize_tunnel_url(candidate)
         if url is None:
@@ -128,9 +89,7 @@ def normalize_cloudflare_domain(value: object) -> str | None:
             return None
         host = parts.hostname or ""
     else:
-        # Bare-domain form. urlsplit does the lowercasing/IDNA-safe host
-        # extraction; a "/", "?" or "#" in the value lands in path/query/
-        # fragment of the constructed URL and is rejected above or here.
+        # A bare domain; urlsplit extracts and lowercases the host.
         if "/" in candidate or "?" in candidate or "#" in candidate or "@" in candidate:
             return None
         try:
@@ -146,20 +105,17 @@ def normalize_cloudflare_domain(value: object) -> str | None:
         return None
     if not all(_DOMAIN_LABEL_RE.fullmatch(label) for label in labels):
         return None
-    # An all-digit final label is an IPv4 literal, not a DNS name — a
-    # Cloudflare tunnel hostname can never be an IP.
+    # An all-digit last label means an IPv4 literal, never a tunnel hostname.
     if labels[-1].isdigit():
         return None
     return host
 
 
 def domain_to_tunnel_url(value: object) -> str | None:
-    """Derive the advertised tunnel URL from a Cloudflare domain.
+    """The tunnel URL for a Cloudflare domain, or None for an unusable one.
 
-    ``None`` in, ``None`` out — the caller decides whether that means
-    "don't advertise" or "leave the existing URL alone". The result is
-    re-run through ``normalize_tunnel_url`` so the two validators can
-    never disagree about what gets published to phones.
+    The URL also goes through normalize_tunnel_url, so the two validators
+    can't disagree.
     """
     host = normalize_cloudflare_domain(value)
     if host is None:
@@ -168,15 +124,11 @@ def domain_to_tunnel_url(value: object) -> str | None:
 
 
 def pick_cloudflared_slug(addons: object) -> str | None:
-    """Pick the cloudflared add-on slug from a Supervisor add-on listing.
+    """The cloudflared slug from [(slug, name, state), ...], or None.
 
-    Input is ``[(slug, name, state), ...]`` (plain strings — the HA-coupled
-    controller flattens the aiohasupervisor models so this stays pure and
-    unit-testable). Matching is by slug suffix ``_cloudflared`` (repo-hash
-    prefixes differ) or the bare slug ``cloudflared``. With
-    several matches, prefer a running one, else first sorted — deterministic
-    so the reconciler always targets the same add-on; the caller logs the
-    choice.
+    Matches the slug cloudflared or the _cloudflared suffix. Among several, a
+    running one wins, then the first in sort order, so the reconciler always
+    targets the same add-on.
     """
     if not isinstance(addons, (list, tuple)):
         return None
@@ -200,23 +152,19 @@ def pick_cloudflared_slug(addons: object) -> str | None:
 
 
 # --- Edge-liveness watchdog -------------------------------------------------
-# Cloudflare returns these statuses from its EDGE when the edge is reachable but
-# it cannot reach the origin tunnel, i.e. cloudflared is running yet its edge
-# connection is dead. That is the "running but offline" case the add-on's own
-# state can't see, and the signal to restart. 521 web server down, 522
-# connection timed out, 523 origin unreachable, 530 (error 1033: tunnel down).
+
+# Cloudflare's edge answers with these when it can't reach the tunnel: 521 web
+# server down, 522 timed out, 523 origin unreachable, 530 (error 1033).
 _EDGE_ORIGIN_DOWN_STATUSES = frozenset({521, 522, 523, 530})
-# Never restart more than once per this window: a real flap gets one restart; a
-# persistent failure (bad creds, Cloudflare outage) is logged, not hammered.
+# At most one restart per window, so a lasting failure (bad credentials, a
+# Cloudflare outage) is logged rather than restarted over and over.
 EDGE_RESTART_COOLDOWN_SECONDS = 900.0  # 15 min
 
 
 def is_edge_origin_down(status: int) -> bool:
-    """True when a status from the tunnel URL means the edge can't reach us.
+    """True when a status from the tunnel URL means the edge can't reach the hub.
 
-    Cloudflare's edge is up but the origin tunnel is unreachable (restart
-    cloudflared). Any other status means the request reached the origin, so
-    the tunnel is alive.
+    Any other status came through the tunnel, so the tunnel is up.
     """
     return status in _EDGE_ORIGIN_DOWN_STATUSES
 
@@ -227,16 +175,12 @@ def edge_watchdog_decision(
     now: float,
     cooldown: float = EDGE_RESTART_COOLDOWN_SECONDS,
 ) -> str:
-    """Pure watchdog verdict from a probe result + restart history.
+    """The watchdog's verdict: "up", "inconclusive", "cooldown" or "restart".
 
-    ``alive`` is the tri-state from the controller's edge probe:
-    True (edge+origin up) / False (edge up, origin down) / None (no response —
-    the hub's OWN internet is likely down, NOT the tunnel).
-
-    Returns one of: ``"up"``, ``"inconclusive"``, ``"cooldown"``, ``"restart"``.
-    We restart ONLY on a definitive origin-down that's outside the cooldown —
-    never on an inconclusive result, so a local-internet outage can't trigger a
-    pointless restart loop.
+    alive is True when the probe came back through the tunnel, False when the
+    edge reports the tunnel down, and None when nothing answered, which
+    usually means the hub's own internet is down. Only False outside the
+    cooldown restarts, so a local outage can't cause a restart loop.
     """
     if alive is None:
         return "inconclusive"
