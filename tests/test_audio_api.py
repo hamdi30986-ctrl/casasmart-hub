@@ -10,9 +10,9 @@ surfaces as HTTP status codes:
 * command + broadcast — command vocabulary (volume/stop ok, unknown 400, play is
   not a per-speaker control).
 * AUTH gate — a role lacking ``audio.manage`` -> 403, no token -> 401.
-* ``_parse_targets`` — the pure module helper, unit-tested directly (the PA
-  multipart UPLOAD body is hard to fake, so the multipart POST is SKIPPED; only
-  ``_parse_targets`` is covered here).
+* ``_parse_targets`` — the pure module helper, unit-tested directly.
+* room scope on control — command/airplay/broadcast/PA reach only the speakers
+  the caller can list (the PA POST is driven through a minimal multipart fake).
 
 Container/CI only (imports Home Assistant). Run:
     docker exec -w /config/tests homeassistant python3 -m unittest test_audio_api -v
@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,9 +38,11 @@ try:
         CasaSmartAudioBrokerView,
         CasaSmartAudioCommandView,
         CasaSmartAudioPaConfigView,
+        CasaSmartAudioPaView,
         CasaSmartAudioProvisionView,
         CasaSmartAudioSpeakersView,
         CasaSmartAudioSpeakerView,
+        _pa_store,
         _parse_targets,
     )
     from casasmart.const import EVENT_AUDIO_CHANGED
@@ -50,6 +53,7 @@ except Exception as err:
     CasaSmartAudioAthanView = CasaSmartAudioBrokerView = None
     CasaSmartAudioPaConfigView = CasaSmartAudioCommandView = None
     CasaSmartAudioBroadcastView = _parse_targets = None
+    CasaSmartAudioPaView = _pa_store = None
     CasaSmartAudioProvisionView = None
     EVENT_AUDIO_CHANGED = None
     _ERR = err
@@ -858,6 +862,223 @@ class SpeakerScope(AudioViewTestCase):
         # Kitchen Spk (legacy label match) + Hall; "Sneaky" hidden despite its
         # Kitchen *label*, because its area_id is area-bedroom.
         self.assertEqual(names, ["Hall Spk", "Kitchen Spk"])
+
+
+class _Part:
+    """One multipart part, as aiohttp's reader yields it to the PA view."""
+
+    def __init__(self, name, data: bytes, filename=None, content_type=None) -> None:
+        self.name = name
+        self.filename = filename
+        self.headers = {"Content-Type": content_type} if content_type else {}
+        self._data = data
+        self._read = False
+
+    async def text(self) -> str:
+        return self._data.decode()
+
+    async def read_chunk(self) -> bytes:
+        if self._read:
+            return b""
+        self._read = True
+        return self._data
+
+
+class _Reader:
+    def __init__(self, parts) -> None:
+        self._parts = list(parts)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._parts:
+            raise StopAsyncIteration
+        return self._parts.pop(0)
+
+
+class _PaRequest(H.FakeRequest):
+    """A PA upload: an ``audio`` file part plus an optional ``targets`` field."""
+
+    def __init__(self, headers, targets=None) -> None:
+        super().__init__(headers=headers)
+        self._parts = []
+        if targets is not None:
+            self._parts.append(_Part("targets", ",".join(targets).encode()))
+        self._parts.append(
+            _Part("audio", b"\x00clip", filename="pa.m4a", content_type="audio/mp4")
+        )
+
+    async def multipart(self):
+        return _Reader(self._parts)
+
+
+class ScopedSpeakerControl(AudioViewTestCase):
+    """Control follows the speaker list's room scope.
+
+    A room-scoped caller may control exactly the speakers ``GET /speakers``
+    shows it: its rooms' speakers plus the unassigned (house-wide) ones. A
+    speaker outside that set answers exactly like an unknown one (no
+    enumeration), and a whole-home play reaches only the visible speakers.
+    Unscoped callers keep the whole-home broadcast topic.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.rt.audio.enroll_speaker("aabbcc000001", "Mine", area_id="room-a")
+        self.rt.audio.enroll_speaker("aabbcc000002", "Hidden", area_id="room-b")
+        self.rt.audio.enroll_speaker("aabbcc000003", "Hall")  # unassigned
+        self.adapter = FakeAdapter()
+        registry = mock.Mock()
+        registry.async_get_area.side_effect = lambda area_id: SimpleNamespace(
+            name=area_id
+        )
+        for target, value in (
+            ("casasmart.audio_api.get_audio_adapter", lambda hass: self.adapter),
+            ("casasmart.audio_api.ar.async_get", lambda hass: registry),
+        ):
+            patcher = mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        _, self.scoped = H.session(self.rt.auth, role="user", rooms=["room-a"])
+
+    def _topics(self) -> list[str]:
+        return [topic for topic, *_ in self.adapter.published]
+
+    async def _command(self, headers, mac6):
+        return H.read_response(
+            await CasaSmartAudioCommandView(self.hass).post(
+                H.FakeRequest(headers=headers, body={"cmd": "volume", "value": 30}),
+                mac6=mac6,
+            )
+        )
+
+    async def _airplay(self, headers, mac6):
+        return H.read_response(
+            await CasaSmartAudioAirplayView(self.hass).post(
+                H.FakeRequest(headers=headers, body={"action": "pause"}), mac6=mac6
+            )
+        )
+
+    async def _broadcast(self, headers):
+        return H.read_response(
+            await CasaSmartAudioBroadcastView(self.hass).post(
+                H.FakeRequest(headers=headers, body={"url": "http://x/clip.mp3"})
+            )
+        )
+
+    async def _pa(self, headers, targets=None):
+        return H.read_response(
+            await CasaSmartAudioPaView(self.hass).post(_PaRequest(headers, targets))
+        )
+
+    async def test_hidden_speaker_answers_like_an_unknown_one(self) -> None:
+        for send in (self._command, self._airplay):
+            with self.subTest(handler=send.__name__):
+                hidden = await send(self.scoped, "000002")
+                unknown = await send(self.scoped, "0000ff")
+                self.assertEqual(hidden[0], 404)
+                self.assertEqual(unknown[0], 404)
+                self.assertEqual(
+                    hidden[1]["message"],
+                    unknown[1]["message"].replace("0000ff", "000002"),
+                )
+        self.assertEqual(self.adapter.published, [])
+
+    async def test_own_and_unassigned_speakers_stay_controllable(self) -> None:
+        for mac6 in ("000001", "000003"):
+            with self.subTest(mac6=mac6):
+                self.assertEqual((await self._command(self.scoped, mac6))[0], 200)
+                self.assertEqual((await self._airplay(self.scoped, mac6))[0], 200)
+        self.assertEqual(
+            self._topics(),
+            [
+                "speakers/000001/command",
+                "speakers/000001/airplay/remote",
+                "speakers/000003/command",
+                "speakers/000003/airplay/remote",
+            ],
+        )
+
+    async def test_scoped_broadcast_fans_out_to_visible_speakers_only(self) -> None:
+        status, body = await self._broadcast(self.scoped)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["played_on"], ["000001", "000003"])
+        self.assertEqual(
+            self._topics(), ["speakers/000001/command", "speakers/000003/command"]
+        )
+        # Each speaker gets the same play the whole-home topic would carry.
+        for _topic, payload, *_ in self.adapter.published:
+            self.assertEqual(payload["cmd"], "play")
+            self.assertEqual(payload["url"], "http://x/clip.mp3")
+
+    async def test_scoped_pa_without_targets_fans_out_to_visible_speakers(self) -> None:
+        status, body = await self._pa(self.scoped)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["played_on"], ["000001", "000003"])
+        self.assertEqual(
+            self._topics(), ["speakers/000001/command", "speakers/000003/command"]
+        )
+
+    async def test_scoped_pa_with_a_hidden_target_is_refused_whole(self) -> None:
+        for targets in (["000002"], ["000001", "000002"], ["000001", "0000ff"]):
+            with self.subTest(targets=targets):
+                status, body = await self._pa(self.scoped, targets)
+                self.assertEqual(status, 404)
+                self.assertEqual(
+                    body["message"], f"No speaker enrolled under {targets[-1]!r}"
+                )
+        self.assertEqual(self.adapter.published, [])
+        self.assertEqual(_pa_store(self.hass)._clips, {})  # no clip hosted
+
+    async def test_scoped_pa_with_visible_targets_plays_on_them(self) -> None:
+        status, body = await self._pa(self.scoped, ["000003", "000001"])
+        self.assertEqual(status, 200)
+        self.assertEqual(body["played_on"], ["000003", "000001"])
+        self.assertEqual(
+            self._topics(), ["speakers/000003/command", "speakers/000001/command"]
+        )
+
+    async def test_empty_scope_reaches_only_unassigned_speakers(self) -> None:
+        _, nothing = H.session(self.rt.auth, role="user", rooms=[])
+        self.assertEqual((await self._command(nothing, "000001"))[0], 404)
+        self.assertEqual((await self._command(nothing, "000003"))[0], 200)
+        self.adapter.published.clear()
+        status, body = await self._broadcast(nothing)
+        self.assertEqual((status, body["played_on"]), (200, ["000003"]))
+        self.assertEqual(self._topics(), ["speakers/000003/command"])
+
+    async def test_no_visible_speaker_is_a_clear_404(self) -> None:
+        self.rt.audio.remove_speaker("000003")
+        _, nothing = H.session(self.rt.auth, role="user", rooms=["room-c"])
+        for status, body in (await self._broadcast(nothing), await self._pa(nothing)):
+            self.assertEqual(status, 404)
+            self.assertEqual(body["message"], "No speakers in your rooms")
+        self.assertEqual(self.adapter.published, [])
+        self.assertEqual(_pa_store(self.hass)._clips, {})
+
+    async def test_unscoped_callers_keep_the_whole_home_topic(self) -> None:
+        _, unscoped_user = H.session(self.rt.auth, role="user")
+        for headers in (self._admin(), unscoped_user):
+            with self.subTest(headers=headers):
+                self.adapter.published.clear()
+                self.assertEqual((await self._command(headers, "000002"))[0], 200)
+                status, body = await self._broadcast(headers)
+                self.assertEqual((status, body["topic"]), (200, "speakers/broadcast"))
+                status, body = await self._pa(headers)
+                self.assertEqual((status, body["played_on"]), (200, "all"))
+                # An unknown PA target is still skipped, not fatal.
+                status, body = await self._pa(headers, ["000002", "0000ff"])
+                self.assertEqual((status, body["played_on"]), (200, ["000002"]))
+                self.assertEqual(
+                    self._topics(),
+                    [
+                        "speakers/000002/command",
+                        "speakers/broadcast",
+                        "speakers/broadcast",
+                        "speakers/000002/command",
+                    ],
+                )
 
 
 if __name__ == "__main__":
