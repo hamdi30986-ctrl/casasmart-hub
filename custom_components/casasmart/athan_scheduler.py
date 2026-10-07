@@ -68,6 +68,7 @@ _LIB_METHODS = frozenset(
 _METHOD_ALIASES = {"egyptian": "egypt", "umalqura": "makkah", "umm_al_qura": "makkah"}
 _DEFAULT_METHOD = "makkah"
 _ASR_SCHOOLS = frozenset({"shafi", "hanafi"})
+_DEFAULT_SCHOOL = "shafi"
 
 
 def compute_prayer_times_utc(
@@ -84,20 +85,21 @@ def compute_prayer_times_utc(
         _LOGGER.warning("Athan: prayer-times-calculator-offline not installed")
         return None
 
-    m = _METHOD_ALIASES.get((method or "").lower(), (method or "").lower())
-    if m not in _LIB_METHODS:
-        m = _DEFAULT_METHOD
-    sch = (school or "shafi").lower()
-    if sch not in _ASR_SCHOOLS:
-        sch = "shafi"
+    method = (method or "").lower()
+    method = _METHOD_ALIASES.get(method, method)
+    if method not in _LIB_METHODS:
+        method = _DEFAULT_METHOD
+    school = (school or _DEFAULT_SCHOOL).lower()
+    if school not in _ASR_SCHOOLS:
+        school = _DEFAULT_SCHOOL
 
     try:
         calc = PrayerTimesCalculator(
             latitude=float(lat),
             longitude=float(lon),
-            calculation_method=m,
+            calculation_method=method,
             date=date_str,
-            school=sch,
+            school=school,
         )
         raw = calc.fetch_prayer_times()
     except Exception:
@@ -413,7 +415,7 @@ class AthanScheduler:
             return None
         tz_name = athan.get("timezone") or self._hass.config.time_zone or "UTC"
         method = athan.get("method") or _DEFAULT_METHOD
-        school = athan.get("school") or "shafi"
+        school = athan.get("school") or _DEFAULT_SCHOOL
         try:
             return float(lat), float(lon), str(tz_name), str(method), str(school)
         except (TypeError, ValueError, OverflowError):
