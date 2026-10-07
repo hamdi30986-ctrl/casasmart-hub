@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1372,9 +1373,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 "(no userinfo/query/fragment)"
             )
 
-        await hass.async_add_executor_job(
-            runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
-        )
+        try:
+            await hass.async_add_executor_job(
+                runtime_data.hub_config.set, TUNNEL_URL_CONFIG_KEY, url
+            )
+        except ConfigError as err:
+            raise HomeAssistantError(f"Could not save the tunnel URL: {err}") from err
         _LOGGER.info(
             "CasaSmart tunnel URL set to %s — advertised on the next handshake",
             url,
@@ -1436,7 +1440,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 )
             runtime_data.storage.table("hq_notifications").clear()
 
-        await hass.async_add_executor_job(_install_key)
+        try:
+            await hass.async_add_executor_job(_install_key)
+        except (StorageError, sqlite3.Error) as err:
+            raise HomeAssistantError(
+                f"Could not save the HQ notification trust: {err}"
+            ) from err
         _LOGGER.info(
             "HQ notification trust configured (fingerprint=%s, sender name=%s)",
             fingerprint,
@@ -1478,7 +1487,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
             runtime_data.hub_config.delete(HQ_NOTIFICATION_PUBLIC_KEY_CONFIG_KEY)
             runtime_data.hub_config.delete(HQ_NOTIFICATION_SENDER_NAME_CONFIG_KEY)
 
-        await hass.async_add_executor_job(_wipe)
+        try:
+            await hass.async_add_executor_job(_wipe)
+        except (StorageError, sqlite3.Error) as err:
+            raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
         _LOGGER.warning(
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
