@@ -121,6 +121,12 @@ def _require_name(name: Any) -> None:
         raise EnrollError("Device name is required")
 
 
+def _stored_name(name: str) -> str:
+    """The name as stored: trimmed and capped at MAX_DEVICE_NAME_LENGTH."""
+    # The second strip() drops a space the length cap may leave behind.
+    return name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
+
+
 def _canonical_key(public_key_pem: Any) -> str:
     """The key as canonical PEM; raises EnrollError when it isn't usable."""
     try:
@@ -236,8 +242,7 @@ class AuthEngine:
         idempotent re-pair path keeps accepting for this device.
         """
         _require_name(name)
-        # The second strip() drops a space the length cap may leave behind.
-        name = name.strip()[:MAX_DEVICE_NAME_LENGTH].strip()
+        name = _stored_name(name)
         if role not in VALID_ROLES:
             raise EnrollError(f"Role must be one of {', '.join(VALID_ROLES)}")
         if not _valid_rooms(rooms):
@@ -300,6 +305,7 @@ class AuthEngine:
         if not isinstance(device_id, str) or not device_id.strip():
             raise EnrollError("device_id is required")
         _require_name(name)
+        name = _stored_name(name)
         if role not in (ROLE_SUB_ADMIN, ROLE_USER):
             raise EnrollError("Provisioned role must be sub-admin or user")
         if not _valid_rooms(rooms):
@@ -326,7 +332,7 @@ class AuthEngine:
                 ver = 1
                 paired_at = time.time()
             self._devices[device_id] = {
-                "name": name.strip(),
+                "name": name,
                 "role": role,
                 "public_key": canonical_pem,
                 "rooms": rooms,
@@ -342,7 +348,7 @@ class AuthEngine:
         _LOGGER.info(
             "Provisioned device %s (%s, role=%s, ver=%d)",
             device_id,
-            name.strip(),
+            name,
             role,
             ver,
         )
@@ -359,6 +365,7 @@ class AuthEngine:
         (no other device can join the admin's member).
         """
         _require_name(name)
+        name = _stored_name(name)
         canonical_pem = _canonical_key(public_key_pem)
 
         with self._lock:
@@ -380,7 +387,7 @@ class AuthEngine:
             with self._devices.transaction():
                 del self._devices[old_admin_id]
                 self._devices[device_id] = {
-                    "name": name.strip(),
+                    "name": name,
                     "role": ROLE_ADMIN,
                     "public_key": canonical_pem,
                     "rooms": None,
@@ -401,7 +408,7 @@ class AuthEngine:
             "Owner recovery: admin %s replaced by %s (%s) — old admin tokens dead",
             old_admin_id,
             device_id,
-            name.strip(),
+            name,
         )
         return device_id
 
