@@ -540,6 +540,37 @@ class TestJsonConfigStoreFailedWrites(unittest.TestCase):
             self.store.set("setting", "rejected")
         self._assert_unchanged()
 
+    def test_read_only_directory_is_a_config_error(self):
+        # Creating the temp file is part of the write: on a read-only data
+        # directory it must fail as ConfigError, not a raw PermissionError.
+        directory = self.path.parent
+        directory.chmod(0o555)
+        self.addCleanup(directory.chmod, 0o755)
+        probe = directory / "probe"
+        try:
+            probe.touch()
+        except PermissionError:
+            pass
+        else:  # permissions not enforced (running as root)
+            probe.unlink()
+            self.skipTest("directory permissions are not enforced here")
+        with self.assertRaises(ConfigError):
+            self.store.set("setting", "rejected")
+        directory.chmod(0o755)
+        self._assert_unchanged()
+
+    def test_failure_creating_temp_file_is_not_applied(self):
+        with (
+            mock.patch.object(
+                config_store.tempfile,
+                "mkstemp",
+                side_effect=PermissionError(13, "Permission denied"),
+            ),
+            self.assertRaises(ConfigError),
+        ):
+            self.store.set("setting", "rejected")
+        self._assert_unchanged()
+
     def test_serialization_failure_is_not_applied(self):
         with (
             mock.patch.object(
