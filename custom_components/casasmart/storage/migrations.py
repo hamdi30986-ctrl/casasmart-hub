@@ -292,7 +292,6 @@ def run_migrations(
     )
 
     conn = sqlite3.connect(db_path)
-    closed = False
     try:
         for migration in pending:
             _LOGGER.info(
@@ -306,8 +305,7 @@ def run_migrations(
                     migration.apply(conn)
                     conn.execute(f"PRAGMA user_version = {migration.version}")
             except Exception as err:
-                conn.close()
-                closed = True
+                conn.close()  # before the restore overwrites the file
                 restore_database(db_path, backup_path)
                 raise MigrationError(
                     f"Migration v{migration.version} ({migration.description}) "
@@ -315,5 +313,4 @@ def run_migrations(
                 ) from err
         return target
     finally:
-        if not closed:
-            conn.close()
+        conn.close()  # closing twice is harmless
