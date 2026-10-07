@@ -102,11 +102,16 @@ class _FakeDispatcher:
 
 
 class _Content:
-    def __init__(self, raw: bytes) -> None:
+    """Like aiohttp's StreamReader: a read returns at most what has arrived."""
+
+    def __init__(self, raw: bytes, chunk: int | None) -> None:
         self._raw = raw
+        self._chunk = chunk
 
     async def read(self, limit: int) -> bytes:
-        return self._raw[:limit]
+        size = limit if self._chunk is None else min(limit, self._chunk)
+        data, self._raw = self._raw[:size], self._raw[size:]
+        return data
 
 
 class _HqRequest:
@@ -114,11 +119,13 @@ class _HqRequest:
 
     content_type = "application/json"
 
-    def __init__(self, raw: bytes, headers: dict[str, str]) -> None:
+    def __init__(
+        self, raw: bytes, headers: dict[str, str], chunk: int | None = None
+    ) -> None:
         self.headers = headers
         self.remote = "203.0.113.7"
         self.content_length = len(raw)
-        self.content = _Content(raw)
+        self.content = _Content(raw, chunk)
 
 
 class HqNotificationViewTests(unittest.IsolatedAsyncioTestCase):
@@ -140,7 +147,9 @@ class HqNotificationViewTests(unittest.IsolatedAsyncioTestCase):
         )
         self.rt.push_dispatcher = _FakeDispatcher()
 
-    def _request(self, event_id: str, nonce: str) -> _HqRequest:
+    def _request(
+        self, event_id: str, nonce: str, chunk: int | None = None
+    ) -> _HqRequest:
         raw = json.dumps(
             {"event_id": event_id, "source_type": "reminder", "target": "today"}
         ).encode()
@@ -153,6 +162,28 @@ class HqNotificationViewTests(unittest.IsolatedAsyncioTestCase):
                 "X-CasaSmart-HQ-Nonce": nonce,
                 "X-CasaSmart-HQ-Signature": base64.b64encode(signature).decode(),
             },
+            chunk,
+        )
+
+    async def test_a_body_that_arrives_in_pieces_is_read_whole(self) -> None:
+        # content.read(n) returns the data received so far, which can be less
+        # than the whole body.
+        view = CasaSmartHqNotificationView(self.hass)
+        response = await view.post(
+            self._request("hq-reminder:00000001", "a" * 24, chunk=16)
+        )
+        self.assertEqual(
+            H.read_response(response),
+            (202, {"accepted": True, "duplicate": False, "delivery": "relay_accepted"}),
+        )
+
+    async def test_an_oversized_body_without_a_length_is_refused(self) -> None:
+        request = _HqRequest(b"x" * 5000, {}, chunk=1000)
+        request.content_length = None  # chunked transfer encoding
+        response = await CasaSmartHqNotificationView(self.hass).post(request)
+        self.assertEqual(
+            H.read_response(response),
+            (400, {"accepted": False, "code": "INVALID_REQUEST"}),
         )
 
     async def test_one_push_per_event_across_both_listeners(self) -> None:
