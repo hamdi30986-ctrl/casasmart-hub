@@ -175,7 +175,7 @@ def _state(entity_id, value="on"):
 
 class TestCoalesceKey(unittest.TestCase):
     def test_state_changed_keys_by_entity(self):
-        self.assertEqual(coalesce_key(_state("light.a")), ("state_changed", "light.a"))
+        self.assertEqual(coalesce_key(_state("light.a")), ("entity", "light.a"))
         # Same entity, different state -> same key (newer supersedes older).
         self.assertEqual(
             coalesce_key(_state("light.a", "on")),
@@ -193,9 +193,10 @@ class TestCoalesceKey(unittest.TestCase):
         self.assertEqual(coalesce_key(frame_alarm_changed()), ("alarm_changed",))
         self.assertEqual(coalesce_key(frame_audio_changed()), ("audio_changed",))
         self.assertEqual(coalesce_key(frame_energy_changed()), ("energy_changed",))
+        # A removal shares its entity's key with that entity's state changes.
         self.assertEqual(
             coalesce_key(frame_entity_removed("light.z")),
-            ("entity_removed", "light.z"),
+            coalesce_key(_state("light.z")),
         )
 
     def test_protocol_frames_are_never_droppable(self):
@@ -213,11 +214,11 @@ class TestCoalesceKey(unittest.TestCase):
         # Defensive: a device without entity_id still yields a stable key.
         self.assertEqual(
             coalesce_key({"type": "state_changed", "device": {}}),
-            ("state_changed", None),
+            ("entity", None),
         )
         self.assertEqual(
             coalesce_key({"type": "state_changed"}),
-            ("state_changed", None),
+            ("entity", None),
         )
 
 
@@ -239,6 +240,28 @@ class TestCoalescingSendQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(frames[0]["device"]["entity_id"], "light.a")
         self.assertEqual(frames[0]["device"]["state"], "off")
         self.assertEqual(frames[1]["device"]["entity_id"], "light.b")
+
+    async def test_newest_frame_for_an_entity_wins_across_remove_and_change(self):
+        # An entity removed and re-added (an integration reload, say) while
+        # its frames are still queued. The app applies frames in order, so
+        # whatever reaches it last must be the entity's newest news.
+        q = CoalescingSendQueue(maxsize=8)
+        self.assertTrue(q.offer(_state("light.a", "on")))
+        self.assertTrue(q.offer(_state("light.b", "on")))
+        self.assertTrue(q.offer(frame_entity_removed("light.a")))
+        self.assertTrue(q.offer(_state("light.a", "off")))
+        frames = await self._drain(q)
+        self.assertEqual(
+            [(f["type"], f.get("device", {}).get("state")) for f in frames],
+            [("state_changed", "off"), ("state_changed", "on")],
+        )
+        self.assertEqual(frames[0]["device"]["entity_id"], "light.a")
+
+        # And the other way round: removed after a queued change stays removed.
+        self.assertTrue(q.offer(_state("light.a", "on")))
+        self.assertTrue(q.offer(frame_entity_removed("light.a")))
+        frames = await self._drain(q)
+        self.assertEqual(frames, [frame_entity_removed("light.a")])
 
     async def test_redundant_nudges_collapse(self):
         q = CoalescingSendQueue(maxsize=8)
