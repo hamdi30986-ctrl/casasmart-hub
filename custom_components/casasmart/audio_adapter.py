@@ -107,7 +107,7 @@ class AudioAdapter:
         host = broker.get("host")
         if not host:
             _LOGGER.info(
-                "CasaSmart audio: no broker configured — MQTT client inert "
+                "CasaSmart audio: no broker configured; MQTT client inert "
                 "until provisioned"
             )
             return

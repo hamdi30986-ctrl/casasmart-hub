@@ -145,14 +145,14 @@ def _load_or_create_identity(data_dir: Path) -> ec.EllipticCurvePrivateKey:
             # Never re-key silently: every paired phone pins this key.
             raise IdentityError(
                 f"Identity key at {key_path} is unreadable ({err}). "
-                "Restore it from backup, or delete the file to re-key — "
+                "Restore it from backup, or delete the file to re-key; "
                 "re-keying unpairs every phone."
             ) from err
         if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(
             key.curve, ec.SECP256R1
         ):
             raise IdentityError(
-                f"Identity key at {key_path} is not P-256 — refusing to use "
+                f"Identity key at {key_path} is not P-256; refusing to use "
                 "or replace it automatically."
             )
         return key

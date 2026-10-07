@@ -283,7 +283,7 @@ def run_migrations(
     if current > target:
         raise MigrationError(
             f"Database schema v{current} is newer than this code supports "
-            f"(v{target}). Refusing to run — update the integration instead."
+            f"(v{target}). Refusing to run; update the integration instead."
         )
 
     backup_path = backup_database(db_path, backup_dir)

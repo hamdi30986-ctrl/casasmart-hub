@@ -182,7 +182,7 @@ def build_tank_script(
     url = json.dumps(ingest_url)
     token = json.dumps(device_token)
     return (
-        "// CasaSmart tank monitor — provisioned by the hub, do not edit.\n"
+        "// CasaSmart tank monitor, provisioned by the hub. Do not edit.\n"
         f"let C={{url:{url},token:{token},vm:{int(voltmeter_id)},"
         f"sec:{int(interval_seconds)}}};\n"
         "function push(){\n"

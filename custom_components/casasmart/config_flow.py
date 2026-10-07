@@ -273,14 +273,14 @@ class CasaSmartOptionsFlow(OptionsFlow):
         if not controller.available():
             return (
                 "Tunnel control is unavailable on this install (no add-on "
-                "Supervisor) — the toggle has no effect here; manage "
+                "Supervisor), so the toggle has no effect here; manage "
                 "cloudflared where it runs."
             )
         try:
             slug = await controller.async_discover()
             if slug is None:
                 return (
-                    "No cloudflared add-on is installed — install it and "
+                    "No cloudflared add-on is installed. Install it and "
                     "the toggle will manage it."
                 )
             state = await controller.async_state(slug)
@@ -288,6 +288,5 @@ class CasaSmartOptionsFlow(OptionsFlow):
             return f"Tunnel add-on state unavailable right now: {err}"
         running = "running" if state.running else "stopped"
         return (
-            f"Tunnel add-on: {slug} — currently {running} "
-            f"(start on boot: {state.boot})."
+            f"Tunnel add-on: {slug}, currently {running} (start on boot: {state.boot})."
         )

@@ -133,7 +133,7 @@ class HubStorage:
     def _connection(self) -> sqlite3.Connection:
         """The open connection; StorageError before open() or after close()."""
         if self._conn is None:
-            raise StorageError("Storage is not open — call open() first")
+            raise StorageError("Storage is not open; call open() first")
         return self._conn
 
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:

@@ -89,27 +89,25 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
     entries, admin ones included, are logged and skipped.
     """
     if not isinstance(entry, dict):
-        _LOGGER.error(
-            "Dev enroll: manifest entry is not an object — skipped: %r", entry
-        )
+        _LOGGER.error("Dev enroll: manifest entry is not an object; skipped: %r", entry)
         return None
 
     public_key = entry.get("public_key") or entry.get("public_key_pem")
     if not isinstance(public_key, str) or not public_key.strip():
-        _LOGGER.error("Dev enroll: entry missing public_key — skipped: %r", entry)
+        _LOGGER.error("Dev enroll: entry missing public_key; skipped: %r", entry)
         return None
     try:
         canonical_pem = auth_keys.validate_public_key(public_key)
     except auth_keys.KeyError_ as err:
-        _LOGGER.error("Dev enroll: entry has an invalid public key (%s) — skipped", err)
+        _LOGGER.error("Dev enroll: entry has an invalid public key (%s); skipped", err)
         return None
 
     role = entry.get("role") or DEFAULT_DEV_ROLE
     if role == ROLE_ADMIN:
-        _LOGGER.error("Dev enroll: refusing to provision an admin device — skipped")
+        _LOGGER.error("Dev enroll: refusing to provision an admin device; skipped")
         return None
     if role not in VALID_ROLES:
-        _LOGGER.error("Dev enroll: entry has unknown role %r — skipped", role)
+        _LOGGER.error("Dev enroll: entry has unknown role %r; skipped", role)
         return None
 
     label = entry.get("label") or entry.get("name") or "dev device"
@@ -123,14 +121,14 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
         or any(not isinstance(room, str) or not room for room in rooms)
     ):
         _LOGGER.error(
-            "Dev enroll: entry %s has a malformed rooms list — skipped", device_id
+            "Dev enroll: entry %s has a malformed rooms list; skipped", device_id
         )
         return None
     if rooms is not None and role != ROLE_USER:
         # Only a user can be room-scoped; sub-admins see every room.
         _LOGGER.error(
             "Dev enroll: entry %s gives a %s a room scope, which only a user "
-            "can have — skipped",
+            "can have; skipped",
             device_id,
             role,
         )

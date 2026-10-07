@@ -455,7 +455,7 @@ class CasaSmartAudioSpeakerView(_AudioView):
             adapter.clear_speaker_retained(mac6)
         except AudioAdapterNotReady:
             _LOGGER.info(
-                "Speaker %s removed from registry but bus is down — reset/retain"
+                "Speaker %s removed from registry but bus is down; reset/retain"
                 " clear skipped (it may briefly reappear as a ghost until it is"
                 " power-cycled)",
                 mac6,
@@ -677,7 +677,7 @@ class CasaSmartAudioPaView(_AudioView):
                             mac=mac6, url=clip_path, priority="pa"
                         )
                     except UnknownSpeakerError:
-                        _LOGGER.warning("PA target %s not enrolled — skipped", mac6)
+                        _LOGGER.warning("PA target %s not enrolled; skipped", mac6)
                         continue
                     published_error = self._publish_or_503(adapter, topic, message)
                     if published_error is not None:
@@ -837,9 +837,7 @@ class CasaSmartAudioAthanView(_AudioView):
                 adapter.publish(TOPIC_ATHAN_CONFIG, stored, qos=1, retain=True)
                 relayed = True
             except AudioAdapterNotReady:
-                _LOGGER.warning(
-                    "Athan config stored but not relayed — MQTT bus is down"
-                )
+                _LOGGER.warning("Athan config stored but not relayed: MQTT bus is down")
         # The scheduler reads the engine rather than the bus.
         scheduler = get_athan_scheduler(self._hass)
         if scheduler is not None:
