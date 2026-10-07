@@ -140,24 +140,29 @@ def _speaker_in_scope(
     return True
 
 
+def _visible_speakers(
+    hass: HomeAssistant, audio: AudioEngine, scope: list[str] | None
+) -> list[dict[str, Any]]:
+    """The enrolled speakers a caller may see; scope None means all of them."""
+    speakers = audio.speakers()
+    if scope is None:
+        return speakers
+    allowed_ids = set(scope)
+    allowed_names = _scoped_area_names(hass, scope)
+    return [s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)]
+
+
 def _controllable_speakers(
     hass: HomeAssistant, audio: AudioEngine, claims: dict[str, Any]
 ) -> set[str] | None:
     """The mac6s a caller may control, or None if it isn't room-scoped.
 
-    The same set GET /audio/speakers shows it, so a caller can't drive a
-    speaker it can't see.
+    These are the speakers it can see, so it can't drive one it can't see.
     """
     scope = claims.get("rooms")
     if scope is None:
         return None
-    allowed_ids = set(scope)
-    allowed_names = _scoped_area_names(hass, scope)
-    return {
-        speaker["mac6"]
-        for speaker in audio.speakers()
-        if _speaker_in_scope(speaker, allowed_ids, allowed_names)
-    }
+    return {speaker["mac6"] for speaker in _visible_speakers(hass, audio, scope)}
 
 
 def _require_controllable(mac: Any, allowed: set[str] | None) -> None:
@@ -368,14 +373,7 @@ class CasaSmartAudioSpeakersView(_AudioView):
         if not_ready is not None:
             return not_ready
         # In memory, so no executor hop.
-        speakers = audio.speakers()
-        scope = claims.get("rooms")
-        if scope is not None:
-            allowed_ids = set(scope)
-            allowed_names = _scoped_area_names(self._hass, scope)
-            speakers = [
-                s for s in speakers if _speaker_in_scope(s, allowed_ids, allowed_names)
-            ]
+        speakers = _visible_speakers(self._hass, audio, claims.get("rooms"))
         return self.json({"speakers": speakers})
 
     async def post(self, request: web.Request) -> web.Response:
