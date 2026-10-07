@@ -64,8 +64,9 @@ class _FakeShelly:
     """A Gen2 Shelly at the HTTP seam: ``GET /shelly`` plus the Script.* RPCs.
 
     ``fail`` maps an RPC method to ``"error"`` (the device answers with an RPC
-    error) or ``"timeout"`` (no answer in time). ``before`` runs a hook when a
-    method arrives, to interleave other hub activity with the upload.
+    error), ``"timeout"`` (no answer in time) or ``"malformed"`` (a result
+    whose fields have the wrong types). ``before`` runs a hook when a method
+    arrives, to interleave other hub activity with the upload.
     """
 
     def __init__(self) -> None:
@@ -86,6 +87,8 @@ class _FakeShelly:
             return _Reply(timeout=True)
         if failure == "error":
             return _Reply({"id": 1, "error": {"code": -1, "message": "refused"}})
+        if failure == "malformed":
+            return _Reply({"id": 1, "result": {"scripts": 5, "id": "x"}})
         return _Reply({"id": 1, "result": self._handle(method, params)})
 
     def _handle(self, method: str, params: dict) -> dict:
@@ -220,6 +223,32 @@ class ProvisionRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 502, body)
         self.assertEqual(self._device_ids(), [SHELLY_ID])
         self.assertEqual(self.tanks.ingest(replacement["token"], 1.5), SHELLY_ID)
+
+    async def test_malformed_script_list_is_a_502_and_the_retry_works(self) -> None:
+        self.shelly.fail["Script.List"] = "malformed"
+        status, body = await self._provision()
+        self.assertEqual(status, 502, body)
+        self.assertEqual(self._device_ids(), [])
+
+        del self.shelly.fail["Script.List"]
+        status, body = await self._provision()
+        self.assertEqual(status, 201, body)
+        self.assertEqual(self.tanks.ingest(self.shelly.token(), 1.5), SHELLY_ID)
+
+    async def test_an_unexpected_upload_error_still_undoes_the_mint(self) -> None:
+        # Whatever goes wrong during the upload, this request's mint must not
+        # survive it, or the retry is refused as a duplicate (409).
+        def explode() -> None:
+            raise RuntimeError("device answered something unforeseen")
+
+        self.shelly.before["Script.PutCode"] = explode
+        with self.assertRaises(RuntimeError):
+            await self._provision()
+        self.assertEqual(self._device_ids(), [])
+
+        status, body = await self._provision()
+        self.assertEqual(status, 201, body)
+        self.assertEqual(self._device_ids(), [SHELLY_ID])
 
 
 if __name__ == "__main__":
