@@ -1,10 +1,10 @@
 """Failure throttle with escalating lockouts for secret-guessing endpoints.
 
-Five failures against one key (a source IP, a device id) lock that key out
-for a growing window: 1 minute, 5, 30, then an hour. A success resets the key.
-State lives in memory, so a restart clears it and only costs an attacker their
-progress. Thread-safe, since callers run on executor threads. Stdlib only,
-like the rest of the auth layer.
+Five failures against one key (a source IP, a device at one IP) lock that key
+out for a growing window: 1 minute, 5, 30, then an hour. A success resets the
+key. State lives in memory, so a restart clears it and only costs an attacker
+their progress. Thread-safe, since callers run on executor threads. Stdlib
+only, like the rest of the auth layer.
 """
 
 from __future__ import annotations
@@ -79,6 +79,12 @@ class FailureThrottle:
         """Forget a key after a success, escalation level included."""
         with self._lock:
             self._entries.pop(key, None)
+
+    def clear_prefix(self, prefix: str) -> None:
+        """Forget every key that starts with prefix."""
+        with self._lock:
+            for key in [k for k in self._entries if k.startswith(prefix)]:
+                del self._entries[key]
 
     def _prune(self, making_room_for: str) -> None:
         """Evict unlocked counters to stay under MAX_ENTRIES (lock held)."""

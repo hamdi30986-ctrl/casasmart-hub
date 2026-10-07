@@ -50,6 +50,10 @@ def make_keypair():
     return private_key, public_pem
 
 
+# The address a test login comes from; the throttle keys on it.
+SOURCE = "192.168.1.20"
+
+
 def sign_nonce(private_key, nonce: str) -> str:
     """What the app does: ECDSA-SHA256 over the nonce string, base64 DER."""
     import base64
@@ -207,11 +211,12 @@ class EngineTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _login(self, device_id):
-        challenge = self.engine.create_challenge(device_id)
+        challenge = self.engine.create_challenge(device_id, SOURCE)
         return self.engine.redeem_challenge(
             device_id,
             challenge["challenge_id"],
             sign_nonce(self.private_key, challenge["nonce"]),
+            SOURCE,
         )
 
     def test_full_login_round_trip(self):
@@ -280,50 +285,53 @@ class EngineTests(unittest.TestCase):
 
     def test_challenge_single_use(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
-        challenge = self.engine.create_challenge(device_id)
+        challenge = self.engine.create_challenge(device_id, SOURCE)
         signature = sign_nonce(self.private_key, challenge["nonce"])
-        self.engine.redeem_challenge(device_id, challenge["challenge_id"], signature)
+        self.engine.redeem_challenge(
+            device_id, challenge["challenge_id"], signature, SOURCE
+        )
         with self.assertRaises(ChallengeError):
             self.engine.redeem_challenge(
-                device_id, challenge["challenge_id"], signature
+                device_id, challenge["challenge_id"], signature, SOURCE
             )
 
     def test_wrong_signature_rejected(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
-        challenge = self.engine.create_challenge(device_id)
+        challenge = self.engine.create_challenge(device_id, SOURCE)
         with self.assertRaises(ChallengeError):
             self.engine.redeem_challenge(
                 device_id,
                 challenge["challenge_id"],
                 sign_nonce(self.private_key, "not-the-nonce"),
+                SOURCE,
             )
 
     def test_unknown_device_challenge(self):
         with self.assertRaises(UnknownDeviceError):
-            self.engine.create_challenge("dev-nope")
+            self.engine.create_challenge("dev-nope", SOURCE)
 
     def test_throttle_locks_after_failures(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
         for _ in range(throttle_mod.MAX_FAILURES):
-            challenge = self.engine.create_challenge(device_id)
+            challenge = self.engine.create_challenge(device_id, SOURCE)
             with self.assertRaises(ChallengeError):
                 self.engine.redeem_challenge(
-                    device_id, challenge["challenge_id"], "AAAA"
+                    device_id, challenge["challenge_id"], "AAAA", SOURCE
                 )
         with self.assertRaises(ThrottledError) as ctx:
-            self.engine.create_challenge(device_id)
+            self.engine.create_challenge(device_id, SOURCE)
         self.assertGreater(ctx.exception.retry_after, 0)
 
     def test_success_resets_throttle(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
         for _ in range(throttle_mod.MAX_FAILURES - 1):
-            challenge = self.engine.create_challenge(device_id)
+            challenge = self.engine.create_challenge(device_id, SOURCE)
             with self.assertRaises(ChallengeError):
                 self.engine.redeem_challenge(
-                    device_id, challenge["challenge_id"], "AAAA"
+                    device_id, challenge["challenge_id"], "AAAA", SOURCE
                 )
         self._login(device_id)  # success wipes the counter
-        challenge = self.engine.create_challenge(device_id)  # no lockout
+        challenge = self.engine.create_challenge(device_id, SOURCE)  # no lockout
         self.assertIn("nonce", challenge)
 
     def test_secret_persists_across_engines(self):
@@ -390,10 +398,15 @@ class EngineTests(unittest.TestCase):
 
     def test_wipe_all_devices_clears_throttle(self):
         device_id = self.engine.enroll_device("Phone", "user", self.public_pem)
-        self.engine.throttle.record_failure(device_id)
-        self.assertIn(device_id, self.engine.throttle._entries)
+        for source in (SOURCE, "192.168.1.21"):
+            challenge = self.engine.create_challenge(device_id, source)
+            with self.assertRaises(ChallengeError):
+                self.engine.redeem_challenge(
+                    device_id, challenge["challenge_id"], "AAAA", source
+                )
+        self.assertEqual(len(self.engine.throttle._entries), 2)
         self.engine.wipe_all_devices()
-        self.assertNotIn(device_id, self.engine.throttle._entries)
+        self.assertEqual(self.engine.throttle._entries, {})
 
     def test_wipe_all_devices_resets_to_unclaimed(self):
         self.engine.enroll_device("Owner", "admin", self.public_pem)

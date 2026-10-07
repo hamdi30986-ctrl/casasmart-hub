@@ -27,7 +27,7 @@ from recovery import (
     normalize_code,
 )
 from storage import HubStorage, JsonConfigStore
-from test_auth import make_keypair, sign_nonce
+from test_auth import SOURCE, make_keypair, sign_nonce
 from test_pairing import NON_ASCII_INPUTS
 from throttle import MAX_FAILURES, ThrottledError
 
@@ -186,11 +186,12 @@ class ReplaceAdminTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _login(self, device_id, private_key):
-        challenge = self.engine.create_challenge(device_id)
+        challenge = self.engine.create_challenge(device_id, SOURCE)
         return self.engine.redeem_challenge(
             device_id,
             challenge["challenge_id"],
             sign_nonce(private_key, challenge["nonce"]),
+            SOURCE,
         )
 
     def test_replace_admin_swaps_identity_and_kills_tokens(self):

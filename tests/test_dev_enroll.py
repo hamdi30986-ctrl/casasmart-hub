@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from storage import HubStorage, JsonConfigStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The address a test login comes from; the throttle keys on it.
+SOURCE = "192.168.1.20"
 DEV_DIR = REPO_ROOT / ".dev"
 
 
@@ -76,11 +78,12 @@ class _EngineFixture(unittest.TestCase):
 
     def login(self, device_id, private_key=None):
         """Full challenge-response round-trip; returns the issued token dict."""
-        challenge = self.engine.create_challenge(device_id)
+        challenge = self.engine.create_challenge(device_id, SOURCE)
         return self.engine.redeem_challenge(
             device_id,
             challenge["challenge_id"],
             sign_nonce(private_key or self.private_key, challenge["nonce"]),
+            SOURCE,
         )
 
 

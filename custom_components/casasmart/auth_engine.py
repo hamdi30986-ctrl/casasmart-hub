@@ -150,6 +150,15 @@ def _public_device(
     }
 
 
+def _throttle_key(device_id: str, source_key: str) -> str:
+    """Login throttle key: one device as seen from one source address.
+
+    Device ids aren't secret, so failures from one address must not lock the
+    device out everywhere.
+    """
+    return f"{device_id}@{source_key}"
+
+
 def _valid_rooms(rooms: Any) -> bool:
     """True for None (all rooms) or a list of non-empty area ids."""
     return rooms is None or (
@@ -377,7 +386,7 @@ class AuthEngine:
                     "member_id": member_id,
                 }
             self._device_cache.pop(old_admin_id, None)
-            self.throttle.clear(old_admin_id)
+            self._clear_throttle(old_admin_id)
             self._device_cache[device_id] = {
                 "role": ROLE_ADMIN,
                 "rooms": None,
@@ -602,7 +611,7 @@ class AuthEngine:
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
             # A re-paired phone shouldn't inherit an old lockout.
-            self.throttle.clear(device_id)
+            self._clear_throttle(device_id)
         _LOGGER.info("Device %s unpaired — all tokens dead", device_id)
         return member_id
 
@@ -622,7 +631,7 @@ class AuthEngine:
             member_id = _member_of(device_id, record)
             del self._devices[device_id]
             self._device_cache.pop(device_id, None)
-            self.throttle.clear(device_id)
+            self._clear_throttle(device_id)
         _LOGGER.info(
             "Device %s left the hub at its own request (role=%s) — all tokens dead",
             device_id,
@@ -641,7 +650,7 @@ class AuthEngine:
             wiped = list(self._devices.keys())
             for device_id in wiped:
                 del self._devices[device_id]
-                self.throttle.clear(device_id)
+                self._clear_throttle(device_id)
             self._device_cache.clear()
         if wiped:
             _LOGGER.info("Wiped all %d device(s) — hub reset to unclaimed", len(wiped))
@@ -649,12 +658,17 @@ class AuthEngine:
 
     # -- challenge-response login ---------------------------------------------
 
-    def create_challenge(self, device_id: str) -> dict[str, Any]:
-        """Issue a one-time nonce for the device to sign."""
-        self.throttle.check(device_id)
+    def create_challenge(self, device_id: str, source_key: str) -> dict[str, Any]:
+        """Issue a one-time nonce for the device to sign.
+
+        source_key is the request's remote address; the login throttle counts
+        failures per device and source.
+        """
+        throttle_key = _throttle_key(device_id, source_key)
+        self.throttle.check(throttle_key)
         if device_id not in self._devices:
             # Counts as a guess: unknown ids must not be a free probe.
-            self.throttle.record_failure(device_id)
+            self.throttle.record_failure(throttle_key)
             raise UnknownDeviceError("Unknown device")
 
         with self._lock:
@@ -683,29 +697,32 @@ class AuthEngine:
         }
 
     def redeem_challenge(
-        self, device_id: str, challenge_id: str, signature_b64: str
+        self, device_id: str, challenge_id: str, signature_b64: str, source_key: str
     ) -> dict[str, Any]:
-        """Verify the signed nonce; mint a JWT on success."""
-        self.throttle.check(device_id)
+        """Verify the signed nonce; mint a JWT on success.
+
+        source_key is the request's remote address, as for create_challenge.
+        A challenge id that wasn't issued for this device costs nothing: it
+        takes no guess at the key, and anyone can send one.
+        """
+        throttle_key = _throttle_key(device_id, source_key)
+        self.throttle.check(throttle_key)
 
         with self._lock:
             self._prune_challenges()
             challenge = self._challenges.pop(challenge_id, None)  # single use
 
         record = self._devices.get(device_id)
-        if (
-            record is None
-            or challenge is None
-            or challenge["device_id"] != device_id
-            or not auth_keys.verify_signature(
-                record["public_key"], challenge["nonce"], signature_b64
-            )
+        # One generic failure, so the caller can't tell which check failed.
+        if challenge is None or challenge["device_id"] != device_id:
+            raise ChallengeError("Challenge verification failed")
+        if record is None or not auth_keys.verify_signature(
+            record["public_key"], challenge["nonce"], signature_b64
         ):
-            # One generic failure, so the caller can't tell which check failed.
-            self.throttle.record_failure(device_id)
+            self.throttle.record_failure(throttle_key)
             raise ChallengeError("Challenge verification failed")
 
-        self.throttle.clear(device_id)
+        self.throttle.clear(throttle_key)
         token = auth_tokens.issue_token(
             self._signing_secret(),
             device_id=device_id,
@@ -803,6 +820,10 @@ class AuthEngine:
         }
 
     # -- housekeeping -------------------------------------------------------------
+
+    def _clear_throttle(self, device_id: str) -> None:
+        """Forget the device's login failures from every source."""
+        self.throttle.clear_prefix(_throttle_key(device_id, ""))
 
     def _prune_challenges(self) -> None:
         """Drop expired nonces (caller holds the lock)."""
