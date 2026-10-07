@@ -809,13 +809,7 @@ class EnergyAdapter:
                     message="Smart AC selection is stale; the room was skipped.",
                 )
                 return
-            for entity in room.climates:
-                if (
-                    entity.entity_id not in keepers
-                    and entity.available
-                    and entity.state != "off"
-                ):
-                    await self._turn_off(entity.entity_id)
+            await self._turn_off_climates_except(room.climates, keepers)
             return
 
         climates = list(room.climates)
@@ -840,13 +834,7 @@ class EnergyAdapter:
                     message="AC keeper selection is stale; the room was skipped.",
                 )
                 return
-            for entity in climates:
-                if (
-                    entity.entity_id not in keepers
-                    and entity.available
-                    and entity.state != "off"
-                ):
-                    await self._turn_off(entity.entity_id)
+            await self._turn_off_climates_except(climates, keepers)
             climates = [entity for entity in climates if entity.entity_id in keepers]
 
         temperature = room.room_temperature
@@ -870,6 +858,18 @@ class EnergyAdapter:
                 await self._set_temperature(entity.entity_id, HEAT_CEILING)
                 if level == LEVEL_MEDIUM:
                     await self._set_fan(entity, "low")
+
+    async def _turn_off_climates_except(
+        self, climates: list[EnergyEntity], keepers: set[str]
+    ) -> None:
+        """Turn off every available, running AC that is not a keeper."""
+        for entity in climates:
+            if (
+                entity.entity_id not in keepers
+                and entity.available
+                and entity.state != "off"
+            ):
+                await self._turn_off(entity.entity_id)
 
     async def _apply_static_lights(
         self,
