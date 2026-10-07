@@ -1,14 +1,10 @@
 """Push-token storage: where each paired device wants its notifications.
 
-Each paired device can register one FCM token, keyed by its device id
-(``push_api``). ``push_dispatcher`` reads them all to address its relay
-batches and drops a token the relay reports as no longer registered. A
-device's token is also removed when it is unpaired, and all of them by the
-pairing-code reset and factory reset.
-
-Thread-safety: delegates to HubStorage's internal lock (KV writes are
-serialized). The ``PushTokenStore`` itself is stateless: every call reads or
-writes the ``push_tokens`` table directly.
+One FCM token per paired device, keyed by device id. push_api writes them;
+push_dispatcher reads them all and drops any the relay reports dead.
+Unpairing removes a device's token, and the pairing-code and factory resets
+remove them all. The store keeps no state of its own; HubStorage serializes
+the writes.
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ MAX_TOKEN_LENGTH = 4096
 
 
 class PushTokenStore:
-    """Thin wrapper around the ``push_tokens`` KV namespace."""
+    """The push_tokens table: one record per device."""
 
     def __init__(self, table: Any) -> None:
         self._table = table
@@ -36,11 +32,10 @@ class PushTokenStore:
         fcm_token: str,
         platform: str,
     ) -> dict[str, Any]:
-        """Store or update a push token for a paired device.
+        """Store or replace a device's push token.
 
-        Upserts by device_id: a token refresh from the same phone just
-        overwrites the old token. Raises ValueError for an unknown platform
-        or an empty, blank or oversized token.
+        Raises ValueError for an unknown platform or an empty, blank or
+        oversized token.
         """
         if platform not in VALID_PLATFORMS:
             raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}")
@@ -57,7 +52,7 @@ class PushTokenStore:
         return record
 
     def unregister(self, device_id: str) -> bool:
-        """Remove the push token for a device. Returns True if it existed."""
+        """Remove a device's push token; True if it existed."""
         try:
             del self._table[device_id]
             _LOGGER.info("Push token removed for device %s", device_id)

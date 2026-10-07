@@ -1,13 +1,11 @@
 """Hub registration with the push relay.
 
-The relay only delivers a batch signed with a push key it knows for that hub.
-``RelayRegistrar`` tells it which key: it posts a proof binding the hub id
-(the TLS identity fingerprint) to the push public key, signed by the hub's
-TLS identity key, and, until the first success, the single-use activation
-code from the CasaSmart Installer Console. It runs in the background at every
-start, retrying with jittered exponential backoff (or the relay's
-``Retry-After``) until the relay accepts or permanently refuses. A permanent
-refusal stops it and asks the owner for a fresh activation code.
+The relay delivers only batches signed with a push key it knows for the hub.
+At every start RelayRegistrar posts a proof, signed by the TLS identity key,
+that binds the hub id to the push public key, with the single-use activation
+code until the first success. It retries with jittered exponential backoff
+(or the relay's Retry-After) until the relay accepts or refuses for good; a
+refusal asks the owner for a fresh activation code.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ REGISTRATION_TIMEOUT_SECONDS = 10
 # Backoff doubles from 5 seconds up to 6 hours.
 REGISTRATION_INITIAL_BACKOFF_SECONDS = 5.0
 REGISTRATION_MAX_BACKOFF_SECONDS = 6 * 60 * 60.0
-# Retries log a warning on the first and every 8th attempt, DEBUG otherwise.
+# Retries log a warning on the first and every 8th attempt, debug otherwise.
 REGISTRATION_LOG_EVERY_ATTEMPTS = 8
 # A larger reply is ignored rather than parsed.
 REGISTRATION_MAX_RESPONSE_BYTES = 4096
@@ -44,10 +42,7 @@ _ACTIVATION_CODE_RE = re.compile(r"^CSACT1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]
 
 
 def is_activation_code_format(value: object) -> bool:
-    """True for a string shaped like an activation code.
-
-    Only the shape is checked here; the relay validates the code itself.
-    """
+    """True for a string shaped like an activation code; the relay checks the rest."""
     return isinstance(value, str) and _ACTIVATION_CODE_RE.fullmatch(value) is not None
 
 
@@ -68,10 +63,10 @@ class PushPublicKey(Protocol):
 
 
 def canonical_registration_payload(payload: dict[str, Any]) -> bytes:
-    """The exact bytes the identity key signs.
+    """The bytes the identity key signs.
 
-    Sorted keys, no whitespace, raw UTF-8: the relay rebuilds the same bytes
-    from the request to check the signature, so this must not change.
+    The relay rebuilds them from the request, so the form (sorted keys, no
+    whitespace, raw UTF-8) must not change.
     """
     return json.dumps(
         payload,
@@ -90,7 +85,7 @@ def build_registration_proof(
     nonce: str,
     activation_code: str | None = None,
 ) -> dict[str, Any]:
-    """The registration request body: the signed fields plus ``signature``."""
+    """The registration request body: the signed fields plus the signature."""
     unsigned: dict[str, Any] = {
         "version": REGISTRATION_VERSION,
         "hub_id": hub_id,
@@ -120,10 +115,9 @@ class _AttemptResult:
 class RelayRegistrar:
     """Registers the hub's push key with the relay, retrying until settled.
 
-    ``on_success`` runs once the relay has the key (setup then deletes the
-    used activation code); ``on_permanent_failure`` runs with the reason when
-    the relay refuses for good (setup then notifies the owner). Clock, nonce,
-    sleep and jitter are injectable for tests.
+    on_success runs once the relay has the key (setup then deletes the used
+    activation code); on_permanent_failure gets the reason when the relay
+    refuses for good (setup then notifies the owner).
     """
 
     def __init__(
@@ -166,7 +160,7 @@ class RelayRegistrar:
         return self._registration_url
 
     def start(self, hass, entry) -> None:
-        """Run ``async_run`` as a background task of the config entry."""
+        """Run async_run as a background task of the config entry."""
         task = entry.async_create_background_task(
             hass,
             self.async_run(),
@@ -310,8 +304,8 @@ class RelayRegistrar:
     async def _read_response(response) -> dict[str, Any]:
         """The JSON object in the reply, or {} for anything else.
 
-        Read in chunks up to ``REGISTRATION_MAX_RESPONSE_BYTES``; a longer
-        reply counts as no answer.
+        A reply longer than REGISTRATION_MAX_RESPONSE_BYTES counts as no
+        answer.
         """
         try:
             chunks: list[bytes] = []
@@ -333,7 +327,7 @@ class RelayRegistrar:
 
     @staticmethod
     async def _async_callback(callback: Callable[..., Any] | None, *args: Any) -> None:
-        """Call ``callback`` (if set), awaiting it when it returns an awaitable."""
+        """Call callback if set, awaiting the result when it is awaitable."""
         if callback is None:
             return
         result = callback(*args)
@@ -342,7 +336,7 @@ class RelayRegistrar:
 
     @staticmethod
     def _parse_retry_after(raw: str | None) -> float | None:
-        """Seconds from a numeric ``Retry-After``; None for anything else."""
+        """Seconds from a numeric Retry-After; None for anything else."""
         if raw is None:
             return None
         try:

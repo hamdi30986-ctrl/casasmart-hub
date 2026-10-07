@@ -1,24 +1,11 @@
-"""Push notifications, signed by the hub and delivered through the push relay.
+"""Push notifications, signed by the hub and delivered by the push relay.
 
-``PushDispatcher`` turns hub events into pushes: alarm triggers
-(``casasmart_alarm_triggered``), settled lock and unlock changes, a newly
-paired device, HQ reminders (``push_api``), and a silent "refresh your
-widgets" nudge when a control entity's state settles. ``TankPushMonitor``
-adds the timer-driven water-tank alerts.
-
-Each push is one batch to the relay's push endpoint: the same payload for
-every target device's FCM token, signed with the hub's Ed25519 push key
-(``push_crypto``). The relay checks the signature against the public key the
-hub registered (``relay_registration``) and delivers each payload to its
-token. Payloads are plain text, protected in transit by HTTPS; the hub does
-not encrypt them.
-
-Most alert types go to the owner's (admin) devices only. A life-safety alarm
-goes to every registered device, and so do alarm and lock alerts when device
-roles can't be read.
-
-``__init__.py`` creates both objects once a relay is configured and the TLS
-and push identities load; without them the hub runs without push.
+PushDispatcher turns alarm triggers, settled lock changes, newly paired
+devices and HQ reminders into pushes, and sends a silent widget refresh when
+a control entity settles. TankPushMonitor adds the timed water-tank alerts.
+Each push is one batch for every target device's FCM token, signed with the
+hub's Ed25519 push key (push_crypto). Payloads are plain text over HTTPS.
+Setup creates both objects only when a relay is configured.
 """
 
 from __future__ import annotations
@@ -61,15 +48,15 @@ _LOGGER = logging.getLogger(__name__)
 
 # --- Push types and audiences -----------------------------------------------
 
-# The ``type`` field of a push payload; the apps route on it. The tank and
-# widget types live in const.py.
+# Payload "type" values; the apps route on them. Tank and widget types are in
+# const.py.
 PUSH_TYPE_SECURITY = "security"
 PUSH_TYPE_LOCK = "lock"
 PUSH_TYPE_DEVICE_PAIRED = "device_paired"
 PUSH_TYPE_HQ_REMINDER = "hq_reminder"
 
-# Sent only to the owner's (admin) devices. A life-safety alarm overrides this
-# for its own push: smoke, gas, CO or a leak must reach everyone in the house.
+# Sent to the owner's (admin) devices only, except a life-safety alarm (smoke,
+# gas, CO, a leak), which goes to everyone.
 _OWNER_ONLY_TYPES = frozenset(
     {
         PUSH_TYPE_SECURITY,
@@ -81,10 +68,8 @@ _OWNER_ONLY_TYPES = frozenset(
     }
 )
 
-# When device roles can't be resolved (the auth engine isn't loaded), owner-only
-# pushes fail CLOSED — except alarm and lock alerts, which fail OPEN to every
-# registered device: a missed break-in or door alert is worse than one extra
-# notification on a family member's phone.
+# Without device roles (auth engine not loaded) owner-only pushes are withheld,
+# except alarm and lock alerts: a missed break-in is worse than an extra alert.
 _FAIL_OPEN_WITHOUT_ROLES = frozenset({PUSH_TYPE_SECURITY, PUSH_TYPE_LOCK})
 
 # Batch priority sent to the relay; only alarm triggers are critical.
@@ -105,26 +90,22 @@ _WIDGET_DOMAINS = frozenset(
     {"light", "switch", "input_boolean", "lock", "cover", "climate", "fan"}
 )
 
-# Widget refreshes are coalesced: the first change arms one push this many
-# seconds later, and changes inside the window ride along with it.
+# The first widget change arms one refresh this many seconds later; changes
+# inside the window share it.
 _WIDGET_PUSH_COALESCE_SECONDS = 15.0
 
 _WIDGET_UNSETTLED = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 
-# Random bytes of the per-batch nonce (hex-encoded in the request). With the
-# timestamp it lets the relay refuse a replayed batch.
+# With the timestamp, the per-batch nonce lets the relay refuse a replay.
 _NONCE_BYTES = 32
 
 
 class PushDispatcher:
     """Sends hub events to the push relay as signed batches.
 
-    ``async_start`` subscribes to alarm triggers and state changes;
-    ``async_stop`` drops the subscriptions, the pending widget flush and any
-    send still in flight. Sending never raises: every send path returns a
-    small result such as ``{"delivery": "relay_accepted"}`` or
-    ``{"delivery": "failed", "reason": ...}``, because a push is best effort
-    and must never fail the code that triggered it.
+    A push is best effort, so sending never raises. Each send returns a small
+    result such as {"delivery": "relay_accepted"} or {"delivery": "failed",
+    "reason": ...}.
     """
 
     def __init__(
@@ -192,7 +173,7 @@ class PushDispatcher:
 
     @callback
     def _schedule_dispatch(self, coro: Any) -> None:
-        """Run a send as a tracked task, so ``async_stop`` can cancel it."""
+        """Run a send as a tracked task, so async_stop can cancel it."""
         task = self._hass.async_create_task(coro)
         if isinstance(task, asyncio.Task):
             self._tasks.add(task)
@@ -200,13 +181,13 @@ class PushDispatcher:
 
     @callback
     def _on_alarm_triggered(self, event: Event) -> None:
-        """A critical push for every ``casasmart_alarm_triggered``."""
+        """Send a critical push for an alarm trigger."""
         data = self._build_security_payload(event.data or {})
         self._schedule_dispatch(self._dispatch(data, PRIORITY_CRITICAL))
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        """Lock pushes and widget refreshes, from HA's state changes."""
+        """Send lock pushes and mark widgets dirty from HA state changes."""
         entity_id = event.data.get("entity_id")
         if not isinstance(entity_id, str):
             return
@@ -225,12 +206,11 @@ class PushDispatcher:
     def _is_widget_relevant_change(
         entity_id: str, old_state: Any, new_state: Any
     ) -> bool:
-        """True for a settled control-domain state edge a widget would render."""
+        """True when a widget-domain entity moves between two known states."""
         domain = entity_id.split(".", 1)[0]
         if domain not in _WIDGET_DOMAINS:
             return False
-        # Need a real new value and a real prior value that actually differs —
-        # ignore attribute-only churn and flaps in/out of unavailable/unknown.
+        # Attribute-only updates and flaps through unavailable/unknown don't count.
         if new_state is None or new_state.state in _WIDGET_UNSETTLED:
             return False
         if old_state is None or old_state.state in _WIDGET_UNSETTLED:
@@ -239,29 +219,26 @@ class PushDispatcher:
 
     @callback
     def _mark_widgets_dirty(self) -> None:
-        """Arm one coalesced widget-refresh flush; absorb changes within it."""
+        """Schedule a widget refresh unless one is already pending."""
         if self._widget_flush_cancel is not None:
-            return  # a flush is already scheduled for this window
+            return
         self._widget_flush_cancel = async_call_later(
             self._hass, _WIDGET_PUSH_COALESCE_SECONDS, self._flush_widget_refresh
         )
 
     @callback
     def _flush_widget_refresh(self, _now: Any) -> None:
-        """Timer callback: send this window's one silent widget refresh."""
+        """Send the window's silent widget refresh."""
         self._widget_flush_cancel = None
         data = {"type": PUSH_TYPE_UPDATE_WIDGETS, "silent": "1"}
         self._schedule_dispatch(self._dispatch(data, PRIORITY_NORMAL))
 
     @staticmethod
     def _is_real_lock_transition(old_state: Any, new_state: Any) -> bool:
-        """True only for a settled ``locked``<->``unlocked`` change.
+        """True when a lock settles in a new state from a known prior state.
 
-        The new state must be a settled lock state; the old state must be a real
-        prior state (not ``unavailable``/``unknown`` and not ``None``); and they
-        must differ. This catches the genuine edge even when the lock reported an
-        intermediate ``locking``/``unlocking`` first, while ignoring flaps in and
-        out of ``unavailable``.
+        An intermediate locking/unlocking state still counts as the prior
+        state; flaps through unavailable or unknown don't.
         """
         if new_state is None or new_state.state not in _LOCK_SETTLED:
             return False
@@ -270,7 +247,7 @@ class PushDispatcher:
         return old_state.state != new_state.state
 
     def _build_security_payload(self, alarm_event: dict[str, Any]) -> dict[str, str]:
-        """Plaintext security notification from an alarm event dict."""
+        """The security push for an alarm event."""
         life_safety = bool(alarm_event.get("life_safety"))
         entity_id = alarm_event.get("entity_id")
         zone = alarm_event.get("zone")
@@ -281,15 +258,14 @@ class PushDispatcher:
         body = f"{name} triggered the alarm" if name else "The alarm was triggered"
         data = {"type": PUSH_TYPE_SECURITY, "title": title, "body": body}
         if life_safety:
-            # House-wide audience flag: a life-safety alarm (smoke, gas, CO, a
-            # leak) must reach everyone, not just the owner (_dispatch_inner).
+            # Sends this owner-only type to every device (_dispatch_inner).
             data["life_safety"] = "1"
         if isinstance(entity_id, str) and entity_id:
             data["entity_id"] = entity_id
         return data
 
     def _build_lock_payload(self, entity_id: str, new_state: Any) -> dict[str, str]:
-        """Plaintext lock notification for a settled lock transition."""
+        """The lock push for a settled lock change."""
         locked = new_state.state == STATE_LOCKED
         name = self._friendly_name(entity_id) or entity_id
         action = "locked" if locked else "unlocked"
@@ -320,13 +296,10 @@ class PushDispatcher:
     async def async_send_device_paired(
         self, name: str, role: str, device_id: str
     ) -> None:
-        """Tell the owner a new device was paired ("New device paired").
+        """Tell the owner a new device was paired; never raises.
 
-        The enroll view calls this once a new device has enrolled (a phone
-        pairing again with the same key doesn't count), so a member code
-        redeemed on the LAN or, with ``remote_pairing_enabled``, from anywhere
-        always reaches the owner. Owner-only, like the alarm, lock and tank
-        alerts. It is a notice, not an approval step. Never raises.
+        The enroll view calls this for each new device (not for a phone
+        pairing again with the same key). It is a notice, not an approval.
         """
         await self._dispatch(
             {
@@ -339,7 +312,7 @@ class PushDispatcher:
         )
 
     async def _dispatch(self, data: dict[str, str], priority: str) -> dict[str, str]:
-        """``_dispatch_inner`` behind a last-resort guard: a push never raises."""
+        """Run _dispatch_inner behind a last-resort guard, so a push never raises."""
         try:
             return await self._dispatch_inner(data, priority)
         except Exception:
@@ -410,10 +383,9 @@ class PushDispatcher:
     ) -> dict[str, Any]:
         """Build the signed relay request body.
 
-        The canonical JSON signed here MUST match what the relay re-derives:
-        sorted keys, no whitespace, raw UTF-8 (``ensure_ascii=False``), integer
-        timestamp. ``signature`` is excluded from the signed bytes and added
-        afterwards.
+        The relay rebuilds the signed bytes from the other fields, so their
+        canonical form (sorted keys, no whitespace, raw UTF-8, integer
+        timestamp) must not change.
         """
         signed = {
             "hub_id": self._hub_id,
@@ -462,11 +434,7 @@ class PushDispatcher:
             return None
 
     async def _cleanup_dead_tokens(self, payload: Any) -> None:
-        """Drop every token the relay flagged ``remove_token``.
-
-        The relay flags a token its push service reports as no longer
-        registered, for example because the app was uninstalled.
-        """
+        """Drop the tokens the relay flags remove_token (app uninstalled, say)."""
         if not isinstance(payload, dict):
             return
         errors = payload.get("errors")
@@ -493,7 +461,7 @@ class PushDispatcher:
             )
 
     def _remove_tokens(self, dead: set[str]) -> int:
-        """Executor: unregister every device whose token the relay rejected."""
+        """Unregister each device whose token the relay rejected (executor)."""
         removed = 0
         for device_id, rec in self._push_store.get_all_tokens().items():
             if rec.get("fcm_token") in dead and self._push_store.unregister(device_id):
@@ -506,8 +474,8 @@ class PushDispatcher:
 # Local wall-clock hour (HA's configured time zone) of the daily low-water sweep.
 TANK_LOW_CHECK_LOCAL_HOUR = 18
 
-# A tank that has reported before and then sends nothing for this long is
-# offline. Sensors post every 5 minutes by default.
+# A tank that has reported before is offline after this long without a
+# reading. Sensors post every 5 minutes by default.
 TANK_OFFLINE_TIMEOUT_SECONDS = 20 * 60
 
 # How often the offline watchdog runs.
@@ -517,24 +485,11 @@ TANK_OFFLINE_POLL = timedelta(minutes=5)
 class TankPushMonitor:
     """Water-tank low-level and offline alerts.
 
-    Unlike the alarm and lock pushes this is timer-driven, not event-driven:
-    tank readings arrive by REST every 5 minutes, and "low at 6pm" or "silent
-    for 20 minutes" are questions about time, not state changes. Two timers:
-
-    - a daily 18:00 sweep in Home Assistant's time zone: every calibrated tank
-      whose latest reading is below its ``low_percent`` gets one push;
-    - a 5-minute watchdog: one push when a tank that was reporting has gone
-      silent for 20 minutes or more.
-
-    Each is limited to one push per tank per local calendar day (so the
-    watchdog doesn't repeat every 5 minutes). Each alert first fires its HA
-    event (``casasmart_tank_low`` / ``casasmart_tank_offline``) for
-    automations, then sends the owner push through
-    ``PushDispatcher.async_send``.
-
-    The checks (``async_check_low_water`` / ``async_check_offline``) take
-    "now" from an injectable ``clock`` and read the engine through the
-    executor, so they can be tested without HA timers or a relay.
+    These run on timers, since "low at 18:00" and "silent for 20 minutes" are
+    questions about time. A daily sweep at 18:00 (HA's time zone) checks every
+    calibrated tank against its low_percent, and a 5-minute watchdog looks for
+    tanks that stopped reporting. Each alert fires its HA event, then pushes
+    to the owner, at most once per tank per local day.
     """
 
     def __init__(
@@ -551,12 +506,10 @@ class TankPushMonitor:
         self._clock = clock
         self._unsub_daily: Callable[[], None] | None = None
         self._unsub_offline: Callable[[], None] | None = None
-        # device_id -> local day ordinal of the last push, one map per channel so a
-        # low-water push and an offline push don't suppress each other.
+        # device_id -> local day of the last push. Separate maps, so a low-water
+        # push doesn't suppress an offline push or the reverse.
         self._low_pushed_day: dict[str, int] = {}
         self._offline_pushed_day: dict[str, int] = {}
-
-    # -- lifecycle -------------------------------------------------------------
 
     @callback
     def async_start(self) -> None:
@@ -597,15 +550,11 @@ class TankPushMonitor:
             self._unsub_offline()
             self._unsub_offline = None
 
-    # -- timer adapters --------------------------------------------------------
-
     async def _handle_daily_check(self, _now: Any = None) -> None:
         await self.async_check_low_water()
 
     async def _handle_offline_check(self, _now: Any = None) -> None:
         await self.async_check_offline()
-
-    # -- checks (testable; clock-driven) ---------------------------------------
 
     async def async_check_low_water(self) -> None:
         """Push once for each calibrated tank currently below its threshold."""
@@ -619,9 +568,7 @@ class TankPushMonitor:
             if self._low_pushed_day.get(device_id) == day:
                 continue
             last = device.get("last_reading")
-            # A dead sensor must not raise a "low" alert off a stale reading —
-            # that's the offline watchdog's job. Skip when the latest reading is
-            # already past the offline threshold.
+            # A stale reading is the offline watchdog's business, not a low alert.
             if not last or now - last.get("t", 0) >= TANK_OFFLINE_TIMEOUT_SECONDS:
                 continue
             try:
@@ -637,7 +584,7 @@ class TankPushMonitor:
             await self._emit_low(device, status)
 
     async def async_check_offline(self) -> None:
-        """Push once for each previously-reporting tank now silent 20+ min."""
+        """Push once for each tank that has reported but is now silent."""
         now = self._clock()
         day = self._local_day(now)
         devices = await self._list_devices()
@@ -646,8 +593,7 @@ class TankPushMonitor:
             if not device_id:
                 continue
             last = device.get("last_reading")
-            # "previously reporting": a tank with no reading at all (freshly
-            # provisioned, never POSTed) is not offline, it's pending.
+            # A tank that has never reported is new, not offline.
             if not last:
                 continue
             if now - last.get("t", 0) < TANK_OFFLINE_TIMEOUT_SECONDS:
@@ -657,10 +603,8 @@ class TankPushMonitor:
             self._offline_pushed_day[device_id] = day
             await self._emit_offline(device, last)
 
-    # -- emit ------------------------------------------------------------------
-
     async def _emit_low(self, device: dict[str, Any], status: dict[str, Any]) -> None:
-        """Fire ``casasmart_tank_low``, then push to the owner."""
+        """Fire casasmart_tank_low, then push to the owner."""
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
         percent = round(status["percent"])
@@ -685,7 +629,7 @@ class TankPushMonitor:
         )
 
     async def _emit_offline(self, device: dict[str, Any], last: dict[str, Any]) -> None:
-        """Fire ``casasmart_tank_offline``, then push to the owner."""
+        """Fire casasmart_tank_offline, then push to the owner."""
         device_id = device["device_id"]
         name = device.get("name") or "Water tank"
         self._hass.bus.async_fire(
@@ -706,8 +650,6 @@ class TankPushMonitor:
             PRIORITY_NORMAL,
         )
 
-    # -- internals -------------------------------------------------------------
-
     async def _list_devices(self) -> list[dict[str, Any]]:
         """Every tank device, or [] (logged) if the engine read fails."""
         try:
@@ -727,5 +669,5 @@ class TankPushMonitor:
         return UTC
 
     def _local_day(self, now: float) -> int:
-        """The local calendar-day ordinal for the once-per-day dedup."""
+        """The local calendar day, for the once-a-day limit."""
         return datetime.fromtimestamp(now, self._time_zone()).date().toordinal()

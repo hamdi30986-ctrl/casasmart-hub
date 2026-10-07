@@ -1,18 +1,11 @@
-"""Push relay settings: validation, endpoints, reloads and migration.
+"""Push relay settings shared by the config flow and setup.
 
-The relay base URL is a config-entry option (``push_relay_url``). The
-single-use hub activation code and the id of the request that submitted it
-sit in the entry's data until registration succeeds. These helpers keep the
-config flow (``config_flow.py``) and setup (``__init__.py``) in agreement:
-
-- ``normalize_relay_base_url`` accepts only a public HTTPS origin;
-- ``relay_endpoints`` derives the push and registration URLs from it;
-- ``relay_config_snapshot`` / ``relay_reload_required`` decide whether an
-  options change needs the push side restarted;
-- ``quiesce_relay_runtime`` / ``async_reload_relay_runtime`` stop it and
-  reload the entry;
-- ``migrate_relay_options`` moves a relay URL that older versions kept in
-  ``hub_config.json`` into the entry options.
+The relay base URL is a config-entry option (push_relay_url). The single-use
+activation code, and the id of the request that submitted it, stay in the
+entry data until registration succeeds. These helpers validate the URL,
+derive the relay endpoints, decide when an options change needs the push
+side reloaded, and move a URL that older versions kept in hub_config.json
+into the options.
 """
 
 from __future__ import annotations
@@ -39,13 +32,11 @@ _NON_PRODUCTION_SUFFIXES = (".internal", ".local", ".localhost")
 
 
 def normalize_relay_base_url(value: object) -> str | None:
-    """The canonical relay origin (``https://host[:port]``), or None.
+    """The canonical relay origin (https://host[:port]), or None.
 
-    The relay receives every push and the hub's registration, so only a
-    public production origin passes: ``https``, printable ASCII, no
-    credentials, path, query or fragment, and a DNS name of two or more
-    labels (no IP literal, no ``.local``/``.internal``/``.localhost``, no
-    numeric top-level label). The host is lowercased and port 443 dropped.
+    The relay sees every push, so only a public HTTPS origin with a DNS name
+    passes: no credentials, path, query, IP literal or private-network
+    suffix. The host is lowercased and port 443 dropped.
     """
     if not isinstance(value, str):
         return None
@@ -201,7 +192,7 @@ def without_relay_activation(data: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RelayMigration:
-    """The migrated options, plus what was found in ``hub_config.json``."""
+    """The migrated options, plus what was found in hub_config.json."""
 
     options: dict[str, Any]
     base_url: str | None
@@ -212,7 +203,7 @@ class RelayMigration:
 def migrate_relay_options(
     options: Mapping[str, Any], legacy_value: object
 ) -> RelayMigration:
-    """Move a relay URL kept in ``hub_config.json`` into the entry options.
+    """Move a relay URL kept in hub_config.json into the entry options.
 
     A valid option already set wins over the legacy value, and an invalid
     URL is dropped from the options rather than kept.

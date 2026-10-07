@@ -1,13 +1,10 @@
 """Push endpoints: device push tokens and HQ reminder notifications.
 
-- ``/api/casasmart/auth/push-token``: a paired device registers (POST) or
-  removes (DELETE) the FCM token its notifications go to. The device id comes
-  from the caller's CasaSmart token, so a device can only manage its own entry.
-- ``/api/casasmart/notifications/hq``: HQ's signed reminder requests
-  (``hq_notifications``), each turned into one generic push to the owner.
-
-Like every CasaSmart view, both are served on Home Assistant's own HTTP port
-and on the hub's TLS listener.
+- /api/casasmart/auth/push-token: a paired device registers (POST) or removes
+  (DELETE) its FCM token. The device id comes from the caller's token, so a
+  device can only manage its own entry.
+- /api/casasmart/notifications/hq: HQ's signed reminder requests
+  (hq_notifications), each sent as one generic push to the owner.
 """
 
 from __future__ import annotations
@@ -58,13 +55,11 @@ def _get_runtime_data(hass: HomeAssistant):
 
 
 def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
-    """The ONE HQ delivery lock, shared across view instances.
+    """The HQ delivery lock, shared by every view instance.
 
-    ``build_views`` constructs fresh view objects for HA's own HTTP app and
-    the TLS listener (and again on each daily TLS refresh). A retry of the
-    same HQ event must wait for the first delivery to be recorded whichever
-    listener it arrives on, so the lock lives in ``hass.data``, never on a
-    view.
+    build_views creates views for HA's HTTP port and for the TLS listener
+    (again on each TLS refresh). A retry must wait for the first delivery to
+    be recorded whichever listener it reaches, so the lock is in hass.data.
     """
     return hass.data.setdefault(DOMAIN, {}).setdefault(
         "hq_notification_lock", asyncio.Lock()
@@ -72,10 +67,9 @@ def _hq_delivery_lock(hass: HomeAssistant) -> asyncio.Lock:
 
 
 class CasaSmartPushTokenView(HomeAssistantView):
-    """POST + DELETE /api/casasmart/auth/push-token.
+    """POST and DELETE /api/casasmart/auth/push-token.
 
-    Both need ``session.manage``, which every paired role has but a widget
-    token doesn't: a widget may read and control devices, but must not
+    Both need session.manage, which widget tokens lack: a widget must not
     redirect or drop its owner's notifications.
     """
 
@@ -170,18 +164,15 @@ class CasaSmartPushTokenView(HomeAssistantView):
 class CasaSmartHqNotificationView(HomeAssistantView):
     """POST /api/casasmart/notifications/hq: one signed, content-free reminder.
 
-    There is no CasaSmart token here; HQ's Ed25519 signature authenticates
-    the request (``HqNotificationVerifier``). The cheap checks come first: push
-    available, a per-address rate limit, content type and size, then the
-    signature. Then, under one lock shared by every view instance, the nonce
-    is reserved, a retry of an event already delivered is answered as a
-    duplicate, and otherwise one owner-only push is sent and recorded.
+    HQ's Ed25519 signature authenticates the request instead of a CasaSmart
+    token. The cheap checks run before the signature check; the nonce, the
+    duplicate check and the send run under the shared delivery lock.
 
-    Answers: 202 when the relay accepted the push; 200 with ``duplicate:
-    true`` for an event already delivered; 401 ``HQ_AUTH_REJECTED`` for any
-    failed check of the signed request (the reason is audited, never
-    returned); 400 for a wrong content type or size; 429 over the rate limit;
-    503 when push isn't running or the delivery failed.
+    Answers 202 when the relay accepted the push, 200 with duplicate: true for
+    an event already delivered, 401 HQ_AUTH_REJECTED for any failed check of
+    the signed request (the reason is audited, not returned), 400 for a bad
+    content type or size, 429 over the rate limit, and 503 when push is off or
+    the delivery failed.
     """
 
     url = "/api/casasmart/notifications/hq"
@@ -194,10 +185,9 @@ class CasaSmartHqNotificationView(HomeAssistantView):
         self._attempts: dict[str, deque[float]] = defaultdict(deque)
 
     def _rate_limited(self, peer: str) -> bool:
-        """True once ``peer`` has sent 30 requests in the last minute.
+        """True once peer has sent 30 requests in the last minute.
 
-        Addresses with no recent request are dropped when more than 512 are
-        tracked, so the map stays small.
+        Idle addresses are dropped once more than 512 are tracked.
         """
         now = time.monotonic()
         attempts = self._attempts[peer]
