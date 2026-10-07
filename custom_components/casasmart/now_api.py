@@ -174,6 +174,18 @@ class CasaSmartNowView(_NowView):
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
         scope = claims.get("rooms")
+
+        def read_stores() -> tuple:
+            recents = now_data.recents_for(member_id)
+            config = now_data.config()
+            rooms = registry.list_rooms()
+            scenes = registry.list_scenes()
+            favorites = registry.get_favorites(member_id)
+            policies = {
+                room["room_id"]: now_data.room_policy(room["room_id"]) for room in rooms
+            }
+            return recents, config, rooms, scenes, favorites, policies
+
         (
             recents,
             config,
@@ -181,19 +193,7 @@ class CasaSmartNowView(_NowView):
             scenes,
             favorites,
             policies,
-        ) = await self._hass.async_add_executor_job(
-            lambda: (
-                now_data.recents_for(member_id),
-                now_data.config(),
-                registry.list_rooms(),
-                registry.list_scenes(),
-                registry.get_favorites(member_id),
-                {
-                    room["room_id"]: now_data.room_policy(room["room_id"])
-                    for room in registry.list_rooms()
-                },
-            )
-        )
+        ) = await self._hass.async_add_executor_job(read_stores)
         rooms = [room for room in rooms if scope is None or room["room_id"] in scope]
         room_ids = {room["room_id"] for room in rooms}
 
