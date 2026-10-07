@@ -161,7 +161,8 @@ registration, tunnel settings, and everything in Home Assistant itself.
 The hub's data is wiped in one step, and every phone's connection is closed.
 If Energy Saving can't switch back on the automations it turned off, the
 reset stops before wiping anything and says which ones. If it reports that it
-couldn't finish, run it again.
+couldn't finish, run it again; if it reports that the hub did not reload,
+restart Home Assistant (every phone is already unpaired).
 
 To hand the hub to a new owner, use factory reset. "Regenerate pairing code"
 keeps the recovery code, so whoever holds the old recovery card could still
