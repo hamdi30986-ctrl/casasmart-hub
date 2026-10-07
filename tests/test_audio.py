@@ -440,6 +440,12 @@ class CommandTests(AudioTestCase):
         with self.assertRaises(AudioError):
             self.engine.build_command("a1b2c3", "explode")
 
+    def test_non_string_command_rejected(self):
+        # A JSON list/object is unhashable; it must be a 400, not a TypeError.
+        for cmd in ([], {}, ["stop"]):
+            with self.subTest(cmd=cmd), self.assertRaises(AudioError):
+                self.engine.build_command("a1b2c3", cmd)
+
     def test_play_not_a_control_command(self):
         # 'play' must never come through the control path (no file smuggling).
         with self.assertRaises(AudioError):
@@ -477,6 +483,11 @@ class AirplayRemoteTests(AudioTestCase):
     def test_unknown_action_rejected(self):
         with self.assertRaises(AudioError):
             self.engine.build_airplay_remote("a1b2c3", "moonwalk")
+
+    def test_non_string_action_rejected(self):
+        for action in ([], {}, ["pause"]):
+            with self.subTest(action=action), self.assertRaises(AudioError):
+                self.engine.build_airplay_remote("a1b2c3", action)
 
     def test_airplay_on_unknown_speaker_raises(self):
         with self.assertRaises(UnknownSpeakerError):
@@ -517,6 +528,11 @@ class PlayBuildTests(AudioTestCase):
     def test_play_rejects_unknown_priority(self):
         with self.assertRaises(AudioError):
             self.engine.build_play(url="http://h/x.mp3", priority="bogus")
+
+    def test_play_rejects_non_string_priority(self):
+        for priority in ([], {}, ["pa"]):
+            with self.subTest(priority=priority), self.assertRaises(AudioError):
+                self.engine.build_play(url="http://h/x.mp3", priority=priority)
 
 
 if __name__ == "__main__":
