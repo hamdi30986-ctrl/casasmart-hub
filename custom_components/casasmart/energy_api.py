@@ -228,6 +228,14 @@ async def async_energy_discovery(
             }
         )
 
+    switches = sorted(
+        (
+            entity
+            for entity in inventory.entities.values()
+            if entity.entity_id.startswith("switch.")
+        ),
+        key=lambda item: item.entity_id,
+    )
     output_rooms: list[dict[str, Any]] = []
     for room_id, record in rooms_by_id.items():
         room = inventory.rooms.get(room_id)
@@ -239,10 +247,8 @@ async def async_energy_discovery(
 
         plugs: list[dict[str, Any]] = []
         heaters: list[dict[str, Any]] = []
-        for entity in sorted(
-            inventory.entities.values(), key=lambda item: item.entity_id
-        ):
-            if entity.room_id != room_id or not entity.entity_id.startswith("switch."):
+        for entity in switches:
+            if entity.room_id != room_id:
                 continue
             typed = typed_gangs.get(entity.entity_id, {})
             gang_type = typed.get("type")
