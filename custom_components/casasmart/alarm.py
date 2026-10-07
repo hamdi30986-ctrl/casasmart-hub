@@ -150,6 +150,13 @@ def active_zones_for_mode(mode: str) -> frozenset[str]:
     return _ACTIVE_ZONES_BY_MODE.get(mode, frozenset())
 
 
+def _actor_str(actor: Any) -> str | None:
+    """Who armed/disarmed, as a capped string for the history (or None)."""
+    if actor is None:
+        return None
+    return str(actor)[:_NAME_MAX]
+
+
 class AlarmEngine:
     """Arm state machine + zone model over four storage tables.
 
@@ -662,10 +669,3 @@ class AlarmEngine:
             "trigger_zone": self._state["trigger_zone"],
             "entry_delay": self._state["entry_delay"],
         }
-
-
-def _actor_str(actor: Any) -> str | None:
-    """Who armed/disarmed, as a capped string for the history (or None)."""
-    if actor is None:
-        return None
-    return str(actor)[:_NAME_MAX]

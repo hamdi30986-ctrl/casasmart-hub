@@ -63,6 +63,30 @@ def _serialize_zones(zones: dict[str, dict]) -> list[dict]:
     ]
 
 
+# -- executor jobs (storage-touching engine calls) -----------------------------
+# Small module-level helpers so async_add_executor_job gets a plain callable
+# instead of a closure capturing request state.
+
+
+def _arm_job(alarm, mode, actor, exit_delay, entry_delay):
+    return alarm.arm(mode, actor=actor, exit_delay=exit_delay, entry_delay=entry_delay)
+
+
+def _disarm_job(alarm, actor):
+    return alarm.disarm(actor=actor)
+
+
+def _set_zone_job(alarm, entity_id, zone, name):
+    return alarm.set_zone(entity_id, zone, name)
+
+
+def _set_settings_job(alarm, entry_delay, exit_delay):
+    return alarm.set_settings(entry_delay=entry_delay, exit_delay=exit_delay)
+
+
+# -- views --------------------------------------------------------------------
+
+
 class _AlarmView(HomeAssistantView):
     """Shared plumbing for the alarm views."""
 
@@ -301,24 +325,3 @@ class CasaSmartAlarmSettingsView(_AlarmView):
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
         self._notify_change()
         return self.json({"settings": settings})
-
-
-# -- executor jobs (storage-touching engine calls) -----------------------------
-# Small module-level helpers so async_add_executor_job gets a plain callable
-# instead of a closure capturing request state.
-
-
-def _arm_job(alarm, mode, actor, exit_delay, entry_delay):
-    return alarm.arm(mode, actor=actor, exit_delay=exit_delay, entry_delay=entry_delay)
-
-
-def _disarm_job(alarm, actor):
-    return alarm.disarm(actor=actor)
-
-
-def _set_zone_job(alarm, entity_id, zone, name):
-    return alarm.set_zone(entity_id, zone, name)
-
-
-def _set_settings_job(alarm, entry_delay, exit_delay):
-    return alarm.set_settings(entry_delay=entry_delay, exit_delay=exit_delay)

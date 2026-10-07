@@ -53,6 +53,25 @@ TANK_LOW_PERCENT_MIN = 1
 TANK_LOW_PERCENT_MAX = 30
 
 
+class TankError(Exception):
+    """Tank input rejected (maps to HTTP 400)."""
+
+
+class UnknownTankError(TankError):
+    """No tank device under that id (maps to HTTP 404)."""
+
+
+class DuplicateTankError(TankError):
+    """Raised when provisioning would replace an existing tank/token."""
+
+
+class UnknownTokenError(Exception):
+    """Ingest token didn't match any device (maps to HTTP 401, generic)."""
+
+
+# -- helpers ------------------------------------------------------------------
+
+
 def _coerce_positive(value: Any, field: str) -> float:
     """A finite, strictly-positive float, or a TankError naming the field."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -106,22 +125,6 @@ def _coerce_low_percent(value: Any) -> int:
     return value
 
 
-class TankError(Exception):
-    """Tank input rejected (maps to HTTP 400)."""
-
-
-class UnknownTankError(TankError):
-    """No tank device under that id (maps to HTTP 404)."""
-
-
-class DuplicateTankError(TankError):
-    """Raised when provisioning would replace an existing tank/token."""
-
-
-class UnknownTokenError(Exception):
-    """Ingest token didn't match any device (maps to HTTP 401, generic)."""
-
-
 def _hash_token(token: str) -> str:
     """The stored form of an ingest token (hex SHA-256)."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -135,6 +138,9 @@ def _clean_name(name: Any) -> str:
     if len(cleaned) > _NAME_MAX:
         raise TankError(f"Tank name is too long (max {_NAME_MAX})")
     return cleaned
+
+
+# -- Shelly script ------------------------------------------------------------
 
 
 def build_tank_script(
@@ -199,6 +205,9 @@ def chunk_script_code(code: str, chunk_size: int = SCRIPT_CHUNK_SIZE) -> list[st
         chunks.append(encoded[start:end].decode("utf-8"))
         start = end
     return chunks
+
+
+# -- engine -------------------------------------------------------------------
 
 
 class TankEngine:

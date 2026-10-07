@@ -46,6 +46,7 @@ ingest never touches storage.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -61,32 +62,6 @@ _LOGGER = logging.getLogger(__name__)
 # with no speaker id.
 TOPIC_BROADCAST = "speakers/broadcast"
 TOPIC_ATHAN_CONFIG = "athan/config"
-
-
-def speaker_command_topic(mac6: str) -> str:
-    """The per-speaker command topic the agent subscribes."""
-    return f"speakers/{mac6}/command"
-
-
-def speaker_status_topic(mac6: str) -> str:
-    """The agent's retained ``online``/``offline`` status topic."""
-    return f"speakers/{mac6}/status"
-
-
-def speaker_state_topic(mac6: str) -> str:
-    """The agent's retained JSON state topic (volume, playing, AirPlay, …)."""
-    return f"speakers/{mac6}/state"
-
-
-def speaker_airplay_remote_topic(mac6: str) -> str:
-    """The topic shairport-sync subscribes for DACP remote control.
-
-    shairport-sync runs with ``enable_remote = "yes"`` and ``topic =
-    speakers/<mac6>/airplay``; a raw command word published to ``<topic>/remote``
-    is relayed as a DACP command to the *AirPlay source* (the phone), so the
-    phone's own playback pauses/skips, rather than the speaker just going quiet.
-    """
-    return f"speakers/{mac6}/airplay/remote"
 
 
 # -- AirPlay transport (DACP verbs shairport-sync accepts on .../remote) -------
@@ -140,6 +115,13 @@ _ATHAN_MAX_SPEAKERS = 64
 # Live-mirror string fields (room/title/...) from the broker — capped so a
 # giant retained value can't bloat what the hub serves the app.
 _LIVE_STR_MAX = 128
+# Max length for a custom-icon key (an app icon-set key like ``speaker`` /
+# ``sonos``, not free text). Bounds a hostile payload without policing the
+# vocabulary — the app owns the icon-key set.
+_ICON_KEY_MAX = 64
+# Max length for an area/room id (an HA area id — the app's room_id is the same
+# id). Bounds a hostile payload; the hub does not validate the id exists.
+_AREA_ID_MAX = 128
 # The agent's play-priority vocabulary, verbatim — an arbitrary priority
 # would defeat the speaker-side ranking.
 PRIORITY_VALUES = frozenset({"athan", "pa", "normal"})
@@ -160,6 +142,38 @@ class AudioError(Exception):
 
 class UnknownSpeakerError(AudioError):
     """No speaker enrolled under that id (maps to HTTP 404)."""
+
+
+# -- Topic builders ------------------------------------------------------------
+
+
+def speaker_command_topic(mac6: str) -> str:
+    """The per-speaker command topic the agent subscribes."""
+    return f"speakers/{mac6}/command"
+
+
+def speaker_status_topic(mac6: str) -> str:
+    """The agent's retained ``online``/``offline`` status topic."""
+    return f"speakers/{mac6}/status"
+
+
+def speaker_state_topic(mac6: str) -> str:
+    """The agent's retained JSON state topic (volume, playing, AirPlay, …)."""
+    return f"speakers/{mac6}/state"
+
+
+def speaker_airplay_remote_topic(mac6: str) -> str:
+    """The topic shairport-sync subscribes for DACP remote control.
+
+    shairport-sync runs with ``enable_remote = "yes"`` and ``topic =
+    speakers/<mac6>/airplay``; a raw command word published to ``<topic>/remote``
+    is relayed as a DACP command to the *AirPlay source* (the phone), so the
+    phone's own playback pauses/skips, rather than the speaker just going quiet.
+    """
+    return f"speakers/{mac6}/airplay/remote"
+
+
+# -- Validation ----------------------------------------------------------------
 
 
 def normalize_mac6(value: Any) -> str:
@@ -197,12 +211,6 @@ def _clean_optional_name(name: Any, *, field: str) -> str | None:
     return _clean_name(name, field=field)
 
 
-# Max length for a custom-icon key (an app icon-set key like ``speaker`` /
-# ``sonos``, not free text). Bounds a hostile payload without policing the
-# vocabulary — the app owns the icon-key set.
-_ICON_KEY_MAX = 64
-
-
 def _clean_optional_icon(icon: Any) -> str | None:
     """Normalise a custom-icon key: ``None`` or ``""`` clears it, a non-empty
     string is stripped + length-capped. The icon key is app-defined, so the hub
@@ -215,11 +223,6 @@ def _clean_optional_icon(icon: Any) -> str | None:
     if not cleaned:
         return None
     return cleaned[:_ICON_KEY_MAX]
-
-
-# Max length for an area/room id (an HA area id — the app's room_id is the same
-# id). Bounds a hostile payload; the hub does not validate the id exists.
-_AREA_ID_MAX = 128
 
 
 def _clean_optional_area_id(area_id: Any) -> str | None:
@@ -531,8 +534,6 @@ class AudioEngine:
                         "athan 'speakers' entries must be non-empty strings"
                     )
         try:
-            import json
-
             # allow_nan=False: a non-finite value would serialise to invalid
             # JSON and poison the relayed athan/config the scheduler reads.
             encoded = json.dumps(config, allow_nan=False)
