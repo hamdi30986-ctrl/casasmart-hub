@@ -241,6 +241,51 @@ class AlarmTestCase(unittest.TestCase):
         self.engine.process_sensor("binary_sensor.front_door", True)
         self.assertIsNone(self.engine.process_sensor("binary_sensor.back_door", True))
 
+    def test_active_zones_follow_a_running_entry_delay(self):
+        # Away monitors perimeter and interior. While an entry delay runs they
+        # ride it (follower zones) instead of triggering at once, so walking
+        # in past a motion sensor and disarming in time sounds nothing.
+        self._seed_zones()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self.engine.process_sensor("binary_sensor.front_door", True)
+        for sensor in ("binary_sensor.hall_motion", "binary_sensor.window"):
+            with self.subTest(sensor=sensor):
+                self.assertIsNone(self.engine.process_sensor(sensor, True))
+                self.assertEqual(self.engine.snapshot()["mode"], MODE_PENDING)
+        self.clock.advance(DEFAULT_ENTRY_DELAY_SECONDS - 1)
+        self.engine.disarm()
+        self.assertIsNone(self.engine.tick())
+        self.assertEqual(len(self.alerts), 0)
+
+    def test_a_follower_trip_triggers_when_the_entry_delay_ends(self):
+        self._seed_zones()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self.engine.process_sensor("binary_sensor.front_door", True)
+        self.engine.process_sensor("binary_sensor.hall_motion", True)
+        self.clock.advance(DEFAULT_ENTRY_DELAY_SECONDS)
+        event = self.engine.tick()
+        self.assertEqual(event["kind"], EVENT_TRIGGERED)
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
+        self.assertEqual(len(self.alerts), 1)
+
+    def test_zones_off_in_the_armed_mode_stay_ignored_during_entry_delay(self):
+        # Night doesn't monitor motion, and an entry delay doesn't change that.
+        self._seed_zones()
+        self.engine.arm(MODE_NIGHT, exit_delay=0)
+        self.engine.process_sensor("binary_sensor.front_door", True)
+        self.assertIsNone(self.engine.process_sensor("binary_sensor.hall_motion", True))
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_PENDING)
+        self.engine.disarm()
+        self.assertEqual(len(self.alerts), 0)
+
+    def test_life_safety_still_fires_during_entry_delay(self):
+        self._seed_zones()
+        self.engine.arm(MODE_AWAY, exit_delay=0)
+        self.engine.process_sensor("binary_sensor.front_door", True)
+        event = self.engine.process_sensor("binary_sensor.smoke", True)
+        self.assertEqual(event["kind"], EVENT_LIFE_SAFETY)
+        self.assertEqual(self.engine.snapshot()["mode"], MODE_TRIGGERED)
+
     def test_pending_deadline_exposed(self):
         self._seed_zones()
         self.engine.arm(MODE_AWAY, exit_delay=0, entry_delay=45)
