@@ -50,6 +50,7 @@ _HA_MODULES = (
     "homeassistant.core",
     "homeassistant.util",
     "homeassistant.util.dt",
+    "homeassistant.util.unit_conversion",
     "homeassistant.helpers",
     "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
