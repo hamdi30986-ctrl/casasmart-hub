@@ -162,13 +162,14 @@ class CasaSmartRegistryView(_RegistryView):
             return not_ready
         scope = claims.get("rooms")
 
-        def _read() -> tuple[list, list, list, dict, list]:
+        def _read() -> tuple[list, list, list, dict, list, list]:
             return (
                 registry.list_floors(),
                 registry.list_rooms(),
                 registry.list_room_tags(),
                 registry.list_assignments(),
                 registry.list_scenes(),
+                registry.list_user_devices(),
             )
 
         try:
@@ -178,6 +179,7 @@ class CasaSmartRegistryView(_RegistryView):
                 room_tags,
                 assignments,
                 scenes,
+                user_devices,
             ) = await self._hass.async_add_executor_job(_read)
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
@@ -236,8 +238,6 @@ class CasaSmartRegistryView(_RegistryView):
             collection.sort(
                 key=lambda item: (item.get("sort_order", 0), item.get("name", ""))
             )
-
-        user_devices = registry.list_user_devices()
 
         user_devices = [
             device
@@ -804,6 +804,8 @@ class CasaSmartUserDeviceView(_RegistryView):
             )
         except RegistryError as err:
             return self._error_response(err)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
         reject = self._scope_reject(
             claims,
             existing.get("entity_ids"),

@@ -15,6 +15,7 @@ Container/CI only (imports Home Assistant). Run:
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -796,6 +797,41 @@ class UserDeviceOwnership(RegistryWritesTestCase):
                     self.assertIn("already grabbed", reply["message"])
         self.assertEqual(self.rt.registry.list_user_devices(), before)
         self.assertEqual(self._kinds("user-devices"), 0)
+
+
+class StorageFailures(RegistryWritesTestCase):
+    """A storage error on a read path is the views' clean JSON 500."""
+
+    async def test_feed_get_when_user_devices_cannot_be_read(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+
+        def _unavailable():
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with (
+            mock.patch.object(self.rt.registry, "list_user_devices", _unavailable),
+            mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope),
+        ):
+            resp = await CasaSmartRegistryView(self.hass).get(
+                H.FakeRequest(headers=hdr)
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 500)
+        self.assertEqual(body["message"], "Storage failure")
+
+    async def test_user_device_delete_when_the_record_cannot_be_read(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+
+        def _unavailable(_ha_device_id):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with mock.patch.object(self.rt.registry, "get_user_device", _unavailable):
+            resp = await CasaSmartUserDeviceView(self.hass).delete(
+                H.FakeRequest(headers=hdr), ha_device_id="dev-a"
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 500)
+        self.assertEqual(body["message"], "Storage failure")
 
 
 if __name__ == "__main__":
