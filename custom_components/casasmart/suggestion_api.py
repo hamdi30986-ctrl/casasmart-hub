@@ -233,28 +233,15 @@ class CasaSmartSuggestionActionView(_SuggestionView):
             if error is not None:
                 return error
             member, scope = await self.member(claims), claims.get("rooms")
-            context = (
-                await service.context(scope)
-                if self.generated
-                else await service.context()
-            )
-            candidate = next(
-                (
-                    s
-                    for _, s, _ in service.candidates(
-                        context, scope, policy_checks=False
-                    )
-                    if s and s["occurrence_id"] == occurrence
-                ),
-                None,
+            context = await self.context(service, scope)
+            candidate = self.find(
+                service, context, scope, occurrence, policy_checks=False
             )
             if candidate is None:
                 raise SuggestionError("occurrence_expired_or_ineligible", 409)
             receipt = context[0]["executions"].get(occurrence)
             if action == "run" and receipt:
-                return self.json(
-                    receipt, 202 if receipt["status"] == "executing" else 200
-                )
+                return self.receipt(receipt)
             previous = context[0]["suppressions"].get(
                 service.store.suppression_key(
                     member, candidate.get("suppression_id", occurrence)
@@ -288,9 +275,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 service.store.claim, candidate, context[3]
             )
             if not claimed:
-                return self.json(
-                    receipt, 202 if receipt["status"] == "executing" else 200
-                )
+                return self.receipt(receipt)
             dispatched = False
             try:
                 # Things may have changed while the claim was stored: check the
@@ -304,22 +289,9 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                         service.store.abort_before_dispatch, occurrence
                     )
                     return error
-                fresh = (
-                    await service.context(fresh_claims.get("rooms"))
-                    if self.generated
-                    else await service.context()
-                )
-                fresh_candidate = next(
-                    (
-                        s
-                        for _, s, _ in service.candidates(
-                            fresh, fresh_claims.get("rooms")
-                        )
-                        if s and s["occurrence_id"] == occurrence
-                    ),
-                    None,
-                )
-                if fresh_candidate is None:
+                fresh_scope = fresh_claims.get("rooms")
+                fresh = await self.context(service, fresh_scope)
+                if self.find(service, fresh, fresh_scope, occurrence) is None:
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
                 suppressed = fresh[0]["suppressions"].get(
                     service.store.suppression_key(
@@ -354,6 +326,30 @@ class CasaSmartSuggestionActionView(_SuggestionView):
             return self.json(receipt)
 
         return await self.handle(request, "devices.read", operation)
+
+    async def context(self, service, scope):
+        """A fresh evaluation context; generated plans depend on the scope."""
+        if self.generated:
+            return await service.context(scope)
+        return await service.context()
+
+    @staticmethod
+    def find(service, context, scope, occurrence, *, policy_checks=True):
+        """The current offer with this occurrence id, or None."""
+        return next(
+            (
+                s
+                for _, s, _ in service.candidates(
+                    context, scope, policy_checks=policy_checks
+                )
+                if s and s["occurrence_id"] == occurrence
+            ),
+            None,
+        )
+
+    def receipt(self, receipt):
+        """An existing run receipt: 202 while it is still executing."""
+        return self.json(receipt, 202 if receipt["status"] == "executing" else 200)
 
     def energy_check(self, claims, scene):
         """Refuse a run the active Energy Saving level does not allow."""
