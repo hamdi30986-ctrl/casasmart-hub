@@ -331,11 +331,6 @@ class CasaSmartTlsServer:
         return self._port
 
     @property
-    def running(self) -> bool:
-        """True while the listener is bound and serving."""
-        return self._site is not None
-
-    @property
     def material(self) -> TlsMaterial:
         """The TLS material currently served."""
         return self._material
