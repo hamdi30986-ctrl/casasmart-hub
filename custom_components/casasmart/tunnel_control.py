@@ -19,7 +19,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .tunnel import (
+    RUNNING_ADDON_STATES,
     edge_watchdog_decision,
+    is_cloudflared_slug,
     is_edge_origin_down,
     pick_cloudflared_slug,
 )
@@ -37,9 +39,6 @@ except ImportError:  # pragma: no cover - installs without the hassio packages
     _SUPERVISOR_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
-
-# The same running states as tunnel.py.
-_RUNNING_STATES = frozenset({"started", "startup"})
 
 _EDGE_PROBE_TIMEOUT_SECONDS = 10.0
 
@@ -100,11 +99,7 @@ class CloudflaredController:
             return self._slug
 
         picked = pick_cloudflared_slug(listing)
-        matches = sorted(
-            slug
-            for slug in slugs
-            if slug == "cloudflared" or slug.endswith("_cloudflared")
-        )
+        matches = sorted(slug for slug in slugs if is_cloudflared_slug(slug))
         if picked is not None and len(matches) > 1:
             _LOGGER.info(
                 "Multiple cloudflared add-ons installed %s — controlling %s",
@@ -124,7 +119,7 @@ class CloudflaredController:
             ) from err
         return TunnelAddonState(
             slug=slug,
-            running=_enum_value(info.state) in _RUNNING_STATES,
+            running=_enum_value(info.state) in RUNNING_ADDON_STATES,
             boot=_enum_value(info.boot),
         )
 
