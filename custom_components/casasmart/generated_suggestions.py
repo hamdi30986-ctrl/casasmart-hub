@@ -104,7 +104,8 @@ def room_actions(states, kind, *, temperature_unit="°C"):
         ):
             add(state, "set_temperature", {"temperature": target})
         if (
-            "low" in attrs.get("fan_modes", [])
+            # fan_modes is null while a fan-capable AC has reported none.
+            "low" in (attrs.get("fan_modes") or [])
             and attrs.get("fan_mode") != "low"
             and int(attrs.get("supported_features", 0)) & 8
         ):

@@ -84,6 +84,12 @@ class PolicyTest(unittest.TestCase):
         )
         self.assertEqual(actions[0]["data"], {"temperature": 75.2})
 
+    def test_null_fan_modes_means_no_fan_command(self):
+        # HA writes fan_modes: null for an AC that supports fan modes but has
+        # not reported any yet.
+        actions = room_actions([ac(fan_modes=None)], "room_eco")
+        self.assertEqual([a["action"] for a in actions], ["set_temperature"])
+
 
 class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = api_fixture.ApiTest.asyncSetUp
