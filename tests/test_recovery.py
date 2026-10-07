@@ -4,6 +4,7 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -19,11 +20,13 @@ from recovery import (
     RECOVERY_CODE_ID,
     CodeInvalidError,
     RecoveryManager,
+    hash_code,
     normalize_code,
 )
 from storage import HubStorage, JsonConfigStore
 from test_auth import make_keypair, sign_nonce
-from throttle import ThrottledError
+from test_pairing import NON_ASCII_INPUTS
+from throttle import MAX_FAILURES, ThrottledError
 
 
 class RecoveryManagerTests(unittest.TestCase):
@@ -115,6 +118,26 @@ class RecoveryManagerTests(unittest.TestCase):
         # Other sources are unaffected.
         with self.assertRaises(CodeInvalidError):
             self.manager.redeem("WRONG-GUESS", "ip-clean")
+
+    def test_non_ascii_input_is_an_ordinary_wrong_code(self):
+        # These used to survive normalization and crash the ASCII hash with
+        # UnicodeEncodeError: an HTTP 500 that never reached the throttle.
+        self.manager.install_recovery_hash(hash_code("STARS-23456"))
+        for label, text in NON_ASCII_INPUTS.items():
+            with self.subTest(label):
+                for _ in range(MAX_FAILURES):
+                    with self.assertRaises(CodeInvalidError):
+                        self.manager.redeem(text, f"ip-{label}")
+                with self.assertRaises(ThrottledError):
+                    self.manager.redeem(text, f"ip-{label}")
+        self.manager.redeem("STARS-23456", "ip-1")  # the card still works
+
+    def test_hash_of_a_valid_code_is_unchanged(self):
+        # The engraved card's stored hash must keep matching.
+        expected = hashlib.sha256(b"STARS23456").hexdigest()
+        for typed in ("STARS-23456", "stars23456", " stars 23456 ", "St-Ar-S2-3456"):
+            with self.subTest(typed=typed):
+                self.assertEqual(hash_code(typed), expected)
 
     def test_no_plaintext_at_rest(self):
         code = self.manager.ensure_armed()
