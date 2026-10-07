@@ -18,9 +18,6 @@ _NAME_MAX = 64
 _MAX_TILES = 64
 _TILE_FIELD_MAX = 128
 
-# Every settable field; an update naming anything else is rejected.
-_KNOWN_FIELDS = ("display_name", "widget_tiles")
-
 
 class SettingsError(Exception):
     """Settings input rejected (maps to HTTP 400)."""
@@ -67,6 +64,8 @@ def _clean_widget_tiles(value: Any) -> list[dict[str, str]] | None:
     return cleaned
 
 
+# Every settable field and its validator; an update naming anything else is
+# rejected.
 _VALIDATORS = {
     "display_name": _clean_display_name,
     "widget_tiles": _clean_widget_tiles,
@@ -83,7 +82,7 @@ class UserSettingsEngine:
     def get(self, member_id: str) -> dict[str, Any]:
         """A member's settings, with None for each unset field."""
         record = self._table.get(member_id) or {}
-        return {field: record.get(field) for field in _KNOWN_FIELDS}
+        return {field: record.get(field) for field in _VALIDATORS}
 
     def update(self, member_id: str, changes: Any) -> dict[str, Any]:
         """Apply a partial update and return the member's full settings.
@@ -111,7 +110,7 @@ class UserSettingsEngine:
                 self._table.pop(member_id, None)
             else:
                 self._table[member_id] = record
-        return {field: record.get(field) for field in _KNOWN_FIELDS}
+        return {field: record.get(field) for field in _VALIDATORS}
 
     def delete(self, member_id: str) -> None:
         """Drop a member's settings, if any (when their last device unpairs)."""
