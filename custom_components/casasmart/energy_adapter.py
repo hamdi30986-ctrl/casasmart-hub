@@ -1,27 +1,12 @@
-"""Home Assistant adapter for CasaSmart Energy Saving.
+"""Home Assistant side of Energy Saving: applies each level's rules to devices.
 
-``energy.py`` owns durable configuration and state.  This module owns the
-live Home Assistant side of the contract:
-
-* deterministic activation/re-apply rules for gangs, climate, lights, plugs,
-  heaters, and covers;
-* Smart room occupancy with instant welcome, a cancellable 45-second empty
-  grace, and the boost-then-settle climate state machine;
-* Medium temperature guards and Smart boost temperature edges;
-* the shared sun clock used by covers and dark-only welcome lighting; and
-* an own-command ledger so a human state change releases one device instead
-  of making the mode fight them.
-
-The rules work in degrees Celsius. Readings are converted to Celsius as they
-are read (in the sensor's own unit, else the home's), and setpoints are
-converted to the home's unit as they are sent, so a Fahrenheit home gets the
-same decisions for the same temperatures.
-
-This module deliberately does not register APIs or manage its own lifecycle:
-``energy_runtime.EnergyController`` (created in ``__init__.py``) starts and
-stops it and owns the lockout boundary.  Keeping this adapter constructible in
-isolation makes the full ruleset testable without a live Home Assistant
-installation.
+energy.py keeps the configuration and state; energy_runtime.EnergyController
+starts and stops this adapter. It applies the static rules (gang switches,
+ACs, lights, plugs, heaters, covers), runs Smart's room occupancy with a
+45-second empty grace and AC boosts, follows the sun for covers and welcome
+lights, and releases a device a person changes by hand. The rules work in
+Celsius: readings are converted as they are read, and setpoints are sent in
+the home's unit.
 """
 
 from __future__ import annotations
@@ -92,7 +77,7 @@ _TEMPERATURE_UNITS = frozenset(
     }
 )
 _PRESENCE_CLASSES = frozenset({"occupancy", "motion", "presence"})
-# The only domains the adapter ever commands.
+# The domains the adapter may command.
 _MANAGED_DOMAINS = frozenset({"light", "switch", "climate", "cover"})
 
 # Event kinds this adapter writes to the engine's history.
@@ -140,16 +125,13 @@ def _as_datetime(value: Any) -> datetime | None:
 
 
 def _home_temperature_unit(hass: HomeAssistant) -> str:
-    """The unit HA reports climate temperatures in and climate services take.
-
-    A host without a unit system (a test double) counts as Celsius.
-    """
+    """The home's temperature unit; Celsius when hass has no unit system."""
     units = getattr(getattr(hass, "config", None), "units", None)
     return getattr(units, "temperature_unit", UnitOfTemperature.CELSIUS)
 
 
 def _to_celsius(value: float | None, unit: str) -> float | None:
-    """A temperature in ``unit`` as Celsius; None stays None."""
+    """Convert a temperature to Celsius; None stays None."""
     if value is None or unit == UnitOfTemperature.CELSIUS:
         return value
     return TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS)
@@ -203,7 +185,7 @@ class EnergyEntity:
 
     @property
     def target_temperature(self) -> float | None:
-        """An AC's target (its ``temperature`` attribute), in Celsius."""
+        """An AC's target (its "temperature" attribute), in Celsius."""
         return _to_celsius(
             _as_float(self.attributes.get("temperature")), self.temperature_unit
         )
@@ -231,7 +213,7 @@ class RoomInventory:
 
     @property
     def automatic(self) -> bool:
-        """Smart runs a room by itself only with temperature AND presence."""
+        """Smart runs a room by itself only with temperature and presence sensors."""
         return bool(self.temperature_sensors and self.presence_sensors)
 
     @property
@@ -294,11 +276,10 @@ class _Boost:
 
 
 class EnergyInventoryBuilder:
-    """Build Energy Saving inventory from HA state + CasaSmart registry.
+    """Snapshot HA states into per-room Energy Saving inventory.
 
-    Registry assignments win.  If a record is absent, the default resolver
-    asks HA's entity/device area registry.  Tests may inject a trivial resolver
-    and avoid importing the HA registries entirely.
+    A device's room comes from the CasaSmart registry, else from HA's area.
+    Tests can inject the area and category lookups.
     """
 
     def __init__(
@@ -322,8 +303,7 @@ class EnergyInventoryBuilder:
         if self._area_resolver is not None:
             return self._area_resolver(self._hass, entity_id)
         try:
-            # Lazy import: the adapter's unit suite intentionally has no HA
-            # registry modules, while the live integration does.
+            # Imported here: the adapter's unit tests run without HA's registries.
             from .filtering import ha_area_id_of
 
             return ha_area_id_of(self._hass, entity_id)
@@ -455,7 +435,7 @@ class EnergyInventoryBuilder:
 
     @staticmethod
     def _is_gang_device(device: dict[str, Any]) -> bool:
-        """Registry records cover every device; gang metadata is the divider."""
+        """True for a registry device with gang metadata (a wall gang switch)."""
         gangs = device.get("gangs")
         if isinstance(gangs, dict) and any(
             isinstance(key, str) and isinstance(value, dict)
@@ -500,11 +480,10 @@ class EnergyInventoryBuilder:
 
 
 class EnergyAdapter:
-    """Execute the Energy Saving contract against live HA.
+    """Apply the active level's rules to live HA devices.
 
-    The clocks and the area/category resolvers are injectable for tests.
-    ``change_callback`` is called whenever the engine state changes outside
-    a REST request (a release, occupancy, a cleared release).
+    change_callback runs when the engine state changes outside a REST
+    request: a release, an occupancy change or cleared releases.
     """
 
     def __init__(
@@ -550,7 +529,7 @@ class EnergyAdapter:
 
     @callback
     def async_start(self) -> None:
-        """Subscribe once; the controller calls ``async_apply`` after activation."""
+        """Start listening for state changes; the controller calls async_apply."""
         if self._unsub_state_changed is not None:
             return
         self._unsub_state_changed = self._hass.bus.async_listen(
@@ -559,7 +538,7 @@ class EnergyAdapter:
 
     @callback
     def async_stop(self) -> None:
-        """Cancel every listener/timer.  Safe to call repeatedly."""
+        """Cancel every listener and timer; safe to call more than once."""
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
@@ -579,7 +558,7 @@ class EnergyAdapter:
         self._config = None
 
     def issues(self) -> list[dict[str, Any]]:
-        """Return current fail-safe warnings for the energy state endpoint."""
+        """The current warnings, for the energy state endpoint."""
         return sorted(
             (copy.deepcopy(issue) for issue in self._issues.values()),
             key=lambda item: (
@@ -598,10 +577,8 @@ class EnergyAdapter:
     async def async_apply(self, *, reason: str = "activation") -> dict[str, Any]:
         """Apply the active level and arm its dynamic rules.
 
-        The engine must already be active.  The controller owns the transaction
-        ordering: ``engine.activate/reapply`` first, then this method.  A
-        failed device command is isolated and reported; it never aborts the
-        remaining home.
+        Call after engine.activate or engine.reapply. A failed device command
+        is reported as an issue and the rest of the home still runs.
         """
         level = self._engine.active_level
         if level is None:
@@ -663,8 +640,7 @@ class EnergyAdapter:
             for entity_id, entity in inventory.entities.items()
         }
         excluded = set(config["excluded_rooms"])
-        # An excluded room's sensors would only ever feed rules that must not
-        # touch that room, so they are not watched at all.
+        # An excluded room's sensors are not watched: no rule may act on it.
         self._sensor_rooms.clear()
         for room_id, room in inventory.rooms.items():
             if room_id in excluded:
@@ -695,8 +671,8 @@ class EnergyAdapter:
     def _troubled_rooms(self, inventory: EnergyInventory) -> set[str]:
         """Rooms with an unavailable or non-numeric sensor; they are skipped.
 
-        Also records a ``sensor_unavailable`` issue per bad sensor, shows a
-        Smart room's occupancy as unknown, and drops issues that cleared.
+        Also records a sensor_unavailable issue per bad sensor, shows a Smart
+        room's occupancy as unknown, and drops issues that cleared.
         """
         troubled: set[str] = set()
         bad_keys: set[tuple[str | None, str, str | None]] = set()
@@ -785,7 +761,7 @@ class EnergyAdapter:
         excluded: set[str],
         troubled: set[str],
     ) -> None:
-        """Turn off the chosen plugs and the heaters marked ``turn_off``."""
+        """Turn off the chosen plugs and the heaters marked turn_off."""
         entity_ids = list(config["plug_offs"]) + [
             item["entity_id"] for item in config["heaters"] if item["turn_off"]
         ]
@@ -810,13 +786,14 @@ class EnergyAdapter:
         room: RoomInventory,
         config: dict[str, Any],
     ) -> None:
-        """ACs under the static rules (every room in Low and Medium, rooms
-        without both Smart sensors in Smart).
+        """Apply the static AC rules.
 
-        Smart turns off every AC that is not a keeper. Medium keeps one AC
-        of several, switches off an AC the room temperature makes pointless,
-        and sets the rest to the floor/ceiling with a low fan. Low only pulls
-        a target colder than the floor (or warmer than the ceiling) back.
+        They cover every room in Low and Medium, and Smart rooms without both
+        sensors. Smart turns off every AC that is not a keeper. Medium keeps
+        one AC of several, turns off an AC the room temperature makes
+        pointless, and holds the rest at the floor or ceiling with a low fan.
+        Low only pulls back a target colder than the floor (or warmer than
+        the ceiling).
         """
         if level == LEVEL_SMART:
             picks = config["ac_keepers"].get(room.room_id)
@@ -1024,8 +1001,10 @@ class EnergyAdapter:
         await self._apply_energy_posture(room)
 
     async def _apply_energy_posture(self, room: RoomInventory) -> None:
-        """Empty Smart room: ACs, lights and its plugs off; covers closed in
-        the heat window. Releases are overridden — the room is empty.
+        """Shut down an empty Smart room, overriding releases.
+
+        ACs, lights and the room's chosen plugs go off; covers close during
+        the heat window.
         """
         config = self._config or {}
         for entity in room.climates:
@@ -1056,8 +1035,10 @@ class EnergyAdapter:
         )
 
     async def _apply_comfort_posture(self, room: RoomInventory) -> None:
-        """Occupied Smart room: climate for comfort, welcome lights at night,
-        covers open by day and closed at night.
+        """Welcome an occupied Smart room.
+
+        ACs run for comfort, the welcome lights come on at night, and covers
+        open by day and close at night.
         """
         temperature = room.room_temperature
         if temperature is None:
@@ -1086,8 +1067,10 @@ class EnergyAdapter:
         )
 
     def _automatic_light_keepers(self, room: RoomInventory) -> list[str]:
-        """The welcome lights: the configured keepers when still valid, else
-        the first half of the room's lights, dimmable ones first.
+        """The welcome lights.
+
+        The configured keepers while they are still valid, else the first
+        half of the room's lights, dimmable ones first.
         """
         configured = (self._config or {}).get("light_keepers", {}).get(room.room_id)
         candidates = {entity.entity_id for entity in room.lights}
@@ -1142,9 +1125,8 @@ class EnergyAdapter:
                 else:
                     await self._settle_entity(entity, "heat")
             else:
-                # Unknown/auto modes use the cooling-safe posture.  The
-                # command includes hvac_mode=COOL only for an AC that is off;
-                # a running AC keeps its current mode.
+                # Any mode but heat is treated as cooling. A running AC keeps
+                # its mode: hvac_mode only goes to one that is off.
                 if temperature < COOL_KILL_BELOW:
                     await self._turn_off(entity.entity_id)
                 elif temperature > COOL_BOOST_ABOVE:
@@ -1300,7 +1282,7 @@ class EnergyAdapter:
     # -- sun clock ---------------------------------------------------------
 
     def _sun_context(self) -> SunContext:
-        """Read ``sun.sun``; without it, it is night and there is no window."""
+        """Read sun.sun; without it, it is night and there is no heat window."""
         state = (
             self._hass.states.get("sun.sun")
             if hasattr(self._hass.states, "get")
@@ -1405,10 +1387,9 @@ class EnergyAdapter:
     def _on_state_changed(self, event: Event) -> None:
         """Route every HA state change.
 
-        The sun and room sensors drive the dynamic rules. Any other change
-        to a managed device that is not the echo of our own command, and
-        is not a change to or from unavailable, is a person taking the
-        device back: it is released.
+        The sun and room sensors drive the dynamic rules. Any other change to
+        a managed device, other than the echo of our own command or a change
+        to or from unavailable, is a person taking it back: it is released.
         """
         entity_id = event.data.get("entity_id")
         if not isinstance(entity_id, str):
@@ -1495,9 +1476,9 @@ class EnergyAdapter:
     ) -> bool:
         """Call one HA service on one device; True when it succeeded.
 
-        A released device is skipped unless ``honor_release`` is False. A
-        failure is counted, reported as an issue and recorded, never raised,
-        so one bad device never stops the rest of the home.
+        A released device is skipped unless honor_release is False. A failure
+        is counted, reported and recorded instead of raised, so one bad device
+        does not stop the rest of the home.
         """
         if self._engine.active_level is None:
             # A rule that was part-way through when Energy Saving stopped
@@ -1567,10 +1548,7 @@ class EnergyAdapter:
         *,
         hvac_mode: str | None = None,
     ) -> bool:
-        """Set a Celsius target, sent in the home's unit.
-
-        ``hvac_mode`` is sent only to an AC that is off.
-        """
+        """Set a Celsius target in the home's unit (hvac_mode only if it is off)."""
         data: dict[str, Any] = {"temperature": self._in_home_unit(temperature)}
         current = self._inventory.entities.get(entity_id) if self._inventory else None
         if hvac_mode is not None and (current is None or current.state == "off"):
@@ -1654,9 +1632,8 @@ class EnergyAdapter:
     async def _excluded_rooms(self, level: str) -> set[str]:
         """Rooms this level must not command, as applied or as configured now.
 
-        The owner can exclude a room while the level is active without a
-        re-apply, so dynamic handlers and delayed callbacks re-read the
-        engine's config instead of trusting only the applied snapshot.
+        A room can be excluded while the level runs, without a re-apply, so
+        handlers and timers re-read the engine's config.
         """
         current = await self._hass.async_add_executor_job(
             self._engine.get_config, level
