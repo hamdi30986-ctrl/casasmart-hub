@@ -3,12 +3,11 @@
 The hub signs every push batch it sends to the relay with a permanent
 Ed25519 key generated on first boot. The relay verifies that signature
 against the hub's public key, which the hub registers itself when it is
-activated (``relay_registration.py``: a P-256 TLS-identity proof plus a
-single-use activation code — this replaced out-of-band registration
-in 1.7.0). The private
-key never leaves the box (``push_identity_key.bin``, 0600); the public
-key (lowercase hex) is mirrored into ``hub_config`` so the registration
-tooling and the admin API have a stable place to read it.
+activated (``relay_registration.py``: a proof signed by the P-256 TLS
+identity, plus a single-use activation code). The private key never leaves
+the box (``push_identity_key.bin``, 0600); the public key (lowercase hex) is
+mirrored into ``hub_config.json`` (``push_public_key``) so an operator can
+read it without opening the key file.
 
 This is a deliberately SEPARATE key from the P-256 TLS identity in
 ``tls.py``: that one pins the LAN certificate, this one authenticates
@@ -40,8 +39,8 @@ _LOGGER = logging.getLogger(__name__)
 # Raw 32-byte Ed25519 private key (seed). Lives next to the TLS identity
 # under <ha-config>/casasmart/.
 PUSH_IDENTITY_KEY_FILENAME = "push_identity_key.bin"
-# hub_config key holding the public key (lowercase hex, 64 chars) so the
-# out-of-band relay registration can read it without unsealing the file.
+# hub_config key holding the public key (lowercase hex, 64 chars), for
+# operators; the registration itself reads it from the signer.
 PUSH_PUBLIC_KEY_CONFIG_KEY = "push_public_key"
 
 # Ed25519 raw private/public keys are always exactly 32 bytes.
@@ -70,7 +69,10 @@ class PushSigner:
 
 
 def _load_or_create_identity(key_path: Path) -> Ed25519PrivateKey:
-    """Load the raw key file, or mint + persist one at 0600 on first boot."""
+    """Load the raw key file, or mint and save one at 0600 on first boot.
+
+    Raises ``PushIdentityError`` for a file of the wrong size or content.
+    """
     if key_path.exists():
         raw = key_path.read_bytes()
         if len(raw) != _ED25519_KEY_BYTES:
@@ -104,9 +106,9 @@ def ensure_push_identity(data_dir: Path, hub_config: JsonConfigStore) -> PushSig
     """Load-or-create the push-identity key (blocking — executor only).
 
     Mirrors the public key (hex) into ``hub_config`` whenever it is missing
-    or out of date, so the value read by the relay-registration tooling
-    always matches the private key actually used to sign. Raises
-    ``PushIdentityError`` only for an unusable key file.
+    or out of date, so the published value always matches the private key
+    actually used to sign. Raises ``PushIdentityError`` only for an unusable
+    key file.
     """
     signer = PushSigner(_load_or_create_identity(data_dir / PUSH_IDENTITY_KEY_FILENAME))
     if hub_config.get(PUSH_PUBLIC_KEY_CONFIG_KEY) != signer.public_key_hex:

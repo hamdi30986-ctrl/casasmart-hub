@@ -1,12 +1,14 @@
-"""Push-token storage for encrypted push notifications.
+"""Push-token storage: where each paired device wants its notifications.
 
-Each paired device can register one FCM token (keyed by device_id).
-The hub stores these so it can fan out encrypted push payloads via
-the relay server when alarm/leak/lock events fire.
+Each paired device can register one FCM token, keyed by its device id
+(``push_api``). ``push_dispatcher`` reads them all to address its relay
+batches and drops a token the relay reports as no longer registered. A
+device's token is also removed when it is unpaired, and all of them by the
+pairing-code reset and factory reset.
 
 Thread-safety: delegates to HubStorage's internal lock (KV writes are
-serialized). The ``PushTokenStore`` itself is stateless — every call
-reads/writes the KV table directly.
+serialized). The ``PushTokenStore`` itself is stateless: every call reads or
+writes the ``push_tokens`` table directly.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
+# What the push-token endpoint accepts.
 VALID_PLATFORMS = frozenset({"ios", "android"})
 MAX_TOKEN_LENGTH = 4096
 
@@ -35,8 +38,9 @@ class PushTokenStore:
     ) -> dict[str, Any]:
         """Store or update a push token for a paired device.
 
-        Upserts by device_id — a token refresh from the same phone
-        just overwrites the old token.
+        Upserts by device_id: a token refresh from the same phone just
+        overwrites the old token. Raises ValueError for an unknown platform
+        or an empty, blank or oversized token.
         """
         if platform not in VALID_PLATFORMS:
             raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}")
