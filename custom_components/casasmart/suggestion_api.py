@@ -212,9 +212,9 @@ class CasaSmartSuggestionActionView(_SuggestionView):
     async def post(self, request):
         # Reading the occurrence needs read access. Dismiss/snooze write the
         # person's suggestion state, so they need a session (session.manage —
-        # not a widget token); Run activates a scene, so it needs control, and
-        # is checked again immediately before acquiring a durable execution
-        # claim.
+        # not a widget token). Run activates a scene, so it needs control:
+        # checked before the durable execution claim is taken, and again
+        # after it, just before dispatch.
         async def operation(service, claims):
             body = await self.body(request, {"action", "occurrence_id"})
             action, occurrence = body.get("action"), body.get("occurrence_id")
