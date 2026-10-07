@@ -625,6 +625,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
     name = f"api:{DOMAIN}:now:room:activity"
+    # Inherited for the room checks only: the policy is set on
+    # /activity-policy, so this path answers PUT with 405.
+    put = None
 
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass)
