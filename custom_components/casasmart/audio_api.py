@@ -240,10 +240,10 @@ def _parse_targets(raw: Any) -> list[str]:
 def _redact_secret(config: dict[str, Any], field: str) -> dict[str, Any]:
     """Copy ``config`` with ``field`` reduced to a bool ``<field>_set``.
 
-    Config GETs are admin-only, but the broker password / PA key still never
-    need to round-trip to the app — the app only needs to know whether one is
-    set. The plaintext stays hub-side (and goes to the Pi only over the
-    key-gated provision endpoint).
+    Config GETs need ``audio.manage``, but the broker password / PA key still
+    never need to round-trip to the app — the app only needs to know whether
+    one is set. The plaintext stays hub-side (the broker password reaches a
+    speaker only through the provision endpoint).
     """
     redacted = dict(config)
     redacted[f"{field}_set"] = bool(redacted.pop(field, None))
