@@ -142,6 +142,10 @@ class AthanScheduler:
         # Last computed schedule, for the GET /audio/athan `schedule` block so
         # the app can show "next athan" and a silent failure can't hide.
         self._schedule: dict[str, Any] = {"enabled": False}
+        # (date, prayer) pairs whose timer already fired. reschedule() arms
+        # anything up to _GRACE_SEC past, so without this the hourly re-arm
+        # or a config save right after a prayer would play it again.
+        self._fired: set[tuple[str, str]] = set()
 
     async def async_start(self) -> None:
         """Arm today's prayers and a self-healing hourly recompute.
@@ -206,7 +210,9 @@ class AthanScheduler:
             return
 
         today = datetime.now(tz).date()
-        times = compute_prayer_times_utc(lat, lon, method, school, today.isoformat())
+        day = today.isoformat()
+        self._fired = {key for key in self._fired if key[0] == day}
+        times = compute_prayer_times_utc(lat, lon, method, school, day)
         if not times:
             _LOGGER.warning("Athan: could not compute prayer times for %s", today)
             self._schedule = {
@@ -227,7 +233,8 @@ class AthanScheduler:
             if fire_at is None:
                 continue
             local = fire_at.astimezone(tz).strftime("%H:%M")
-            upcoming = (fire_at - now_utc).total_seconds() >= -_GRACE_SEC
+            in_grace = (fire_at - now_utc).total_seconds() >= -_GRACE_SEC
+            upcoming = in_grace and (day, prayer) not in self._fired
             prayers_out.append(
                 {
                     "name": prayer,
@@ -237,9 +244,9 @@ class AthanScheduler:
                 }
             )
             if not upcoming:
-                continue  # already well past — skip (grace guards a late wake)
+                continue  # already fired, or well past (grace covers a late wake)
             unsub = async_track_point_in_time(
-                self._hass, self._make_fire(prayer), fire_at
+                self._hass, self._make_fire(prayer, day), fire_at
             )
             self._unsub_prayers.append(unsub)
             armed.append(f"{prayer} {local}")
@@ -317,9 +324,10 @@ class AthanScheduler:
                 targets.append(mac6)
         return True, targets
 
-    def _make_fire(self, prayer: str) -> Any:
+    def _make_fire(self, prayer: str, day: str) -> Any:
         @callback
         def _fire(_now: datetime) -> None:
+            self._fired.add((day, prayer))
             self._fire_athan(prayer)
 
         return _fire

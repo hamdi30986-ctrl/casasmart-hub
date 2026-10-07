@@ -278,6 +278,51 @@ class TestFireAndArming(_RestoresModuleGlobals, unittest.TestCase):
         A.AthanScheduler(_Hass(), _Engine({"enabled": False}), _Adapter()).reschedule()
         self.assertEqual(armed, [])
 
+    def test_a_prayer_that_fired_is_not_armed_again(self):
+        # reschedule() arms anything up to _GRACE_SEC past, and it runs every
+        # hour at minute 1 and on every config save. A prayer that has just
+        # fired must not be armed (and so played) a second time.
+        armed = []
+        A.async_track_point_in_time = lambda hass, action, when: (
+            armed.append((action, when)) or (lambda: None)
+        )
+        now = datetime.datetime.now(datetime.UTC)
+        times = {
+            "Fajr": now - timedelta(hours=3),
+            "Dhuhr": now - timedelta(seconds=60),
+            "Asr": now + timedelta(hours=3),
+            "Maghrib": now + timedelta(hours=5),
+            "Isha": now + timedelta(hours=6),
+        }
+        A.compute_prayer_times_utc = lambda *args: dict(times)
+        adapter = _Adapter()
+        s = A.AthanScheduler(
+            _Hass(),
+            _Engine(
+                {
+                    "enabled": True,
+                    "lat": 24.7136,
+                    "lon": 46.6753,
+                    "timezone": "Asia/Riyadh",
+                    "method": "makkah",
+                }
+            ),
+            adapter,
+        )
+        s.reschedule()
+        dhuhr = [action for action, when in armed if when == times["Dhuhr"]]
+        self.assertEqual(len(dhuhr), 1)
+        dhuhr[0](now)  # its timer fires
+        self.assertEqual(len(adapter.published), 1)
+
+        armed.clear()
+        s.reschedule()  # e.g. the hourly re-arm a minute later
+        self.assertEqual(
+            [when for _, when in armed],
+            [times["Asr"], times["Maghrib"], times["Isha"]],
+        )
+        self.assertEqual(s.schedule_snapshot()["next"]["name"], "Asr")
+
     def test_malformed_timezone_schedules_nothing_instead_of_raising(self):
         # zoneinfo raises ValueError, not "not found", for keys like these. The
         # stored athan config is an opaque blob and reschedule() runs during
