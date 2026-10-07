@@ -2,8 +2,8 @@
 
 These back the app's installer screens: Zigbee permit-join, entity rename, the
 IR wizard and discovered devices. The app reaches them only through hub
-endpoints gated by installer.manage, never with a Home Assistant token. No HA
-imports, so the tests run without Home Assistant.
+endpoints gated by installer.manage. No HA imports, so the tests run without
+Home Assistant.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def resolve_zigbee_base_topics(configured: Any, requested: Any = None) -> list[s
     A large home may run one instance per floor, and permit-join is per
     instance. configured is the hub's zigbee_base_topics list (the default
     topic when it has none). All of them open unless requested names one of
-    them: a client may pick a configured instance but never name a new topic.
+    them: a client can pick a configured instance but can't add a topic.
     Order is kept and duplicates are dropped.
     """
     topics: list[str] = []

@@ -68,7 +68,8 @@ class IdentityError(Exception):
 class TlsIdentitySigner:
     """Signs push relay registration requests with the identity key.
 
-    Callers get the public key and a sign operation, never the private key.
+    Callers get the public key and a sign operation; the private key stays
+    inside this object.
     """
 
     _SCALAR_BYTES = 32
