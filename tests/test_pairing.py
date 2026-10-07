@@ -152,6 +152,14 @@ class PairingTests(unittest.TestCase):
         with self.assertRaises(PairingError):
             self.manager.generate_code("user", rooms=[1])
 
+    def test_non_string_expiry_is_a_pairing_error(self):
+        # expires_in comes straight from the JSON body. A list or object is
+        # unhashable: it must be the same PairingError (HTTP 400) as any other
+        # bad expiry, not a TypeError (HTTP 500).
+        for bad in (["1d"], {"1d": True}, 1, None):
+            with self.subTest(bad=bad), self.assertRaises(PairingError):
+                self.manager.generate_code("user", expires_in=bad)
+
     def test_expired_code_rejected(self):
         issued = self.manager.generate_code("user", expires_in="1d")
         real_time = throttle_mod.time.time

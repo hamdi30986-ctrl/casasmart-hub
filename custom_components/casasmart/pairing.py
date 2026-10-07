@@ -214,7 +214,7 @@ class PairingManager:
         # Room-scoping is a per-USER toggle; sub-admins see all rooms.
         if rooms is not None and role != ROLE_USER:
             raise PairingError("Room scope only applies to the user role")
-        ttl = EXPIRY_CHOICES.get(expires_in)
+        ttl = EXPIRY_CHOICES.get(expires_in) if isinstance(expires_in, str) else None
         if ttl is None:
             raise PairingError(f"expires_in must be one of {', '.join(EXPIRY_CHOICES)}")
 
