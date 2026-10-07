@@ -139,6 +139,7 @@ from .tunnel import (
 from .tunnel_control import CloudflaredController, TunnelControlError
 from .update_install import async_clear_legacy_update_dirs
 from .user_settings import UserSettingsEngine
+from .ws import async_close_connections
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1430,11 +1431,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) -
 
     If a platform fails to unload, its entities still use the engines, so
     nothing is stopped and False is returned; the stop listener still closes
-    storage at shutdown. Storage closes last, after the TLS listener stops.
+    storage at shutdown. WebSockets close first, so the TLS listener doesn't
+    wait on them, and storage closes last.
     """
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         _LOGGER.error("CasaSmart Hub platforms failed to unload; hub left running")
         return False
+    await async_close_connections(hass)
     if entry.runtime_data.suggestions is not None:
         entry.runtime_data.suggestions.stop()
     if entry.runtime_data.energy_controller is not None:
