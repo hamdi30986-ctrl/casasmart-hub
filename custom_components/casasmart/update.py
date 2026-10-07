@@ -1,23 +1,9 @@
-"""Pure self-update logic — no HA imports.
+"""Self-update logic with no Home Assistant or network code.
 
-The version math, GitHub-release parsing and install-side filesystem logic
-behind ``update_api.py`` and ``update_install.py``, kept import-free so the
-unit tests run without a Home Assistant install (same split as
-``automations.py`` / ``history.py`` / ``entity_bridge.py``).
-
-The update check:
-
-- ``parse_release`` turns the GitHub ``releases/latest`` JSON into a
-  ``ReleaseInfo`` (or ``None`` for a draft / malformed payload).
-- ``is_newer`` answers "is the released version newer than the one the
-  hub is running" with a small, dependency-free semver comparison.
-
-The install side (signature check, locate / version-match / atomic swap)
-has its own section below.
-
-No network, no HA, no global state — the checker in ``update_api.py`` and
-the installer in ``update_install.py`` own the network side and lean on
-these for the decisions.
+Version comparison, GitHub release parsing and the filesystem side of an
+install (signature check, finding the integration, the atomic swap), kept
+apart so the unit tests run without Home Assistant. update_api and
+update_install own the HTTP and Home Assistant side.
 """
 
 from __future__ import annotations
@@ -34,26 +20,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# A release tag is the version, with an optional leading "v" (v1.2.3).
-# We compare only the numeric release part (1.2.3); a pre-release suffix
-# (-beta.1) is parsed out and used solely as a tiebreak (see _split).
+# A tag is the version with an optional leading "v". A pre-release suffix
+# (-beta.1) only breaks ties between equal release numbers.
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)(?:[-+](.+))?$")
 
-# The packaged release asset (hacs.json ``filename``) and its detached
-# signature. HACS installs exactly this file; so does the built-in updater.
+# The release asset HACS installs (hacs.json "filename") and its signature.
+# The built-in updater installs the same file.
 RELEASE_ASSET_NAME = "casasmart.zip"
 SIGNATURE_ASSET_NAME = RELEASE_ASSET_NAME + ".sig"
 
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    """The fields the app's update UI needs, distilled from a release.
+    """The fields the app's update screen needs, taken from a GitHub release.
 
-    ``download_url`` is the packaged ``casasmart.zip`` release asset (the
-    same file HACS installs) and ``signature_url`` its detached Ed25519
-    signature. GitHub's auto-generated source zipball is never used: it is
-    not the release artifact and is never signed. Either is ``None`` when
-    the release doesn't ship it, and the installer then refuses.
+    download_url is the casasmart.zip asset and signature_url its Ed25519
+    signature. Either is None when the release lacks it, and the installer
+    then refuses. GitHub's source zipball is unsigned and never used.
     """
 
     version: str
@@ -65,7 +48,7 @@ class ReleaseInfo:
 
 
 def _split(raw: Any) -> tuple[tuple[int, ...], str | None] | None:
-    """Return ``((release ints), prerelease-or-None)`` or None if unparsable.
+    """Return ((release numbers), pre-release or None), or None if unparsable.
 
     "1.2.3"      -> ((1, 2, 3), None)
     "v0.1"       -> ((0, 1), None)
@@ -90,18 +73,12 @@ def _pad(
 
 
 def is_newer(current: Any, latest: Any) -> bool:
-    """True when ``latest`` is a strictly newer version than ``current``.
+    """True when latest is a strictly newer version than current.
 
-    Dependency-free and deliberately small. Rules:
-
-    - Compare the numeric release parts left-to-right (1.2.0 vs 1.10.0).
-    - Equal release parts: a final release beats a pre-release of the
-      same base (1.0.0 > 1.0.0-rc1), and two pre-releases compare by
-      their suffix string. This is enough for the hub's own tags; it is
-      NOT a full semver engine and never claims to be.
-    - An unparsable ``latest`` is never "newer" (we don't offer a junk
-      tag as an update); an unparsable ``current`` is treated as oldest
-      so any real release shows as available.
+    Release numbers compare numerically (1.10.0 > 1.2.0). With equal numbers
+    a final release beats a pre-release (1.0.0 > 1.0.0-rc1) and pre-releases
+    compare as strings: enough for the hub's own tags, not full semver. An
+    unparsable latest is never newer; an unparsable current counts as oldest.
     """
     parsed_latest = _split(latest)
     if parsed_latest is None:
@@ -116,23 +93,20 @@ def is_newer(current: Any, latest: Any) -> bool:
     if lat_release != cur_release:
         return lat_release > cur_release
 
-    # Same numeric base — settle on the pre-release suffix.
     if cur_pre == lat_pre:
         return False
-    if lat_pre is None:  # final release beats any pre-release of the same base
+    if lat_pre is None:
         return True
-    if cur_pre is None:  # latest is a pre-release of a base we already run
+    if cur_pre is None:
         return False
     return lat_pre > cur_pre
 
 
 def parse_release(payload: Any) -> ReleaseInfo | None:
-    """Distill GitHub's ``releases/latest`` JSON into a ``ReleaseInfo``.
+    """A ReleaseInfo from GitHub's releases/latest JSON, or None.
 
-    Returns ``None`` for anything we shouldn't offer as an update: a
-    non-object payload, a draft, or a release with no usable tag. A
-    pre-release IS kept here — whether it counts as "newer" is decided
-    later by ``is_newer`` against the running version.
+    None for a non-object payload, a draft or a release without a tag.
+    Pre-releases are kept; is_newer decides whether one is offered.
     """
     if not isinstance(payload, dict):
         return None
@@ -156,7 +130,7 @@ def parse_release(payload: Any) -> ReleaseInfo | None:
 
 
 def _asset_urls(payload: dict) -> dict[str, str]:
-    """``{asset name: download URL}`` for a release's uploaded assets."""
+    """{asset name: download URL} for a release's uploaded assets."""
     urls: dict[str, str] = {}
     assets = payload.get("assets")
     if isinstance(assets, list):
@@ -171,42 +145,36 @@ def _asset_urls(payload: dict) -> dict[str, str]:
 
 
 def _pick_download_url(payload: dict) -> str | None:
-    """The packaged ``casasmart.zip`` asset, or None — never the zipball."""
+    """The casasmart.zip asset URL, or None (never the source zipball)."""
     return _asset_urls(payload).get(RELEASE_ASSET_NAME)
 
 
-# --- Install-side filesystem logic (pure, no HA / no network) ----------------
-#
-# The installer in update_install.py owns the aiohttp download + the HA
-# restart; everything that touches only the filesystem lives here so it can
-# be unit-tested with temp dirs (same pure/IO split as the version math).
+# --- Install: the filesystem side -------------------------------------------
 
-# The self-update's working dirs live under ``<config>/casasmart/update``, the
-# hub's data dir, and never in custom_components: Home Assistant scans every
-# directory there and takes the domain from its manifest.json, so a copy of
-# the integration beside the live one can be loaded in its place.
+# Working dirs live in <config>/casasmart/update, not custom_components: HA
+# loads any directory there by its manifest, so a copy could replace the live one.
 UPDATE_DIR_NAME = "update"
 # The previous version, kept after a successful swap.
 ROLLBACK_DIR_NAME = "rollback"
 # Per-swap work: the download, the staged new tree, trees on their way out.
 STAGING_DIR_NAME = "staging"
 
-# Names earlier versions gave their self-update dirs inside custom_components:
-# the rollback, a retired rollback, and a staged new tree.
+# Dirs that earlier versions left in custom_components: the rollback, a
+# retired rollback and a staged new tree.
 _LEGACY_SUFFIX_RE = re.compile(r"\.(?:bak|bak-old-[0-9a-f]{8}|new-[0-9a-f]{8})")
 
 
 class InstallError(Exception):
-    """A self-update step failed in a way the caller should surface verbatim."""
+    """A self-update step failed; the message goes back to the app as is."""
 
 
 def verify_release_signature(
     archive: bytes, signature: bytes, public_key_b64: str
 ) -> None:
-    """Raise InstallError unless ``signature`` is the release key's signature.
+    """Raise InstallError unless signature is the release key's signature.
 
-    Pure Ed25519 over the exact bytes of the downloaded ``casasmart.zip``
-    (``openssl pkeyutl -sign -rawin`` in scripts/release.sh produces it).
+    Plain Ed25519 over the bytes of casasmart.zip, as scripts/release.sh
+    signs it.
     """
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -224,12 +192,11 @@ def verify_release_signature(
 
 
 def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
-    """Find the integration dir (the one holding its manifest) in an extracted release.
+    """Find the integration dir in an extracted release, or None.
 
-    The packaged ``casasmart.zip`` asset — the HACS layout — holds the
-    integration files at the zip root, so a root ``manifest.json`` for this
-    domain wins. Otherwise look for ``custom_components/<domain>`` (a source
-    tree) and take the shallowest hit, ignoring any nested test fixtures.
+    The release asset has the integration at the zip root (the HACS layout).
+    Otherwise the shallowest custom_components/<domain> wins, so nested test
+    fixtures are ignored.
     """
     root = Path(extracted_root)
     if _manifest_domain(root / "manifest.json") == domain:
@@ -242,7 +209,7 @@ def locate_integration_dir(extracted_root: Any, domain: str) -> Path | None:
 
 
 def _manifest_domain(manifest: Path) -> str | None:
-    """The ``domain`` declared in a manifest file, or None if unreadable."""
+    """The domain declared in a manifest file, or None if unreadable."""
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -252,7 +219,7 @@ def _manifest_domain(manifest: Path) -> str | None:
 
 
 def read_manifest_version(integration_dir: Any) -> str | None:
-    """Read ``version`` from an integration dir's ``manifest.json``, or None."""
+    """The version in an integration dir's manifest.json, or None."""
     manifest = Path(integration_dir) / "manifest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -263,12 +230,10 @@ def read_manifest_version(integration_dir: Any) -> str | None:
 
 
 def versions_match(tag: Any, manifest_version: Any) -> bool:
-    """True if a release tag and a manifest version are the same release.
+    """True if a release tag and a manifest version name the same release.
 
-    Tolerates a leading ``v`` and trailing-zero differences (``v1.2`` ==
-    ``1.2.0``) but requires an exact numeric+prerelease match — a guard
-    against installing a payload whose code doesn't match the tag we
-    fetched.
+    A leading v and trailing zeros don't matter (v1.2 matches 1.2.0); the
+    pre-release suffix must match.
     """
     a = _split(tag)
     b = _split(manifest_version)
@@ -283,22 +248,15 @@ def versions_match(tag: Any, manifest_version: Any) -> bool:
 def swap_integration_dir(
     current_dir: Any, new_source_dir: Any, update_dir: Any
 ) -> Path:
-    """Replace ``current_dir`` with ``new_source_dir``, all or nothing.
+    """Replace current_dir with new_source_dir, all or nothing.
 
-    Returns the rollback: ``<update_dir>/rollback``, now holding the tree that
-    was live. The new tree is first copied into ``<update_dir>/staging``, so a
-    slow or failed copy never touches the live tree or the rollback. Then four
-    renames, each atomic: the live dir moves to staging, the copy becomes the
-    live dir, the previous rollback is set aside, and the old live tree
-    becomes the rollback. Only then is the previous rollback deleted.
-
-    The live dir moves first because that rename crosses from
-    custom_components into the data dir: when they are on different
-    filesystems it fails with EXDEV before anything has changed, and the
-    update is refused. A failure at any step undoes the renames before it, so
-    the hub keeps its integration and the rollback it had; it is raised as
-    InstallError, including an overlapping swap that finds a dir already
-    moved.
+    Returns <update_dir>/rollback, which now holds the old live tree. The new
+    tree is copied into <update_dir>/staging first, so a failed copy changes
+    nothing. Then four renames: live dir to staging, copy to live, previous
+    rollback aside, old live tree to rollback. The live dir moves first
+    because that rename leaves custom_components: on another filesystem it
+    fails with EXDEV before anything has changed. Any failure undoes the
+    earlier renames and raises InstallError.
     """
     current = Path(current_dir)
     new_source = Path(new_source_dir)
@@ -364,14 +322,12 @@ class LegacyDirAction:
 def clear_legacy_update_dirs(
     integration_dir: Any, update_dir: Any
 ) -> list[LegacyDirAction]:
-    """Move or remove the self-update dirs earlier versions left beside the
-    live integration in custom_components.
+    """Move or remove the self-update dirs earlier versions left in custom_components.
 
-    ``<name>.bak`` becomes ``<update_dir>/rollback`` when there is no rollback
-    yet, and is removed otherwise; ``<name>.bak-old-<hex>`` and
-    ``<name>.new-<hex>`` are leftovers of an interrupted swap and are removed.
-    Nothing else is touched, and symlinks are not followed. One failure
-    doesn't stop the rest; each outcome is returned for the log.
+    <name>.bak becomes the rollback if there is none yet and is removed
+    otherwise; <name>.bak-old-<hex> and <name>.new-<hex> are removed. Symlinks
+    are not followed. One failure doesn't stop the rest; each outcome is
+    returned for the log.
     """
     current = Path(integration_dir)
     rollback = Path(update_dir) / ROLLBACK_DIR_NAME

@@ -1,10 +1,10 @@
 """Self-update status and install endpoints.
 
 The status view compares the running version with the latest release of the
-GitHub repository named by ``update_repo`` in ``hub_config.json``, cached for
-``UPDATE_CHECK_TTL_SECONDS``; the install view runs ``update_install``. With
-``update_repo`` unset (the default) the hub never contacts GitHub and reports
-no update: HACS installs and updates the hub instead.
+GitHub repository named by update_repo in hub_config.json, cached for
+UPDATE_CHECK_TTL_SECONDS; the install view runs update_install. With
+update_repo unset (the default) the hub never contacts GitHub and reports no
+update, since HACS updates the hub.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ _GITHUB_REPO_RE = re.compile(
 
 
 def _resolve_repo(hass: HomeAssistant) -> str | None:
-    """The ``owner/repo`` from ``update_repo``, or None if unset or malformed."""
+    """The owner/repo from update_repo, or None if unset or malformed."""
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if entries:
         runtime_data = entries[0].runtime_data
@@ -65,10 +65,8 @@ def _resolve_repo(hass: HomeAssistant) -> str | None:
 class UpdateChecker:
     """The latest GitHub release compared with the running version, cached.
 
-    One per hub (``get_or_create_checker``). A refresh happens at most once
-    per TTL, and a failed one (network, GitHub error, bad reply) is logged
-    and caches nothing: the status keeps the last successful answer, or
-    "no update" before the first, and the next request tries again.
+    One per hub. A failed refresh is logged and caches nothing, so the status
+    keeps the last good answer and the next request tries again.
     """
 
     def __init__(self, hass: HomeAssistant, current_version: str) -> None:
@@ -91,7 +89,7 @@ class UpdateChecker:
         return self._build_status()
 
     async def async_artifact_urls(self) -> tuple[str | None, str | None]:
-        """``(casasmart.zip URL, signature URL)`` of the latest release, refreshing if stale."""
+        """(zip URL, signature URL) of the latest release, refreshing if stale."""
         if not self._is_fresh():
             await self._async_refresh()
         if self._latest is None:
@@ -161,10 +159,10 @@ class UpdateChecker:
 
 
 def get_or_create_checker(hass: HomeAssistant, current_version: str) -> UpdateChecker:
-    """The hub's single ``UpdateChecker``, created on first use.
+    """The hub's UpdateChecker, created on first use.
 
-    ``build_views`` runs once per listener (plain + TLS), so the checker
-    is stashed in ``hass.data`` to share one cache across both surfaces.
+    build_views runs once per listener, so the checker lives in hass.data
+    and both share one cache.
     """
     domain_data = hass.data.setdefault(DOMAIN, {})
     checker = domain_data.get("update_checker")
@@ -175,7 +173,7 @@ def get_or_create_checker(hass: HomeAssistant, current_version: str) -> UpdateCh
 
 
 class CasaSmartUpdateStatusView(HomeAssistantView):
-    """GET /api/casasmart/update/status — current vs latest hub version."""
+    """GET /api/casasmart/update/status: the running and latest hub versions."""
 
     url = f"/api/{DOMAIN}/update/status"
     name = f"api:{DOMAIN}:update:status"
@@ -186,12 +184,7 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
         self._checker = checker
 
     async def get(self, request: web.Request) -> web.Response:
-        """Report the update status.
-
-        A failed check never fails the request: the answer is the last
-        successful check, or ``latest_version: null`` (no update) before
-        the first.
-        """
+        """Report the update status; a failed check answers with the last good one."""
         _, error = authenticate_request(self._hass, request, "update.read")
         if error is not None:
             return error
@@ -199,13 +192,11 @@ class CasaSmartUpdateStatusView(HomeAssistantView):
 
 
 class CasaSmartUpdateInstallView(HomeAssistantView):
-    """POST /api/casasmart/update/install — owner-only self-update.
+    """POST /api/casasmart/update/install: the owner-only self-update.
 
-    Gated by ``update.install`` (owner only). On success the integration tree
-    is already swapped and an HA restart is scheduled; the app gets a 202
-    "installing" before the connection drops, then reconnects on the new
-    code. A "nothing newer", a bad payload, or an install already running
-    (or swapped and waiting for its restart) is a clean 409, never a 500.
+    Answers 202 "installing" once the new tree is in place and a restart is
+    scheduled; the app then reconnects to the new code. Nothing newer, a bad
+    payload or an install already under way is a 409.
     """
 
     url = f"/api/{DOMAIN}/update/install"
@@ -221,8 +212,7 @@ class CasaSmartUpdateInstallView(HomeAssistantView):
         if error is not None:
             return error
 
-        # Imported here to keep update_api importable without the installer
-        # (and to avoid any import-order coupling at module load).
+        # update_install imports this module, so it is imported at call time.
         from .update import InstallError
         from .update_install import perform_install
 
