@@ -328,7 +328,8 @@ class HqNotificationVerifier:
     def _prune_nonces(self, current: int) -> None:
         """Drop expired or malformed nonce rows, then the oldest over the cap."""
         nonce_rows: list[tuple[str, int]] = []
-        for key, value in self._table.items():
+        # A copy: rows are deleted inside the loop.
+        for key, value in list(self._table.items()):
             if not key.startswith("nonce:"):
                 continue
             at = value.get("at", 0) if isinstance(value, dict) else 0
