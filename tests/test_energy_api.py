@@ -171,6 +171,28 @@ class EnergyApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 409)
         self.assertEqual(body["error"], "scene_skipped_energy_saving")
 
+    async def test_unflagged_scene_refusal_has_a_message_for_the_apps(self):
+        # The apps' transport reads a 409 as a conflict only when the body has
+        # a message; without one the scene looks like a hub outage.
+        scene = self.runtime.registry.create_scene(
+            "Movie", [{"entity_id": "light.lamp", "action": "turn_off", "data": {}}]
+        )
+        config = default_level_config(LEVEL_LOW)
+        config["setup_complete"] = True
+        self.runtime.energy.replace_config(LEVEL_LOW, config)
+        self.runtime.energy.activate(LEVEL_LOW)
+
+        status, body = H.read_response(
+            await CasaSmartSceneActivateView(self.hass).post(
+                H.FakeRequest(headers=self.admin), scene["scene_id"]
+            )
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "scene_skipped_energy_saving")
+        self.assertEqual(body["scene_id"], scene["scene_id"])
+        self.assertIsInstance(body.get("message"), str)
+        self.assertTrue(body["message"])
+
     async def test_subadmin_cannot_set_scene_energy_flag(self):
         view = CasaSmartScenesView(self.hass)
         status, _body = H.read_response(
