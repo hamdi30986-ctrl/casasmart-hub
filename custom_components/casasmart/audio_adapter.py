@@ -55,6 +55,7 @@ from homeassistant.core import HomeAssistant, callback
 from .audio import (
     TOPIC_ATHAN_CONFIG,
     AudioEngine,
+    AudioError,
     speaker_state_topic,
     speaker_status_topic,
 )
@@ -245,6 +246,11 @@ class AudioAdapter:
         """Route one broker message into the engine, then nudge the WS server."""
         try:
             changed = self._ingest(message.topic, message.payload)
+        except AudioError as err:
+            # A speaker id that isn't a valid mac6 is bad data from the bus,
+            # not a hub fault: one line, no traceback.
+            _LOGGER.debug("CasaSmart audio: ignored %s (%s)", message.topic, err)
+            return
         except Exception:
             _LOGGER.exception(
                 "CasaSmart audio: failed to ingest %s", getattr(message, "topic", "?")
