@@ -12,8 +12,8 @@ the "update available" state ``update_api`` reports into an actual upgrade:
     4. Extract it (every member must stay inside the staging dir), locate
        the integration, and verify its ``manifest.json`` version matches
        the tag we fetched.
-    5. Atomically swap the live integration dir for the new tree, keeping a
-       ``.bak`` rollback.
+    5. Atomically swap the live integration dir for the new tree, keeping
+       the previous one as the rollback.
     6. Schedule an HA restart *after* the HTTP response flushes, so the app
        gets a clean "installing" reply before the connection drops; Home
        Assistant comes back up on the new code.
@@ -23,6 +23,13 @@ restart: a second request gets a 409 "update already in progress".
 
 A hub managed by HACS should be updated through HACS: a self-update swaps
 the files without HACS knowing, so HACS keeps reporting the old version.
+
+Its working dirs are under the hub's data dir, ``<config>/casasmart/update``
+(see ``update.py``), never in custom_components. The rollback is
+``<config>/casasmart/update/rollback``: to go back, stop Home Assistant and
+put that directory in place of ``custom_components/casasmart``. Setup moves
+the rollback that earlier versions kept in custom_components there too
+(``async_clear_legacy_update_dirs``).
 
 The filesystem mechanics (locate / version-match / atomic swap) are pure and
 live in ``update.py`` so they unit-test with temp dirs. This module owns the
@@ -37,16 +44,18 @@ import logging
 import shutil
 import tempfile
 import zipfile
-from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 
 import aiohttp
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, UPDATE_SIGNING_PUBLIC_KEY_B64
+from .const import DATA_DIR_NAME, DOMAIN, UPDATE_SIGNING_PUBLIC_KEY_B64
 from .update import (
+    STAGING_DIR_NAME,
+    UPDATE_DIR_NAME,
     InstallError,
+    clear_legacy_update_dirs,
     locate_integration_dir,
     read_manifest_version,
     swap_integration_dir,
@@ -83,6 +92,50 @@ _IN_PROGRESS = "update already in progress"
 def _integration_dir() -> Path:
     """The live ``custom_components/casasmart`` dir — where this code runs from."""
     return Path(__file__).resolve().parent
+
+
+def _update_dir(hass: HomeAssistant) -> Path:
+    """``<config>/casasmart/update``: the self-update's working dirs."""
+    return Path(hass.config.path(DATA_DIR_NAME, UPDATE_DIR_NAME))
+
+
+async def async_clear_legacy_update_dirs(hass: HomeAssistant) -> None:
+    """Move or remove self-update dirs that earlier versions left beside us.
+
+    Runs at setup. Earlier versions kept the rollback (``casasmart.bak``) and
+    interrupted swaps' copies in custom_components, where Home Assistant may
+    load one of them instead of the integration. The rollback moves to the
+    data dir and the rest is removed (``update.clear_legacy_update_dirs``);
+    every outcome is logged, and a failure never fails setup.
+    """
+    try:
+        actions = await hass.async_add_executor_job(
+            clear_legacy_update_dirs, _integration_dir(), _update_dir(hass)
+        )
+    except OSError as err:
+        _LOGGER.warning(
+            "Could not check custom_components for leftover self-update "
+            "directories: %s",
+            err,
+        )
+        return
+    for action in actions:
+        if action.error is not None:
+            _LOGGER.warning(
+                "Could not remove the leftover self-update directory %s (%s); "
+                "remove it by hand, or Home Assistant may load it instead of "
+                "the integration",
+                action.path,
+                action.error,
+            )
+        elif action.moved_to is not None:
+            _LOGGER.info(
+                "Moved the self-update rollback %s to %s",
+                action.path,
+                action.moved_to,
+            )
+        else:
+            _LOGGER.info("Removed the leftover self-update directory %s", action.path)
 
 
 async def perform_install(hass: HomeAssistant, checker: UpdateChecker) -> dict:
@@ -129,14 +182,12 @@ async def _async_install(
 
     _LOGGER.info("Self-update: installing %s from %s", target_version, download_url)
 
-    # Stage everything under one temp dir we always clean up. The new tree is
-    # copied into the live (same-filesystem) config dir by swap_integration_dir,
-    # so a cross-filesystem temp location is fine here. Creating and removing
-    # it is file work too, so it runs in the executor like the rest.
+    # Download and extract into one temp dir in the update's staging dir,
+    # always removed afterwards. Creating and removing it is file work too, so
+    # it runs in the executor like the rest.
+    update_dir = _update_dir(hass)
     staging_path = Path(
-        await hass.async_add_executor_job(
-            partial(tempfile.mkdtemp, prefix="casasmart-update-")
-        )
+        await hass.async_add_executor_job(_make_download_dir, update_dir)
     )
     try:
         archive = staging_path / "release.zip"
@@ -146,7 +197,11 @@ async def _async_install(
         await hass.async_add_executor_job(_verify_archive, archive, signature)
         # File work (extract, inspect, copy the tree in) stays off the event loop.
         backup = await hass.async_add_executor_job(
-            _stage_and_swap, archive, staging_path / "extracted", target_version
+            _stage_and_swap,
+            archive,
+            staging_path / "extracted",
+            target_version,
+            update_dir,
         )
         # The new tree is live on disk now: no other install until the restart.
         domain_data[_SWAPPED_VERSION_KEY] = target_version
@@ -197,7 +252,19 @@ def _verify_archive(archive: Path, signature: Path) -> None:
     verify_release_signature(archive.read_bytes(), sig, UPDATE_SIGNING_PUBLIC_KEY_B64)
 
 
-def _stage_and_swap(archive: Path, extracted: Path, target_version: str) -> Path:
+def _make_download_dir(update_dir: Path) -> str:
+    """Executor: a fresh temp dir for one install's download and extraction."""
+    staging = update_dir / STAGING_DIR_NAME
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        return tempfile.mkdtemp(prefix="download-", dir=staging)
+    except OSError as err:
+        raise InstallError(f"cannot create the update dir {staging}: {err}") from err
+
+
+def _stage_and_swap(
+    archive: Path, extracted: Path, target_version: str, update_dir: Path
+) -> Path:
     """Executor: extract the verified zip, check it, swap it in; returns the backup.
 
     Raises InstallError (nothing swapped) if the archive holds no casasmart
@@ -216,7 +283,7 @@ def _stage_and_swap(archive: Path, extracted: Path, target_version: str) -> Path
             f"version mismatch: release tag {target_version!r} but "
             f"downloaded manifest is {new_version!r}"
         )
-    return swap_integration_dir(_integration_dir(), new_dir)
+    return swap_integration_dir(_integration_dir(), new_dir, update_dir)
 
 
 def _extract_zip(archive: Path, dest: Path) -> None:

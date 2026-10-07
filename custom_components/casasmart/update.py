@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import json
 import os
 import re
@@ -180,6 +181,20 @@ def _pick_download_url(payload: dict) -> str | None:
 # restart; everything that touches only the filesystem lives here so it can
 # be unit-tested with temp dirs (same pure/IO split as the version math).
 
+# The self-update's working dirs live under ``<config>/casasmart/update``, the
+# hub's data dir, and never in custom_components: Home Assistant scans every
+# directory there and takes the domain from its manifest.json, so a copy of
+# the integration beside the live one can be loaded in its place.
+UPDATE_DIR_NAME = "update"
+# The previous version, kept after a successful swap.
+ROLLBACK_DIR_NAME = "rollback"
+# Per-swap work: the download, the staged new tree, trees on their way out.
+STAGING_DIR_NAME = "staging"
+
+# Names earlier versions gave their self-update dirs inside custom_components:
+# the rollback, a retired rollback, and a staged new tree.
+_LEGACY_SUFFIX_RE = re.compile(r"\.(?:bak|bak-old-[0-9a-f]{8}|new-[0-9a-f]{8})")
+
 
 class InstallError(Exception):
     """A self-update step failed in a way the caller should surface verbatim."""
@@ -265,31 +280,42 @@ def versions_match(tag: Any, manifest_version: Any) -> bool:
     return a_release == b_release and a_pre == b_pre
 
 
-def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
-    """Atomically replace ``current_dir`` with ``new_source_dir``; return the backup.
+def swap_integration_dir(
+    current_dir: Any, new_source_dir: Any, update_dir: Any
+) -> Path:
+    """Replace ``current_dir`` with ``new_source_dir``, all or nothing.
 
-    The new tree is first copied next to the live dir under a unique name, so
-    a slow or failed copy never touches the live tree or its rollback. Then
-    three same-filesystem renames (each atomic): the previous ``<name>.bak``
-    is set aside, the live dir becomes ``<name>.bak``, and the copy becomes
-    the live dir. Only then is the previous backup deleted. A failure at any
-    step undoes the renames before it, so the hub keeps its integration and
-    the rollback it had, and is raised as InstallError — including an
-    overlapping swap that finds a dir already moved. The returned backup is
-    left in place as the rollback.
+    Returns the rollback: ``<update_dir>/rollback``, now holding the tree that
+    was live. The new tree is first copied into ``<update_dir>/staging``, so a
+    slow or failed copy never touches the live tree or the rollback. Then four
+    renames, each atomic: the live dir moves to staging, the copy becomes the
+    live dir, the previous rollback is set aside, and the old live tree
+    becomes the rollback. Only then is the previous rollback deleted.
+
+    The live dir moves first because that rename crosses from
+    custom_components into the data dir: when they are on different
+    filesystems it fails with EXDEV before anything has changed, and the
+    update is refused. A failure at any step undoes the renames before it, so
+    the hub keeps its integration and the rollback it had; it is raised as
+    InstallError, including an overlapping swap that finds a dir already
+    moved.
     """
     current = Path(current_dir)
     new_source = Path(new_source_dir)
     if not new_source.is_dir():
         raise InstallError(f"replacement source is not a directory: {new_source}")
 
-    backup = current.with_name(current.name + ".bak")
+    work = Path(update_dir)
+    rollback = work / ROLLBACK_DIR_NAME
+    staging = work / STAGING_DIR_NAME
     # Unique per swap, so overlapping swaps never share a staging name.
     token = secrets.token_hex(4)
-    staged = current.with_name(f"{current.name}.new-{token}")
-    retired = current.with_name(f"{current.name}.bak-old-{token}")
+    staged = staging / f"new-{token}"
+    outgoing = staging / f"live-{token}"
+    retired = staging / f"rollback-{token}"
 
     try:
+        staging.mkdir(parents=True, exist_ok=True)
         shutil.copytree(new_source, staged)
     except OSError as err:
         shutil.rmtree(staged, ignore_errors=True)
@@ -297,14 +323,22 @@ def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
 
     done: list[tuple[Path, Path]] = []  # renames so far, to undo in reverse
     try:
-        if backup.exists():
-            os.rename(backup, retired)
-            done.append((backup, retired))
-        os.rename(current, backup)
-        done.append((current, backup))
+        os.rename(current, outgoing)
+        done.append((current, outgoing))
         os.rename(staged, current)
+        done.append((staged, current))
+        if rollback.exists():
+            os.rename(rollback, retired)
+            done.append((rollback, retired))
+        os.rename(outgoing, rollback)
     except OSError as err:
-        message = f"failed to swap in new integration tree: {err}"
+        if err.errno == errno.EXDEV:
+            message = (
+                f"cannot update in place: {current.parent} and {work} are on "
+                "different filesystems; update through HACS instead"
+            )
+        else:
+            message = f"failed to swap in new integration tree: {err}"
         for src, dst in reversed(done):
             try:
                 os.rename(dst, src)
@@ -313,4 +347,51 @@ def swap_integration_dir(current_dir: Any, new_source_dir: Any) -> Path:
         shutil.rmtree(staged, ignore_errors=True)
         raise InstallError(message) from err
     shutil.rmtree(retired, ignore_errors=True)
-    return backup
+    return rollback
+
+
+@dataclass(frozen=True)
+class LegacyDirAction:
+    """What ``clear_legacy_update_dirs`` did with one directory."""
+
+    path: Path
+    # Where it was moved, or None when it was removed (or not handled).
+    moved_to: Path | None = None
+    # Why it could not be moved or removed; None on success.
+    error: str | None = None
+
+
+def clear_legacy_update_dirs(
+    integration_dir: Any, update_dir: Any
+) -> list[LegacyDirAction]:
+    """Move or remove the self-update dirs earlier versions left beside the
+    live integration in custom_components.
+
+    ``<name>.bak`` becomes ``<update_dir>/rollback`` when there is no rollback
+    yet, and is removed otherwise; ``<name>.bak-old-<hex>`` and
+    ``<name>.new-<hex>`` are leftovers of an interrupted swap and are removed.
+    Nothing else is touched, and symlinks are not followed. One failure
+    doesn't stop the rest; each outcome is returned for the log.
+    """
+    current = Path(integration_dir)
+    rollback = Path(update_dir) / ROLLBACK_DIR_NAME
+    actions: list[LegacyDirAction] = []
+    for entry in sorted(current.parent.iterdir()):
+        if not entry.name.startswith(current.name):
+            continue
+        suffix = entry.name[len(current.name) :]
+        if not _LEGACY_SUFFIX_RE.fullmatch(suffix):
+            continue
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            if suffix == ".bak" and not rollback.exists():
+                rollback.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(entry, rollback)
+                actions.append(LegacyDirAction(entry, moved_to=rollback))
+            else:
+                shutil.rmtree(entry)
+                actions.append(LegacyDirAction(entry))
+        except OSError as err:
+            actions.append(LegacyDirAction(entry, error=str(err)))
+    return actions
