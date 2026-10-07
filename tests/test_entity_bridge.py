@@ -321,13 +321,16 @@ class TestStage3aWidening(unittest.TestCase):
             ("xy_color", [0.31, 0.32]),
             ("rgbw_color", [255, 200, 120, 0]),
             ("rgbww_color", [255, 200, 120, 0, 0]),
-            ("color_temp", 300),
+            ("color_temp_kelvin", 3000),
         ):
             with self.subTest(key=key):
                 _, service, data = validate_command(
                     "light.living1", "turn_on", {key: value}
                 )
                 self.assertEqual((service, data), ("turn_on", {key: value}))
+        # The mired dialect is accepted and sent as kelvin (see below).
+        _, _, data = validate_command("light.living1", "turn_on", {"color_temp": 300})
+        self.assertEqual(data, {"color_temp_kelvin": 3333})
 
     def test_climate_set_temperature_carries_hvac_mode(self):
         # The goodnight quick action preserves the current mode.
@@ -477,6 +480,92 @@ class TestStage3aWidening(unittest.TestCase):
         )["attributes"]
         self.assertEqual(attrs["effect"], "colorloop")
         self.assertEqual(attrs["effect_list"], ["colorloop", "fire"])
+
+
+class TestColourTemperatureBridge(unittest.TestCase):
+    """The apps work in mireds; Home Assistant 2026 takes and reports kelvin."""
+
+    def test_mired_command_is_sent_as_kelvin(self):
+        _, service, data = validate_command(
+            "light.living1", "turn_on", {"color_temp": 300, "brightness": 128}
+        )
+        self.assertEqual(service, "turn_on")
+        self.assertEqual(data, {"color_temp_kelvin": 3333, "brightness": 128})
+        _, _, data = validate_command("light.living1", "turn_on", {"color_temp": 370.4})
+        self.assertEqual(data, {"color_temp_kelvin": 2700})
+
+    def test_kelvin_wins_when_both_are_given(self):
+        _, _, data = validate_command(
+            "light.living1",
+            "turn_on",
+            {"color_temp": 300, "color_temp_kelvin": 2700},
+        )
+        self.assertEqual(data, {"color_temp_kelvin": 2700})
+
+    def test_out_of_range_mireds_are_clamped(self):
+        for mireds, kelvin in ((50, 10000), (100, 10000), (1000, 1000), (5000, 1000)):
+            with self.subTest(mireds=mireds):
+                _, _, data = validate_command(
+                    "light.living1", "turn_on", {"color_temp": mireds}
+                )
+                self.assertEqual(data, {"color_temp_kelvin": kelvin})
+
+    def test_unusable_mireds_are_rejected(self):
+        for bad in ("warm", None, True, 0, -5, [300], float("nan")):
+            with self.subTest(bad=bad), self.assertRaises(CommandError):
+                validate_command("light.living1", "turn_on", {"color_temp": bad})
+
+    def test_kelvin_only_light_also_reports_mireds(self):
+        attrs = serialize_state(
+            FakeState(
+                "light.lamp",
+                "on",
+                {
+                    "color_temp_kelvin": 2700,
+                    "min_color_temp_kelvin": 2000,
+                    "max_color_temp_kelvin": 6535,
+                },
+            )
+        )["attributes"]
+        self.assertEqual(
+            attrs,
+            {
+                "color_temp_kelvin": 2700,
+                "min_color_temp_kelvin": 2000,
+                "max_color_temp_kelvin": 6535,
+                # As Home Assistant 2025 computed them: floor(1e6 / kelvin).
+                "color_temp": 370,
+                "min_mireds": 153,
+                "max_mireds": 500,
+            },
+        )
+
+    def test_mired_values_home_assistant_reports_are_kept(self):
+        provided = {
+            "color_temp_kelvin": 2700,
+            "min_color_temp_kelvin": 2000,
+            "max_color_temp_kelvin": 6535,
+            "color_temp": 360,
+            "min_mireds": 150,
+            "max_mireds": 520,
+        }
+        attrs = serialize_state(FakeState("light.lamp", "on", provided))["attributes"]
+        self.assertEqual(attrs, provided)
+        # A light that is off reports no temperature: nothing is made up.
+        attrs = serialize_state(
+            FakeState(
+                "light.lamp",
+                "off",
+                {"color_temp_kelvin": None, "color_temp": None, "max_mireds": 500},
+            )
+        )["attributes"]
+        self.assertEqual(
+            attrs, {"color_temp_kelvin": None, "color_temp": None, "max_mireds": 500}
+        )
+        attrs = serialize_state(
+            FakeState("light.lamp", "off", {"color_temp_kelvin": None})
+        )["attributes"]
+        self.assertEqual(attrs, {"color_temp_kelvin": None})
 
 
 if __name__ == "__main__":

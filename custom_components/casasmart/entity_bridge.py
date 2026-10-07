@@ -6,6 +6,7 @@ command validation. No Home Assistant imports, so it is unit-testable alone.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # The domains the app can see at all. Anything else (remote, script, ...)
@@ -209,6 +210,20 @@ DIAGNOSTIC_BINARY_SENSOR_CLASSES: frozenset[str] = frozenset(
 )
 
 
+# Colour temperature. Both apps work in mireds (color_temp, min_mireds,
+# max_mireds); Home Assistant takes and reports kelvin, and from 2026.1 kelvin
+# only. A mired command is sent as color_temp_kelvin on every release, clamped
+# to 100-1000 mireds (10000-1000 K, wider than any white light). Kelvin-only
+# lights also get the mired attributes, as HA itself computed them before.
+_MIRED_MIN = 100
+_MIRED_MAX = 1000
+_MIRED_FROM_KELVIN = (
+    ("color_temp", "color_temp_kelvin"),
+    ("min_mireds", "max_color_temp_kelvin"),
+    ("max_mireds", "min_color_temp_kelvin"),
+)
+
+
 class CommandError(Exception):
     """An app command failed validation (maps to HTTP 400)."""
 
@@ -257,6 +272,37 @@ def is_category_served(category: str, entity_id: str, device_class: str | None) 
     return False
 
 
+def _positive_number(value: Any) -> bool:
+    """A finite number above zero (bool excluded)."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _add_mired_attributes(attributes: dict[str, Any]) -> None:
+    """Fill in the mired attributes a kelvin-only light lacks, in place.
+
+    Additive: a value Home Assistant reports (None included) is never
+    replaced, and nothing is derived from a missing or unset kelvin value.
+    """
+    for mired_key, kelvin_key in _MIRED_FROM_KELVIN:
+        kelvin = attributes.get(kelvin_key)
+        if mired_key not in attributes and _positive_number(kelvin):
+            attributes[mired_key] = math.floor(1_000_000 / kelvin)
+
+
+def _mired_to_kelvin(mireds: Any) -> int:
+    """A light command's mired color_temp as kelvin, clamped to a sane range."""
+    if isinstance(mireds, bool) or not isinstance(mireds, (int, float)):
+        raise CommandError("'color_temp' must be a number of mireds")
+    if not mireds > 0:  # also rejects NaN
+        raise CommandError("'color_temp' must be above zero")
+    return round(1_000_000 / min(max(mireds, _MIRED_MIN), _MIRED_MAX))
+
+
 def serialize_state(
     state: Any, area: str | None = None, entity_category: str | None = None
 ) -> dict[str, Any]:
@@ -270,6 +316,8 @@ def serialize_state(
     attributes = {
         key: value for key, value in state.attributes.items() if key in allowed
     }
+    if domain == "light":
+        _add_mired_attributes(attributes)
     last_updated = getattr(state, "last_updated", None)
     return {
         "entity_id": state.entity_id,
@@ -291,8 +339,9 @@ def validate_command(
     """Validate an app command against the whitelist.
 
     Returns ``(ha_domain, ha_service, service_data)`` ready for
-    ``hass.services.async_call``. Raises ``CommandError`` (HTTP 400
-    territory) on anything outside the whitelist.
+    ``hass.services.async_call``; a light's mired ``color_temp`` comes back as
+    ``color_temp_kelvin``. Raises ``CommandError`` (HTTP 400 territory) on
+    anything outside the whitelist.
     """
     domain = entity_domain(entity_id)
     if domain not in EXPOSED_DOMAINS:
@@ -321,4 +370,9 @@ def validate_command(
             f"Data keys not allowed for {action!r}: {', '.join(sorted(rejected))}"
         )
 
-    return domain, service, dict(data)
+    service_data = dict(data)
+    if domain == "light" and "color_temp" in service_data:
+        mireds = service_data.pop("color_temp")
+        if "color_temp_kelvin" not in service_data:  # kelvin wins when both
+            service_data["color_temp_kelvin"] = _mired_to_kelvin(mireds)
+    return domain, service, service_data
