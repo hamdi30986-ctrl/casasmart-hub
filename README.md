@@ -124,9 +124,9 @@ by hand leave it showing the wrong version. The built-in updater
 | Button | `button.casasmart_factory_reset` | Wipes the app layer (see [Factory reset](#factory-reset)) and issues new owner and recovery codes |
 | Sensor | `sensor.casasmart_energy_savings` | The active Energy Saving level: `off`, `low`, `medium` or `smart` |
 | Sensors | `sensor.casasmart_user_*` | One per paired phone |
-| Service | `casasmart.factory_reset` | The same reset as the button |
+| Service | `casasmart.factory_reset` | The same reset as the button (Home Assistant admins only) |
 | Service | `casasmart.activate_scene` | Runs a CasaSmart scene from an automation |
-| Service | `casasmart.set_tunnel_url` | Sets the tunnel address the hub gives phones. A bare `https://host` also becomes the Cloudflare tunnel hostname, and switches the tunnel on unless it was switched off before (see [Remote access](#remote-access)). |
+| Service | `casasmart.set_tunnel_url` | Sets the tunnel address the hub gives phones (Home Assistant admins only). A bare `https://host` also becomes the Cloudflare tunnel hostname, and switches the tunnel on unless it was switched off before (see [Remote access](#remote-access)). |
 | Service | `casasmart.configure_hq_notifications` | Trusts a signing key for HQ reminder notifications (Home Assistant admins only) |
 
 ### Automation events
@@ -156,6 +156,11 @@ A factory reset clears:
 It keeps tanks, alarm zones and settings, the hub's identity, the relay
 registration, tunnel settings, and everything in Home Assistant itself.
 
+The hub's data is wiped in one step, and every phone's connection is closed.
+If Energy Saving can't switch back on the automations it turned off, the
+reset stops before wiping anything and says which ones. If it reports that it
+couldn't finish, run it again.
+
 To hand the hub to a new owner, use factory reset. "Regenerate pairing code"
 keeps the recovery code, so whoever holds the old recovery card could still
 take the hub back from the local network.
@@ -173,7 +178,7 @@ none of them. To change one:
 
 | Key | Value | Effect |
 |---|---|---|
-| `hub_name` | string | Name phones see when they discover the hub (default "CasaSmart Hub"). On Docker Desktop the Mac helper's `--name` is shown instead. |
+| `hub_name` | string | Name phones see when they discover the hub (default "CasaSmart Hub"). Only phones on the local network get it, through mDNS or the handshake; on Docker Desktop, mDNS shows the Mac helper's `--name` instead. |
 | `tls_port` | integer | The hub's TLS port (default `8443`). The apps expect 8443. A value that isn't a port number (1–65535) is ignored with a warning. |
 | `lan_relay_ingress` | `"on"` / `"off"` | Whether the TLS port counts as the local network (default `"off"`). See below. |
 | `remote_pairing_enabled` | `true` / `false` | Lets invited members pair from outside the network (default `false`). |
@@ -230,7 +235,7 @@ folder.
 | "Pairing is only available on the hub's own network" | The phone must be on the hub's Wi-Fi or LAN, not mobile data, a VPN or the tunnel. On Docker Desktop, check the relay from the [Docker Desktop guide](deploy/macos/README.md). |
 | "Too many failed attempts" | Five wrong codes in a row from one phone lock that phone out for a minute, and longer if it happens again. Behind the Docker Desktop relay all phones share one lockout. |
 | Phones can't find the hub | mDNS isn't reaching them. Check host networking (Container) or the mDNS helper (Docker Desktop), and that the Wi-Fi doesn't isolate clients. |
-| No push notifications | Look for a CasaSmart notification in Home Assistant about the relay or activation. Registration may need a fresh activation code (**Configure**). A relay that is only briefly unreachable is retried and logged, without a notification. |
+| No push notifications | Look for a CasaSmart notification in Home Assistant about the relay or activation. Registration may need a fresh activation code (**Configure**). A relay that is only briefly unreachable is retried and logged, without a notification. If the log says push was skipped because the push-identity key couldn't be loaded or saved, check that `/config/casasmart/` is writable and not full. |
 
 For more detail, turn on debug logging:
 
