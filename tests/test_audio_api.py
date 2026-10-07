@@ -81,9 +81,12 @@ class FakeAdapter:
 
     def __init__(self) -> None:
         self.published: list[tuple] = []
+        self.queued_if_down: list[str] = []
 
-    def publish(self, topic, payload, qos=0, retain=False):
+    def publish(self, topic, payload, qos=0, retain=False, queue_if_down=False):
         self.published.append((topic, payload, qos, retain))
+        if queue_if_down:
+            self.queued_if_down.append(topic)
 
     def clear_speaker_retained(self, mac6):
         self.published.append(("__clear__", mac6, None, None))
@@ -257,6 +260,19 @@ class SpeakerView(AudioViewTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["deleted"], "ddeeff")
         self.assertFalse(self.rt.audio.is_enrolled("ddeeff"))
+
+    async def test_delete_lets_the_reset_wait_for_the_broker(self) -> None:
+        # Controls fail fast while the broker is down, but a removed speaker's
+        # reset and retained clears may arrive late: otherwise it keeps
+        # announcing itself and comes back as a discovery ghost.
+        adapter = FakeAdapter()
+        with mock.patch("casasmart.audio_api.get_audio_adapter", lambda hass: adapter):
+            resp = await self.view.delete(
+                H.FakeRequest(headers=self._admin()), mac6="ddeeff"
+            )
+        self.assertEqual(H.read_response(resp)[0], 200)
+        self.assertEqual(adapter.queued_if_down, ["speakers/ddeeff/command"])
+        self.assertEqual(adapter.published[-1][:2], ("__clear__", "ddeeff"))
 
     async def test_delete_unknown_is_404(self) -> None:
         with mock.patch(
