@@ -56,6 +56,7 @@ from .auth_api import (
     is_keyless_speaker_provisioning_enabled,
     is_lan_request,
     read_json_object,
+    ready_or_503,
 )
 from .const import DOMAIN, EVENT_AUDIO_CHANGED
 from .runtime_lookup import loaded_runtime_data
@@ -314,12 +315,7 @@ class _AudioView(HomeAssistantView):
 
     def _audio_or_503(self) -> tuple[AudioEngine | None, web.Response | None]:
         """(engine, None), or (None, 503) while the hub is loading."""
-        audio = get_audio(self._hass)
-        if audio is None:
-            return None, self.json_message(
-                "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE
-            )
-        return audio, None
+        return ready_or_503(self, get_audio(self._hass))
 
     def _adapter_or_503(self) -> tuple[AudioAdapter | None, web.Response | None]:
         """(adapter, None), or (None, 503) before the adapter exists."""

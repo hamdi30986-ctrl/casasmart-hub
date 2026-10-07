@@ -38,11 +38,18 @@ def load_api():
     module("homeassistant.core", HomeAssistant=object)
     module("homeassistant.exceptions", HomeAssistantError=Exception)
     module("room_api_fixture", __path__=[])
+
+    def ready_or_503(view, engine):
+        if engine is None:
+            return None, view.json_message("Hub not ready", 503)
+        return engine, None
+
     module(
         "room_api_fixture.auth_api",
         authenticate_request=None,
         get_engine=None,
         read_json_object=None,
+        ready_or_503=ready_or_503,
     )
     module("room_api_fixture.auth_engine", AuthEngine=object)
     module(
