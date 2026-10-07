@@ -1140,6 +1140,8 @@ class CasaSmartSceneActivateView(_RegistryView):
                     "message": (
                         "Energy saving is active — controls are locked by the admin"
                     ),
+                    # The phone reads code on a 403: this isn't an expired login.
+                    "code": "energy_lockout",
                 },
                 HTTPStatus.FORBIDDEN,
             )

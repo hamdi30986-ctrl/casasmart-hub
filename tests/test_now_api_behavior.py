@@ -361,14 +361,14 @@ class MemberLookupTest(unittest.TestCase):
         self.states = _States([_State("light.a", "on", self.ROOM)])
         self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
         self.engine.set_room_policy(self.ROOM, True, ["light.a"])
-        runtime = SimpleNamespace(
+        self.runtime = SimpleNamespace(
             now_data=self.engine,
             energy=None,
             registry=SimpleNamespace(
                 list_rooms=list, list_scenes=list, get_favorites=lambda member: []
             ),
         )
-        self.hass = _ExecutorTrackingHass(self.states, runtime)
+        self.hass = _ExecutorTrackingHass(self.states, self.runtime)
         self.lookups: list[bool] = []
 
     def _lookup(self, sub: str) -> str:
@@ -408,6 +408,17 @@ class MemberLookupTest(unittest.TestCase):
         result = self._room_command(self._lookup)
         self.assertEqual(self.lookups, [True])
         self.assertEqual([o["entity_id"] for o in result["outcomes"]], ["light.a"])
+
+    def test_energy_lockout_refusal_carries_its_code(self) -> None:
+        # The phone keeps "code" on a 403: it tells the lockout apart from a
+        # credential that a re-login would fix.
+        self.runtime.energy = object()
+        with patch.object(_API, "energy_lockout_applies", lambda *args: True):
+            result = self._room_command(self._lookup)
+        self.assertEqual(result["error"], "energy_lockout")
+        self.assertEqual(result["code"], "energy_lockout")
+        self.assertIsInstance(result["message"], str)
+        self.assertEqual(self.hass.services.calls, [])
 
     def test_room_command_storage_error_is_a_clean_500(self) -> None:
         result = self._room_command(self._unavailable)
