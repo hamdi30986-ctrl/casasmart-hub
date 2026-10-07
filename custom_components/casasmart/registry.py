@@ -35,9 +35,14 @@ _NAME_MAX = 64
 _ICON_MAX = 64
 _MAX_FAVORITES = 200
 _MAX_SCENE_ENTITIES = 50
-_MAX_DEVICE_ENTITIES = 100
+MAX_DEVICE_ENTITIES = 100
 _MAX_ROOM_TAGS = 64
 _MAX_TAG_ROOMS = 128
+# Room moves: the idempotency key format, and how many results are kept for
+# replay and for how long (seconds).
+IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
+_MAX_MOVE_RECEIPTS = 1024
+_MOVE_RECEIPT_TTL = 24 * 60 * 60
 _TAG_COLORS = frozenset(
     {
         # The tablet's palette (first four), then earlier presets that stay
@@ -149,7 +154,7 @@ def _clean_energy_flag(value: Any) -> bool:
 
 
 def _clean_entity_ids(
-    value: Any, what: str = "entity_ids", max_count: int = _MAX_DEVICE_ENTITIES
+    value: Any, what: str = "entity_ids", max_count: int = MAX_DEVICE_ENTITIES
 ) -> list[str]:
     """A capped list of entity_ids, deduplicated in order."""
     if not isinstance(value, list) or any(
@@ -204,8 +209,10 @@ def _clean_gangs(value: Any) -> dict[str, dict[str, Any]]:
         gtype = gang.get("type")
         clean_type = "switch" if gtype is None else _clean_gang_type(gtype)
         icon = gang.get("icon")
-        if icon is not None and (not isinstance(icon, str) or len(icon) > 64):
-            raise RegistryError("gang icon must be a string of at most 64 chars")
+        if icon is not None and (not isinstance(icon, str) or len(icon) > _ICON_MAX):
+            raise RegistryError(
+                f"gang icon must be a string of at most {_ICON_MAX} chars"
+            )
         name = gang.get("name")
         if name is not None and not isinstance(name, str):
             raise RegistryError("gang name must be a string")
@@ -777,15 +784,17 @@ class RegistryEngine:
             raise RegistryError("expected_gang_override is required for a solo gang")
         if gang_id is None and expected_override is not None:
             raise RegistryError("expected_gang_override requires a solo gang")
-        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+        if not isinstance(key, str) or not IDEMPOTENCY_KEY.fullmatch(key):
             raise RegistryError("Invalid idempotency_key")
         if room_id is not None and (not isinstance(room_id, str) or not room_id):
             raise RegistryError("Invalid room_id")
         if (
             not isinstance(expected, dict)
-            or not 0 < len(expected) <= _MAX_DEVICE_ENTITIES
+            or not 0 < len(expected) <= MAX_DEVICE_ENTITIES
         ):
-            raise RegistryError("expected_rooms must contain 1-100 primary entities")
+            raise RegistryError(
+                f"expected_rooms must contain 1-{MAX_DEVICE_ENTITIES} primary entities"
+            )
         if any(
             not isinstance(k, str)
             or len(k) > 255
@@ -930,14 +939,14 @@ class RegistryEngine:
                 for old_key, value in entries:
                     if value.get("expires_at", 0) <= now:
                         del receipts[old_key]
-                while len(receipts) >= 1024:
+                while len(receipts) >= _MAX_MOVE_RECEIPTS:
                     old_key = min(
                         receipts.items(), key=lambda item: item[1]["expires_at"]
                     )[0]
                     del receipts[old_key]
                 receipts[receipt_key] = {
                     "fingerprint": fingerprint,
-                    "expires_at": now + 86400,
+                    "expires_at": now + _MOVE_RECEIPT_TTL,
                     "result": result,
                 }
             # Update the mirror only after the commit.

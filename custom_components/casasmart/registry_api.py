@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -30,6 +29,8 @@ from .energy_runtime import energy_lockout_applies
 from .entity_bridge import CommandError, validate_command
 from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
 from .registry import (
+    IDEMPOTENCY_KEY,
+    MAX_DEVICE_ENTITIES,
     UNSET,
     InUseError,
     RegistryEngine,
@@ -713,7 +714,7 @@ class CasaSmartRoomMoveView(_RegistryView):
         key = payload.get("idempotency_key")
         request_id = (
             key[:12]
-            if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)
+            if isinstance(key, str) and IDEMPOTENCY_KEY.fullmatch(key)
             else "invalid"
         )
         runtime = _runtime_data(self._hass)
@@ -723,7 +724,9 @@ class CasaSmartRoomMoveView(_RegistryView):
         # membership and scope again under its lock.
         expected = payload.get("expected_rooms")
         ids = list(expected) if isinstance(expected, dict) else []
-        if len(ids) > 100 or any(not isinstance(eid, str) for eid in ids):
+        if len(ids) > MAX_DEVICE_ENTITIES or any(
+            not isinstance(eid, str) for eid in ids
+        ):
             return self.json_message("Invalid expected_rooms", HTTPStatus.BAD_REQUEST)
         assignable = {eid for eid in ids if is_assignable(self._hass, eid)}
         fallback = {eid: ha_area_id_of(self._hass, eid) for eid in assignable}
