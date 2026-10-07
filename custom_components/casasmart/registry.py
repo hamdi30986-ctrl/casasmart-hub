@@ -48,6 +48,8 @@ _TAG_COLORS = frozenset(
         "#A16207",  # amber/brown
     }
 )
+_VALID_GANG_PRESENTATIONS = frozenset({"grouped", "solo", "hidden"})
+_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
 
 class RegistryError(Exception):
@@ -155,12 +157,6 @@ def _clean_gang_map(value: Any, what: str) -> dict[str, str]:
     ):
         raise RegistryError(f"{what} must be a map of strings to strings")
     return dict(value)
-
-
-_VALID_GANG_PRESENTATIONS = frozenset({"grouped", "solo", "hidden"})
-
-
-_KNOWN_GANG_TYPES = frozenset({"switch", "light", "fan", "heater", "outlet"})
 
 
 def _clean_gang_type(value: Any) -> str:
@@ -495,6 +491,13 @@ class RegistryEngine:
         )
         return cleared
 
+    def _checked_floor_id(self, floor_id: Any) -> str | None:
+        if floor_id is None:
+            return None
+        if not isinstance(floor_id, str) or floor_id not in self._floors:
+            raise RegistryError("Unknown floor_id")
+        return floor_id
+
     # Room tags are stored as one small document so a multi-room edit is one
     # SQLite write. That prevents an interrupted update from leaving different
     # rooms with half of the requested tag assignment.
@@ -630,13 +633,6 @@ class RegistryEngine:
                 raise UnknownItemError("Unknown room tag")
             del tags[tag_id]
             self._room_tags["all"] = tags
-
-    def _checked_floor_id(self, floor_id: Any) -> str | None:
-        if floor_id is None:
-            return None
-        if not isinstance(floor_id, str) or floor_id not in self._floors:
-            raise RegistryError("Unknown floor_id")
-        return floor_id
 
     def list_assignments(self) -> dict[str, dict[str, Any]]:
         """entity_id -> {room_id, display_name, sort_order}."""
