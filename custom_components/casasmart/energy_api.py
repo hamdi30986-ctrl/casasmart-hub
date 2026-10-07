@@ -36,18 +36,13 @@ from .energy import (
 )
 from .energy_adapter import EnergyInventoryBuilder
 from .energy_validation import validate_config_against_discovery
+from .runtime_lookup import loaded_runtime_data
 
 if TYPE_CHECKING:
     from . import CasaSmartRuntimeData
 
 
 # -- discovery helpers --------------------------------------------------------
-
-
-def _runtime(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """The loaded entry's runtime data, or None while the hub isn't loaded."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0].runtime_data if entries else None
 
 
 def _entity_name(entity: Any) -> str:
@@ -331,7 +326,7 @@ class _EnergyView(HomeAssistantView):
 
     def _ready(self) -> tuple[CasaSmartRuntimeData | None, web.Response | None]:
         """The runtime data, or a 503 until Energy Saving has started."""
-        runtime = _runtime(self._hass)
+        runtime = loaded_runtime_data(self._hass)
         if runtime is None or runtime.energy_controller is None:
             return None, self.json_message(
                 "Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE

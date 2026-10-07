@@ -60,6 +60,7 @@ def load_api():
             ["area_id_of", "ha_area_id_of", "in_scope", "is_assignable", "is_served"]
         ),
     )
+    module("room_api_fixture.runtime_lookup", loaded_runtime_data=None)
     modules["room_api_fixture.registry"] = _REGISTRY
     modules["room_api_fixture.storage"] = storage_module
     path = Path(__file__).parents[1] / "custom_components/casasmart/registry_api.py"
@@ -95,7 +96,7 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.api.get_registry = lambda hass: self.engine
-        self.api._runtime_data = lambda hass: SimpleNamespace(storage=self.store)
+        self.api.loaded_runtime_data = lambda hass: SimpleNamespace(storage=self.store)
         self.api.get_engine = lambda hass: SimpleNamespace(
             member_id_for=lambda sub: "member"
         )
@@ -154,6 +155,6 @@ class RoomMoveApiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_body_and_missing_runtime_are_rejected(self):
         self.assertEqual((await self.view.post([])).status, 400)
-        self.api._runtime_data = lambda hass: None
+        self.api.loaded_runtime_data = lambda hass: None
         self.assertEqual((await self.view.post(self.payload)).status, 503)
         self.assertEqual(self.events, [])

@@ -19,9 +19,9 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
-from .const import DOMAIN
 from .entity_bridge import is_category_served, is_exposed, serialize_state
 from .registry import UNSET
+from .runtime_lookup import loaded_runtime_data
 
 if TYPE_CHECKING:
     from .registry import RegistryEngine
@@ -29,10 +29,8 @@ if TYPE_CHECKING:
 
 def get_registry_engine(hass: HomeAssistant) -> RegistryEngine | None:
     """The loaded entry's registry engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    return entries[0].runtime_data.registry
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.registry if runtime_data is not None else None
 
 
 def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:

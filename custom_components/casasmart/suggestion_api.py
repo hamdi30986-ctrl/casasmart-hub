@@ -26,14 +26,9 @@ from .auth_api import authenticate_request, get_engine, json_body
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .registry_api import async_execute_registry_scene
+from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
 from .suggestions import MAX_RULES, SuggestionError, evaluate, validate_rule
-
-
-def runtime_for(hass):
-    """The loaded entry's runtime data, or None while the hub isn't loaded."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    return entries[0].runtime_data if entries else None
 
 
 class _SuggestionView(HomeAssistantView):
@@ -64,7 +59,7 @@ class _SuggestionView(HomeAssistantView):
         # room-scoped admin cannot see.
         if permission == "suggestions.manage" and claims.get("rooms") is not None:
             return self.json({"error": "unrestricted_admin_required"}, 403)
-        runtime = runtime_for(self.hass)
+        runtime = loaded_runtime_data(self.hass)
         service = getattr(runtime, "suggestions", None)
         if self.generated:
             service = getattr(service, "generated", None)
@@ -356,7 +351,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
 
     def energy_check(self, claims, scene):
         """Refuse a run the active Energy Saving level does not allow."""
-        energy = getattr(runtime_for(self.hass), "energy", None)
+        energy = getattr(loaded_runtime_data(self.hass), "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
             raise SuggestionError("energy_lockout", 403)
         if (

@@ -23,7 +23,7 @@ import ipaddress
 import logging
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -35,6 +35,7 @@ from .auth_api import (
     json_body,
 )
 from .const import DOMAIN, EVENT_TANK_CHANGED
+from .runtime_lookup import loaded_runtime_data
 from .tank import (
     TANK_INGEST_URL_CONFIG_KEY,
     TANK_SCRIPT_NAME,
@@ -47,9 +48,6 @@ from .tank import (
     chunk_script_code,
 )
 from .throttle import FailureThrottle, ThrottledError
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,11 +81,8 @@ class ShellyRpcError(Exception):
 
 def get_tanks(hass: HomeAssistant) -> TankEngine | None:
     """The loaded entry's tank engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.tanks
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.tanks if runtime_data is not None else None
 
 
 def _is_lan_target(ip: str) -> bool:
@@ -254,9 +249,8 @@ class _TankView(HomeAssistantView):
         For setups where the hub's LAN address differs from what it sees
         itself (Docker Desktop, bridge networking).
         """
-        entries = self._hass.config_entries.async_loaded_entries(DOMAIN)
-        if entries:
-            runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
+        runtime_data = loaded_runtime_data(self._hass)
+        if runtime_data is not None:
             override = runtime_data.hub_config.get(TANK_INGEST_URL_CONFIG_KEY)
             if isinstance(override, str) and override.startswith(
                 ("http://", "https://")

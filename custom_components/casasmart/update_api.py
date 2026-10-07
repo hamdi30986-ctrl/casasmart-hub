@@ -29,6 +29,7 @@ from .const import (
     UPDATE_CHECK_TTL_SECONDS,
     UPDATE_REPO_CONFIG_KEY,
 )
+from .runtime_lookup import loaded_runtime_data
 from .update import InstallError, ReleaseInfo, is_newer, parse_release
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,9 +52,8 @@ _GITHUB_REPO_RE = re.compile(
 
 def _resolve_repo(hass: HomeAssistant) -> str | None:
     """The owner/repo from update_repo, or None if unset or malformed."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if entries:
-        runtime_data = entries[0].runtime_data
+    runtime_data = loaded_runtime_data(hass)
+    if runtime_data is not None:
         override = getattr(runtime_data, "hub_config", {}).get(UPDATE_REPO_CONFIG_KEY)
         if isinstance(override, str):
             candidate = override.strip()

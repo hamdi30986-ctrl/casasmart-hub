@@ -13,7 +13,7 @@ import asyncio
 import logging
 from functools import partial
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -127,6 +127,7 @@ from .registry_api import (
     CasaSmartUserDeviceGangView,
     CasaSmartUserDeviceView,
 )
+from .runtime_lookup import loaded_runtime_data
 from .settings_api import CasaSmartUserSettingsView
 from .suggestion_api import (
     CasaSmartGeneratedSuggestionActionView,
@@ -153,18 +154,7 @@ from .update_api import (
 )
 from .ws import CasaSmartWebSocketView
 
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
-
 _LOGGER = logging.getLogger(__name__)
-
-
-def _get_runtime_data(hass: HomeAssistant) -> CasaSmartRuntimeData | None:
-    """Return the loaded entry's runtime data, or None if not loaded."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    return entries[0].runtime_data
 
 
 def _visible_state(
@@ -323,7 +313,7 @@ class CasaSmartHandshakeView(HomeAssistantView):
             "capabilities": handshake_capabilities(),
         }
 
-        runtime_data = _get_runtime_data(self._hass)
+        runtime_data = loaded_runtime_data(self._hass)
         # A phone that finds the hub by scanning the LAN shows this name. The
         # handshake is public through the tunnel, so the name stays on the LAN.
         if is_lan_request(request):
@@ -393,7 +383,7 @@ class CasaSmartHealthView(HomeAssistantView):
             "api_version": API_VERSION,
         }
 
-        runtime_data = _get_runtime_data(self._hass)
+        runtime_data = loaded_runtime_data(self._hass)
         if runtime_data is None:
             body["status"] = "error"
             body["storage"] = "unavailable"
@@ -487,7 +477,7 @@ class CasaSmartCommandView(HomeAssistantView):
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
 
-        runtime_data = _get_runtime_data(self._hass)
+        runtime_data = loaded_runtime_data(self._hass)
         energy = getattr(runtime_data, "energy", None)
         if energy is not None and energy_lockout_applies(energy, claims):
             return self.json(
@@ -547,7 +537,7 @@ class CasaSmartCommandView(HomeAssistantView):
             unsub()
 
         new_state = self._hass.states.get(entity_id)
-        now_data = getattr(_get_runtime_data(self._hass), "now_data", None)
+        now_data = getattr(loaded_runtime_data(self._hass), "now_data", None)
         if now_data is not None:
             engine = get_engine(self._hass)
             sub = claims["sub"]

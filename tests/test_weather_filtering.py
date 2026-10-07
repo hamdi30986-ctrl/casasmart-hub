@@ -46,9 +46,12 @@ def _load_filtering():
     bridge.serialize_state = lambda *args, **kwargs: {}
     registry_module = _module("casasmart.registry")
     registry_module.UNSET = object()
+    lookup = _module("casasmart.runtime_lookup")
+    lookup.loaded_runtime_data = lambda hass: None
     casa.const = const
     casa.entity_bridge = bridge
     casa.registry = registry_module
+    casa.runtime_lookup = lookup
 
     spec = importlib.util.spec_from_file_location(
         "casasmart.filtering",

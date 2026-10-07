@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import re
 from http import HTTPStatus
-from typing import TYPE_CHECKING
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -21,10 +20,8 @@ from homeassistant.core import HomeAssistant
 from .auth_api import authenticate_request, get_engine, json_body
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
 from .filtering import in_scope, is_served
+from .runtime_lookup import loaded_runtime_data
 from .user_settings import SettingsError, UserSettingsEngine
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +35,8 @@ _ENTITY_ID = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 
 def get_user_settings(hass: HomeAssistant) -> UserSettingsEngine | None:
     """The loaded entry's settings engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.user_settings
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.user_settings if runtime_data is not None else None
 
 
 class CasaSmartUserSettingsView(HomeAssistantView):

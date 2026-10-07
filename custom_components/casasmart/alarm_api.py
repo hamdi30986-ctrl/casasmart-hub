@@ -20,7 +20,6 @@ adapter re-sync its entry-delay timer, so an app disarm cancels a countdown.
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -29,18 +28,13 @@ from homeassistant.core import HomeAssistant
 from .alarm import AlarmEngine, AlarmError, UnknownZoneError
 from .auth_api import authenticate_request, json_body
 from .const import DOMAIN, EVENT_ALARM_CHANGED
-
-if TYPE_CHECKING:
-    from . import CasaSmartRuntimeData
+from .runtime_lookup import loaded_runtime_data
 
 
 def get_alarm(hass: HomeAssistant) -> AlarmEngine | None:
     """The loaded entry's alarm engine, or None when not set up."""
-    entries = hass.config_entries.async_loaded_entries(DOMAIN)
-    if not entries:
-        return None
-    runtime_data: CasaSmartRuntimeData = entries[0].runtime_data
-    return runtime_data.alarm
+    runtime_data = loaded_runtime_data(hass)
+    return runtime_data.alarm if runtime_data is not None else None
 
 
 def _serialize_zones(zones: dict[str, dict]) -> list[dict]:
