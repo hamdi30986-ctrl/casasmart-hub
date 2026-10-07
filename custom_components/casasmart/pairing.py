@@ -12,8 +12,8 @@
   the 8-char code brute-force-proof). ``purpose`` is the request's
   network class (LAN vs remote), so remote redemption
   bursts can never exhaust the lockout counter the owner's on-LAN
-  bootstrap claim answers to, even where a proxy / CIDR-widening change
-  makes both arrive with the same source string.
+  bootstrap claim answers to, even where a tunnel and the trusted LAN
+  relay make both arrive with the same source string.
 - Every code carries a CLASS: ``bootstrap`` (the owner claim,
   LAN-only forever) vs ``member`` (admin-minted, remotely redeemable once
   the hub's ``remote_pairing_enabled`` flag is on — enforced in ``redeem``
@@ -28,7 +28,7 @@ the last admin leaves (``auth/unpair-self``). A factory reset or the
 regenerate-pairing-code button rotates it instead, killing the old
 sticker.
 
-Codes are stored hashed (SHA-256). The 8-char alphanumeric space (~2^38)
+Codes are stored hashed (SHA-256). The 8-char code space (31^8, ~2^39)
 plus the escalating throttle is brute-force-proof; hashing also keeps
 plaintext secrets out of DB reads, backups, and log lines. The plaintext
 is returned exactly once, at generation.
@@ -75,7 +75,7 @@ ISSUABLE_ROLES = (ROLE_SUB_ADMIN, ROLE_USER)
 # 8 chars from an unambiguous alphabet (no 0/O, 1/I/L). The admin code is
 # printed on the hub sticker and read by humans, so every character must be
 # unmistakable. Mixed letters+digits, uppercase; redemption is normalized so it
-# is case- and formatting-insensitive. ~2^38 space; the escalating per-IP
+# is case- and formatting-insensitive. ~2^39 space; the escalating per-IP
 # throttle keeps it brute-force-proof despite the never-expiring bootstrap code.
 CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LEN = 8
@@ -92,8 +92,8 @@ CODE_CLASS_MEMBER = "member"
 # bucket per network class, so a remote lockout (e.g. every tunnel caller
 # collapsing onto one loopback source, or a port proxy rewriting all sources to
 # one IP) can never block the owner's LAN redemption from the same source
-# string — and vice versa. ``FailureThrottle`` keys are caller-chosen strings
-# by design; this composes the existing mechanism, it does not add a new one.
+# string — and vice versa. ``FailureThrottle`` keys are caller-chosen strings,
+# so one throttle serves both buckets.
 THROTTLE_PURPOSE_LAN = "lan"
 THROTTLE_PURPOSE_REMOTE = "remote"
 
@@ -107,40 +107,48 @@ class CodeInvalidError(PairingError):
 
 
 class HubAlreadyClaimedError(PairingError):
-    """The owner bootstrap code is correct but the hub already has an admin and
-    the presenting device is NOT already enrolled — i.e. a DIFFERENT phone.
-    Distinct from CodeInvalidError so enroll answers 'this hub is already paired'
-    instead of the generic 'invalid code'. The SAME phone re-pairing never
-    reaches here: enroll short-circuits it by public-key idempotency first."""
+    """The owner code is right, but the hub already has its admin.
+
+    The presenting device is NOT already enrolled, so it is a DIFFERENT phone.
+    Distinct from CodeInvalidError so enroll answers "this hub is already
+    paired" instead of the generic "invalid code". The SAME phone re-pairing
+    never reaches here: enroll short-circuits it by public-key idempotency.
+    """
 
 
 class LanOnlyCodeError(PairingError):
-    """The code is VALID but its class may not be redeemed from a remote
-    source — the bootstrap owner claim is LAN-only by design (physical
-    possession). Same posture as HubAlreadyClaimedError: the secret was
-    right, only the location wasn't, so the code is NOT consumed and no
-    throttle slot is burned. Enroll answers with the same LAN-only 403 the
-    network gate uses."""
+    """The code is VALID, but its class can't be redeemed from off the LAN.
+
+    The bootstrap owner claim is LAN-only by design (physical possession).
+    Same posture as HubAlreadyClaimedError: the secret was right, only the
+    location wasn't, so the code is NOT consumed and no throttle slot is
+    burned. Enroll answers with the same LAN-only 403 the network gate uses.
+    """
 
 
 def normalize_code(code: str) -> str:
-    """Canonical form: uppercase, ASCII alphanumerics only (spaces/dashes
-    dropped), so a code typed with stray spacing or lowercase still matches.
+    """Canonical form: uppercase ASCII letters and digits only.
 
-    Codes are ASCII, so everything else is dropped too, BEFORE upper-casing
-    (a few non-ASCII letters upper-case to ASCII ones). Non-ASCII input then
-    fails as an ordinary wrong code, throttle included, instead of crashing
-    the ASCII hash."""
+    Spaces and dashes are dropped, so a code typed with stray spacing or in
+    lowercase still matches. Codes are ASCII, so everything else is dropped
+    too, BEFORE upper-casing (a few non-ASCII letters upper-case to ASCII
+    ones). Non-ASCII input then fails as an ordinary wrong code, throttle
+    included, instead of crashing the ASCII hash.
+    """
     return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
 
 
 def hash_code(code: str) -> str:
-    """SHA-256 of the NORMALIZED code — the single hashing path used by mint,
-    redeem, and the stored permanent-code hash, so all three always agree."""
+    """SHA-256 hex of the NORMALIZED code.
+
+    The single hashing path for mint, redeem and the stored permanent-code
+    hash, so all three always agree.
+    """
     return hashlib.sha256(normalize_code(code).encode("ascii")).hexdigest()
 
 
 def _new_code() -> str:
+    """A fresh random code from ``CODE_ALPHABET``."""
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
 
 
@@ -281,10 +289,9 @@ class PairingManager:
     def clear_all_codes(self) -> int:
         """Delete EVERY pairing code, the bootstrap admin code included; count.
 
-        Wipes every code including the bootstrap admin code (afterwards none
-        exists at all) — the factory-reset path. The "Regenerate pairing code"
-        button calls this as part of a full pairing reset, then re-mints a
-        fresh bootstrap admin code on the now-unclaimed hub via
+        Afterwards no code exists at all. The "Regenerate pairing code"
+        button calls this as part of its pairing reset, then mints a fresh
+        bootstrap admin code on the now-unclaimed hub via
         :meth:`ensure_bootstrap_code`.
         """
         with self._lock:
@@ -310,12 +317,12 @@ class PairingManager:
         The enroll view short-circuits when it recognises a public key, so a
         phone re-running onboarding against its own claimed hub isn't bounced
         with "invalid code" (the bootstrap code is dead once an admin exists,
-        so there is no code it *could* type). That leniency was too wide: a
-        hub that merely REMEMBERS a phone would admit it on a code minted by a
-        DIFFERENT hub. With two hubs on one LAN holding the same phone key,
-        the app's enroll chain takes the first hub that answers yes — so the
-        RIGHT hub's code could silently pair the phone to the WRONG one, every
-        layer reporting success (field failure, 2026-07-31).
+        so there is no code it *could* type). Recognising the key alone is too
+        lenient: a hub that merely REMEMBERS a phone would admit it on a code
+        minted by a DIFFERENT hub. With two hubs on one LAN holding the same
+        phone key, the app's enroll chain takes the first hub that answers
+        yes, so the RIGHT hub's code could silently pair the phone to the
+        WRONG one, every layer reporting success.
 
         So: consume nothing, but require the code to be this hub's —
 
@@ -327,7 +334,7 @@ class PairingManager:
           double-submit or a retry after a mid-redeem timeout still passes
           even though that code was consumed on the first pass.
 
-        Raises [CodeInvalidError] otherwise, throttled exactly like
+        Raises ``CodeInvalidError`` otherwise, throttled exactly like
         :meth:`redeem` so this path can't become a free code-guessing oracle.
         """
         throttle_key = _throttle_key(source_key, remote_source)
@@ -427,9 +434,8 @@ class PairingManager:
             ", remote" if remote_source else "",
         )
         # ``code_id`` lets the enroll path record which code a device used
-        # (``enrolled_via``), retained for potential per-code revocation. The
-        # bootstrap code is single-per-hub and never regenerated, so its id
-        # flows through harmlessly.
+        # (``enrolled_via``, shown in the users list). The bootstrap code
+        # always has the same fixed id, so the owner's phone records that.
         return {
             "role": record["role"],
             "rooms": record.get("rooms"),
@@ -470,9 +476,10 @@ class PairingManager:
     def install_bootstrap_hash(self, code_hash: str) -> None:
         """Install the hub's PERMANENT bootstrap admin code from a stored hash.
 
-        The acquire code is printed on a sticker once and must survive factory
-        reset, so its hash is persisted in hub_config and re-installed here on
-        every boot (instead of minting a fresh random code each time). Idempotent;
+        The code is printed on a sticker once and must survive restarts, so
+        its hash is persisted in hub_config and re-installed here on every
+        boot (instead of minting a fresh random code each time); a factory
+        reset or the "Regenerate pairing code" button replaces it. Idempotent;
         mirrors :meth:`ensure_bootstrap_code`'s claimed-state gate — drops the
         code once an admin is enrolled, (re)installs it while the hub is unclaimed.
         """

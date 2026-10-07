@@ -23,7 +23,7 @@ Recovery tiers:
 
 Code format: 10 characters from an unambiguous alphabet (no 0/O, 1/I/L),
 grouped ``XXXXX-XXXXX`` for engraving. ~49 bits — unguessable through
-the escalating throttle, and like the 8-char pairing codes it never
+the escalating throttle, and like the bootstrap pairing code it never
 expires. Stored SHA-256-hashed (plaintext exists exactly once, at mint;
 re-installed from the stored hash on every boot). Redemption input is
 normalized (case, dashes, spaces) so reading the card aloud can't fail
@@ -64,28 +64,36 @@ class RecoveryError(Exception):
 
 
 class CodeInvalidError(RecoveryError):
-    """Code unknown, not armed, or already used — deliberately one bucket."""
+    """Wrong code, or none armed — deliberately one bucket."""
 
 
 def _hash_code(code: str) -> str:
+    """SHA-256 hex of an already normalized code."""
     return hashlib.sha256(code.encode("ascii")).hexdigest()
 
 
 def _new_code() -> str:
+    """A fresh random ``XXXXX-XXXXX`` code from ``CODE_ALPHABET``."""
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     return "-".join(raw[i : i + CODE_GROUP] for i in range(0, CODE_LENGTH, CODE_GROUP))
 
 
 def normalize_code(code: str) -> str:
-    """Canonical form: uppercase, ASCII alphanumerics only (dashes/spaces
-    dropped). Non-ASCII is dropped before upper-casing, as in pairing, so it
-    fails as an ordinary wrong code instead of crashing the ASCII hash."""
+    """Canonical form: uppercase ASCII letters and digits only.
+
+    Dashes and spaces are dropped. Non-ASCII is dropped before upper-casing,
+    as in pairing, so it fails as an ordinary wrong code instead of crashing
+    the ASCII hash.
+    """
     return "".join(ch for ch in code if ch.isascii() and ch.isalnum()).upper()
 
 
 def hash_code(code: str) -> str:
-    """SHA-256 of the normalized code — one hashing path for mint, redeem, and
-    the stored permanent-code hash, so all three always agree."""
+    """SHA-256 hex of the normalized code.
+
+    One hashing path for mint, redeem and the stored permanent-code hash, so
+    all three always agree.
+    """
     return _hash_code(normalize_code(code))
 
 
@@ -111,8 +119,10 @@ class RecoveryManager:
         Returns the plaintext (dashed) code when a NEW one was just
         minted — the ONLY time it exists in plaintext — so the caller can
         surface it for engraving. None when already armed, or when the
-        hub has no admin yet (an unclaimed hub has nothing to recover;
-        any stale code from a previous owner is dropped).
+        hub has no admin yet; on such a hub an installed code is DROPPED,
+        so call this only once an admin exists. A code minted here is not
+        written to hub_config: the stored hash, reinstalled at every boot
+        by :meth:`install_recovery_hash`, stays the permanent card.
         """
         with self._lock:
             if not self._admin_exists():
@@ -148,11 +158,12 @@ class RecoveryManager:
             }
 
     def mint_permanent(self) -> str:
-        """Mint a fresh permanent recovery code, install it, return the plaintext
-        — the ONLY time it exists in the clear, surfaced once for engraving.
+        """Mint and install a fresh permanent recovery code; return it.
 
-        Used at first provisioning; thereafter the stored hash is re-installed
-        via :meth:`install_recovery_hash`.
+        This is the ONLY time the code exists in the clear: the caller saves
+        its hash in hub_config and shows it once for engraving. Used at first
+        start (and after a factory reset); thereafter the stored hash is
+        re-installed via :meth:`install_recovery_hash`.
         """
         code = _new_code()
         with self._lock:
@@ -164,7 +175,7 @@ class RecoveryManager:
         return code
 
     def is_armed(self) -> bool:
-        """True while an unredeemed recovery code exists."""
+        """True while a recovery code is installed (redeeming doesn't use it up)."""
         with self._lock:
             return RECOVERY_CODE_ID in self._codes
 

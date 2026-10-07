@@ -26,12 +26,14 @@ Token shape (claims):
   engine bumps a device's version on any role/room change and checks
   ``ver`` on validation, so privilege edits invalidate outstanding
   tokens immediately instead of riding out the TTL.
-- ``jti`` — unique token id (random), for future revocation lists.
+- ``jti`` — random unique token id. Nothing checks it; revocation rides
+  ``ver``.
 - ``scope`` — OPTIONAL. Absent on normal session tokens. ``widget`` marks
   the home-screen-widget token: long-lived, but the engine's
   ``authorize`` only honors it for the narrow widget permission set
-  (device read + control), so a leaked widget token can never touch
-  cameras, history, automations CRUD, pairing, or user management.
+  (device read + control), so a leaked widget token can do nothing else:
+  no cameras, history, automations, pairing, user management or session
+  writes.
   Revocation rides the existing ``ver`` check — unpairing or editing the
   issuing device kills its widget tokens the same instant as its session
   tokens.
@@ -145,7 +147,8 @@ def validate_token(
     """Verify signature + claims; return the claims dict or raise TokenError.
 
     Signature is checked FIRST (constant-time) so claim parsing never runs
-    on unauthenticated input.
+    on unauthenticated input. Anything that isn't one of our tokens, a
+    non-ASCII string included, raises TokenError and nothing else.
     """
     if not secret:
         raise TokenError("Empty signing secret")
