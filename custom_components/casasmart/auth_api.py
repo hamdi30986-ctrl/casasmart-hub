@@ -532,6 +532,11 @@ class CasaSmartRecoverView(HomeAssistantView):
             # One generic bucket: wrong code vs not-armed is not leaked.
             return self.json_message("Invalid recovery code", HTTPStatus.UNAUTHORIZED)
 
+        replaced = [
+            device["device_id"]
+            for device in await self._hass.async_add_executor_job(engine.list_devices)
+            if device["role"] == ROLE_ADMIN
+        ]
         try:
             device_id = await self._hass.async_add_executor_job(
                 lambda: engine.replace_admin(
@@ -544,6 +549,14 @@ class CasaSmartRecoverView(HomeAssistantView):
             # card just matched, so it is still armed. No arm_recovery here: on
             # a hub with no admin it would drop the card.
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+        # The replaced phone is now unpaired: drop its push token like any
+        # unpair does, or it keeps receiving the alerts sent to every
+        # registered device (life-safety alarms).
+        push = _get_push_store(self._hass)
+        if push is not None:
+            for old_device_id in replaced:
+                await self._hass.async_add_executor_job(push.unregister, old_device_id)
 
         # Safety net: mint (and surface to the HA admin) a code only when
         # none is armed.

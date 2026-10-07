@@ -97,6 +97,7 @@ class EnrollGateTests(unittest.IsolatedAsyncioTestCase):
             pairing=self.pairing,
             hub_config=self.hub_config,
             recovery=None,  # arm_recovery no-ops; not under test here
+            push=None,  # no push-token store; the unpair paths skip it
             push_dispatcher=None,  # relay push leg not running (default)
         )
         self.hass = H.FakeHass(self.runtime)
@@ -793,3 +794,15 @@ class OwnerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self._recover(self.CARD)
         self.assertEqual(status, 201)
         self.assertEqual(body["role"], "admin")
+
+    async def test_recovery_drops_the_replaced_phones_push_token(self) -> None:
+        lost = self.auth.enroll_device("Lost phone", "admin", make_public_pem())
+        self.push.register(lost, "token-lost-phone", "ios")
+        family = self.auth.enroll_device("Family phone", "user", make_public_pem())
+        self.push.register(family, "token-family-phone", "android")
+        status, body = await self._recover(self.CARD)
+        self.assertEqual(status, 201)
+        # The lost phone is unpaired like any departed device, so it gets no
+        # more pushes: life-safety alarms go to every registered token.
+        self.assertIsNone(self.push.get_token(lost))
+        self.assertIsNotNone(self.push.get_token(family))
