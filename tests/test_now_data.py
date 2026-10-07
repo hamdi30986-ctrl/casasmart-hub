@@ -42,6 +42,17 @@ class NowDataEngineTest(unittest.TestCase):
         )
         self.assertEqual(engine.recents_for("member-b"), [])
 
+    def test_malformed_stored_room_policy_is_ignored(self) -> None:
+        engine = make_engine()
+        for record in (["light.kitchen"], "participates", 1):
+            with self.subTest(record=record):
+                engine._policies["room-kitchen"] = record
+                self.assertEqual(
+                    engine.room_policy("room-kitchen"),
+                    {"participates": False, "eligible_entity_ids": []},
+                )
+                self.assertFalse(engine.room_participates("room-kitchen"))
+
     def test_room_policy_and_config_are_explicit_not_auto_discovered(self) -> None:
         engine = make_engine()
         self.assertFalse(engine.room_participates("room-kitchen"))
