@@ -549,7 +549,7 @@ class RegistryEngine:
         if not isinstance(raw, dict):
             return {}
         return {
-            str(tag_id): dict(record)
+            tag_id: dict(record)
             for tag_id, record in raw.items()
             if isinstance(tag_id, str) and isinstance(record, dict)
         }
@@ -724,14 +724,13 @@ class RegistryEngine:
                     raise RegistryError("Unknown room_id")
                 record["room_id"] = room_id
             if display_name is not ...:
-                if display_name is not None and not isinstance(display_name, str):
-                    raise RegistryError("display_name must be a string or null")
                 if display_name is not None:
-                    display_name = (
-                        _clean_name(display_name, "Device")
-                        if display_name.strip()
-                        else None
-                    )
+                    if not isinstance(display_name, str):
+                        raise RegistryError("display_name must be a string or null")
+                    if display_name.strip():
+                        display_name = _clean_name(display_name, "Device")
+                    else:
+                        display_name = None
                 record["display_name"] = display_name
             if sort_order is not ...:
                 record["sort_order"] = _clean_sort_order(sort_order)
@@ -842,13 +841,11 @@ class RegistryEngine:
             current = {}
             for eid in entities:
                 assignment = self._devices.get(eid)
-                current[eid] = (
-                    assignment.get("room_id")
-                    if assignment is not None
-                    else fallback_rooms.get(eid)
-                    if fallback_rooms.get(eid) in self._rooms
-                    else None
-                )
+                if assignment is not None:
+                    current[eid] = assignment.get("room_id")
+                else:
+                    fallback = fallback_rooms.get(eid)
+                    current[eid] = fallback if fallback in self._rooms else None
             permission_rooms = dict(current)
             if gang is not None:
                 if gang.get("room_id") is not None or gang.get("room_override") is True:
@@ -933,10 +930,7 @@ class RegistryEngine:
                 }
                 # Pruning shares the transaction, so a failed write leaves no
                 # receipt behind.
-                entries = sorted(
-                    receipts.items(), key=lambda item: item[1].get("expires_at", 0)
-                )
-                for old_key, value in entries:
+                for old_key, value in list(receipts.items()):
                     if value.get("expires_at", 0) <= now:
                         del receipts[old_key]
                 while len(receipts) >= _MAX_MOVE_RECEIPTS:
