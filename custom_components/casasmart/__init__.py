@@ -110,13 +110,11 @@ from .lan_ingress import (
     resolve_lan_relay_ingress,
 )
 from .now_data import NowDataEngine
-from .pairing import PairingManager
-from .pairing import hash_code as pairing_hash_code
+from .pairing import PairingManager, hash_code
 from .push import PushTokenStore
 from .push_crypto import PushIdentityError, ensure_push_identity
 from .push_dispatcher import PushDispatcher, TankPushMonitor
 from .recovery import RecoveryManager
-from .recovery import hash_code as recovery_hash_code
 from .registry import RegistryEngine, RegistryError
 from .registry_api import async_execute_registry_scene
 from .relay_config import (
@@ -276,16 +274,14 @@ def _build_runtime_data(
     else:
         bootstrap_code = pairing.ensure_bootstrap_code()
         if bootstrap_code is not None:
-            hub_config.set(
-                BOOTSTRAP_CODE_HASH_CONFIG_KEY, pairing_hash_code(bootstrap_code)
-            )
+            hub_config.set(BOOTSTRAP_CODE_HASH_CONFIG_KEY, hash_code(bootstrap_code))
     recovery_hash = hub_config.get(RECOVERY_CODE_HASH_CONFIG_KEY)
     if recovery_hash:
         recovery.install_recovery_hash(recovery_hash)
         recovery_code = None
     else:
         recovery_code = recovery.mint_permanent()
-        hub_config.set(RECOVERY_CODE_HASH_CONFIG_KEY, recovery_hash_code(recovery_code))
+        hub_config.set(RECOVERY_CODE_HASH_CONFIG_KEY, hash_code(recovery_code))
 
     # The key speakers present to fetch their broker settings; created once.
     if not hub_config.get(PROVISION_SECRET_CONFIG_KEY):
