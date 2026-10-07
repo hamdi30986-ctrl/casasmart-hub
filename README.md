@@ -164,7 +164,7 @@ none of them.
 | `zigbee_base_topics` | list of strings | zigbee2mqtt base topics that "add a device" opens (default `["zigbee2mqtt"]`) |
 | `tank_ingest_url` | full URL | Where tank sensors post readings, e.g. `http://192.168.1.20:8123/api/casasmart/tank/reading`. The default uses the hub's own LAN address and HA's port; set this when that address isn't reachable from the LAN (Docker Desktop, bridge networking). A tank keeps the address it was given at setup until it is set up again. |
 | `keyless_speaker_provisioning` | `true` / `false` | Let speakers on the local network fetch their broker settings without the provisioning key (default `false`). Only for speakers that don't send the key; the hub logs a warning while it is on. |
-| `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. |
+| `update_repo` | `owner/repo` | Turns on the built-in updater for that GitHub repository. Off by default; update through HACS instead. The updater keeps the previous version in `/config/casasmart/update/rollback`; to roll back, stop Home Assistant and put that folder in place of `/config/custom_components/casasmart`. |
 
 **`lan_relay_ingress` values:**
 - `"off"` (the default) checks client addresses.
@@ -191,7 +191,8 @@ The hub keeps its own data in `/config/casasmart/`:
 - the database;
 - its TLS and push identity keys;
 - `hub_config.json`;
-- automatic database backups before migrations.
+- automatic database backups before migrations;
+- the built-in updater's work and rollback copy (`update/`), if it is used.
 
 Home Assistant backups include it. Keep that folder intact when you move the
 hub, or every phone will have to pair again.

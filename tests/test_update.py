@@ -4,6 +4,7 @@ Run from the repo root:
     python3 -m unittest discover -s tests -v
 """
 
+import errno
 import json
 import shutil
 import sys
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from update import (
     InstallError,
     ReleaseInfo,
+    clear_legacy_update_dirs,
     is_newer,
     locate_integration_dir,
     parse_release,
@@ -242,57 +244,42 @@ class TestLocateAndReadManifest(unittest.TestCase):
 
 
 class TestSwapIntegrationDir(unittest.TestCase):
-    def test_swap_replaces_and_backs_up(self):
+    """The swap keeps every copy of the integration out of custom_components.
+
+    Home Assistant scans every directory in custom_components and takes the
+    domain from its manifest.json, so a rollback or staged copy beside the
+    live dir could be loaded in its place. Copies live under the hub's data
+    dir instead (``<config>/casasmart/update``).
+    """
+
+    def test_swap_replaces_and_keeps_the_rollback_in_the_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            current = root / "casasmart"
-            current.mkdir()
-            (current / "old.py").write_text("# v1")
+            current, new_source, update_dir = _swap_fixture(root, with_backup=False)
 
-            new_source = root / "new_casasmart"
-            new_source.mkdir()
-            (new_source / "new.py").write_text("# v2")
+            rollback = swap_integration_dir(current, new_source, update_dir)
 
-            backup = swap_integration_dir(current, new_source)
+            self.assertEqual(_tree(current), _version_tree("2.4.0"))
+            self.assertEqual(rollback, update_dir / "rollback")
+            self.assertEqual(_tree(rollback), _version_tree("2.3.0"))
+            self.assertEqual(_entries(current.parent), ["casasmart"])
+            self.assertEqual(_staging(update_dir), [])
 
-            # Live dir now holds the new tree...
-            self.assertTrue((current / "new.py").exists())
-            self.assertFalse((current / "old.py").exists())
-            # ...and the old tree is preserved in the backup for rollback.
-            self.assertTrue((backup / "old.py").exists())
-            self.assertEqual(backup.name, "casasmart.bak")
-
-    def test_swap_overwrites_stale_backup(self):
+    def test_swap_replaces_the_previous_rollback(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            current = root / "casasmart"
-            current.mkdir()
-            (current / "cur.py").write_text("# cur")
-            stale = root / "casasmart.bak"
-            stale.mkdir()
-            (stale / "stale.py").write_text("# stale")
-            new_source = root / "new"
-            new_source.mkdir()
-            (new_source / "n.py").write_text("# n")
-
-            backup = swap_integration_dir(current, new_source)
-            self.assertTrue((backup / "cur.py").exists())
-            self.assertFalse((backup / "stale.py").exists())
-
-    def test_swap_keeps_the_previous_backup_until_it_succeeds(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            current, new_source = _swap_fixture(Path(tmp), with_backup=True)
-            backup = swap_integration_dir(current, new_source)
-            self.assertEqual(_tree(current), _tree(new_source))
-            self.assertEqual(_tree(backup), _version_tree("2.3.0"))
-            self.assertEqual(_entries(Path(tmp)), ["casasmart", "casasmart.bak"])
+            current, new_source, update_dir = _swap_fixture(Path(tmp), with_backup=True)
+            rollback = swap_integration_dir(current, new_source, update_dir)
+            self.assertEqual(_tree(current), _version_tree("2.4.0"))
+            self.assertEqual(_tree(rollback), _version_tree("2.3.0"))
+            self.assertEqual(_entries(current.parent), ["casasmart"])
+            self.assertEqual(_staging(update_dir), [])
 
     def test_swap_rejects_non_directory_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            current = Path(tmp) / "casasmart"
-            current.mkdir()
+            current, _, update_dir = _swap_fixture(Path(tmp), with_backup=False)
             with self.assertRaises(InstallError):
-                swap_integration_dir(current, Path(tmp) / "does-not-exist")
+                swap_integration_dir(current, Path(tmp) / "does-not-exist", update_dir)
+            self.assertEqual(_tree(current), _version_tree("2.3.0"))
 
 
 def _version_tree(version: str) -> dict[str, str]:
@@ -312,17 +299,26 @@ def _tree(path: Path) -> dict[str, str]:
     return {f.name: f.read_text() for f in path.iterdir()}
 
 
-def _entries(root: Path) -> list[str]:
-    """What sits next to the live dir, minus the release staging dir."""
-    return sorted(p.name for p in root.iterdir() if p.name != "release")
+def _entries(path: Path) -> list[str]:
+    return sorted(p.name for p in path.iterdir())
 
 
-def _swap_fixture(root: Path, *, with_backup: bool) -> tuple[Path, Path]:
-    """Live 2.3.0, optionally a 2.2.0 rollback beside it, and a 2.4.0 release."""
-    current = _write_tree(root / "casasmart", "2.3.0")
+def _staging(update_dir: Path) -> list[str]:
+    """What a swap left in the staging dir (nothing, when it is done)."""
+    staging = update_dir / "staging"
+    return _entries(staging) if staging.exists() else []
+
+
+def _swap_fixture(root: Path, *, with_backup: bool) -> tuple[Path, Path, Path]:
+    """Live 2.3.0 in custom_components, optionally a 2.2.0 rollback in the
+    data dir, and a 2.4.0 release to install."""
+    current = _write_tree(root / "custom_components" / "casasmart", "2.3.0")
+    update_dir = root / "casasmart" / "update"
     if with_backup:
-        _write_tree(root / "casasmart.bak", "2.2.0")
-    return current, _write_tree(root / "release", "2.4.0")
+        _write_tree(update_dir / "rollback", "2.2.0")
+    else:
+        update_dir.mkdir(parents=True)
+    return current, _write_tree(root / "release", "2.4.0"), update_dir
 
 
 class TestSwapFailures(unittest.TestCase):
@@ -334,7 +330,7 @@ class TestSwapFailures(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return Path(tmp.name)
 
-    def _fail_rename(self, nth: int):
+    def _fail_rename(self, nth: int, err: OSError | None = None):
         """Make the nth os.rename of the swap fail (later ones, the undo, work)."""
         real_rename = update.os.rename
         calls = []
@@ -342,7 +338,7 @@ class TestSwapFailures(unittest.TestCase):
         def rename(src, dst):
             calls.append((src, dst))
             if len(calls) == nth:
-                raise OSError(5, "I/O error")
+                raise err or OSError(5, "I/O error")
             real_rename(src, dst)
 
         return mock.patch.object(update.os, "rename", side_effect=rename)
@@ -357,56 +353,67 @@ class TestSwapFailures(unittest.TestCase):
 
         return mock.patch.object(update.shutil, "copytree", side_effect=copytree)
 
-    def _assert_untouched(self, current: Path, *, with_backup: bool):
+    def _assert_untouched(self, current: Path, update_dir: Path, *, with_backup):
         self.assertEqual(_tree(current), _version_tree("2.3.0"))
-        expected = ["casasmart"]
+        self.assertEqual(_entries(current.parent), ["casasmart"])
         if with_backup:
-            backup = current.with_name("casasmart.bak")
-            self.assertEqual(_tree(backup), _version_tree("2.2.0"))
-            expected.append("casasmart.bak")
-        # No staging copy or set-aside backup is left behind.
-        self.assertEqual(_entries(current.parent), expected)
+            self.assertEqual(_tree(update_dir / "rollback"), _version_tree("2.2.0"))
+        else:
+            self.assertFalse((update_dir / "rollback").exists())
+        # No staged copy or set-aside tree is left behind.
+        self.assertEqual(_staging(update_dir), [])
 
     def test_copy_failure(self):
         for with_backup in (True, False):
             with self.subTest(with_backup=with_backup):
-                current, new_source = _swap_fixture(
+                current, new_source, update_dir = _swap_fixture(
                     self._new_root(), with_backup=with_backup
                 )
                 with self._fail_copy(), self.assertRaises(InstallError):
-                    swap_integration_dir(current, new_source)
-                self._assert_untouched(current, with_backup=with_backup)
+                    swap_integration_dir(current, new_source, update_dir)
+                self._assert_untouched(current, update_dir, with_backup=with_backup)
 
     def test_rename_failure_at_each_stage(self):
-        # With a backup: set the old backup aside, live -> .bak, copy -> live.
-        # Without one the first of those is skipped.
-        for with_backup, renames in ((True, 3), (False, 2)):
+        # Live -> staging, copy -> live, old rollback aside (only when there is
+        # one), live's old tree -> rollback.
+        for with_backup, renames in ((True, 4), (False, 3)):
             for nth in range(1, renames + 1):
                 with self.subTest(with_backup=with_backup, rename=nth):
-                    current, new_source = _swap_fixture(
+                    current, new_source, update_dir = _swap_fixture(
                         self._new_root(), with_backup=with_backup
                     )
                     with self._fail_rename(nth), self.assertRaises(InstallError):
-                        swap_integration_dir(current, new_source)
-                    self._assert_untouched(current, with_backup=with_backup)
+                        swap_integration_dir(current, new_source, update_dir)
+                    self._assert_untouched(current, update_dir, with_backup=with_backup)
+
+    def test_another_filesystem_is_refused_before_anything_changes(self):
+        # custom_components on a different mount from the data dir: the first
+        # rename out of custom_components fails with EXDEV.
+        for with_backup in (True, False):
+            with self.subTest(with_backup=with_backup):
+                current, new_source, update_dir = _swap_fixture(
+                    self._new_root(), with_backup=with_backup
+                )
+                exdev = OSError(errno.EXDEV, "Invalid cross-device link")
+                with (
+                    self._fail_rename(1, exdev),
+                    self.assertRaisesRegex(InstallError, "different filesystems"),
+                ):
+                    swap_integration_dir(current, new_source, update_dir)
+                self._assert_untouched(current, update_dir, with_backup=with_backup)
 
     def test_overlapping_swap_is_refused_and_the_rollback_survives(self):
-        # Swap A stops right after moving the live dir to .bak; swap B runs
-        # meanwhile. B used to die on a bare FileNotFoundError, after already
-        # deleting the .bak that A had just made.
+        # Swap A stops right after moving the live dir out of custom_components;
+        # swap B runs meanwhile and must fail cleanly without touching A's work.
         root = self._new_root()
-        current, new_source = _swap_fixture(root, with_backup=True)
+        current, new_source, update_dir = _swap_fixture(root, with_backup=True)
         real_rename = update.os.rename
         a_moved_live = threading.Event()
         b_done = threading.Event()
 
         def rename(src, dst):
             real_rename(src, dst)
-            if (
-                threading.current_thread().name == "A"
-                and Path(src) == current
-                and Path(dst).name == "casasmart.bak"
-            ):
+            if threading.current_thread().name == "A" and Path(src) == current:
                 a_moved_live.set()
                 b_done.wait(5)
 
@@ -416,7 +423,7 @@ class TestSwapFailures(unittest.TestCase):
             if name == "B":
                 a_moved_live.wait(5)
             try:
-                results[name] = swap_integration_dir(current, new_source)
+                results[name] = swap_integration_dir(current, new_source, update_dir)
             except Exception as err:
                 results[name] = err
             if name == "B":
@@ -429,11 +436,91 @@ class TestSwapFailures(unittest.TestCase):
             for thread in threads:
                 thread.join(10)
 
-        self.assertEqual(results["A"], root / "casasmart.bak")
+        self.assertEqual(results["A"], update_dir / "rollback")
         self.assertIsInstance(results["B"], InstallError)
         self.assertEqual(_tree(current), _version_tree("2.4.0"))
-        self.assertEqual(_tree(root / "casasmart.bak"), _version_tree("2.3.0"))
-        self.assertEqual(_entries(root), ["casasmart", "casasmart.bak"])
+        self.assertEqual(_tree(update_dir / "rollback"), _version_tree("2.3.0"))
+        self.assertEqual(_entries(current.parent), ["casasmart"])
+        self.assertEqual(_staging(update_dir), [])
+
+
+class TestClearLegacyUpdateDirs(unittest.TestCase):
+    """Earlier versions kept the rollback (casasmart.bak) and swap leftovers
+    (casasmart.bak-old-<hex>, casasmart.new-<hex>) inside custom_components."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cc = self.root / "custom_components"
+        self.current = _write_tree(self.cc / "casasmart", "2.4.0")
+        self.update_dir = self.root / "casasmart" / "update"
+
+    def test_bak_becomes_the_rollback_and_leftovers_are_removed(self):
+        _write_tree(self.cc / "casasmart.bak", "2.3.0")
+        _write_tree(self.cc / "casasmart.bak-old-0a1b2c3d", "2.2.0")
+        _write_tree(self.cc / "casasmart.new-deadbeef", "2.4.0")
+        # Not ours, or not a name the old swap used: left alone.
+        for name in ("hacs", "casasmart_extra", "casasmart.backup", "casasmart.new-x"):
+            (self.cc / name).mkdir()
+
+        actions = clear_legacy_update_dirs(self.current, self.update_dir)
+
+        self.assertEqual(
+            _entries(self.cc),
+            [
+                "casasmart",
+                "casasmart.backup",
+                "casasmart.new-x",
+                "casasmart_extra",
+                "hacs",
+            ],
+        )
+        self.assertEqual(_tree(self.update_dir / "rollback"), _version_tree("2.3.0"))
+        self.assertEqual(_tree(self.current), _version_tree("2.4.0"))
+        self.assertEqual(
+            sorted((a.path.name, a.moved_to, a.error) for a in actions),
+            [
+                ("casasmart.bak", self.update_dir / "rollback", None),
+                ("casasmart.bak-old-0a1b2c3d", None, None),
+                ("casasmart.new-deadbeef", None, None),
+            ],
+        )
+
+    def test_an_existing_rollback_is_kept(self):
+        _write_tree(self.update_dir / "rollback", "2.3.5")
+        _write_tree(self.cc / "casasmart.bak", "2.3.0")
+        actions = clear_legacy_update_dirs(self.current, self.update_dir)
+        self.assertEqual(_entries(self.cc), ["casasmart"])
+        self.assertEqual(_tree(self.update_dir / "rollback"), _version_tree("2.3.5"))
+        self.assertEqual([(a.moved_to, a.error) for a in actions], [(None, None)])
+
+    def test_nothing_to_do(self):
+        self.assertEqual(clear_legacy_update_dirs(self.current, self.update_dir), [])
+        self.assertEqual(_entries(self.cc), ["casasmart"])
+
+    def test_a_symlink_is_not_followed(self):
+        target = _write_tree(self.root / "elsewhere", "1.0.0")
+        (self.cc / "casasmart.bak").symlink_to(target, target_is_directory=True)
+        self.assertEqual(clear_legacy_update_dirs(self.current, self.update_dir), [])
+        self.assertEqual(_tree(target), _version_tree("1.0.0"))
+
+    def test_a_failure_is_reported_and_the_rest_still_handled(self):
+        _write_tree(self.cc / "casasmart.bak-old-0a1b2c3d", "2.2.0")
+        _write_tree(self.cc / "casasmart.new-deadbeef", "2.4.0")
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path, *args, **kwargs):
+            if Path(path).name == "casasmart.bak-old-0a1b2c3d":
+                raise PermissionError(13, "Permission denied")
+            real_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(update.shutil, "rmtree", side_effect=rmtree):
+            actions = clear_legacy_update_dirs(self.current, self.update_dir)
+        outcome = {a.path.name: a.error for a in actions}
+        self.assertIn("Permission denied", outcome["casasmart.bak-old-0a1b2c3d"])
+        self.assertIsNone(outcome["casasmart.new-deadbeef"])
+        self.assertEqual(_entries(self.cc), ["casasmart", "casasmart.bak-old-0a1b2c3d"])
 
 
 if __name__ == "__main__":

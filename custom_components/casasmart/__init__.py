@@ -136,6 +136,7 @@ from .tunnel import (
     normalize_tunnel_url,
 )
 from .tunnel_control import CloudflaredController, TunnelControlError
+from .update_install import async_clear_legacy_update_dirs
 from .user_settings import UserSettingsEngine
 
 _LOGGER = logging.getLogger(__name__)
@@ -416,6 +417,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: CasaSmartConfigEntry) ->
     a corrupt identity key stops setup until a person fixes it.
     """
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
+    # Earlier versions' self-update kept copies of the integration in
+    # custom_components, where Home Assistant can load one instead of us.
+    await async_clear_legacy_update_dirs(hass)
 
     try:
         (
