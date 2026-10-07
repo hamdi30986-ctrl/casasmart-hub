@@ -1,4 +1,11 @@
-"""HA-free cross-validation of Energy Saving wizard picks and discovery."""
+"""HA-free cross-validation of Energy Saving wizard picks and discovery.
+
+``energy.validate_level_config`` checks a level document on its own. This
+module checks it against the home as it is now: the ``energy_api`` discovery
+payload of rooms, gangs, lights, plugs, heaters and ACs. ``energy_api`` runs
+it on every wizard PATCH, before anything is stored, so a stored document
+never names a device that is not a valid candidate.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,7 @@ from typing import Any
 
 try:
     from .energy import LEVEL_LOW, LEVEL_MEDIUM, LEVEL_SMART, EnergyConfigError
-except ImportError:  # direct module import in the HA-free unit environment
+except ImportError:  # imported as a top-level module by the HA-free unit tests
     from energy import (  # type: ignore[no-redef]
         LEVEL_LOW,
         LEVEL_MEDIUM,
@@ -19,7 +26,15 @@ except ImportError:  # direct module import in the HA-free unit environment
 def validate_config_against_discovery(
     level: str, config: dict[str, Any], discovery: dict[str, Any]
 ) -> None:
-    """Reject incomplete, stale, or foreign picks before durable storage."""
+    """Reject incomplete, stale, or foreign picks before durable storage.
+
+    Every pick must be a current candidate in a room that is not excluded.
+    Low keeps two channels of each three-gang switch, Medium and Smart one of
+    each two- or three-gang switch; a room with several lights keeps
+    ``ceil(n/2)`` of them. Once ``setup_complete`` is set, every eligible
+    gang, light room, heater and AC room must also have been answered.
+    Raises ``EnergyConfigError`` naming the first problem found.
+    """
     rooms = {room["room_id"]: room for room in discovery["rooms"]}
     excluded = set(config["excluded_rooms"])
     unknown_excluded = excluded - set(rooms)
@@ -31,6 +46,7 @@ def validate_config_against_discovery(
         for room_id, room in rooms.items()
         for gang in room["gangs"]
     }
+    # Low only thins three-gang switches; a two-gang keeps both its channels.
     allowed_counts = {3} if level == LEVEL_LOW else {2, 3}
     eligible_groups = {
         group_id
@@ -53,6 +69,7 @@ def validate_config_against_discovery(
     eligible_light_rooms: set[str] = set()
     for room_id, room in rooms.items():
         candidates = {item["entity_id"] for item in room["lights"]}
+        # Smart drives the lights of a room with its own sensors itself.
         if (
             room_id not in excluded
             and len(candidates) > 1
@@ -98,6 +115,8 @@ def validate_config_against_discovery(
     ):
         raise EnergyConfigError("heater setup is incomplete or stale")
 
+    # Medium asks which AC to keep in a room with several; Smart asks for
+    # every sensorless room with an AC (it may keep none of them).
     eligible_ac_rooms: set[str] = set()
     for room_id, room in rooms.items():
         candidates = {item["entity_id"] for item in room["climates"]}

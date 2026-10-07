@@ -2,7 +2,17 @@
 
 The durable engine stays HA-free in :mod:`energy`; this module owns the
 transaction ordering around HA automations and the device adapter
-(:mod:`energy_adapter`).
+(:mod:`energy_adapter`):
+
+* ``EnergyFlags`` stores each automation's "works during Energy Saving"
+  flag and the set of automations the hub switched off, so it can switch
+  back on exactly those;
+* ``EnergyAutomationManager`` switches unflagged automations off when a
+  level applies and back on when it stops;
+* ``EnergyController`` is the one entry point for start-up, activate,
+  deactivate and re-apply, and runs them one at a time;
+* ``energy_lockout_applies`` is the check every command path uses to keep
+  non-admins from overriding an active level.
 """
 
 from __future__ import annotations
@@ -21,6 +31,8 @@ from .energy_adapter import EnergyAdapter
 
 _LOGGER = logging.getLogger(__name__)
 
+# Flag rows are keyed "automation:<config key>"; the remembered set of
+# automations the hub switched off lives under one reserved key.
 _FLAG_PREFIX = "automation:"
 _DISABLED_KEY = "_disabled_automations"
 
@@ -42,6 +54,7 @@ class EnergyFlags:
 
     @staticmethod
     def _clean_key(config_key: Any) -> str:
+        """A stripped, non-empty, bounded automation config key."""
         if not isinstance(config_key, str) or not config_key.strip():
             raise ValueError("automation config key must be a non-empty string")
         key = config_key.strip()
@@ -50,6 +63,7 @@ class EnergyFlags:
         return key
 
     def works_during_energy_saving(self, config_key: str) -> bool:
+        """True when the automation may keep running while a level is active."""
         key = self._clean_key(config_key)
         value = self._table.get(f"{_FLAG_PREFIX}{key}")
         return bool(
@@ -57,6 +71,7 @@ class EnergyFlags:
         )
 
     def set_works_during_energy_saving(self, config_key: str, enabled: Any) -> bool:
+        """Store the automation's flag and return it."""
         key = self._clean_key(config_key)
         if not isinstance(enabled, bool):
             raise ValueError("works_during_energy_saving must be a boolean")
@@ -64,10 +79,12 @@ class EnergyFlags:
         return enabled
 
     def delete_automation(self, config_key: str) -> None:
+        """Forget the flag of an automation that no longer exists."""
         key = self._clean_key(config_key)
         self._table.pop(f"{_FLAG_PREFIX}{key}", None)
 
     def disabled_automations(self) -> list[str]:
+        """Entity ids the hub switched off and still owes a switch-on."""
         value = self._table.get(_DISABLED_KEY)
         if not isinstance(value, dict) or not isinstance(value.get("entity_ids"), list):
             return []
@@ -80,6 +97,7 @@ class EnergyFlags:
         )
 
     def set_disabled_automations(self, entity_ids: list[str]) -> None:
+        """Replace the remembered set; an empty set removes the row."""
         clean = sorted(
             {
                 item.strip()
@@ -118,6 +136,7 @@ class EnergyAutomationManager:
 
     @staticmethod
     def _config_key(state: Any) -> str:
+        """The automation's config ``id``, else its entity object id."""
         attributes = dict(getattr(state, "attributes", {}) or {})
         value = attributes.get("id")
         if isinstance(value, str) and value.strip():
@@ -227,6 +246,7 @@ class EnergyAutomationManager:
         *,
         level: str | None,
     ) -> None:
+        """Append an audit event; a failure is logged, never raised."""
         try:
             await self._hass.async_add_executor_job(
                 lambda: self._engine.record_event(
@@ -262,9 +282,11 @@ class EnergyController:
         self._apply_task: asyncio.Task[dict[str, Any]] | None = None
 
     def notify_changed(self) -> None:
+        """Tell WebSocket clients, the sensor and suggestions to re-read state."""
         self._hass.bus.async_fire(EVENT_ENERGY_CHANGED)
 
     async def async_start(self) -> None:
+        """Start listening and re-apply a level that was active at shutdown."""
         self.adapter.async_start()
         generation = self._generation
         async with self._lock:
@@ -282,6 +304,7 @@ class EnergyController:
         self.adapter.async_stop()
 
     async def async_state(self) -> dict[str, Any]:
+        """The engine snapshot plus the adapter's current issues and stats."""
         state, stats = await self._hass.async_add_executor_job(
             lambda: (self.engine.snapshot(), self.engine.stats())
         )
@@ -294,6 +317,10 @@ class EnergyController:
         smart_lockout_enabled: bool | None = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
+        """Record the level as active, then apply it.
+
+        Raises ``EnergyInactiveError`` when a deactivate arrives first.
+        """
         generation = self._generation
         async with self._lock:
             self._raise_if_superseded(generation)
@@ -310,6 +337,10 @@ class EnergyController:
             return {"state": state, "apply": applied}
 
     async def async_deactivate(self, *, actor: str | None = None) -> dict[str, Any]:
+        """Stop the active level and switch its automations back on.
+
+        Devices are left as they are.
+        """
         # The newest request wins. Stop an apply in flight rather than wait
         # for every device in the home: the tablet gives up after 15 seconds.
         self._generation += 1
@@ -326,6 +357,7 @@ class EnergyController:
             return state
 
     async def async_reapply(self, *, actor: str | None = None) -> dict[str, Any]:
+        """Clear every release and apply the active level again."""
         generation = self._generation
         async with self._lock:
             self._raise_if_superseded(generation)

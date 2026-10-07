@@ -12,6 +12,9 @@ live Home Assistant side of the contract:
 * an own-command ledger so a human state change releases one device instead
   of making the mode fight them.
 
+Temperatures are in degrees Celsius: the thresholds below assume room
+sensors and ACs that report Celsius.
+
 This module deliberately does not register APIs or manage its own lifecycle:
 ``energy_runtime.EnergyController`` (created in ``__init__.py``) starts and
 stops it and owns the lockout boundary.  Keeping this adapter constructible in
@@ -43,21 +46,32 @@ from .registry import UNSET, RegistryEngine
 
 _LOGGER = logging.getLogger(__name__)
 
+# Smart: how long a room must read empty before it is treated as empty, and
+# how long a boost may run before it settles on its own.
 EMPTY_GRACE_SECONDS = 45
 BOOST_FAILSAFE_SECONDS = 15 * 60
+# How long a state change after one of our own commands counts as that
+# command's echo rather than a person taking the device back. Covers take a
+# while to travel, so they get longer.
 OWN_COMMAND_GRACE_SECONDS = 15
 COVER_COMMAND_GRACE_SECONDS = 120
 
+# Cooling: targets are held at the floor; an AC in a room already below the
+# kill line is switched off; Smart boosts a room above the boost line with
+# the boost target until it cools down.
 COOL_FLOOR = 24.0
 COOL_KILL_BELOW = 22.0
 COOL_BOOST_ABOVE = 28.0
 COOL_BOOST_TARGET = 16.0
 
+# Heating mirrors cooling.
 HEAT_CEILING = 21.0
 HEAT_KILL_ABOVE = 24.0
 HEAT_BOOST_BELOW = 18.0
 HEAT_BOOST_TARGET = 30.0
 
+# Smart's night-time welcome brightness, and each level's cap on the lights
+# it keeps on.
 WELCOME_BRIGHTNESS_PCT = 60
 LIGHT_CAP_PCT = {
     LEVEL_LOW: 80,
@@ -67,8 +81,10 @@ LIGHT_CAP_PCT = {
 
 _UNAVAILABLE_STATES = frozenset({"unavailable", "unknown"})
 _PRESENCE_CLASSES = frozenset({"occupancy", "motion", "presence"})
+# The only domains the adapter ever commands.
 _MANAGED_DOMAINS = frozenset({"light", "switch", "climate", "cover"})
 
+# Event kinds this adapter writes to the engine's history.
 EVENT_RULES_APPLIED = "rules_applied"
 EVENT_RULE_FAILED = "rule_failed"
 EVENT_ROOM_SKIPPED = "room_skipped"
@@ -78,11 +94,15 @@ EVENT_ENERGY_POSTURE = "energy_posture"
 EVENT_COMFORT_POSTURE = "comfort_posture"
 
 
+# -- helpers ------------------------------------------------------------------
+
+
 def _domain(entity_id: str) -> str:
     return entity_id.partition(".")[0]
 
 
 def _as_float(value: Any) -> float | None:
+    """A finite float, or None for anything else (including booleans)."""
     if isinstance(value, bool):
         return None
     try:
@@ -93,6 +113,7 @@ def _as_float(value: Any) -> float | None:
 
 
 def _as_datetime(value: Any) -> datetime | None:
+    """A UTC datetime from a datetime or ISO string; naive values are UTC."""
     if isinstance(value, datetime):
         result = value
     elif isinstance(value, str):
@@ -108,11 +129,15 @@ def _as_datetime(value: Any) -> datetime | None:
 
 
 def _state_changed(old_state: Any, new_state: Any) -> bool:
+    """True when the state or any attribute differs (timestamps don't count)."""
     if old_state is None or new_state is None:
         return old_state is not new_state
     return old_state.state != new_state.state or dict(
         getattr(old_state, "attributes", {}) or {}
     ) != dict(getattr(new_state, "attributes", {}) or {})
+
+
+# -- inventory ----------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -168,7 +193,7 @@ class RoomInventory:
 
     @property
     def automatic(self) -> bool:
-        """Smart v1 requires both temperature and presence."""
+        """Smart runs a room by itself only with temperature AND presence."""
         return bool(self.temperature_sensors and self.presence_sensors)
 
     @property
@@ -181,6 +206,7 @@ class RoomInventory:
 
     @property
     def room_temperature(self) -> float | None:
+        """The first available temperature sensor's reading."""
         values = [
             entity.temperature
             for entity in self.temperature_sensors
@@ -190,6 +216,7 @@ class RoomInventory:
 
     @property
     def occupied(self) -> bool | None:
+        """Any presence sensor on; None without presence or with a dead sensor."""
         if not self.presence_sensors or not self.sensors_available:
             return None
         return any(entity.state == "on" for entity in self.presence_sensors)
@@ -207,6 +234,12 @@ class EnergyInventory:
 
 @dataclass(frozen=True)
 class SunContext:
+    """Where the day is: daylight, the cover heat window, and its next start.
+
+    The heat window runs from an hour after sunrise to an hour before
+    sunset; Medium and Smart close covers during it.
+    """
+
     day: bool
     heat_window: bool
     next_heat_window_start: datetime | None
@@ -214,6 +247,8 @@ class SunContext:
 
 @dataclass
 class _Boost:
+    """A running Smart boost: its mode, ACs and failsafe timer."""
+
     room_id: str
     mode: str
     entity_ids: set[str]
@@ -242,6 +277,7 @@ class EnergyInventoryBuilder:
         self._category_resolver = category_resolver
 
     def _room_of(self, entity_id: str) -> str | None:
+        """The CasaSmart registry room, else HA's area for the entity."""
         room_id = self._registry.room_of(entity_id)
         if room_id is not UNSET:
             return room_id
@@ -257,6 +293,7 @@ class EnergyInventoryBuilder:
             return None
 
     def _category_of(self, entity_id: str) -> str | None:
+        """HA's entity category ("config", "diagnostic"), if any."""
         if self._category_resolver is not None:
             return self._category_resolver(self._hass, entity_id)
         try:
@@ -270,6 +307,11 @@ class EnergyInventoryBuilder:
         return str(getattr(entry.entity_category, "value", entry.entity_category))
 
     async def async_build(self) -> EnergyInventory:
+        """Snapshot every relevant entity, by room, and every gang switch.
+
+        Lights that are channels of a wall gang switch are left out of the
+        room's lights: the gang rules own them.
+        """
         raw_user_devices = await self._hass.async_add_executor_job(
             self._registry.list_user_devices
         )
@@ -379,6 +421,7 @@ class EnergyInventoryBuilder:
 
     @staticmethod
     def _is_temperature(entity: EnergyEntity) -> bool:
+        """A room temperature sensor, not a device's internal one."""
         if entity.entity_category in {"config", "diagnostic"}:
             return False
         device_class = str(entity.attributes.get("device_class", "")).lower()
@@ -393,6 +436,7 @@ class EnergyInventoryBuilder:
 
     @staticmethod
     def _is_presence(entity: EnergyEntity) -> bool:
+        """An occupancy, motion or presence sensor (by class or by name)."""
         if entity.entity_category in {"config", "diagnostic"}:
             return False
         device_class = str(entity.attributes.get("device_class", "")).lower()
@@ -406,8 +450,16 @@ class EnergyInventoryBuilder:
         )
 
 
+# -- adapter ------------------------------------------------------------------
+
+
 class EnergyAdapter:
-    """Execute the Energy Saving contract against live HA."""
+    """Execute the Energy Saving contract against live HA.
+
+    The clocks and the area/category resolvers are injectable for tests.
+    ``change_callback`` is called whenever the engine state changes outside
+    a REST request (a release, occupancy, a cleared release).
+    """
 
     def __init__(
         self,
@@ -553,6 +605,11 @@ class EnergyAdapter:
         return summary
 
     def _set_context(self, inventory: EnergyInventory, config: dict[str, Any]) -> None:
+        """Remember the applied inventory and config, and what to watch.
+
+        A managed entity is one the active level may command, so a manual
+        change to it releases it; a watched sensor drives its room's rules.
+        """
         self._inventory = inventory
         self._config = config
         self._entity_rooms = {
@@ -590,6 +647,11 @@ class EnergyAdapter:
         }
 
     def _troubled_rooms(self, inventory: EnergyInventory) -> set[str]:
+        """Rooms with an unavailable or non-numeric sensor; they are skipped.
+
+        Also records a ``sensor_unavailable`` issue per bad sensor, shows a
+        Smart room's occupancy as unknown, and drops issues that cleared.
+        """
         troubled: set[str] = set()
         bad_keys: set[tuple[str | None, str, str | None]] = set()
         excluded = set((self._config or {}).get("excluded_rooms", []))
@@ -638,6 +700,11 @@ class EnergyAdapter:
         excluded: set[str],
         troubled: set[str],
     ) -> None:
+        """Turn off each gang switch's non-keepers, once all its channels are on.
+
+        Low thins three-gang switches only; Medium and Smart thin two- and
+        three-gang switches.
+        """
         keepers_by_group = config["gang_keepers"]
         for group in inventory.gangs:
             count = len(group.entity_ids)
@@ -672,6 +739,7 @@ class EnergyAdapter:
         excluded: set[str],
         troubled: set[str],
     ) -> None:
+        """Turn off the chosen plugs and the heaters marked ``turn_off``."""
         entity_ids = list(config["plug_offs"]) + [
             item["entity_id"] for item in config["heaters"] if item["turn_off"]
         ]
@@ -696,6 +764,14 @@ class EnergyAdapter:
         room: RoomInventory,
         config: dict[str, Any],
     ) -> None:
+        """ACs under the static rules (every room in Low and Medium, rooms
+        without both Smart sensors in Smart).
+
+        Smart turns off every AC that is not a keeper. Medium keeps one AC
+        of several, switches off an AC the room temperature makes pointless,
+        and sets the rest to the floor/ceiling with a low fan. Low only pulls
+        a target colder than the floor (or warmer than the ceiling) back.
+        """
         if level == LEVEL_SMART:
             picks = config["ac_keepers"].get(room.room_id)
             if picks is None:
@@ -778,6 +854,7 @@ class EnergyAdapter:
         room: RoomInventory,
         config: dict[str, Any],
     ) -> None:
+        """Turn off non-keeper lights and dim keepers to the level's cap."""
         if len(room.lights) <= 1:
             return
         picks = config["light_keepers"].get(room.room_id)
@@ -810,6 +887,7 @@ class EnergyAdapter:
                 await self._turn_on_light(entity.entity_id, cap)
 
     async def _apply_static_covers(self, level: str, room: RoomInventory) -> None:
+        """Medium and Smart close covers during the heat window."""
         if level == LEVEL_LOW or not self._sun_context().heat_window:
             return
         for entity in room.covers:
@@ -819,6 +897,7 @@ class EnergyAdapter:
     # -- Smart occupancy ---------------------------------------------------
 
     async def _initialize_smart_room(self, room: RoomInventory) -> None:
+        """Start a Smart room: welcome it if occupied, else start the grace."""
         if not room.sensors_available or room.room_temperature is None:
             await self._set_occupancy(room.room_id, None, sensors_available=False)
             return
@@ -829,6 +908,7 @@ class EnergyAdapter:
             self._schedule_empty(room.room_id)
 
     async def _async_presence_changed(self, room_id: str) -> None:
+        """Smart presence edge: welcome at once; an empty room waits the grace."""
         if self._engine.active_level != LEVEL_SMART:
             return
         if room_id in await self._excluded_rooms(LEVEL_SMART):
@@ -859,6 +939,7 @@ class EnergyAdapter:
 
     @callback
     def _schedule_empty(self, room_id: str) -> None:
+        """Start the room's empty grace unless it is already running."""
         if room_id in self._empty_timers:
             return
 
@@ -872,6 +953,7 @@ class EnergyAdapter:
         )
 
     async def _finish_empty(self, room_id: str) -> None:
+        """End of the grace: if the room is still empty, shut it down."""
         if self._engine.active_level != LEVEL_SMART:
             return
         if room_id in await self._excluded_rooms(LEVEL_SMART):
@@ -896,6 +978,9 @@ class EnergyAdapter:
         await self._apply_energy_posture(room)
 
     async def _apply_energy_posture(self, room: RoomInventory) -> None:
+        """Empty Smart room: ACs, lights and its plugs off; covers closed in
+        the heat window. Releases are overridden — the room is empty.
+        """
         config = self._config or {}
         for entity in room.climates:
             if entity.available and entity.state != "off":
@@ -925,6 +1010,9 @@ class EnergyAdapter:
         )
 
     async def _apply_comfort_posture(self, room: RoomInventory) -> None:
+        """Occupied Smart room: climate for comfort, welcome lights at night,
+        covers open by day and closed at night.
+        """
         temperature = room.room_temperature
         if temperature is None:
             return
@@ -952,6 +1040,9 @@ class EnergyAdapter:
         )
 
     def _automatic_light_keepers(self, room: RoomInventory) -> list[str]:
+        """The welcome lights: the configured keepers when still valid, else
+        the first half of the room's lights, dimmable ones first.
+        """
         configured = (self._config or {}).get("light_keepers", {}).get(room.room_id)
         candidates = {entity.entity_id for entity in room.lights}
         expected = math.ceil(len(room.lights) / 2)
@@ -973,6 +1064,10 @@ class EnergyAdapter:
     async def _apply_smart_climate(
         self, room: RoomInventory, temperature: float
     ) -> None:
+        """Per AC: off when the room needs none, boost when far off, else settle.
+
+        Released ACs are left alone. Boosted ACs get a failsafe timer.
+        """
         self._cancel_boost(room.room_id)
         boosts: set[str] = set()
         boost_mode: str | None = None
@@ -1019,12 +1114,15 @@ class EnergyAdapter:
             self._start_boost(room.room_id, boost_mode, boosts)
 
     async def _settle_entity(self, entity: EnergyEntity, mode: str) -> None:
+        """Hold an AC at the floor (cool) or ceiling (heat) with a low fan."""
         target = HEAT_CEILING if mode == "heat" else COOL_FLOOR
         await self._set_temperature(entity.entity_id, target, hvac_mode=mode)
         await self._set_fan(entity, "low")
 
     @callback
     def _start_boost(self, room_id: str, mode: str, entity_ids: set[str]) -> None:
+        """Track the room's boost and arm its failsafe settle."""
+
         @callback
         def _expired(_now: Any) -> None:
             self._boosts.pop(room_id, None)
@@ -1049,6 +1147,11 @@ class EnergyAdapter:
         )
 
     async def _async_temperature_changed(self, room_id: str) -> None:
+        """Temperature edge: Medium's kill guard, or Smart's boost settle.
+
+        A Smart room whose sensors were unavailable is started again here
+        once they read.
+        """
         level = self._engine.active_level
         if level not in {LEVEL_MEDIUM, LEVEL_SMART}:
             return
@@ -1118,6 +1221,7 @@ class EnergyAdapter:
         entity_ids: Iterable[str],
         reason: str,
     ) -> None:
+        """Settle a room's boosted ACs, if it is still occupied."""
         if self._engine.active_level != LEVEL_SMART:
             return
         if room_id in await self._excluded_rooms(LEVEL_SMART):
@@ -1150,6 +1254,7 @@ class EnergyAdapter:
     # -- sun clock ---------------------------------------------------------
 
     def _sun_context(self) -> SunContext:
+        """Read ``sun.sun``; without it, it is night and there is no window."""
         state = (
             self._hass.states.get("sun.sun")
             if hasattr(self._hass.states, "get")
@@ -1183,6 +1288,7 @@ class EnergyAdapter:
 
     @callback
     def _schedule_sun_timer(self) -> None:
+        """Arm the timer for the next heat-window start (Medium and Smart)."""
         if self._cancel_sun_timer is not None:
             self._cancel_sun_timer()
             self._cancel_sun_timer = None
@@ -1203,6 +1309,7 @@ class EnergyAdapter:
         self._hass.async_create_task(self._async_heat_window_start())
 
     async def _async_heat_window_start(self) -> None:
+        """Close covers as the heat window opens, except in occupied Smart rooms."""
         level = self._engine.active_level
         if level not in {LEVEL_MEDIUM, LEVEL_SMART}:
             return
@@ -1222,6 +1329,7 @@ class EnergyAdapter:
         self._schedule_sun_timer()
 
     async def _async_sun_changed(self) -> None:
+        """Sunrise/sunset: re-arm the timer; occupied Smart rooms follow the sun."""
         level = self._engine.active_level
         if level not in {LEVEL_MEDIUM, LEVEL_SMART}:
             return
@@ -1249,6 +1357,13 @@ class EnergyAdapter:
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
+        """Route every HA state change.
+
+        The sun and room sensors drive the dynamic rules. Any other change
+        to a managed device that is not the echo of our own command, and
+        is not a change to or from unavailable, is a person taking the
+        device back: it is released.
+        """
         entity_id = event.data.get("entity_id")
         if not isinstance(entity_id, str):
             return
@@ -1283,6 +1398,7 @@ class EnergyAdapter:
         self._hass.async_create_task(self._mark_released(entity_id))
 
     async def _mark_released(self, entity_id: str) -> None:
+        """Release a device and drop it from any boost it was part of."""
         room_id = self._entity_rooms.get(entity_id)
         changed = await self._hass.async_add_executor_job(
             lambda: self._engine.mark_released(
@@ -1297,6 +1413,7 @@ class EnergyAdapter:
                     self._cancel_boost(room_id)
 
     def _note_own_command(self, entity_id: str) -> None:
+        """Open the device's echo window before commanding it."""
         self._prune_own_commands()
         grace = (
             COVER_COMMAND_GRACE_SECONDS
@@ -1306,6 +1423,11 @@ class EnergyAdapter:
         self._own_commands[entity_id] = self._monotonic_clock() + grace
 
     def _consume_own_command(self, entity_id: str) -> bool:
+        """True while the device is inside the echo window of our command.
+
+        Every change inside the window counts as the echo: one command can
+        produce several state changes.
+        """
         self._prune_own_commands()
         return entity_id in self._own_commands
 
@@ -1325,6 +1447,12 @@ class EnergyAdapter:
         *,
         honor_release: bool = True,
     ) -> bool:
+        """Call one HA service on one device; True when it succeeded.
+
+        A released device is skipped unless ``honor_release`` is False. A
+        failure is counted, reported as an issue and recorded, never raised,
+        so one bad device never stops the rest of the home.
+        """
         if self._engine.active_level is None:
             # A rule that was part-way through when Energy Saving stopped
             # sends nothing more.
@@ -1393,6 +1521,7 @@ class EnergyAdapter:
         *,
         hvac_mode: str | None = None,
     ) -> bool:
+        """Set a target; ``hvac_mode`` is sent only to an AC that is off."""
         data: dict[str, Any] = {"temperature": temperature}
         current = self._inventory.entities.get(entity_id) if self._inventory else None
         if hvac_mode is not None and (current is None or current.state == "off"):
@@ -1400,6 +1529,7 @@ class EnergyAdapter:
         return await self._command(entity_id, "set_temperature", data)
 
     async def _set_fan(self, entity: EnergyEntity, desired: str) -> bool:
+        """Set the AC's own name for a "low" or "max" fan, if it has one."""
         modes = [str(mode) for mode in (entity.attributes.get("fan_modes") or [])]
         selected = self._fan_mode(modes, desired)
         if selected is None:
@@ -1439,11 +1569,13 @@ class EnergyAdapter:
 
     @staticmethod
     def _climate_mode(entity: EnergyEntity) -> str:
+        """Heat and heat_cool count as "heat"; any other mode as cooling."""
         mode = str(entity.attributes.get("hvac_mode") or entity.state).lower()
         return "heat" if mode.startswith("heat") else "cool"
 
     @staticmethod
     def _temperature_kills(mode: str, room_temperature: float | None) -> bool:
+        """True when the room is already past the point this AC is for."""
         if room_temperature is None:
             return False
         return (mode == "heat" and room_temperature > HEAT_KILL_ABOVE) or (
@@ -1453,6 +1585,7 @@ class EnergyAdapter:
     # -- helpers -----------------------------------------------------------
 
     async def _refresh_inventory(self) -> EnergyInventory:
+        """Rebuild the inventory for a dynamic rule, keeping the applied config."""
         inventory = await self._builder.async_build()
         if self._config is not None:
             self._set_context(inventory, self._config)
@@ -1521,6 +1654,7 @@ class EnergyAdapter:
         entity_id: str | None,
         message: str,
     ) -> None:
+        """Record a fail-safe warning once per (room, code, entity)."""
         key = (room_id, code, entity_id)
         if key in self._issues:
             return
