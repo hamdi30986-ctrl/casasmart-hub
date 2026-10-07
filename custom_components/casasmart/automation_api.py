@@ -176,6 +176,20 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             )
         return data, None
 
+    async def _save(self, data: list[dict[str, Any]]) -> web.Response | None:
+        """Write automations.yaml off the event loop; a failed write is a 500."""
+        try:
+            await self._hass.async_add_executor_job(
+                _write_yaml, self._config_path, data
+            )
+        except (OSError, HomeAssistantError) as err:
+            # HA's atomic writer wraps every OSError in WriteError.
+            _LOGGER.error("automations.yaml write failed: %s", err)
+            return self.json_message(
+                "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
+            )
+        return None
+
     async def get(self, request: web.Request, config_key: str) -> web.Response:
         """One automation's stored config (the editor's lazy load)."""
         _, error = self._gate(request)
@@ -243,16 +257,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
             if load_error is not None:
                 return load_error
             upsert_automation(data, config_key, payload)
-            try:
-                await self._hass.async_add_executor_job(
-                    _write_yaml, self._config_path, data
-                )
-            except (OSError, HomeAssistantError) as err:
-                # HA's atomic writer wraps every OSError in WriteError.
-                _LOGGER.error("automations.yaml write failed: %s", err)
-                return self.json_message(
-                    "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
-                )
+            if (save_error := await self._save(data)) is not None:
+                return save_error
 
         await self._reload(config_key)
         # Report the stored flag, even when this edit did not send one.
@@ -292,16 +298,8 @@ class CasaSmartAutomationConfigView(HomeAssistantView):
                 return self.json_message(
                     f"Automation {config_key!r} not found", HTTPStatus.NOT_FOUND
                 )
-            try:
-                await self._hass.async_add_executor_job(
-                    _write_yaml, self._config_path, data
-                )
-            except (OSError, HomeAssistantError) as err:
-                # HA's atomic writer wraps every OSError in WriteError.
-                _LOGGER.error("automations.yaml write failed: %s", err)
-                return self.json_message(
-                    "Failed to persist automation", HTTPStatus.INTERNAL_SERVER_ERROR
-                )
+            if (save_error := await self._save(data)) is not None:
+                return save_error
 
         # As in HA's config view: no reload. Removing the registry entry
         # (unique_id is the config key) retires the running entity, which
