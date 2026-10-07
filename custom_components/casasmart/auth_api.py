@@ -324,7 +324,7 @@ def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
 class CasaSmartEnrollView(HomeAssistantView):
     """POST /api/casasmart/auth/enroll: pair a device with a pairing code.
 
-    The role and room scope come from the code, never from the request.
+    The code sets the role and room scope; the request can't change them.
     Pairing is LAN-only unless remote_pairing_enabled is on; then member
     codes work from anywhere, but the bootstrap owner claim stays LAN-only
     (pairing.redeem enforces that).
@@ -724,8 +724,8 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
 
     "Remove Hub" in the app calls this, so an owner can hand the hub back
     without the recovery card or a reset. The token proves possession of the
-    device's private key, so any role, the admin included, may remove itself;
-    only the token's subject is unpaired, never a device named in the body.
+    device's private key, so any role, the admin included, may remove itself.
+    Only the token's own device is unpaired; the body can't name another.
     When the last admin leaves, the permanent sticker code is armed again
     from its stored hash, so the owner can claim the hub with the printed code.
     """
