@@ -7,8 +7,9 @@ installs by tag. Earlier tags (v1.8, v2.0, v2.1) omitted the patch digit.
 
 A hardening release for hubs installed by anyone, not just one house. The REST
 API, WebSocket frames, handshake capabilities and storage schema (version 4)
-change only by the stricter input checks below, so the current phone and
-tablet apps keep working. 2.2.0 was never published; everything in it is here.
+change only by the stricter input checks and the few added fields below, so
+the current phone and tablet apps keep working. 2.2.0 was never published;
+everything in it is here.
 
 ### Upgrade notes
 
@@ -28,6 +29,8 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   unchanged.
 - **HQ reminder pushes** are titled "CasaSmart HQ" unless a sender name is set
   (the new `sender_name` field of `casasmart.configure_hq_notifications`).
+- **Services:** `casasmart.factory_reset` and `casasmart.set_tunnel_url` need
+  a Home Assistant admin. Automations can still call them.
 
 ### Added
 
@@ -87,6 +90,20 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   so client-sent `CF-Connecting-IP` or `X-Forwarded-For` headers can't dodge
   it.
 - Pairing-code hashes are compared in constant time everywhere.
+- `casasmart.factory_reset` and `casasmart.set_tunnel_url` are admin-only.
+  Any Home Assistant user could unpair every phone or point the phones at
+  another tunnel.
+- The login throttle counts failures per device and source address. Anyone
+  who knew the owner's device id (a sub-admin can see it) could send a few
+  bad logins and lock the owner out.
+- Camera links stop working when their phone is unpaired, the hub is factory
+  reset, the phone's rooms change or the hub unloads; before, a link kept
+  playing for its full 15 minutes.
+- A WebSocket hears about a removed entity only if it was shown that entity.
+  Every app learned the ids of removed people, device trackers and scripts,
+  and room-scoped members those of entities removed anywhere in the house.
+- Every WebSocket closes when the hub is factory reset or unloaded, so a wiped
+  phone stops receiving live state at once.
 
 #### Pairing and owner recovery
 
@@ -104,6 +121,15 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
 - A pairing request with a bad name or key no longer uses up the code.
 - A pairing or recovery code with non-ASCII characters counts as a wrong code
   instead of causing a server error.
+- Owner recovery and factory reset are all-or-nothing. A disk error or power
+  cut during recovery could leave the hub with no admin and a dead recovery
+  card, and a failed reset left a half-wiped hub that still accepted old
+  tokens.
+- A recovery code minted after the first one was dropped is saved before it
+  is shown, so the engraved card still works after a restart.
+- Hubs the phone finds by scanning the local network show their name. The
+  handshake's `hub_name` goes to local callers only, so the tunnel doesn't
+  reveal it.
 
 #### Alarm and push notifications
 
@@ -120,9 +146,12 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   pushes are still withheld then.
 - Alarm alerts no longer log a misleading "push not yet wired" warning; push
   to phones always worked.
+- The alarm sounds even when storage fails: a failed state or history write
+  stopped the triggered event, the phone push and the entry-delay timer.
 - HQ reminders: a retry arriving on the other port sends one push, not two; a
-  request whose body arrives in more than one piece is no longer rejected; and
-  stored delivery records are capped at 1,000.
+  request whose body arrives in more than one piece is no longer rejected;
+  stored delivery records are capped at 1,000; and the limit of 30 requests a
+  minute per address covers both ports, not each.
 
 #### Energy Saving
 
@@ -137,6 +166,18 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   with nothing to restore them.
 - A rule part-way through when Energy Saving stops sends no further commands,
   and a failed save leaves the live state as it was.
+- Energy Saving no longer holds up setup: the startup re-apply runs in the
+  background, so one slow plug doesn't keep every endpoint at 503. Unloading
+  stops a device pass in progress, so after a reload two passes no longer
+  command the same devices.
+- The lockout's 403 carries `"code": "energy_lockout"` on every control path
+  (device commands, scenes, room activity, suggestions), so the phone can tell
+  it from an expired login. A scene refused because it isn't set to run
+  during Energy Saving gets a message, so the apps show the refusal instead
+  of "Hub is not connected".
+- Activation finishes when an automation's id is too long to flag (that
+  automation is skipped with a warning), and the heat window skips
+  unavailable covers.
 
 #### Rooms, scenes and devices
 
@@ -161,6 +202,18 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   moment no longer overwrite each other.
 - Generated suggestions work with an AC that reports no fan modes, and a
   failed read or write of `automations.yaml` answers with a JSON error.
+- Automations saved from the apps run on Home Assistant 2026: a light's
+  color temperature is stored in kelvin, and read back in mireds for the
+  apps' editor.
+- Automations last saved in Home Assistant's editor open in the apps with
+  their triggers, conditions and actions, instead of empty.
+- An automation id longer than 255 characters is refused with a 400 before
+  `automations.yaml` is touched; it used to be written and then answered 500.
+- Widget layouts with a light-group tile save; every such layout was refused.
+- Thermostats report their setpoint step, so a 0.5-degree unit can be set to
+  its halves.
+- Deleting a room also clears it from user devices assigned to it directly.
+- A malformed stored room policy no longer breaks the Now page.
 
 #### Speakers and athan
 
@@ -214,6 +267,19 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   `device_registry.devices`, which stops working in 2027.9.
 - The macOS TLS relay handles an upstream timeout on the system Python 3.9,
   and judges IPv4-mapped IPv6 peers by their IPv4 address.
+- Reloading or unloading the hub with a phone connected is instant; it took
+  over 80 seconds while the phone's WebSocket held the TLS listener open.
+- A setup that fails part-way stops what it started. Before, the TLS port
+  stayed bound, the database open and the old alarm engine running, so after
+  a reload two alarm engines ran and the stale one could trigger after the
+  owner disarmed. An unusable push-identity key now skips push with a warning
+  instead of failing setup.
+- After an unload, a daily TLS check or mDNS refresh that was already running
+  no longer brings the listener or the mDNS record back.
+- Token checks no longer wait for a pairing, edit or unpair to finish writing
+  to disk, which stalled every request on a slow disk.
+- With a TLS MQTT broker, the audio adapter no longer loads certificates on
+  Home Assistant's event loop.
 
 #### Input checks
 
@@ -225,6 +291,12 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
   tank reading windows.
 - `PUT /now/rooms/{id}/activity` answers 405. It used to change the room's
   activity policy, which belongs to `/activity-policy`.
+- Numbers too large for a float in tank readings and calibration and in
+  athan coordinates, and history timestamps that overflow in UTC, get a 400
+  instead of a server error. Athan coordinates saved earlier no longer break
+  setup.
+- Device names from owner recovery and the developer manifest are capped at
+  the same length as pairing's.
 
 #### Remote access
 
@@ -247,8 +319,8 @@ tablet apps keep working. 2.2.0 was never published; everything in it is here.
 - The comments and docstrings removed by the 1.7.0 sanitize are back wherever
   the code is provably unchanged (AST-checked), rewritten to be short and
   without internal plan references.
-- The original test suite is back: about 1,600 tests, some 230 of which need
-  a real Home Assistant. Test data no longer contains anyone's network, names
+- The original test suite is back: 1,673 tests, 266 of which need a real
+  Home Assistant. Test data no longer contains anyone's network, names
   or devices.
 - Dead code removed, ruff formatting applied, and CI added (ruff, pytest with
   and without Home Assistant, hassfest, HACS validation, tag/manifest check),
