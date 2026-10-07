@@ -24,8 +24,9 @@ What it does:
   fire must hop to the loop thread).
 - Provides ``publish`` for the REST API (``audio_api``) and the athan
   scheduler to send the topic+payload the engine's ``build_command`` /
-  ``build_play`` produced, and ``async_discover`` to provoke a fresh round of
-  announces (publishes ``speakers/ping``).
+  ``build_play`` produced (refused, not queued, while the broker is
+  unreachable), and ``async_discover`` to provoke a fresh round of announces
+  (publishes ``speakers/ping``).
 - Re-publishes the stored athan config, retained, on every connect.
 
 Discovery runs over MQTT, not an HTTP subnet sweep: the speaker agent has no
@@ -80,11 +81,12 @@ _RECONNECT_MAX_DELAY = 60
 
 
 class AudioAdapterNotReady(RuntimeError):
-    """Raised when a publish is attempted while the MQTT client isn't running.
+    """Raised when a publish is attempted while the speaker bus is unusable.
 
-    That is: no broker configured yet, a start that failed, or after stop.
-    The REST API maps this to a 503 — the control was rejected, not silently
-    dropped, so the app can tell the user the speaker bus is unreachable.
+    That is: no broker configured yet, a start that failed, after stop, or a
+    running client that isn't connected to the broker. The REST API maps
+    this to a 503 — the control was rejected, not silently dropped or queued,
+    so the app can tell the user the speaker bus is unreachable.
     """
 
 
@@ -302,7 +304,24 @@ class AudioAdapter:
         """Fire EVENT_AUDIO_CHANGED on the loop thread (we're on paho's)."""
         self._hass.loop.call_soon_threadsafe(self._fire_changed)
 
-    # -- outbound (used by the REST API) ---------------------------------------
+    # -- outbound (used by the REST API and the athan scheduler) --------------
+
+    def _connected_client(self) -> Any:
+        """The client, if it is running and connected to the broker.
+
+        Raises ``AudioAdapterNotReady`` otherwise. While the broker link is
+        down paho would accept a QoS 1 publish and send it after the
+        reconnect, possibly minutes later: a late play or volume change is
+        worse than a refused one, so nothing is handed to paho then.
+        """
+        client = self._client
+        if not self._started or client is None:
+            raise AudioAdapterNotReady("Audio MQTT client is not connected")
+        if not client.is_connected():
+            raise AudioAdapterNotReady(
+                "Speaker bus unavailable: the hub can't reach the MQTT broker"
+            )
+        return client
 
     def publish(
         self, topic: str, payload: Any, *, qos: int = 1, retain: bool = False
@@ -310,16 +329,15 @@ class AudioAdapter:
         """Publish a command/PA/athan message the engine built.
 
         ``payload`` may be a dict (JSON-encoded) or a raw string. Raises
-        ``AudioAdapterNotReady`` when the client isn't running, so the API can
-        answer 503 instead of silently dropping a control the user thinks went
-        through. While the client runs but the broker link is down, paho takes
-        the message: QoS 1 is queued and sent after the reconnect, QoS 0 is
-        dropped.
+        ``AudioAdapterNotReady`` when the client isn't running or isn't
+        connected to the broker, so the API answers 503 instead of a control
+        the user thinks went through being dropped or delivered late. (A link
+        that drops in the instant between that check and the send is still
+        paho's to retry.)
         """
-        if not self._started or self._client is None:
-            raise AudioAdapterNotReady("Audio MQTT client is not connected")
+        client = self._connected_client()
         body = json.dumps(payload) if not isinstance(payload, (str, bytes)) else payload
-        self._client.publish(topic, body, qos=qos, retain=retain)
+        client.publish(topic, body, qos=qos, retain=retain)
 
     def clear_speaker_retained(self, mac6: str) -> None:
         """Wipe a removed speaker's retained ``status``/``state`` topics.
@@ -327,13 +345,13 @@ class AudioAdapter:
         Publishing an empty retained payload tells the broker to drop the
         retained message, so a deleted speaker can't resurrect as a discovery
         ghost the next time the hub reconnects and the broker replays retained
-        state. Raises ``AudioAdapterNotReady`` if the client isn't running —
-        the DELETE handler treats that as a non-fatal best-effort cleanup.
+        state. Raises ``AudioAdapterNotReady`` if the client isn't running or
+        connected — the DELETE handler treats that as a non-fatal best-effort
+        cleanup.
         """
-        if not self._started or self._client is None:
-            raise AudioAdapterNotReady("Audio MQTT client is not connected")
+        client = self._connected_client()
         for topic in (speaker_status_topic(mac6), speaker_state_topic(mac6)):
-            self._client.publish(topic, "", qos=1, retain=True)
+            client.publish(topic, "", qos=1, retain=True)
 
     async def async_discover(self) -> list[dict[str, Any]]:
         """Provoke a fresh announce round and return un-enrolled speakers.
