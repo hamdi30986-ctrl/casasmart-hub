@@ -1,8 +1,9 @@
-"""JsonConfigStore — JSON file for rarely-changed hub config.
+"""JsonConfigStore — JSON file for rarely changed hub config.
 
-Holds the small, near-static stuff: hub identity, network settings, version
-pin. Multi-user / frequently-written data belongs in HubStorage (SQLite),
-not here.
+Holds the small, near-static settings and secrets in ``hub_config.json``: hub
+identity, pairing and recovery code hashes, network and relay settings (the
+README's "Hub settings"). Per-user or frequently written data belongs in
+HubStorage (SQLite), not here.
 
 Writes are atomic: serialize to a temp file in the same directory, fsync,
 then ``os.replace`` over the target — a crash mid-write can never leave a
@@ -40,6 +41,7 @@ class JsonConfigStore:
         self._data: dict[str, Any] = self._load()
 
     def _load(self) -> dict[str, Any]:
+        """Read the file; a missing file is an empty config, a bad one an error."""
         if not self._path.exists():
             _LOGGER.info("Config file %s missing — starting empty", self._path)
             return {}
@@ -58,6 +60,7 @@ class JsonConfigStore:
     # -- access ----------------------------------------------------------------
 
     def get(self, key: str, default: Any = None) -> Any:
+        """The stored value, or ``default`` when the key is unset."""
         with self._lock:
             return self._data.get(key, default)
 
@@ -70,6 +73,7 @@ class JsonConfigStore:
             self._data = candidate
 
     def delete(self, key: str) -> None:
+        """Remove a key and persist; a no-op (no write) when it is unset."""
         with self._lock:
             candidate = dict(self._data)
             if candidate.pop(key, _MISSING) is not _MISSING:
@@ -92,6 +96,7 @@ class JsonConfigStore:
     # -- persistence -------------------------------------------------------------
 
     def _save(self, data: dict[str, Any]) -> None:
+        """Atomically replace the file with ``data``; ConfigError on failure."""
         try:
             payload = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError) as err:

@@ -10,7 +10,11 @@ class StorageError(Exception):
 
 
 class MigrationError(StorageError):
-    """A schema migration failed. The database has been restored from backup."""
+    """A schema migration was refused or failed.
+
+    Refused when the database is newer than this code. When a step fails, the
+    database has already been restored from the backup taken before the run.
+    """
 
 
 class ConfigError(StorageError):
