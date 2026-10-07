@@ -53,6 +53,14 @@ _BACKDATE = timedelta(hours=1)
 TLS_LISTENER_TRUSTED_LAN = web.AppKey("casasmart_tls_listener_trusted_lan", bool)
 
 
+def _spki_der(public_key: ec.EllipticCurvePublicKey) -> bytes:
+    """The public key as DER SubjectPublicKeyInfo."""
+    return public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
 class IdentityError(Exception):
     """The permanent identity key is unusable; it is never replaced automatically."""
 
@@ -67,10 +75,7 @@ class TlsIdentitySigner:
 
     def __init__(self, private_key: ec.EllipticCurvePrivateKey) -> None:
         self._private_key = private_key
-        self._public_spki_der = private_key.public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
+        self._public_spki_der = _spki_der(private_key.public_key())
 
     @property
     def public_spki_der(self) -> bytes:
@@ -161,12 +166,8 @@ def _identity_public_pem(key: ec.EllipticCurvePrivateKey) -> str:
 
 def _identity_fingerprint(key: ec.EllipticCurvePrivateKey) -> str:
     """SHA-256 hex of the identity public key's SPKI DER: the pinned value."""
-    spki = key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
     digest = hashes.Hash(hashes.SHA256())
-    digest.update(spki)
+    digest.update(_spki_der(key.public_key()))
     return digest.finalize().hex()
 
 
@@ -196,13 +197,7 @@ def _leaf_is_valid(
         cert_pub, ec.EllipticCurvePublicKey
     ):
         return None
-    if leaf_key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ) != cert_pub.public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ):
+    if _spki_der(leaf_key.public_key()) != _spki_der(cert_pub):
         return None
 
     try:
