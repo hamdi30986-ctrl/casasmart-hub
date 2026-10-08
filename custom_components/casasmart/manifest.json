@@ -11,5 +11,5 @@
   "issue_tracker": "https://github.com/hamdi30986-ctrl/casasmart-hub/issues",
   "requirements": ["paho-mqtt>=1.6.1", "prayer-times-calculator-offline>=1.0.3,<2"],
   "single_config_entry": true,
-  "version": "2.1.0"
+  "version": "2.3.0"
 }
