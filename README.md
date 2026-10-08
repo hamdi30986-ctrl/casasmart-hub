@@ -1,13 +1,14 @@
 # CasaSmart Hub
 
-A Home Assistant integration that turns a Home Assistant installation into a
-CasaSmart hub, the home server behind the CasaSmart phone and tablet apps. It
-adds:
+CasaSmart Hub is the home server behind the CasaSmart phone and tablet apps.
+It runs on Home Assistant, installed through HACS, and also works with devices
+directly: it sets up Shelly water-tank sensors by scripting them, and drives
+speakers and the athan over MQTT. It adds:
 
 - secure pairing for each person's phone;
 - rooms, favorites and scenes;
 - a security alarm that runs on the hub;
-- water-tank monitoring;
+- water-tank monitoring with Shelly sensors;
 - speaker announcements and prayer-time athan;
 - Energy Saving;
 - push notifications through the CasaSmart relay;
