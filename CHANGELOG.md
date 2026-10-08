@@ -3,7 +3,7 @@
 Release tags are `vX.Y.Z` and always equal `manifest.json`'s `version`; HACS
 installs by tag. Earlier tags (v1.8, v2.0, v2.1) omitted the patch digit.
 
-## [2.3.0] - Unreleased
+## [2.3.0] - 2026-10-08
 
 A hardening release for hubs installed by anyone, not just one house. The REST
 API, WebSocket frames, handshake capabilities and storage schema (version 4)
