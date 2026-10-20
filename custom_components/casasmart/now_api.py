@@ -130,6 +130,13 @@ class _NowView(HomeAssistantView):
         _LOGGER.error("Now storage failure: %s", err)
         return self.json_message("Storage failure", HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _device_class(self, entity_id: str, state: Any) -> Any:
+        """The integration's own device class, else the one in the state."""
+        entry = er.async_get(self._hass).async_get(entity_id)
+        if entry is not None and entry.original_device_class:
+            return entry.original_device_class
+        return state.attributes.get("device_class")
+
 
 class CasaSmartNowView(_NowView):
     """Return the server-computed, user-scoped Now snapshot."""
@@ -157,17 +164,27 @@ class CasaSmartNowView(_NowView):
         def read_stores() -> tuple:
             recents = now_data.recents_for(member_id)
             config = now_data.config()
+            contacts_picked = now_data.contacts_picked()
             rooms = registry.list_rooms()
             scenes = registry.list_scenes()
             favorites = registry.get_favorites(member_id)
             policies = {
                 room["room_id"]: now_data.room_policy(room["room_id"]) for room in rooms
             }
-            return recents, config, rooms, scenes, favorites, policies
+            return (
+                recents,
+                config,
+                contacts_picked,
+                rooms,
+                scenes,
+                favorites,
+                policies,
+            )
 
         (
             recents,
             config,
+            contacts_picked,
             rooms,
             scenes,
             favorites,
@@ -256,7 +273,14 @@ class CasaSmartNowView(_NowView):
 
         weather = self._weather_payload(config.get("outdoor_weather_entity_id"))
         air_quality = self._air_quality_payload(config.get("air_quality_entity_id"))
-        contacts = self._contacts_payload(config.get("contact_entity_ids") or [], scope)
+        # Until an admin saves a list, every door/window sensor counts, as in
+        # Apple Home; a home without a tablet never gets a picker.
+        contacts = self._contacts_payload(
+            config.get("contact_entity_ids") or []
+            if contacts_picked
+            else self._auto_contact_ids(scope),
+            scope,
+        )
         suggestions = getattr(loaded_runtime_data(self._hass), "suggestions", None)
         generated = getattr(suggestions, "generated", None)
         if generated is not None:
@@ -363,6 +387,16 @@ class CasaSmartNowView(_NowView):
             "value": state.state,
             "unit": state.attributes.get("unit_of_measurement"),
         }
+
+    def _auto_contact_ids(self, scope: list[str] | None) -> list[str]:
+        """Every door/window/opening sensor the caller can see, sorted."""
+        return sorted(
+            state.entity_id
+            for state in self._hass.states.async_all("binary_sensor")
+            if self._device_class(state.entity_id, state) in _CONTACT_DEVICE_CLASSES
+            and is_served(self._hass, state.entity_id)
+            and in_scope(self._hass, state.entity_id, scope)
+        )
 
     def _contacts_payload(
         self, entity_ids: list[str], scope: list[str] | None
@@ -514,13 +548,6 @@ class CasaSmartNowConfigView(_NowView):
         if not entity_id.startswith("binary_sensor."):
             return False
         return self._device_class(entity_id, state) in _CONTACT_DEVICE_CLASSES
-
-    def _device_class(self, entity_id: str, state: Any) -> Any:
-        """The integration's own device class, else the one in the state."""
-        entry = er.async_get(self._hass).async_get(entity_id)
-        if entry is not None and entry.original_device_class:
-            return entry.original_device_class
-        return state.attributes.get("device_class")
 
 
 class CasaSmartRoomActivityPolicyView(_NowView):

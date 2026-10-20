@@ -158,6 +158,8 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.registry.get_favorites = lambda member: []
         self.data.now_data = old._NOW.NowDataEngine({}, {}, {}, {}, {})
         self.data.now_data.configure({"suggested_scene_id": "scene-night"})
+        # No contact list saved, so the snapshot lists the door/window sensors.
+        self.states.async_all = lambda domain=None: []
         now_view = old._API.CasaSmartNowView(self.hass)
         with patch.object(old._API, "authenticate_request", API.authenticate_request):
             configured = await now_view.get(self.request())

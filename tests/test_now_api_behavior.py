@@ -133,8 +133,12 @@ class _States:
     def __init__(self, values: list[_State]) -> None:
         self._values = {value.entity_id: value for value in values}
 
-    def async_all(self):
-        return list(self._values.values())
+    def async_all(self, domain=None):
+        return [
+            value
+            for value in self._values.values()
+            if domain is None or value.entity_id.startswith(f"{domain}.")
+        ]
 
     def get(self, entity_id):
         return self._values.get(entity_id)
@@ -225,6 +229,51 @@ class NowBulkBehaviorTest(unittest.TestCase):
                 self.assertEqual(payload["status"], "unknown")
                 self.assertEqual(payload["open_count"], 0)
                 self.assertEqual(payload["unknown_count"], 1)
+
+    def test_doors_default_to_every_contact_sensor_until_a_list_is_saved(
+        self,
+    ) -> None:
+        states = [
+            _State("binary_sensor.front_door", "on", "hall"),
+            _State("binary_sensor.bedroom_window", "off", "bedroom"),
+            _State("binary_sensor.hall_motion", "off", "hall"),
+            _State("lock.gate", "locked", "outdoor"),
+        ]
+        classes = {
+            "binary_sensor.front_door": "door",
+            "binary_sensor.bedroom_window": "window",
+            "binary_sensor.hall_motion": "motion",
+            "lock.gate": "door",
+        }
+        for state in states:
+            state.attributes["device_class"] = classes[state.entity_id]
+        hass = _Hass(_States(states))
+        view = _API.CasaSmartNowView(hass)
+        registry = SimpleNamespace(async_get=lambda entity_id: None)
+
+        with patch.object(_API.er, "async_get", lambda hass: registry):
+            auto = view._auto_contact_ids(None)
+            with patch.object(
+                _API,
+                "in_scope",
+                lambda hass, entity_id, scope: entity_id == "binary_sensor.front_door",
+            ):
+                scoped = view._auto_contact_ids(["hall"])
+
+        self.assertEqual(
+            auto, ["binary_sensor.bedroom_window", "binary_sensor.front_door"]
+        )
+        self.assertEqual(scoped, ["binary_sensor.front_door"])
+        payload = view._contacts_payload(auto, None)
+        self.assertEqual(payload["status"], "open")
+        self.assertEqual(payload["configured_count"], 2)
+
+        engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.assertFalse(engine.contacts_picked())
+        engine.configure({"outdoor_weather_entity_id": None})
+        self.assertFalse(engine.contacts_picked())
+        engine.configure({"contact_entity_ids": []})
+        self.assertTrue(engine.contacts_picked())
 
     def test_off_captures_only_confirmed_changes_and_on_restores_once(self) -> None:
         states = _States(

@@ -296,6 +296,10 @@ class NowDataEngine:
             self._config["global"] = record
         return self.config()
 
+    def contacts_picked(self) -> bool:
+        """True once a contact list was saved, even an empty one."""
+        return "contact_entity_ids" in (self._config.get("global") or {})
+
     def config(self) -> dict[str, Any]:
         """The Now config, with every field present."""
         raw = self._config.get("global") or {}
