@@ -2,6 +2,9 @@
 
 What changed in each version of CasaSmart Hub.
 
+## [2.3.1] - 2026-10-21
+- The phone's Doors pill now counts all door and window sensors until you pick a list.
+
 ## [2.3.0] - 2026-10-08
 
 A reliability and security update. Your phones stay paired and the apps keep
