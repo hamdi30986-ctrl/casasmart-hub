@@ -30,10 +30,17 @@ from .auth_api import (
     ready_or_503,
 )
 from .auth_engine import AuthEngine
-from .const import DOMAIN, EVENT_REGISTRY_CHANGED
+from .const import DOMAIN, EVENT_AUTH_CHANGED, EVENT_REGISTRY_CHANGED
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .entity_bridge import CommandError, validate_command
-from .filtering import area_id_of, ha_area_id_of, in_scope, is_assignable, is_served
+from .filtering import (
+    area_id_of,
+    ha_area_id_of,
+    in_scope,
+    is_assignable,
+    is_served,
+    visible_to,
+)
 from .registry import (
     IDEMPOTENCY_KEY,
     MAX_DEVICE_ENTITIES,
@@ -298,7 +305,8 @@ class CasaSmartRegistryView(_RegistryView):
     Floors, rooms, room tags, scenes and user devices, plus one entry per
     served entity with its resolved room and display name. A room-scoped
     caller gets only its rooms, the floors and tags they use, and the scenes
-    and user devices whose entities are all in scope.
+    and user devices whose entities are all in scope. Cameras also follow the
+    caller's camera access.
     """
 
     url = f"/api/{DOMAIN}/registry"
@@ -361,7 +369,8 @@ class CasaSmartRegistryView(_RegistryView):
             entity_id = state.entity_id
             if not is_served(self._hass, entity_id):
                 continue
-            if not in_scope(self._hass, entity_id, scope):
+            # The room scope, and for a camera the caller's camera access.
+            if not visible_to(self._hass, entity_id, claims):
                 continue
             record = assignments.get(entity_id, {})
             room_id = area_id_of(self._hass, entity_id)
@@ -569,17 +578,44 @@ class CasaSmartRoomView(_RegistryView):
             and ha_area_id_of(self._hass, state.entity_id) == room_id
         ]
 
-        def _delete() -> int:
+        runtime = loaded_runtime_data(self._hass)
+        auth = getattr(runtime, "auth", None)
+
+        def _delete() -> tuple[int, list[dict[str, Any]]]:
             unassigned = registry.delete_room(room_id)
             for entity_id in ha_orphans:
                 registry.assign_device(entity_id, room_id=None)
-            return unassigned + len(ha_orphans)
+            # The room's id leaves every member's scope with it; a member whose
+            # scope ends up empty is reported so the admin can fix it.
+            changed = []
+            if auth is not None:
+                known = {room["room_id"] for room in registry.list_rooms()}
+                changed = auth.prune_rooms(known)
+            return unassigned + len(ha_orphans), changed
 
-        unassigned, failed = await self._call(_delete)
+        result, failed = await self._call(_delete)
         if failed is not None:
             return failed
+        unassigned, changed = result
+        if changed:
+            # The per-user sensors show each device's rooms.
+            self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
         self._notify_change("rooms")
-        return self.json({"deleted": room_id, "devices_unassigned": unassigned})
+        return self.json(
+            {
+                "deleted": room_id,
+                "devices_unassigned": unassigned,
+                "members_without_rooms": [
+                    {
+                        "device_id": device["device_id"],
+                        "name": device.get("name"),
+                        "member_id": device.get("member_id"),
+                    }
+                    for device in changed
+                    if not device.get("rooms")
+                ],
+            }
+        )
 
 
 class CasaSmartRoomTagsView(_RegistryView):
@@ -1132,7 +1168,6 @@ class CasaSmartFavoritesView(_RegistryView):
         registry, not_ready = self._registry_or_503()
         if not_ready is not None:
             return not_ready
-        scope = claims.get("rooms")
         try:
             member_id = await async_member_id(self._hass, claims)
             stored = await self._hass.async_add_executor_job(
@@ -1147,7 +1182,7 @@ class CasaSmartFavoritesView(_RegistryView):
             for eid in stored
             if self._hass.states.get(eid) is not None
             and is_served(self._hass, eid)
-            and in_scope(self._hass, eid, scope)
+            and visible_to(self._hass, eid, claims)
         ]
         return self.json({"entity_ids": favorites})
 
@@ -1167,13 +1202,12 @@ class CasaSmartFavoritesView(_RegistryView):
             return self.json_message(
                 "entity_ids must be a list", HTTPStatus.BAD_REQUEST
             )
-        scope = claims.get("rooms")
         for entity_id in entity_ids:
             if (
                 not isinstance(entity_id, str)
                 or self._hass.states.get(entity_id) is None
                 or not is_served(self._hass, entity_id)
-                or not in_scope(self._hass, entity_id, scope)
+                or not visible_to(self._hass, entity_id, claims)
             ):
                 return self.json_message(
                     f"Unknown device {entity_id!r}", HTTPStatus.BAD_REQUEST
@@ -1185,16 +1219,20 @@ class CasaSmartFavoritesView(_RegistryView):
             )
         except (StorageError, sqlite3.Error) as err:
             return self._storage_failure(err)
-        # A scoped caller only sees its rooms' favorites, so keep the others,
-        # after its new list.
-        out_of_scope = [eid for eid in stored if not in_scope(self._hass, eid, scope)]
+        # A scoped caller only sees the favorites it may see, so keep the
+        # others, after its new list.
+        hidden = [eid for eid in stored if not visible_to(self._hass, eid, claims)]
         saved, failed = await self._call(
-            registry.set_favorites, member_id, entity_ids + out_of_scope
+            registry.set_favorites, member_id, entity_ids + hidden
         )
         if failed is not None:
             return failed
         # The member's other phones re-fetch favorites on registry_changed.
         self._notify_change("favorites")
         return self.json(
-            {"entity_ids": [eid for eid in saved if in_scope(self._hass, eid, scope)]}
+            {
+                "entity_ids": [
+                    eid for eid in saved if visible_to(self._hass, eid, claims)
+                ]
+            }
         )

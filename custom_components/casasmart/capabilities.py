@@ -25,6 +25,9 @@ ORBIT_CAPABILITIES: Final = (
     "contextual_suggestions_v1",
     "generated_room_suggestions_v1",
     "push_relay_optional_v1",
+    # Per-member camera access (none / rooms / all) on users, pairing codes
+    # and every camera path; room ids are validated and pruned on delete.
+    "member_camera_access_v1",
 )
 
 # Features whose server-side enforcement is complete. admin_password_v1 and
@@ -36,6 +39,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
         "atomic_room_move_v1",
         "contextual_suggestions_v1",
         "generated_room_suggestions_v1",
+        "member_camera_access_v1",
     }
 )
 

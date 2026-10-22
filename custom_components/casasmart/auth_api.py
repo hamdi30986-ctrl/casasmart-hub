@@ -30,7 +30,7 @@ from .auth_engine import (
     UnknownDeviceError,
     UserManagementError,
 )
-from .auth_tokens import ROLE_ADMIN, TokenError
+from .auth_tokens import ROLE_ADMIN, VALID_CAMERA_ACCESS, TokenError
 from .const import (
     BOOTSTRAP_CODE_HASH_CONFIG_KEY,
     CONF_TUNNEL_ENABLED,
@@ -113,6 +113,42 @@ def get_recovery(hass: HomeAssistant) -> RecoveryManager | None:
     """The loaded entry's recovery manager, or None when not set up."""
     runtime_data = loaded_runtime_data(hass)
     return runtime_data.recovery if runtime_data is not None else None
+
+
+def _known_room_ids(hass: HomeAssistant) -> set[str] | None:
+    """The ids of the rooms in the registry, or None when it isn't loaded.
+
+    Blocking (a registry read): call it in the executor.
+    """
+    runtime_data = loaded_runtime_data(hass)
+    registry = getattr(runtime_data, "registry", None)
+    if registry is None:
+        return None
+    return {room["room_id"] for room in registry.list_rooms()}
+
+
+def _unknown_rooms(rooms: Any, known: set[str] | None) -> list[str]:
+    """The room ids in a scope that don't exist, in request order.
+
+    A scope is only checked when it is a list of strings (the engines refuse
+    any other shape) and the registry is loaded; a dead id must never get
+    into a member's scope, since nothing would ever drop it again.
+    """
+    if known is None or not isinstance(rooms, list):
+        return []
+    return [room for room in rooms if isinstance(room, str) and room not in known]
+
+
+def _camera_access_error(payload: dict[str, Any]) -> str | None:
+    """The 400 message when a body carries a camera_access the engines won't
+    take; None when the field is absent or valid. A null is a bad value here,
+    not "leave it": the effective access is always one of the three."""
+    if (
+        "camera_access" not in payload
+        or payload["camera_access"] in VALID_CAMERA_ACCESS
+    ):
+        return None
+    return f"camera_access must be one of {', '.join(VALID_CAMERA_ACCESS)}"
 
 
 def get_provision_secret(hass: HomeAssistant) -> str | None:
@@ -364,7 +400,8 @@ def _payload_v2_fields(hass: HomeAssistant, code: str) -> dict[str, Any]:
 class CasaSmartEnrollView(HomeAssistantView):
     """POST /api/casasmart/auth/enroll: pair a device with a pairing code.
 
-    The code sets the role and room scope; the request can't change them.
+    The code sets the role, room scope and camera access; the request can't
+    change them.
     Pairing is LAN-only unless remote_pairing_enabled is on; then member
     codes work from anywhere, but the bootstrap owner claim stays LAN-only
     (pairing.redeem enforces that).
@@ -486,6 +523,7 @@ class CasaSmartEnrollView(HomeAssistantView):
                     enrolled_via=grant.get("code_id"),
                     member_id=grant.get("member_id"),
                     code_hash=hash_code(payload.get("pairing_code", "")),
+                    camera_access=grant.get("camera_access"),
                 )
             )
         except EnrollError as err:
@@ -517,8 +555,15 @@ class CasaSmartEnrollView(HomeAssistantView):
                 )
             )
 
+        enrolled = await self._hass.async_add_executor_job(engine.get_device, device_id)
         return self.json(
-            {"device_id": device_id, "role": grant["role"], "rooms": grant["rooms"]},
+            {
+                "device_id": device_id,
+                "role": grant["role"],
+                "rooms": grant["rooms"],
+                # The effective value (a code without one follows the rooms).
+                "camera_access": (enrolled or {}).get("camera_access"),
+            },
             HTTPStatus.CREATED,
         )
 
@@ -756,6 +801,9 @@ class CasaSmartWhoamiView(HomeAssistantView):
                 "role": device["role"],
                 "device_id": device["device_id"],
                 "name": device.get("name"),
+                # The app shows its own scope from these; older apps ignore them.
+                "rooms": device.get("rooms"),
+                "camera_access": device.get("camera_access"),
             }
         )
 
@@ -860,9 +908,10 @@ class CasaSmartPairingCodesView(HomeAssistantView):
             return error
 
         # "Add a device to <member>": the new device gets that member's current
-        # role and rooms, whatever the payload says.
+        # role, rooms and camera access, whatever the payload says.
         role = payload.get("role", "")
         rooms = payload.get("rooms")
+        camera_access = payload.get("camera_access")
         member_id = payload.get("member_id")
         if member_id is not None:
             engine = get_engine(self._hass)
@@ -876,6 +925,21 @@ class CasaSmartPairingCodesView(HomeAssistantView):
                 return self.json_message("Unknown member", HTTPStatus.BAD_REQUEST)
             role = member["role"]
             rooms = member["rooms"]
+            camera_access = member.get("camera_access")
+        else:
+            # A code may leave the access unset (cameras follow the rooms).
+            bad_access = (
+                _camera_access_error(payload) if camera_access is not None else None
+            )
+            if bad_access is not None:
+                return self.json_message(bad_access, HTTPStatus.BAD_REQUEST)
+            # A code must not bake in a room that doesn't exist.
+            known = await self._hass.async_add_executor_job(_known_room_ids, self._hass)
+            unknown = _unknown_rooms(rooms, known)
+            if unknown:
+                return self.json_message(
+                    f"Unknown room(s): {', '.join(unknown)}", HTTPStatus.BAD_REQUEST
+                )
 
         try:
             issued = await self._hass.async_add_executor_job(
@@ -884,6 +948,7 @@ class CasaSmartPairingCodesView(HomeAssistantView):
                     rooms=rooms,
                     expires_in=payload.get("expires_in", "1d"),
                     member_id=member_id,
+                    camera_access=camera_access,
                 )
             )
         except PairingError as err:
@@ -936,7 +1001,12 @@ class CasaSmartPairingCodeView(HomeAssistantView):
 
 
 class CasaSmartUsersView(HomeAssistantView):
-    """GET /api/casasmart/users: every paired device (admin only)."""
+    """GET /api/casasmart/users: every paired device (admin only).
+
+    Room ids that no longer exist are dropped from every scope first, so the
+    list never shows a room that is gone and a member left with no rooms
+    shows an empty list the app can flag.
+    """
 
     url = f"/api/{DOMAIN}/users"
     name = f"api:{DOMAIN}:users"
@@ -952,15 +1022,25 @@ class CasaSmartUsersView(HomeAssistantView):
         engine = get_engine(self._hass)
         if engine is None:
             return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
-        users = await self._hass.async_add_executor_job(engine.list_devices)
+
+        def _read() -> tuple[list[dict[str, Any]], bool]:
+            known = _known_room_ids(self._hass)
+            pruned = known is not None and bool(engine.prune_rooms(known))
+            return engine.list_devices(), pruned
+
+        users, pruned = await self._hass.async_add_executor_job(_read)
+        if pruned:
+            # The per-user sensors show each device's rooms.
+            self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
         return self.json({"users": users})
 
 
 class CasaSmartUserView(HomeAssistantView):
     """PATCH/DELETE /api/casasmart/users/{device_id}: edit or unpair a device.
 
-    Either way the device's outstanding tokens stop working at once. The
-    admin can't be edited or unpaired here; the owner's phone leaves only by
+    PATCH takes role, rooms and camera_access (none / rooms / all). Either
+    way the device's outstanding tokens stop working at once. The admin
+    can't be edited or unpaired here; the owner's phone leaves only by
     unpairing itself, by owner recovery, or by a reset from Home Assistant.
     """
 
@@ -981,11 +1061,22 @@ class CasaSmartUserView(HomeAssistantView):
         payload, error = await read_json_object(self, request)
         if error is not None:
             return error
-        if "role" not in payload and "rooms" not in payload:
+        if not any(key in payload for key in ("role", "rooms", "camera_access")):
             return self.json_message(
-                "Nothing to change: provide role and/or rooms",
+                "Nothing to change: provide role, rooms and/or camera_access",
                 HTTPStatus.BAD_REQUEST,
             )
+        bad_access = _camera_access_error(payload)
+        if bad_access is not None:
+            return self.json_message(bad_access, HTTPStatus.BAD_REQUEST)
+        if "rooms" in payload:
+            # A scope must not take in a room that doesn't exist.
+            known = await self._hass.async_add_executor_job(_known_room_ids, self._hass)
+            unknown = _unknown_rooms(payload.get("rooms"), known)
+            if unknown:
+                return self.json_message(
+                    f"Unknown room(s): {', '.join(unknown)}", HTTPStatus.BAD_REQUEST
+                )
 
         try:
             updated = await self._hass.async_add_executor_job(
@@ -993,6 +1084,7 @@ class CasaSmartUserView(HomeAssistantView):
                     device_id,
                     role=payload.get("role"),
                     rooms=payload.get("rooms", ...),
+                    camera_access=payload.get("camera_access", ...),
                 )
             )
         except UnknownDeviceError:

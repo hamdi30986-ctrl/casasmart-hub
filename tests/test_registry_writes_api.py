@@ -203,7 +203,7 @@ class RoomsCrud(RegistryWritesTestCase):
     async def test_delete_unknown_room_is_404(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         # No served states, so the ha_orphans scan is empty.
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for([]),
         ):
@@ -212,6 +212,53 @@ class RoomsCrud(RegistryWritesTestCase):
             )
         status, _ = H.read_response(resp)
         self.assertEqual(status, 404)
+
+    async def test_delete_drops_the_room_from_member_scopes(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        kitchen = self.rt.registry.create_room("Kitchen")["room_id"]
+        garage = self.rt.registry.create_room("Garage")["room_id"]
+        kid = H.enroll(self.rt.auth, role="user", rooms=[kitchen, garage], name="Kid")
+        guest = H.enroll(self.rt.auth, role="user", rooms=[garage], name="Guest")
+        free = H.enroll(self.rt.auth, role="user")
+        with mock.patch.multiple(
+            "casasmart.registry_api", is_served=H.is_served_for([])
+        ):
+            resp = await CasaSmartRoomView(self.hass).delete(
+                H.FakeRequest(headers=hdr), room_id=garage
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["deleted"], garage)
+        # The admin is told who is left with no rooms at all.
+        self.assertEqual(
+            body["members_without_rooms"],
+            [
+                {
+                    "device_id": guest,
+                    "name": "Guest",
+                    "member_id": self.rt.auth.member_id_for(guest),
+                }
+            ],
+        )
+        self.assertEqual(self.rt.auth.get_device(kid)["rooms"], [kitchen])
+        self.assertEqual(self.rt.auth.get_device(guest)["rooms"], [])
+        self.assertIsNone(self.rt.auth.get_device(free)["rooms"])
+        # The per-user sensors repaint.
+        self.assertIn(("casasmart_auth_changed", {}), self.hass.bus.fired)
+
+    async def test_delete_with_no_scoped_member_reports_nobody(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        room = self.rt.registry.create_room("Den")["room_id"]
+        with mock.patch.multiple(
+            "casasmart.registry_api", is_served=H.is_served_for([])
+        ):
+            resp = await CasaSmartRoomView(self.hass).delete(
+                H.FakeRequest(headers=hdr), room_id=room
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["members_without_rooms"], [])
+        self.assertNotIn(("casasmart_auth_changed", {}), self.hass.bus.fired)
 
     async def test_delete_floor_in_use_is_409(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
@@ -243,7 +290,7 @@ class DeviceAssignment(RegistryWritesTestCase):
 
         eid = "switch.gang2"  # secondary gang the integration hid
         view = CasaSmartDeviceAssignmentView(self.hass)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_assignable=_assignable_for([eid]),  # exists in registry
             is_served=H.is_served_for([]),  # but HIDDEN from the feed
@@ -271,7 +318,7 @@ class DeviceAssignment(RegistryWritesTestCase):
         _, hdr = H.session(self.rt.auth, role="admin")
         eid = "light.never_existed"
         view = CasaSmartDeviceAssignmentView(self.hass)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_assignable=_assignable_for([]),  # not assignable
             is_served=H.is_served_for([]),
@@ -292,7 +339,7 @@ class DeviceAssignment(RegistryWritesTestCase):
         dev, hdr = H.session(self.rt.auth, role="sub-admin", rooms=["room1"])
         eid = "switch.elsewhere"
         view = CasaSmartDeviceAssignmentView(self.hass)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_assignable=_assignable_for([eid]),
             is_served=H.is_served_for([eid]),
@@ -316,7 +363,7 @@ class DeviceAssignment(RegistryWritesTestCase):
         # Seed an assignment record directly.
         self.rt.registry.assign_device(eid, room_id=room_id)
         view = CasaSmartDeviceAssignmentView(self.hass)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_assignable=_assignable_for([eid]),
             is_served=H.is_served_for([eid]),
@@ -338,7 +385,7 @@ class ScenesCrud(RegistryWritesTestCase):
         _, hdr = H.session(self.rt.auth, role="admin")
         self.hass.states.add("switch.a")
         entities = [{"entity_id": "switch.a", "action": "turn_on"}]
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["switch.a"]),
         ):
@@ -376,7 +423,7 @@ class ScenesCrud(RegistryWritesTestCase):
         _, hdr = H.session(self.rt.auth, role="admin")
         self.hass.states.add("switch.a")  # exists but not served
         entities = [{"entity_id": "switch.a", "action": "turn_on"}]
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for([]),  # nothing served
         ):
@@ -457,7 +504,7 @@ class RegistryFeed(RegistryWritesTestCase):
             "light.a", room_id=room_id, display_name="Lamp", sort_order=3
         )
         view = CasaSmartRegistryView(self.hass)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a"]),  # hidden NOT served
             in_scope=_all_in_scope,
@@ -506,7 +553,7 @@ class RegistryFeed(RegistryWritesTestCase):
         view = CasaSmartRegistryView(self.hass)
         # Scope is ["room1"]; rooms in registry are r1/r2 so the room slice is
         # empty — what we assert is the per-entity in_scope device filter.
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.in", "light.out"]),
             in_scope=H.in_scope_for({"room1": {"light.in"}}),
@@ -532,7 +579,7 @@ class RegistryFeed(RegistryWritesTestCase):
             gang_names={"light.b": "SECRET-MASTER-BEDROOM"},
             custom_name="Hidden Group",
         )
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a", "light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b OUT of scope
@@ -554,7 +601,7 @@ class RegistryFeed(RegistryWritesTestCase):
         self.rt.registry.upsert_user_device(
             "grp-2", entity_ids=["light.a", "light.b"], custom_name="Both Here"
         )
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a", "light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a", "light.b"}}),  # both in
@@ -652,7 +699,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
         view = CasaSmartUserDeviceGangView(self.hass)
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await view.patch(
                 H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
                 ha_device_id="grp",
@@ -668,7 +715,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_type_to_known_value(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={"type": "heater"}),
                 ha_device_id="grp",
@@ -681,7 +728,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_invalid_presentation_is_400_no_push(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={"presentation": "bogus"}),
                 ha_device_id="grp",
@@ -695,7 +742,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_unknown_type_is_400(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={"type": "cover"}),
                 ha_device_id="grp",
@@ -707,7 +754,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_empty_body_is_400(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={}),
                 ha_device_id="grp",
@@ -718,7 +765,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
 
     async def test_patch_unknown_device_is_404(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
                 ha_device_id="nope",
@@ -730,7 +777,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_unknown_gang_is_404(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             resp = await CasaSmartUserDeviceGangView(self.hass).patch(
                 H.FakeRequest(headers=hdr, body={"presentation": "solo"}),
                 ha_device_id="grp",
@@ -742,7 +789,7 @@ class UserDeviceGangView(RegistryWritesTestCase):
     async def test_patch_out_of_scope_gang_is_400(self) -> None:
         self._seed()
         _, hdr = H.session(self.rt.auth, role="sub-admin", rooms=["room1"])
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             in_scope=H.in_scope_for({"room1": set()}),  # gang not in scope
         ):
@@ -786,7 +833,7 @@ class UserDeviceOwnership(RegistryWritesTestCase):
         _, hdr = H.session(self.rt.auth, role="admin")
         view = CasaSmartUserDeviceView(self.hass)
         body = {"entity_ids": ["switch.second", "switch.first"]}
-        with mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope):
+        with H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope):
             for verb in (view.patch, view.put):
                 with self.subTest(verb=verb.__name__):
                     resp = await verb(
@@ -810,7 +857,7 @@ class StorageFailures(RegistryWritesTestCase):
 
         with (
             mock.patch.object(self.rt.registry, "list_user_devices", _unavailable),
-            mock.patch.multiple("casasmart.registry_api", in_scope=_all_in_scope),
+            H.patch_scope("casasmart.registry_api", in_scope=_all_in_scope),
         ):
             resp = await CasaSmartRegistryView(self.hass).get(
                 H.FakeRequest(headers=hdr)

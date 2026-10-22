@@ -30,6 +30,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "contextual_suggestions_v1",
                 "generated_room_suggestions_v1",
                 "push_relay_optional_v1",
+                "member_camera_access_v1",
             },
         )
         self.assertEqual(
@@ -45,6 +46,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "contextual_suggestions_v1": True,
                 "generated_room_suggestions_v1": True,
                 "push_relay_optional_v1": False,
+                "member_camera_access_v1": True,
             },
         )
         self.assertTrue(
