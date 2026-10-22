@@ -2,13 +2,12 @@
 
 What changed in each version of CasaSmart Hub.
 
-## [Unreleased]
-- Each member now has a camera access setting: no cameras, only the cameras
-  in their rooms, or every camera. The hub applies it to camera lists,
-  snapshots and streams. Members you already have keep what they see today.
-- A member's room list can no longer name a room that doesn't exist, and a
-  deleted room leaves every member's list; the app tells you if someone is
-  left with no rooms.
+## [2.3.2] - 2026-10-22
+- Admins can now choose which cameras each member sees: none, only the
+  cameras in their rooms, or all of them. Existing members keep what they
+  see today.
+- Cameras can be placed in a room, like any other device.
+- Deleting a room also removes it from every member who had it.
 
 ## [2.3.1] - 2026-10-21
 - The phone's Doors pill now counts all door and window sensors until you pick a list.
