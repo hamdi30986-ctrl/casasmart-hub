@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from http import HTTPStatus
+from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -19,7 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from .auth_api import async_member_id, authenticate_request, read_json_object
 from .const import DOMAIN, EVENT_REGISTRY_CHANGED
-from .filtering import in_scope, is_served
+from .filtering import is_served, visible_to
 from .runtime_lookup import loaded_runtime_data
 from .user_settings import SettingsError, UserSettingsEngine
 
@@ -61,14 +62,14 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         # Filter for the reply only: during HA startup states are still
         # arriving, and saving the filtered list would erase the layout.
         if doc.get("widget_tiles"):
-            scope = claims.get("rooms")
             doc["widget_tiles"] = [
-                tile for tile in doc["widget_tiles"] if self._tile_allowed(tile, scope)
+                tile for tile in doc["widget_tiles"] if self._tile_allowed(tile, claims)
             ]
         return self.json(doc)
 
-    def _tile_allowed(self, tile: object, scope: list[str] | None) -> bool:
-        """False for an entity tile that is missing, unserved or out of scope."""
+    def _tile_allowed(self, tile: object, claims: dict[str, Any]) -> bool:
+        """False for an entity tile that is missing, unserved or not visible to
+        the caller (outside its rooms, or a camera its camera access hides)."""
         if not isinstance(tile, dict) or tile.get("type") not in _ENTITY_TILE_TYPES:
             return True
         eid = tile.get("entityId")
@@ -78,7 +79,7 @@ class CasaSmartUserSettingsView(HomeAssistantView):
             isinstance(eid, str)
             and self._hass.states.get(eid) is not None
             and is_served(self._hass, eid)
-            and in_scope(self._hass, eid, scope)
+            and visible_to(self._hass, eid, claims)
         )
 
     async def put(self, request: web.Request) -> web.Response:
@@ -94,12 +95,11 @@ class CasaSmartUserSettingsView(HomeAssistantView):
         # Shape errors, a non-string type included, are left to the engine.
         tiles = payload.get("widget_tiles")
         if isinstance(tiles, list):
-            scope = claims.get("rooms")
             for tile in tiles:
                 if (
                     isinstance(tile, dict)
                     and isinstance(tile.get("type"), str)
-                    and not self._tile_allowed(tile, scope)
+                    and not self._tile_allowed(tile, claims)
                 ):
                     return self.json_message(
                         f"Unknown device {tile.get('entityId')!r}",

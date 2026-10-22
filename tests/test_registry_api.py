@@ -16,7 +16,6 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
@@ -47,7 +46,7 @@ class FavoritesViewTestCase(unittest.IsolatedAsyncioTestCase):
         """Mark entity_ids as existing (in states) AND served."""
         for eid in entity_ids:
             self.hass.states.add(eid)
-        return mock.patch.multiple(
+        return H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(entity_ids),
             in_scope=H.in_scope_for(),
@@ -84,7 +83,7 @@ class FavoritesGet(FavoritesViewTestCase):
         # light.a is real+served; switch.gone was deleted (no state at all).
         self.rt.registry.set_favorites(member, ["light.a", "switch.gone"])
         self.hass.states.add("light.a")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a", "switch.gone"]),
             in_scope=H.in_scope_for(),
@@ -104,7 +103,7 @@ class FavoritesGet(FavoritesViewTestCase):
         self.rt.registry.set_favorites(member, ["light.a", "switch.hidden"])
         self.hass.states.add("light.a")
         self.hass.states.add("switch.hidden")  # exists but is_served=False
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a"]),  # hidden not served
             in_scope=H.in_scope_for(),
@@ -122,7 +121,7 @@ class FavoritesGet(FavoritesViewTestCase):
         self.rt.registry.set_favorites(member, ["light.a", "light.b"])
         self.hass.states.add("light.a")
         self.hass.states.add("light.b")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a", "light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b is elsewhere
@@ -146,7 +145,7 @@ class FavoritesPut(FavoritesViewTestCase):
     async def test_rejects_unserved_entity(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         self.hass.states.add("light.a")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a"]),  # bogus not served
             in_scope=H.in_scope_for(),
@@ -195,7 +194,7 @@ class FavoritesPut(FavoritesViewTestCase):
         self.rt.registry.set_favorites(member, ["light.a", "light.b"])
         self.hass.states.add("light.a")
         self.hass.states.add("light.b")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.registry_api",
             is_served=H.is_served_for(["light.a", "light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),

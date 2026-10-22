@@ -31,6 +31,7 @@ import sys
 import types
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 # Package-relative engines: put the parent of the package on the path and import
 # as ``casasmart.*`` (repo layout in CI; deployed tree inside the container).
@@ -298,12 +299,21 @@ def make_hub(tmpdir) -> tuple[Any, Any]:
     return FakeHass(runtime), runtime
 
 
-def enroll(auth, *, role="admin", rooms=None, member_id=None, name="Test Device"):
+def enroll(
+    auth,
+    *,
+    role="admin",
+    rooms=None,
+    member_id=None,
+    name="Test Device",
+    camera_access=None,
+):
     """Seed a device record + auth cache (skips the pubkey crypto path tested in
     test_auth) and return its device_id. ``validate_token`` will accept a token
-    minted for this id; ``member_id_for`` resolves to ``member_id``."""
+    minted for this id; ``member_id_for`` resolves to ``member_id``.
+    ``camera_access`` None is a record from before camera access existed."""
     device_id = f"dev-{secrets.token_urlsafe(9)}"
-    auth._devices[device_id] = {
+    record = {
         "name": name,
         "role": role,
         "public_key": "test-pem",
@@ -311,7 +321,19 @@ def enroll(auth, *, role="admin", rooms=None, member_id=None, name="Test Device"
         "ver": 1,
         "member_id": member_id or f"mem-{secrets.token_urlsafe(9)}",
     }
-    auth._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
+    if camera_access is not None:
+        record["camera_access"] = camera_access
+    auth._devices[device_id] = record
+    auth._device_cache[device_id] = {
+        "role": role,
+        "rooms": rooms,
+        "camera_access": (
+            "all"
+            if role == "admin"
+            else auth_tokens.effective_camera_access(camera_access, rooms)
+        ),
+        "ver": 1,
+    }
     return device_id
 
 
@@ -347,6 +369,46 @@ def is_served_for(served):
     """A fake ``is_served(hass, eid)`` returning True iff eid ∈ served."""
     served = set(served)
     return lambda hass, eid: eid in served
+
+
+def patch_scope(target: str, **values):
+    """``mock.patch.multiple(target, **values)``, with ``in_scope`` faked where
+    the room check is read.
+
+    The views decide visibility through ``filtering.visible_to`` (the room
+    scope plus a camera's access), which reads ``filtering.in_scope``, so a
+    fake ``in_scope`` lands there; modules that still call ``in_scope``
+    themselves (registry_api, for scenes and user devices) get it too.
+    """
+    in_scope = values.pop("in_scope", None)
+    patches = [mock.patch.multiple(target, **values)] if values else []
+    if in_scope is not None:
+        patches.append(mock.patch("casasmart.filtering.in_scope", in_scope))
+        if hasattr(importlib.import_module(target), "in_scope"):
+            patches.append(mock.patch(f"{target}.in_scope", in_scope))
+    return _Patches(patches)
+
+
+class _Patches:
+    """Start a list of patchers together and stop them in reverse."""
+
+    def __init__(self, patches) -> None:
+        self._patches = patches
+
+    def __enter__(self):
+        for patcher in self._patches:
+            patcher.start()
+        return self
+
+    def __exit__(self, *exc):
+        for patcher in reversed(self._patches):
+            patcher.stop()
+        return False
+
+    start = __enter__
+
+    def stop(self) -> None:
+        self.__exit__()
 
 
 def in_scope_for(scope_map=None):

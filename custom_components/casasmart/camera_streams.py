@@ -14,6 +14,7 @@ import re
 import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 # The player mints a ticket each time it opens, so one only has to outlast a
 # single viewing; a leaked URL still goes cold quickly.
@@ -39,8 +40,9 @@ class TicketError(Exception):
 class StreamTicket:
     """A grant to fetch one camera's HLS files until expires_at.
 
-    device_id, ver and rooms are the minting device, its auth version and its
-    room scope (None for every room) at mint time.
+    device_id, ver, rooms and camera_access are the minting device, its auth
+    version, its room scope (None for every room) and its camera access at
+    mint time.
     """
 
     ticket_id: str
@@ -49,6 +51,16 @@ class StreamTicket:
     device_id: str
     ver: int
     rooms: tuple[str, ...] | None
+    camera_access: str | None = None
+
+    @property
+    def claims(self) -> dict[str, Any]:
+        """The grant as the claims shape the visibility checks take."""
+        return {
+            "sub": self.device_id,
+            "rooms": list(self.rooms) if self.rooms is not None else None,
+            "camera_access": self.camera_access,
+        }
 
 
 def is_valid_hls_filename(filename: str) -> bool:
@@ -77,6 +89,7 @@ class StreamTicketStore:
         device_id: str,
         ver: int,
         rooms: Iterable[str] | None,
+        camera_access: str | None = None,
     ) -> StreamTicket:
         """Issue a ticket for entity_id to the device that asked for it."""
         self._purge(now)
@@ -90,6 +103,7 @@ class StreamTicketStore:
             device_id=device_id,
             ver=ver,
             rooms=tuple(rooms) if rooms is not None else None,
+            camera_access=camera_access,
         )
         self._tickets[ticket.ticket_id] = ticket
         return ticket

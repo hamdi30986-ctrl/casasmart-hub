@@ -20,7 +20,6 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
@@ -213,7 +212,7 @@ class WidgetTileFilter(SettingsViewTestCase):
             },
         )
         self.hass.states.add("light.a")  # switch.gone has no state (deleted)
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.a"]),
             in_scope=H.in_scope_for(),
@@ -241,7 +240,7 @@ class WidgetTileFilter(SettingsViewTestCase):
                 ]
             },
         )
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for([]),  # nothing served
             in_scope=H.in_scope_for(),
@@ -264,7 +263,7 @@ class WidgetTileFilter(SettingsViewTestCase):
         )
         self.hass.states.add("light.a")
         self.hass.states.add("light.b")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.a", "light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b out of scope
@@ -278,7 +277,7 @@ class WidgetTileFilter(SettingsViewTestCase):
     async def test_put_rejects_unserved_entity_tile(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         self.hass.states.add("light.a")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.a"]),
             in_scope=H.in_scope_for(),
@@ -296,7 +295,7 @@ class WidgetTileFilter(SettingsViewTestCase):
     async def test_put_rejects_out_of_scope_entity_tile(self) -> None:
         _, hdr = H.session(self.rt.auth, role="user", rooms=["room1"])
         self.hass.states.add("light.b")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.b"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),  # b out of scope
@@ -314,7 +313,7 @@ class WidgetTileFilter(SettingsViewTestCase):
     async def test_put_accepts_served_entity_plus_pseudo_tiles(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         self.hass.states.add("light.a")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.a"]),
             in_scope=H.in_scope_for(),
@@ -341,7 +340,7 @@ class WidgetTileFilter(SettingsViewTestCase):
             {"type": "toggle", "entityId": "light.a", "name": "A"},
             {"type": "toggle", "entityId": "light_group:g1", "name": "Downstairs"},
         ]
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for(["light.a"]),
             in_scope=H.in_scope_for({"room1": {"light.a"}}),
@@ -355,7 +354,7 @@ class WidgetTileFilter(SettingsViewTestCase):
 
     async def test_entity_shaped_ids_are_still_checked(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.settings_api",
             is_served=H.is_served_for([]),
             in_scope=H.in_scope_for(),

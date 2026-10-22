@@ -55,6 +55,7 @@ def load_api():
     module(
         "room_api_fixture.const",
         DOMAIN="casasmart",
+        EVENT_AUTH_CHANGED="auth_changed",
         EVENT_REGISTRY_CHANGED="registry_changed",
     )
     module(
@@ -68,7 +69,14 @@ def load_api():
     module(
         "room_api_fixture.filtering",
         **dict.fromkeys(
-            ["area_id_of", "ha_area_id_of", "in_scope", "is_assignable", "is_served"]
+            [
+                "area_id_of",
+                "ha_area_id_of",
+                "in_scope",
+                "is_assignable",
+                "is_served",
+                "visible_to",
+            ]
         ),
     )
     module("room_api_fixture.runtime_lookup", loaded_runtime_data=None)

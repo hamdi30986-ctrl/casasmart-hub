@@ -115,7 +115,7 @@ class LightCommandTests(unittest.IsolatedAsyncioTestCase):
         _, self.headers = H.session(self.rt.auth, role="admin")
 
     async def test_mired_command_reaches_home_assistant_as_kelvin(self) -> None:
-        with mock.patch.multiple(
+        with H.patch_scope(
             "casasmart.api",
             is_served=lambda hass, eid: True,
             in_scope=lambda hass, eid, rooms: True,

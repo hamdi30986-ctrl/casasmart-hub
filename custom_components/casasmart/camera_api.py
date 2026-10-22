@@ -25,7 +25,7 @@ from .camera_streams import (
     is_valid_hls_filename,
 )
 from .const import DOMAIN
-from .filtering import in_scope, is_served
+from .filtering import is_served, visible_to
 from .runtime_lookup import loaded_entry, loaded_runtime_data
 from .tunnel import TUNNEL_URL_CONFIG_KEY, normalize_tunnel_url
 
@@ -70,14 +70,18 @@ def _hub_not_ready() -> web.Response:
     )
 
 
-def _serves_camera(hass: HomeAssistant, entity_id: str, rooms) -> bool:
-    """True when entity_id is a served camera in the caller's rooms."""
+def _serves_camera(hass: HomeAssistant, entity_id: str, claims: dict) -> bool:
+    """True when entity_id is a served camera the caller may see.
+
+    claims are the token's (or a stream ticket's) claims: the room scope and
+    the camera access decide together, as for every other camera path.
+    """
     state = hass.states.get(entity_id)
     return (
         state is not None
         and entity_id.startswith("camera.")
         and is_served(hass, entity_id)
-        and in_scope(hass, entity_id, rooms)
+        and visible_to(hass, entity_id, claims)
     )
 
 
@@ -95,7 +99,7 @@ class CasaSmartCameraSnapshotView(HomeAssistantView):
         claims, error = authenticate_request(self._hass, request, "cameras.view")
         if error is not None:
             return error
-        if not _serves_camera(self._hass, entity_id, claims.get("rooms")):
+        if not _serves_camera(self._hass, entity_id, claims):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -123,7 +127,7 @@ class CasaSmartCameraStreamView(HomeAssistantView):
         claims, error = authenticate_request(self._hass, request, "cameras.view")
         if error is not None:
             return error
-        if not _serves_camera(self._hass, entity_id, claims.get("rooms")):
+        if not _serves_camera(self._hass, entity_id, claims):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -145,6 +149,7 @@ class CasaSmartCameraStreamView(HomeAssistantView):
             device_id=claims["sub"],
             ver=claims.get("ver"),
             rooms=claims.get("rooms"),
+            camera_access=claims.get("camera_access"),
         )
         path = (
             f"/api/{DOMAIN}/camera/{entity_id}"
@@ -172,7 +177,8 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
 
     Serves one HLS playlist or segment to the app's player. The stream ticket
     in the path is the credential, and each fetch checks again that its device
-    is still enrolled unchanged and still sees the camera. Each file is fetched
+    is still enrolled unchanged and still sees the camera (its room scope and
+    camera access as minted). Each file is fetched
     from Home Assistant's own HLS endpoint over loopback, whose stream token is
     looked up per fetch and never reaches the app.
     """
@@ -195,13 +201,14 @@ class CasaSmartCameraHlsProxyView(HomeAssistantView):
             grant = store.validate(ticket, entity_id, now=time.time())
         except TicketError as err:
             return self.json_message(str(err), HTTPStatus.UNAUTHORIZED)
-        # An unpair, a reset or a role or room edit changes or removes the
-        # device's auth version, which revokes its tickets as it does its tokens.
+        # An unpair, a reset or a role, room or camera-access edit changes or
+        # removes the device's auth version, which revokes its tickets as it
+        # does its tokens.
         if engine.device_version(grant.device_id) != grant.ver:
             store.discard(ticket)
             return self.json_message("Stream ticket revoked", HTTPStatus.UNAUTHORIZED)
 
-        if not _serves_camera(self._hass, entity_id, grant.rooms):
+        if not _serves_camera(self._hass, entity_id, grant.claims):
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )

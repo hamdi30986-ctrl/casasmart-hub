@@ -19,6 +19,11 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
+from .auth_tokens import (
+    CAMERA_ACCESS_ALL,
+    CAMERA_ACCESS_NONE,
+    effective_camera_access,
+)
 from .entity_bridge import is_category_served, is_exposed, serialize_state
 from .registry import UNSET
 from .runtime_lookup import loaded_runtime_data
@@ -83,6 +88,34 @@ def in_scope(hass: HomeAssistant, entity_id: str, rooms: list[str] | None) -> bo
         return True
     area_id = area_id_of(hass, entity_id)
     return area_id is not None and area_id in rooms
+
+
+def camera_access_of(claims: dict[str, Any]) -> str:
+    """The camera access a token's claims grant.
+
+    validate_token sets camera_access from the device record; claims built
+    elsewhere (a stream ticket, an older connection) fall back to the
+    room-scope behaviour.
+    """
+    return effective_camera_access(claims.get("camera_access"), claims.get("rooms"))
+
+
+def visible_to(hass: HomeAssistant, entity_id: str, claims: dict[str, Any]) -> bool:
+    """True when the token's holder may see the entity at all.
+
+    The room scope decides for every entity, and a camera must also pass
+    the holder's camera access: "none" hides every camera, "all" shows every
+    camera whatever its room, and "rooms" leaves the room scope to decide.
+    Every path a camera can leave the hub by (device lists, pushes,
+    snapshots, streams, favorites, widget tiles) must use this, not in_scope.
+    """
+    if entity_id.startswith("camera."):
+        access = camera_access_of(claims)
+        if access == CAMERA_ACCESS_NONE:
+            return False
+        if access == CAMERA_ACCESS_ALL:
+            return True
+    return in_scope(hass, entity_id, claims.get("rooms"))
 
 
 def is_visible(hass: HomeAssistant, entity_id: str) -> bool:

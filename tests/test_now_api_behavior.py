@@ -82,6 +82,7 @@ def _load_now_api():
         entity_id
     ).attributes.get("room")
     filtering.in_scope = lambda *args: True
+    filtering.visible_to = lambda *args: True
     filtering.is_served = lambda *args: True
     filtering.serialize_device = lambda hass, state: {"entity_id": state.entity_id}
     registry = _module("casasmart.registry")

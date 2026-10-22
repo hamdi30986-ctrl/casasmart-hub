@@ -39,7 +39,7 @@ from .const import (
     WS_SEND_QUEUE_MAX,
     WS_TOKEN_RECHECK,
 )
-from .filtering import in_scope, is_served, serialize_device
+from .filtering import is_served, serialize_device, visible_to
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -295,13 +295,13 @@ class WsConnection:
         """
         if self._claims is None:
             return
-        rooms = self._claims.get("rooms")
+        claims = self._claims
         devices = [
             serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
             if is_served(self._hass, state.entity_id)
             and self._subscription.matches(state.entity_id)
-            and in_scope(self._hass, state.entity_id, rooms)
+            and visible_to(self._hass, state.entity_id, claims)
         ]
         devices.sort(key=lambda device: device["entity_id"])
         self._shown = {device["entity_id"] for device in devices}
@@ -325,7 +325,7 @@ class WsConnection:
             self._reauth_deadline_task = None
         await self._enqueue(ws_protocol.frame_auth_ok(self._hub_version, API_VERSION))
         # Nothing was sent while re-auth was pending, so resync the app (and
-        # apply any change of rooms) with a fresh snapshot.
+        # apply any change of rooms or camera access) with a fresh snapshot.
         if self._subscribed:
             await self._emit_snapshot()
 
@@ -347,7 +347,7 @@ class WsConnection:
         if (
             not self._subscription.matches(entity_id)
             or not is_served(self._hass, entity_id)
-            or not in_scope(self._hass, entity_id, (self._claims or {}).get("rooms"))
+            or not visible_to(self._hass, entity_id, self._claims or {})
         ):
             return
         device = serialize_device(self._hass, new_state)

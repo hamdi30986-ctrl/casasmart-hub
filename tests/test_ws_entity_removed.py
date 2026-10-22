@@ -38,15 +38,18 @@ class EntityRemovedTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.add(entity_id)
         for name, value in (
             ("is_served", H.is_served_for(["light.kitchen", "light.bedroom"])),
-            (
-                "in_scope",
-                lambda hass, eid, rooms: H.in_scope_for(self.scope)(hass, eid, rooms),
-            ),
             ("serialize_device", lambda hass, state: {"entity_id": state.entity_id}),
         ):
             patcher = mock.patch.object(wsmod, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # visible_to reads filtering.in_scope.
+        patcher = mock.patch(
+            "casasmart.filtering.in_scope",
+            lambda hass, eid, rooms: H.in_scope_for(self.scope)(hass, eid, rooms),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _connect(self, rooms=None):
         conn = wsmod.WsConnection(

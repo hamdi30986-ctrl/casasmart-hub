@@ -137,7 +137,8 @@ class EnergyApiTests(unittest.IsolatedAsyncioTestCase):
         view = CasaSmartCommandView(self.hass)
         with (
             mock.patch("casasmart.api.is_served", return_value=True),
-            mock.patch("casasmart.api.in_scope", return_value=True),
+            # The view decides through filtering.visible_to.
+            mock.patch("casasmart.filtering.in_scope", return_value=True),
         ):
             status, body = H.read_response(
                 await view.post(

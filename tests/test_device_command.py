@@ -59,12 +59,18 @@ class CommandRecencyTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = _call
         for name, value in (
             ("is_served", lambda hass, eid: True),
-            ("in_scope", lambda hass, eid, rooms: True),
             ("serialize_device", lambda hass, state: {"entity_id": state.entity_id}),
         ):
             patcher = mock.patch(f"casasmart.api.{name}", value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The view decides through filtering.visible_to, which reads
+        # filtering.in_scope for the room part.
+        patcher = mock.patch(
+            "casasmart.filtering.in_scope", lambda hass, eid, rooms: True
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.recorded: list[tuple[str, str]] = []
         self.rt.now_data = types.SimpleNamespace(
             record_successful_control=lambda member, eid: self.recorded.append(

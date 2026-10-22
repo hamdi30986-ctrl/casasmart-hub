@@ -165,3 +165,53 @@ class IsServedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(
+    filtering is None, f"casasmart.filtering unimportable: {_IMPORT_ERROR}"
+)
+class VisibleToTests(unittest.TestCase):
+    """visible_to: the room scope for every entity, plus camera access for
+    cameras. The room part is faked; it is pinned above."""
+
+    def setUp(self):
+        self.rooms = {"kitchen": {"camera.kitchen", "light.kitchen"}}
+        patcher = mock.patch.object(
+            filtering,
+            "in_scope",
+            lambda hass, eid, scope: (
+                scope is None or any(eid in self.rooms.get(room, ()) for room in scope)
+            ),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_none_hides_every_camera_and_nothing_else(self):
+        claims = {"rooms": None, "camera_access": "none"}
+        self.assertFalse(filtering.visible_to(_hass(), "camera.kitchen", claims))
+        self.assertFalse(filtering.visible_to(_hass(), "camera.garage", claims))
+        self.assertTrue(filtering.visible_to(_hass(), "light.kitchen", claims))
+
+    def test_rooms_leaves_the_room_scope_to_decide(self):
+        claims = {"rooms": ["kitchen"], "camera_access": "rooms"}
+        self.assertTrue(filtering.visible_to(_hass(), "camera.kitchen", claims))
+        self.assertFalse(filtering.visible_to(_hass(), "camera.garage", claims))
+        self.assertFalse(filtering.visible_to(_hass(), "light.garage", claims))
+        unscoped = {"rooms": None, "camera_access": "rooms"}
+        self.assertTrue(filtering.visible_to(_hass(), "camera.garage", unscoped))
+
+    def test_all_shows_a_camera_outside_the_rooms_but_no_other_device(self):
+        claims = {"rooms": ["kitchen"], "camera_access": "all"}
+        self.assertTrue(filtering.visible_to(_hass(), "camera.garage", claims))
+        self.assertTrue(filtering.visible_to(_hass(), "camera.kitchen", claims))
+        self.assertFalse(filtering.visible_to(_hass(), "light.garage", claims))
+        self.assertTrue(filtering.visible_to(_hass(), "light.kitchen", claims))
+
+    def test_claims_without_the_field_follow_the_rooms(self):
+        # A stream ticket or an older connection: today's behaviour.
+        scoped = {"rooms": ["kitchen"]}
+        self.assertTrue(filtering.visible_to(_hass(), "camera.kitchen", scoped))
+        self.assertFalse(filtering.visible_to(_hass(), "camera.garage", scoped))
+        self.assertEqual(filtering.camera_access_of(scoped), "rooms")
+        self.assertEqual(filtering.camera_access_of({"rooms": None}), "all")
+        self.assertTrue(filtering.visible_to(_hass(), "camera.garage", {"rooms": None}))

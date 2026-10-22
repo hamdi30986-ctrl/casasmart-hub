@@ -94,7 +94,6 @@ class WsReauthTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.add(entity_id, state="off")
         for name, value in (
             ("is_served", lambda hass, entity_id: True),
-            ("in_scope", H.in_scope_for(_SCOPE_MAP)),
             (
                 "serialize_device",
                 lambda hass, state: {
@@ -106,6 +105,10 @@ class WsReauthTests(unittest.IsolatedAsyncioTestCase):
             patcher = mock.patch.object(wsmod, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # visible_to reads filtering.in_scope.
+        patcher = mock.patch("casasmart.filtering.in_scope", H.in_scope_for(_SCOPE_MAP))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def _connect(self, *, role="admin", rooms=None):
         """Auth + subscribe-all on a fresh connection; returns its pieces."""

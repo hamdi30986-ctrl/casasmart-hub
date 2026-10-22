@@ -35,7 +35,7 @@ from .auth_api import (
 )
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
-from .filtering import area_id_of, in_scope, is_served, serialize_device
+from .filtering import area_id_of, in_scope, is_served, serialize_device, visible_to
 from .now_data import (
     NowDataEngine,
     NowDataError,
@@ -196,7 +196,7 @@ class CasaSmartNowView(_NowView):
         recent_items = [
             entry
             for item in recents
-            if (entry := self._recent_entry(item["entity_id"], item["at"], scope))
+            if (entry := self._recent_entry(item["entity_id"], item["at"], claims))
         ]
         recent_source = "recency"
         if not recent_items:
@@ -204,7 +204,7 @@ class CasaSmartNowView(_NowView):
             recent_items = [
                 entry
                 for entity_id in favorites
-                if (entry := self._recent_entry(entity_id, None, scope))
+                if (entry := self._recent_entry(entity_id, None, claims))
             ]
 
         active_rooms: list[dict[str, Any]] = []
@@ -341,14 +341,18 @@ class CasaSmartNowView(_NowView):
         )
 
     def _recent_entry(
-        self, entity_id: str, at: str | None, scope: list[str] | None
+        self, entity_id: str, at: str | None, claims: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """A recently used device for the page, or None if the caller can't see it."""
+        """A recently used device for the page, or None if the caller can't see it.
+
+        A favorite can be a camera, so this takes the camera access into
+        account (filtering.visible_to), not only the room scope.
+        """
         state = self._hass.states.get(entity_id)
         if (
             state is None
             or not is_served(self._hass, entity_id)
-            or not in_scope(self._hass, entity_id, scope)
+            or not visible_to(self._hass, entity_id, claims)
         ):
             return None
         return {

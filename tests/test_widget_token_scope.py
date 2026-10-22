@@ -246,12 +246,18 @@ class WidgetTokenKeepsItsDeviceSurfaceTests(_HubTestCase):
         self.hass.services.async_call = _call
         for name, value in (
             ("is_served", lambda hass, eid: True),
-            ("in_scope", lambda hass, eid, rooms: True),
             ("serialize_device", lambda hass, state: {"entity_id": state.entity_id}),
         ):
             patcher = mock.patch(f"casasmart.api.{name}", value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The view decides through filtering.visible_to, which reads
+        # filtering.in_scope for the room part.
+        patcher = mock.patch(
+            "casasmart.filtering.in_scope", lambda hass, eid, rooms: True
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def test_widget_token_lists_reads_and_commands_devices(self) -> None:
         status, body = H.read_response(
@@ -298,7 +304,7 @@ class WidgetTokenCannotWritePersonalStateTests(_HubTestCase):
         self.settings = UserSettingsEngine(self.rt.storage.table("user_settings"))
         self.rt.user_settings = self.settings
         for module in ("registry_api", "settings_api"):
-            patcher = mock.patch.multiple(
+            patcher = H.patch_scope(
                 f"casasmart.{module}",
                 is_served=lambda hass, eid: True,
                 in_scope=lambda hass, eid, rooms: True,

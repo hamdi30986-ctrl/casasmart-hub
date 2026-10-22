@@ -97,7 +97,7 @@ from .energy_api import (
 )
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .entity_bridge import CommandError, validate_command
-from .filtering import in_scope, is_served, serialize_device
+from .filtering import is_served, serialize_device, visible_to
 from .history import (
     HistoryQueryError,
     parse_history_query,
@@ -158,14 +158,18 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _visible_state(
-    hass: HomeAssistant, entity_id: str, rooms: list[str] | None
+    hass: HomeAssistant, entity_id: str, claims: dict[str, Any]
 ) -> State | None:
-    """The entity's state when it exists, is served and is in rooms, else None."""
+    """The entity's state when it exists, is served and the caller may see it.
+
+    claims are the token's: room scope for every entity, camera access for a
+    camera (filtering.visible_to).
+    """
     state = hass.states.get(entity_id)
     if (
         state is None
         or not is_served(hass, entity_id)
-        or not in_scope(hass, entity_id, rooms)
+        or not visible_to(hass, entity_id, claims)
     ):
         return None
     return state
@@ -420,12 +424,11 @@ class CasaSmartDevicesView(HomeAssistantView):
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
-        rooms = claims.get("rooms")
         devices = [
             serialize_device(self._hass, state)
             for state in self._hass.states.async_all()
             if is_served(self._hass, state.entity_id)
-            and in_scope(self._hass, state.entity_id, rooms)
+            and visible_to(self._hass, state.entity_id, claims)
         ]
         devices.sort(key=lambda device: device["entity_id"])
         return self.json({"devices": devices, "count": len(devices)})
@@ -446,7 +449,7 @@ class CasaSmartDeviceView(HomeAssistantView):
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
-        state = _visible_state(self._hass, entity_id, claims.get("rooms"))
+        state = _visible_state(self._hass, entity_id, claims)
         if state is None:
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
@@ -472,7 +475,7 @@ class CasaSmartCommandView(HomeAssistantView):
         claims, error = authenticate_request(self._hass, request, "devices.control")
         if error is not None:
             return error
-        if _visible_state(self._hass, entity_id, claims.get("rooms")) is None:
+        if _visible_state(self._hass, entity_id, claims) is None:
             return self.json_message(
                 f"Device {entity_id!r} not found", HTTPStatus.NOT_FOUND
             )
@@ -575,12 +578,10 @@ class CasaSmartHistoryView(HomeAssistantView):
         except HistoryQueryError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
-        rooms = claims.get("rooms")
-
         allowed = [
             entity_id
             for entity_id in entity_ids
-            if _visible_state(self._hass, entity_id, rooms) is not None
+            if _visible_state(self._hass, entity_id, claims) is not None
         ]
         if not allowed:
             return self.json({"history": {}})
