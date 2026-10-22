@@ -238,11 +238,12 @@ class CasaSmartUserSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Device id, name, rooms, pairing time and last-seen time."""
+        """Device id, name, rooms, camera access, pairing and last-seen time."""
         return {
             "device_id": self._device_id,
             "name": self._record.get("name"),
             "rooms": self._record.get("rooms"),
+            "camera_access": self._record.get("camera_access"),
             "enrolled_at": _iso(self._record.get("paired_at")),
             "last_seen": _iso(self._engine.last_seen(self._device_id)),
         }

@@ -1,6 +1,6 @@
 """Pairing codes: the one-time codes a phone redeems to enroll.
 
-Admin-minted member codes carry the role and room scope, are single-use,
+Admin-minted member codes carry the role, room scope and camera access, are single-use,
 expire, and can be redeemed remotely when remote pairing is on. The bootstrap
 code (the printed sticker) grants admin, never expires, is LAN-only and works
 only while the hub has no admin; its hash is reinstalled from hub_config at
@@ -20,13 +20,19 @@ from collections.abc import Callable
 from typing import Any
 
 try:
-    from .auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER
+    from .auth_tokens import (
+        ROLE_ADMIN,
+        ROLE_SUB_ADMIN,
+        ROLE_USER,
+        VALID_CAMERA_ACCESS,
+    )
     from .throttle import FailureThrottle
 except ImportError:  # top-level import in the test env (no HA package init)
     from auth_tokens import (  # type: ignore[no-redef]
         ROLE_ADMIN,
         ROLE_SUB_ADMIN,
         ROLE_USER,
+        VALID_CAMERA_ACCESS,
     )
     from throttle import FailureThrottle  # type: ignore[no-redef]
 
@@ -159,12 +165,14 @@ class PairingManager:
         rooms: list[str] | None = None,
         expires_in: str = DEFAULT_EXPIRY,
         member_id: str | None = None,
+        camera_access: str | None = None,
     ) -> dict[str, Any]:
         """Mint a single-use member code; the plaintext is returned only here.
 
         With a member_id the redeeming phone joins that existing member and
         shares their favorites and settings; the caller passes the member's
-        own role and rooms.
+        own role, rooms and camera access. camera_access None leaves cameras
+        following the room scope (auth_tokens.effective_camera_access).
         """
         if member_id is not None and (not isinstance(member_id, str) or not member_id):
             raise PairingError("member_id must be a non-empty string")
@@ -180,6 +188,10 @@ class PairingManager:
         # Only users are room-scoped; sub-admins see every room.
         if rooms is not None and role != ROLE_USER:
             raise PairingError("Room scope only applies to the user role")
+        if camera_access is not None and camera_access not in VALID_CAMERA_ACCESS:
+            raise PairingError(
+                f"camera_access must be one of {', '.join(VALID_CAMERA_ACCESS)}"
+            )
         ttl = EXPIRY_CHOICES.get(expires_in) if isinstance(expires_in, str) else None
         if ttl is None:
             raise PairingError(f"expires_in must be one of {', '.join(EXPIRY_CHOICES)}")
@@ -193,6 +205,7 @@ class PairingManager:
                 "code_hash": hash_code(code),
                 "role": role,
                 "rooms": rooms,
+                "camera_access": camera_access,
                 "member_id": member_id,
                 "created_at": now,
                 "expires_at": now + ttl,
@@ -209,6 +222,7 @@ class PairingManager:
             "code": code,
             "role": role,
             "rooms": rooms,
+            "camera_access": camera_access,
             "member_id": member_id,
             "expires_at": int(now + ttl),
             "code_class": CODE_CLASS_MEMBER,
@@ -223,6 +237,7 @@ class PairingManager:
                     "code_id": code_id,
                     "role": record["role"],
                     "rooms": record.get("rooms"),
+                    "camera_access": record.get("camera_access"),
                     "created_at": int(record["created_at"]),
                     "expires_at": (
                         int(record["expires_at"]) if record["expires_at"] else None
@@ -349,6 +364,7 @@ class PairingManager:
         return {
             "role": record["role"],
             "rooms": record.get("rooms"),
+            "camera_access": record.get("camera_access"),
             "code_id": code_id,
             "member_id": record.get("member_id"),
             "code_class": code_class,

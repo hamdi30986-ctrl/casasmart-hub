@@ -2,9 +2,10 @@
 
 Each paired device has its own P-256 key. It logs in by signing a one-time
 nonce and gets a short-lived hub-signed JWT (auth_tokens). An in-memory mirror
-of every device's role, rooms and auth version lets token checks run on the
-event loop, and makes unpairing or editing a device revoke its tokens at once.
-Methods that touch storage block, so call them in the executor.
+of every device's role, rooms, camera access and auth version lets token
+checks run on the event loop, and makes unpairing or editing a device revoke
+its tokens at once. Methods that touch storage block, so call them in the
+executor.
 """
 
 from __future__ import annotations
@@ -13,28 +14,35 @@ import logging
 import secrets
 import threading
 import time
+from collections.abc import Iterable
 from typing import Any
 
 # ThrottledError is re-exported; callers catch it as auth_engine.ThrottledError.
 try:
     from . import auth_keys, auth_tokens
     from .auth_tokens import (
+        CAMERA_ACCESS_ALL,
         ROLE_ADMIN,
         ROLE_SUB_ADMIN,
         ROLE_USER,
+        VALID_CAMERA_ACCESS,
         VALID_ROLES,
         TokenError,
+        effective_camera_access,
     )
     from .throttle import FailureThrottle, ThrottledError
 except ImportError:  # top-level import in the test env (no HA package init)
     import auth_keys
     import auth_tokens
     from auth_tokens import (
+        CAMERA_ACCESS_ALL,
         ROLE_ADMIN,
         ROLE_SUB_ADMIN,
         ROLE_USER,
+        VALID_CAMERA_ACCESS,
         VALID_ROLES,
         TokenError,
+        effective_camera_access,
     )
     from throttle import FailureThrottle, ThrottledError  # noqa: F401
 
@@ -140,6 +148,23 @@ def _member_of(device_id: str, record: dict[str, Any]) -> str:
     return record.get("member_id") or device_id
 
 
+def _camera_access_of(record: dict[str, Any]) -> str:
+    """The camera access a stored record grants (the admin always has all)."""
+    if record.get("role") == ROLE_ADMIN:
+        return CAMERA_ACCESS_ALL
+    return effective_camera_access(record.get("camera_access"), record.get("rooms"))
+
+
+def _cache_entry(record: dict[str, Any]) -> dict[str, Any]:
+    """What validate_token needs from a record, resolved once at write time."""
+    return {
+        "role": record.get("role"),
+        "rooms": record.get("rooms"),
+        "camera_access": _camera_access_of(record),
+        "ver": int(record.get("ver", 1)),
+    }
+
+
 def _public_device(
     device_id: str, record: dict[str, Any], last_seen: float | None
 ) -> dict[str, Any]:
@@ -149,6 +174,7 @@ def _public_device(
         "name": record.get("name"),
         "role": record.get("role"),
         "rooms": record.get("rooms"),
+        "camera_access": _camera_access_of(record),
         "paired_at": int(record.get("paired_at", 0)),
         "enrolled_via": record.get("enrolled_via"),
         "member_id": _member_of(device_id, record),
@@ -173,6 +199,11 @@ def _valid_rooms(rooms: Any) -> bool:
     )
 
 
+def _valid_camera_access(camera_access: Any) -> bool:
+    """True for None (keep the room-scope behaviour) or a known value."""
+    return camera_access is None or camera_access in VALID_CAMERA_ACCESS
+
+
 class AuthEngine:
     """Enrolls devices, runs the login challenge, and mints and checks JWTs."""
 
@@ -184,9 +215,10 @@ class AuthEngine:
         self._challenges: dict[str, dict[str, Any]] = {}
         self.throttle = FailureThrottle("login")
         self._secret: bytes | None = None
-        # device_id -> {role, rooms, ver, last_seen}. validate_token reads only
-        # this, never storage. Writes replace an entry, never edit it, and only
-        # after their commit, so the loop-side readers can skip the lock.
+        # device_id -> {role, rooms, camera_access, ver, last_seen}.
+        # validate_token reads only this, never storage. Writes replace an
+        # entry, never edit it, and only after their commit, so the loop-side
+        # readers can skip the lock.
         self._device_cache: dict[str, dict[str, Any]] = {}
 
     def warm_up(self) -> None:
@@ -197,11 +229,7 @@ class AuthEngine:
         self._signing_secret()
         with self._lock:
             self._device_cache = {
-                device_id: {
-                    "role": record.get("role"),
-                    "rooms": record.get("rooms"),
-                    "ver": int(record.get("ver", 1)),
-                }
+                device_id: _cache_entry(record)
                 for device_id, record in self._devices.items()
             }
 
@@ -234,12 +262,14 @@ class AuthEngine:
         enrolled_via: str | None = None,
         member_id: str | None = None,
         code_hash: str | None = None,
+        camera_access: str | None = None,
     ) -> str:
         """Store a new device and return its random id.
 
         enrolled_via is the id of the pairing code the device redeemed (None
         when there was none). code_hash is that code's hash, which the
-        idempotent re-pair path keeps accepting for this device.
+        idempotent re-pair path keeps accepting for this device. camera_access
+        None means cameras follow the room scope (see effective_camera_access).
         """
         _require_name(name)
         name = _stored_name(name)
@@ -249,6 +279,10 @@ class AuthEngine:
             raise EnrollError("rooms must be a list of area ids")
         if rooms is not None and role != ROLE_USER:
             raise EnrollError("Room scope only applies to the user role")
+        if not _valid_camera_access(camera_access):
+            raise EnrollError(
+                f"camera_access must be one of {', '.join(VALID_CAMERA_ACCESS)}"
+            )
         canonical_pem = _canonical_key(public_key_pem)
 
         with self._lock:
@@ -256,11 +290,13 @@ class AuthEngine:
                 raise AdminExistsError("This hub already has an admin")
 
             device_id = f"dev-{secrets.token_urlsafe(12)}"
-            self._devices[device_id] = {
+            record = {
                 "name": name,
                 "role": role,
                 "public_key": canonical_pem,
                 "rooms": rooms,
+                # None keeps the room-scope behaviour; resolved on every read.
+                "camera_access": camera_access,
                 "ver": 1,
                 "paired_at": time.time(),
                 "enrolled_via": enrolled_via,
@@ -271,7 +307,8 @@ class AuthEngine:
                 # names an existing member, otherwise the device starts one.
                 "member_id": member_id or f"mem-{secrets.token_urlsafe(9)}",
             }
-            self._device_cache[device_id] = {"role": role, "rooms": rooms, "ver": 1}
+            self._devices[device_id] = record
+            self._device_cache[device_id] = _cache_entry(record)
         _LOGGER.info("Enrolled device %s (%s, role=%s)", device_id, name, role)
         return device_id
 
@@ -292,15 +329,17 @@ class AuthEngine:
         role: str,
         public_key_pem: str,
         rooms: list[str] | None = None,
+        camera_access: str | None = None,
     ) -> bool:
         """Enroll or update a sub-admin or user under a caller-chosen id.
 
         For the developer manifest (dev_enroll), whose ids must survive a
         factory reset. Returns False when the id is already stored with the
-        same key, role and rooms, so it is safe to call on every boot.
-        Otherwise writes the record, bumping ver to revoke older tokens, and
-        updates the cache so the device can log in right away. Never creates an
-        admin, so a manifest can't get around the single-admin rule.
+        same key, role, rooms and camera access, so it is safe to call on
+        every boot. Otherwise writes the record, bumping ver to revoke older
+        tokens, and updates the cache so the device can log in right away.
+        Never creates an admin, so a manifest can't get around the
+        single-admin rule.
         """
         if not isinstance(device_id, str) or not device_id.strip():
             raise EnrollError("device_id is required")
@@ -312,6 +351,10 @@ class AuthEngine:
             raise EnrollError("rooms must be a list of area ids")
         if rooms is not None and role != ROLE_USER:
             raise EnrollError("Room scope only applies to the user role")
+        if not _valid_camera_access(camera_access):
+            raise EnrollError(
+                f"camera_access must be one of {', '.join(VALID_CAMERA_ACCESS)}"
+            )
         canonical_pem = _canonical_key(public_key_pem)
 
         device_id = device_id.strip()
@@ -322,6 +365,7 @@ class AuthEngine:
                 and existing.get("public_key") == canonical_pem
                 and existing.get("role") == role
                 and existing.get("rooms") == rooms
+                and existing.get("camera_access") == camera_access
             ):
                 return False  # already up to date
 
@@ -331,20 +375,18 @@ class AuthEngine:
             else:
                 ver = 1
                 paired_at = time.time()
-            self._devices[device_id] = {
+            record = {
                 "name": name,
                 "role": role,
                 "public_key": canonical_pem,
                 "rooms": rooms,
+                "camera_access": camera_access,
                 "ver": ver,
                 "paired_at": paired_at,
                 "enrolled_via": None,
             }
-            self._device_cache[device_id] = {
-                "role": role,
-                "rooms": rooms,
-                "ver": ver,
-            }
+            self._devices[device_id] = record
+            self._device_cache[device_id] = _cache_entry(record)
         _LOGGER.info(
             "Provisioned device %s (%s, role=%s, ver=%d)",
             device_id,
@@ -384,26 +426,24 @@ class AuthEngine:
             old_record = self._devices.get(old_admin_id) or {}
             member_id = _member_of(old_admin_id, old_record)
             device_id = f"dev-{secrets.token_urlsafe(12)}"
+            record = {
+                "name": name,
+                "role": ROLE_ADMIN,
+                "public_key": canonical_pem,
+                "rooms": None,
+                "camera_access": None,
+                "ver": 1,
+                "paired_at": time.time(),
+                # No pairing code was redeemed; kept for the enroll record shape.
+                "enrolled_via": None,
+                "member_id": member_id,
+            }
             with self._devices.transaction():
                 del self._devices[old_admin_id]
-                self._devices[device_id] = {
-                    "name": name,
-                    "role": ROLE_ADMIN,
-                    "public_key": canonical_pem,
-                    "rooms": None,
-                    "ver": 1,
-                    "paired_at": time.time(),
-                    # No pairing code was redeemed; kept for the enroll record shape.
-                    "enrolled_via": None,
-                    "member_id": member_id,
-                }
+                self._devices[device_id] = record
             self._device_cache.pop(old_admin_id, None)
             self._clear_throttle(old_admin_id)
-            self._device_cache[device_id] = {
-                "role": ROLE_ADMIN,
-                "rooms": None,
-                "ver": 1,
-            }
+            self._device_cache[device_id] = _cache_entry(record)
         _LOGGER.info(
             "Owner recovery: admin %s replaced by %s (%s); old admin tokens dead",
             old_admin_id,
@@ -465,6 +505,7 @@ class AuthEngine:
                         "device_id": device_id,
                         "role": record.get("role"),
                         "rooms": record.get("rooms"),
+                        "camera_access": _camera_access_of(record),
                         # Only for the enroll view, which drops it from replies.
                         "enrolled_code_hash": record.get("enrolled_code_hash"),
                     }
@@ -496,7 +537,8 @@ class AuthEngine:
     def list_members(self) -> list[dict[str, Any]]:
         """Distinct members with a device count, for the "add a device" picker.
 
-        Name, role and rooms come from the member's most recently paired device.
+        Name, role, rooms and camera access come from the member's most
+        recently paired device.
         """
         members: dict[str, dict[str, Any]] = {}
         for device_id, record in self._devices.items():
@@ -509,6 +551,7 @@ class AuthEngine:
                     "name": record.get("name"),
                     "role": record.get("role"),
                     "rooms": record.get("rooms"),
+                    "camera_access": _camera_access_of(record),
                     "device_count": 1,
                     "_paired_at": paired_at,
                 }
@@ -519,6 +562,7 @@ class AuthEngine:
                         name=record.get("name"),
                         role=record.get("role"),
                         rooms=record.get("rooms"),
+                        camera_access=_camera_access_of(record),
                         _paired_at=paired_at,
                     )
         for entry in members.values():
@@ -559,12 +603,15 @@ class AuthEngine:
         device_id: str,
         role: str | None = None,
         rooms: list[str] | object | None = ...,
+        camera_access: str | object = ...,
     ) -> dict[str, Any]:
-        """Change a device's role and/or room scope; its outstanding JWTs die.
+        """Change a device's role, room scope and/or camera access; its
+        outstanding JWTs die.
 
         The admin can't be edited here, and the highest role granted is
         sub-admin. rooms=... (the default) leaves the scope unchanged; None
-        clears it. Only users can be room-scoped.
+        clears it. Only users can be room-scoped. camera_access=... leaves
+        the camera access unchanged.
         """
         with self._lock:
             record = self._devices.get(device_id)
@@ -581,29 +628,71 @@ class AuthEngine:
             # Only users are room-scoped; sub-admins see every room.
             if new_rooms is not None and new_role != ROLE_USER:
                 raise UserManagementError("Room scope only applies to the user role")
+            if camera_access is not ... and camera_access not in VALID_CAMERA_ACCESS:
+                raise UserManagementError(
+                    f"camera_access must be one of {', '.join(VALID_CAMERA_ACCESS)}"
+                )
 
             record["role"] = new_role
             record["rooms"] = new_rooms
+            if camera_access is not ...:
+                record["camera_access"] = camera_access
             record["ver"] = int(record.get("ver", 1)) + 1
             self._devices[device_id] = record  # persist
-            self._device_cache[device_id] = {
-                "role": new_role,
-                "rooms": new_rooms,
-                "ver": record["ver"],
-            }
+            self._device_cache[device_id] = _cache_entry(record)
         _LOGGER.info(
-            "Device %s updated (role=%s, rooms=%s); outstanding tokens invalidated",
+            "Device %s updated (role=%s, rooms=%s, cameras=%s); "
+            "outstanding tokens invalidated",
             device_id,
             new_role,
             "all" if new_rooms is None else len(new_rooms),
+            _camera_access_of(record),
         )
         return {
             "device_id": device_id,
             "name": record.get("name"),
             "role": new_role,
             "rooms": new_rooms,
+            "camera_access": _camera_access_of(record),
             "paired_at": int(record.get("paired_at", 0)),
         }
+
+    def prune_rooms(self, known_rooms: Iterable[str]) -> list[dict[str, Any]]:
+        """Drop room ids that no longer exist from every device's room scope.
+
+        A deleted room's id would otherwise sit in member scopes forever; the
+        registry's delete and the users list both call this with the rooms
+        that exist. Tokens are not revoked: a dead id granted nothing, so
+        nothing a device may do changes, and validate_token reads the scope
+        from the cache anyway. Returns the public record of every device
+        whose scope changed, so a caller can tell the admin about a member
+        left with no rooms at all.
+        """
+        known = set(known_rooms)
+        changed: list[dict[str, Any]] = []
+        with self._lock:
+            for device_id, record in list(self._devices.items()):
+                rooms = record.get("rooms")
+                if not isinstance(rooms, list):
+                    continue
+                kept = [room for room in rooms if room in known]
+                if kept == rooms:
+                    continue
+                record["rooms"] = kept
+                self._devices[device_id] = record  # persist
+                self._device_cache[device_id] = {
+                    **self._device_cache.get(device_id, _cache_entry(record)),
+                    "rooms": kept,
+                    "camera_access": _camera_access_of(record),
+                }
+                changed.append(_public_device(device_id, record, None))
+        for device in changed:
+            _LOGGER.info(
+                "Device %s: dropped deleted room(s) from its scope, %d left",
+                device["device_id"],
+                len(device["rooms"]),
+            )
+        return changed
 
     def delete_device(self, device_id: str) -> str:
         """Unpair a device, killing its tokens; return its member_id.
@@ -735,6 +824,7 @@ class AuthEngine:
             raise ChallengeError("Challenge verification failed")
 
         self.throttle.clear(throttle_key)
+        camera_access = _camera_access_of(record)
         token = auth_tokens.issue_token(
             self._signing_secret(),
             device_id=device_id,
@@ -742,12 +832,16 @@ class AuthEngine:
             rooms=record.get("rooms"),
             ttl=TOKEN_TTL,
             ver=int(record.get("ver", 1)),
+            camera_access=camera_access,
         )
         return {
             "token": token,
             "expires_in": TOKEN_TTL,
             "role": record["role"],
             "device_id": device_id,
+            # The app shows its own scope from these; older apps ignore them.
+            "rooms": record.get("rooms"),
+            "camera_access": camera_access,
         }
 
     # -- validation and authorization (no I/O, safe on the event loop) --------
@@ -772,10 +866,15 @@ class AuthEngine:
             raise TokenError("Token revoked", code="token_stale")
         # For the per-user sensors; kept in memory, so no write per request.
         cached["last_seen"] = time.time()
-        # authorize() uses the stored role and rooms. The ver check means they
-        # match the claims; this keeps authorize() tied to the record.
+        # authorize() and the scope checks use the stored role, rooms and
+        # camera access. The ver check means they match the claims; this
+        # keeps every check tied to the record (prune_rooms edits it without
+        # a ver bump, so the cache is the only source).
         claims["role"] = cached["role"]
         claims["rooms"] = cached.get("rooms")
+        claims["camera_access"] = cached.get(
+            "camera_access"
+        ) or effective_camera_access(None, cached.get("rooms"))
         return claims
 
     def is_owner_device(self, device_id: str) -> bool:
@@ -826,6 +925,7 @@ class AuthEngine:
             ttl=WIDGET_TOKEN_TTL,
             ver=cached["ver"],
             scope=auth_tokens.SCOPE_WIDGET,
+            camera_access=cached.get("camera_access"),
         )
         return {
             "token": token,

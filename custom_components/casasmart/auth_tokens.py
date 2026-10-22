@@ -5,7 +5,9 @@ module accepts one format (HS256, our issuer, our claim shape) and rejects
 everything else; there is no algorithm negotiation to get wrong. Claims are
 iss, sub (device id), role, rooms (None for all rooms), ver (the device's
 auth version, checked by the engine so edits revoke tokens at once), iat,
-exp, jti, and an optional scope ("widget" for the home-screen widget token).
+exp, jti, an optional scope ("widget" for the home-screen widget token) and
+an optional camera_access (none / rooms / all; a token without it keeps the
+pre-2.4 behaviour, cameras following the room scope).
 """
 
 from __future__ import annotations
@@ -31,6 +33,27 @@ VALID_ROLES = (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER)
 # The only non-default scope a hub token can carry (home-screen widgets).
 SCOPE_WIDGET = "widget"
 VALID_SCOPES = (SCOPE_WIDGET,)
+
+# A member's camera access: no cameras at all, only the cameras in the rooms
+# the member can see (which for an unscoped member is every camera), or every
+# camera whatever the room scope. The admin always has every camera.
+CAMERA_ACCESS_NONE = "none"
+CAMERA_ACCESS_ROOMS = "rooms"
+CAMERA_ACCESS_ALL = "all"
+VALID_CAMERA_ACCESS = (CAMERA_ACCESS_NONE, CAMERA_ACCESS_ROOMS, CAMERA_ACCESS_ALL)
+
+
+def effective_camera_access(camera_access: Any, rooms: Any) -> str:
+    """The camera access a record or token grants.
+
+    A record from before camera access existed has no value, and keeps the
+    behaviour it had: cameras follow the room scope, so an unscoped member
+    sees every camera and a scoped one the cameras in their rooms. No member
+    is locked out by the upgrade.
+    """
+    if camera_access in VALID_CAMERA_ACCESS:
+        return camera_access
+    return CAMERA_ACCESS_ALL if rooms is None else CAMERA_ACCESS_ROOMS
 
 
 class TokenError(Exception):
@@ -72,14 +95,22 @@ def issue_token(
     ver: int = 1,
     now: float | None = None,
     scope: str | None = None,
+    camera_access: str | None = None,
 ) -> str:
-    """Mint a signed token for an authenticated device."""
+    """Mint a signed token for an authenticated device.
+
+    camera_access is written as a claim when given; the engine reads the
+    device's current value from its cache on every check anyway, so the
+    claim is informational (it lets a holder know its own access).
+    """
     if not secret:
         raise ValueError("Empty signing secret")
     if role not in VALID_ROLES:
         raise ValueError(f"Unknown role {role!r}")
     if scope is not None and scope not in VALID_SCOPES:
         raise ValueError(f"Unknown scope {scope!r}")
+    if camera_access is not None and camera_access not in VALID_CAMERA_ACCESS:
+        raise ValueError(f"Unknown camera access {camera_access!r}")
     issued_at = int(now if now is not None else time.time())
     header = {"alg": ALGORITHM, "typ": "JWT"}
     claims = {
@@ -94,6 +125,8 @@ def issue_token(
     }
     if scope is not None:
         claims["scope"] = scope
+    if camera_access is not None:
+        claims["camera_access"] = camera_access
     signing_input = (
         _b64url_encode(json.dumps(header, separators=(",", ":")).encode())
         + "."
@@ -154,6 +187,8 @@ def validate_token(
     if "scope" in claims and claims["scope"] not in VALID_SCOPES:
         # Reject an unknown scope so it can't validate as an unscoped token.
         raise TokenError("Unknown scope claim")
+    if "camera_access" in claims and claims["camera_access"] not in VALID_CAMERA_ACCESS:
+        raise TokenError("Malformed camera_access claim")
 
     current = now if now is not None else time.time()
     exp = claims.get("exp")

@@ -428,3 +428,66 @@ class CommittedManifestIntegrityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CameraAccessTests(_EngineFixture):
+    """The manifest may set a device's camera access; a bad value skips it."""
+
+    def test_ensure_enrolled_stores_and_rewrites_camera_access(self):
+        self.assertTrue(
+            self.engine.ensure_enrolled(
+                "dev-cam", "n", ROLE_USER, self.public_pem, camera_access="none"
+            )
+        )
+        self.assertEqual(self.engine.get_device("dev-cam")["camera_access"], "none")
+        # Same record again: nothing to write.
+        self.assertFalse(
+            self.engine.ensure_enrolled(
+                "dev-cam", "n", ROLE_USER, self.public_pem, camera_access="none"
+            )
+        )
+        # A changed access rewrites (and bumps ver, as any edit does).
+        token = self.login("dev-cam")["token"]
+        self.assertTrue(
+            self.engine.ensure_enrolled(
+                "dev-cam", "n", ROLE_USER, self.public_pem, camera_access="all"
+            )
+        )
+        self.assertEqual(self.engine.get_device("dev-cam")["camera_access"], "all")
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)
+
+    def test_ensure_enrolled_refuses_an_unknown_access(self):
+        with self.assertRaises(EnrollError):
+            self.engine.ensure_enrolled(
+                "dev-x", "n", ROLE_USER, self.public_pem, camera_access="some"
+            )
+
+    def test_manifest_entry_carries_camera_access(self):
+        entry = dev_enroll._normalize_entry(
+            {
+                "label": "Kiosk",
+                "role": ROLE_USER,
+                "public_key": self.public_pem,
+                "rooms": ["hall"],
+                "camera_access": "none",
+            }
+        )
+        self.assertEqual(entry["camera_access"], "none")
+        # Absent means unset (cameras follow the rooms), never a grant.
+        entry = dev_enroll._normalize_entry(
+            {"label": "Kiosk", "role": ROLE_USER, "public_key": self.public_pem}
+        )
+        self.assertIsNone(entry["camera_access"])
+
+    def test_manifest_entry_with_a_bad_access_is_skipped(self):
+        self.assertIsNone(
+            dev_enroll._normalize_entry(
+                {
+                    "label": "Kiosk",
+                    "role": ROLE_USER,
+                    "public_key": self.public_pem,
+                    "camera_access": "everything",
+                }
+            )
+        )

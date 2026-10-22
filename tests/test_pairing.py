@@ -116,6 +116,7 @@ class PairingTests(unittest.TestCase):
             {
                 "role": "user",
                 "rooms": ["area_living"],
+                "camera_access": None,  # not set: cameras follow the rooms
                 "code_id": issued["code_id"],
                 "member_id": None,  # a new-member code mints one at enroll
                 "code_class": CODE_CLASS_MEMBER,  # admin-minted = member class
@@ -408,3 +409,40 @@ class PairingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CameraAccessCodeTests(unittest.TestCase):
+    """A code bakes in the camera access as it does the role and rooms."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = HubStorage(db_path=Path(self._tmp.name) / "hub.db")
+        self.storage.open()
+        self.manager = PairingManager(self.storage.table("pairing_codes"), lambda: True)
+
+    def tearDown(self):
+        self.storage.close()
+        self._tmp.cleanup()
+
+    def test_access_rides_generate_list_and_redeem(self):
+        issued = self.manager.generate_code(
+            "user", rooms=["area_living"], camera_access="none"
+        )
+        self.assertEqual(issued["camera_access"], "none")
+        listed = self.manager.list_codes()[0]
+        self.assertEqual(listed["camera_access"], "none")
+        grant = self.manager.redeem(issued["code"], "ip-1")
+        self.assertEqual(grant["camera_access"], "none")
+        self.assertEqual(grant["rooms"], ["area_living"])
+
+    def test_a_sub_admin_code_may_restrict_cameras(self):
+        issued = self.manager.generate_code("sub-admin", camera_access="none")
+        self.assertEqual(
+            self.manager.redeem(issued["code"], "ip-1")["camera_access"], "none"
+        )
+
+    def test_unknown_access_is_a_pairing_error(self):
+        with self.assertRaises(PairingError):
+            self.manager.generate_code("user", camera_access="everything")
+        with self.assertRaises(PairingError):
+            self.manager.generate_code("user", camera_access="")

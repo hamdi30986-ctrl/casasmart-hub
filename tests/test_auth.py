@@ -798,3 +798,208 @@ class LoopSideReadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CameraAccessTests(unittest.TestCase):
+    """Per-member camera access: none / rooms / all, admin always all.
+
+    A record from before the field existed keeps today's behaviour (cameras
+    follow the room scope), so the upgrade locks nobody out.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.storage = HubStorage(db_path=tmp / "hub.db")
+        self.storage.open()
+        self.engine = AuthEngine(
+            self.storage.table("auth_devices"), JsonConfigStore(tmp / "cfg.json")
+        )
+        self.engine.warm_up()
+
+    def tearDown(self):
+        self.storage.close()
+        self._tmp.cleanup()
+
+    def _pair(self, name, role, **kwargs):
+        """Enroll a fresh phone; returns (device_id, private_key, public_pem)."""
+        private_key, public_pem = make_keypair()
+        device_id = self.engine.enroll_device(name, role, public_pem, **kwargs)
+        return device_id, private_key, public_pem
+
+    def _login(self, device_id, private_key):
+        challenge = self.engine.create_challenge(device_id, SOURCE)
+        return self.engine.redeem_challenge(
+            device_id,
+            challenge["challenge_id"],
+            sign_nonce(private_key, challenge["nonce"]),
+            SOURCE,
+        )
+
+    def test_effective_access_defaults_follow_the_room_scope(self):
+        self.assertEqual(auth_tokens.effective_camera_access(None, None), "all")
+        self.assertEqual(auth_tokens.effective_camera_access(None, ["k"]), "rooms")
+        self.assertEqual(auth_tokens.effective_camera_access(None, []), "rooms")
+        self.assertEqual(auth_tokens.effective_camera_access("none", None), "none")
+        # Garbage in storage is treated as unset, never as a grant.
+        self.assertEqual(
+            auth_tokens.effective_camera_access("everything", ["k"]), "rooms"
+        )
+
+    def test_record_without_the_field_keeps_todays_behaviour(self):
+        unscoped, _, _ = self._pair("Phone", "user")
+        scoped, scoped_key, _ = self._pair("Kid", "user", rooms=["bedroom"])
+        # Stored as unset, reported as the behaviour it has.
+        self.assertIsNone(self.engine._devices[unscoped]["camera_access"])
+        self.assertEqual(self.engine.get_device(unscoped)["camera_access"], "all")
+        self.assertEqual(self.engine.get_device(scoped)["camera_access"], "rooms")
+        # A record written by an older hub has no key at all.
+        legacy = dict(self.engine._devices[scoped])
+        del legacy["camera_access"]
+        self.engine._devices[scoped] = legacy
+        self.engine.warm_up()
+        self.assertEqual(self.engine.get_device(scoped)["camera_access"], "rooms")
+        issued = self._login(scoped, scoped_key)
+        self.assertEqual(issued["camera_access"], "rooms")
+        self.assertEqual(issued["rooms"], ["bedroom"])
+        claims = self.engine.validate_token(issued["token"])
+        self.assertEqual(claims["camera_access"], "rooms")
+
+    def test_old_token_without_the_claim_gets_the_records_access(self):
+        device_id, _, _ = self._pair("Phone", "user", camera_access="none")
+        # What a pre-upgrade hub minted: no camera_access claim at all.
+        old = auth_tokens.issue_token(
+            self.engine._signing_secret(), device_id, "user", None, ttl=600, ver=1
+        )
+        self.assertEqual(self.engine.validate_token(old)["camera_access"], "none")
+
+    def test_explicit_access_is_stored_and_lands_in_the_token(self):
+        device_id, key, _ = self._pair("Phone", "user", camera_access="none")
+        self.assertEqual(self.engine.get_device(device_id)["camera_access"], "none")
+        issued = self._login(device_id, key)
+        self.assertEqual(issued["camera_access"], "none")
+        self.assertIsNone(issued["rooms"])
+        claims = self.engine.validate_token(issued["token"])
+        self.assertEqual(claims["camera_access"], "none")
+        # Also in the signed claims themselves (the holder can read its own).
+        raw = auth_tokens.validate_token(self.engine._signing_secret(), issued["token"])
+        self.assertEqual(raw["camera_access"], "none")
+
+    def test_update_changes_access_and_revokes_tokens(self):
+        device_id, key, _ = self._pair("Phone", "user")
+        token = self._login(device_id, key)["token"]
+        updated = self.engine.update_device(device_id, camera_access="none")
+        self.assertEqual(updated["camera_access"], "none")
+        with self.assertRaises(TokenError):
+            self.engine.validate_token(token)
+        fresh = self._login(device_id, key)["token"]
+        self.assertEqual(self.engine.validate_token(fresh)["camera_access"], "none")
+        # The sentinel default leaves it alone; a room edit keeps it.
+        self.engine.update_device(device_id, rooms=["kitchen"])
+        self.assertEqual(self.engine.get_device(device_id)["camera_access"], "none")
+        self.engine.update_device(device_id, camera_access="all")
+        self.assertEqual(self.engine.get_device(device_id)["camera_access"], "all")
+        self.assertEqual(self.engine.get_device(device_id)["rooms"], ["kitchen"])
+
+    def test_bad_values_are_refused(self):
+        _, public_pem = make_keypair()
+        with self.assertRaises(EnrollError):
+            self.engine.enroll_device(
+                "Phone", "user", public_pem, camera_access="everything"
+            )
+        device_id, _, _ = self._pair("Phone", "user")
+        with self.assertRaises(UserManagementError):
+            self.engine.update_device(device_id, camera_access="some")
+        with self.assertRaises(UserManagementError):
+            self.engine.update_device(device_id, camera_access=None)
+        with self.assertRaises(ValueError):
+            auth_tokens.issue_token(
+                SECRET, "dev-1", "user", None, ttl=60, camera_access="some"
+            )
+
+    def test_malformed_claim_in_a_token_is_rejected(self):
+        import base64
+        import hashlib
+        import hmac
+        import json
+
+        token = auth_tokens.issue_token(SECRET, "dev-1", "user", None, ttl=3600)
+        header, claims, _ = token.split(".")
+        decoded = json.loads(base64.urlsafe_b64decode(claims + "=="))
+        decoded["camera_access"] = "everything"
+        forged = (
+            base64.urlsafe_b64encode(json.dumps(decoded).encode()).rstrip(b"=").decode()
+        )
+        signing_input = f"{header}.{forged}".encode()
+        signature = (
+            base64.urlsafe_b64encode(
+                hmac.new(SECRET, signing_input, hashlib.sha256).digest()
+            )
+            .rstrip(b"=")
+            .decode()
+        )
+        with self.assertRaises(TokenError):
+            auth_tokens.validate_token(SECRET, f"{header}.{forged}.{signature}")
+
+    def test_admin_always_has_every_camera(self):
+        admin_id, key, _ = self._pair("Owner", "admin")
+        self.assertEqual(self.engine.get_device(admin_id)["camera_access"], "all")
+        # Even a stray value in storage can't take the owner's cameras away.
+        record = self.engine._devices[admin_id]
+        record["camera_access"] = "none"
+        self.engine._devices[admin_id] = record
+        self.engine.warm_up()
+        self.assertEqual(self.engine.get_device(admin_id)["camera_access"], "all")
+        claims = self.engine.validate_token(self._login(admin_id, key)["token"])
+        self.assertEqual(claims["camera_access"], "all")
+
+    def test_widget_token_carries_the_access(self):
+        device_id, _, _ = self._pair("Phone", "user", camera_access="none")
+        claims = self.engine.validate_token(
+            self.engine.mint_widget_token(device_id)["token"]
+        )
+        self.assertEqual(claims["camera_access"], "none")
+
+    def test_members_and_public_key_lookup_report_the_access(self):
+        device_id, _, public_pem = self._pair(
+            "Phone", "user", rooms=["k"], camera_access="all"
+        )
+        member = self.engine.list_members()[0]
+        self.assertEqual(member["camera_access"], "all")
+        self.assertEqual(member["rooms"], ["k"])
+        known = self.engine.device_for_public_key(public_pem)
+        self.assertEqual(known["device_id"], device_id)
+        self.assertEqual(known["camera_access"], "all")
+
+    def test_prune_rooms_drops_dead_ids_without_revoking(self):
+        self._pair("Owner", "admin")
+        kid, kid_key, _ = self._pair("Kid", "user", rooms=["kitchen", "garage"])
+        guest, _, _ = self._pair("Guest", "user", rooms=["garage"])
+        free, _, _ = self._pair("Free", "user")
+        token = self._login(kid, kid_key)["token"]
+        ver_before = self.engine.device_version(kid)
+
+        changed = self.engine.prune_rooms({"kitchen", "living"})
+
+        self.assertEqual(
+            sorted((d["device_id"], d["rooms"]) for d in changed),
+            sorted([(kid, ["kitchen"]), (guest, [])]),
+        )
+        self.assertEqual(self.engine.get_device(kid)["rooms"], ["kitchen"])
+        self.assertEqual(self.engine.get_device(guest)["rooms"], [])
+        self.assertIsNone(self.engine.get_device(free)["rooms"])
+        # No revocation: a dead id granted nothing, so nothing changed for
+        # the holder; every check reads the new scope from the cache.
+        self.assertEqual(self.engine.device_version(kid), ver_before)
+        self.assertEqual(self.engine.validate_token(token)["rooms"], ["kitchen"])
+        # Idempotent.
+        self.assertEqual(self.engine.prune_rooms({"kitchen", "living"}), [])
+        # Survives a restart.
+        self.engine.warm_up()
+        self.assertEqual(self.engine._device_cache[guest]["rooms"], [])
+
+    def test_authorize_still_grants_cameras_view_to_every_role(self):
+        # The permission stays role-wide; the per-member access is enforced by
+        # filtering.visible_to on every camera path, not by authorize().
+        for role in ("admin", "sub-admin", "user"):
+            self.assertTrue(AuthEngine.authorize({"role": role}, "cameras.view"))

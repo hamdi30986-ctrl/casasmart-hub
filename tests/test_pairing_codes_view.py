@@ -60,6 +60,8 @@ V1_KEYS = {
     "expires_at",
     "code_class",
 }
+# Added with member camera access; absent on the wire = None (follow rooms).
+ACCESS_KEYS = {"camera_access"}
 V2_KEYS = {"payload_version", "identity_fingerprint", "tunnel_url", "qr_payload"}
 
 
@@ -125,8 +127,9 @@ class PairingCodesViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(body["expires_at"], int)
         self.assertGreater(body["expires_at"], time.time())
         self.assertEqual(body["code_class"], "member")
-        # Exact key set: v1 + v2, nothing renamed, nothing dropped.
-        self.assertEqual(set(body), V1_KEYS | V2_KEYS)
+        # Exact key set: v1 + v2 + camera access, nothing renamed or dropped.
+        self.assertEqual(set(body), V1_KEYS | V2_KEYS | ACCESS_KEYS)
+        self.assertIsNone(body["camera_access"])
 
     # -- v2 fields --------------------------------------------------------------
 

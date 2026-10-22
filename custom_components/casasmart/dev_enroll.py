@@ -5,7 +5,8 @@ CASASMART_DEV_ENROLL environment variable is set and a dev_devices.json
 manifest exists in the hub's data dir or in a .dev/ folder next to
 custom_components/; the manifest never ships with the integration. Each entry
 is a public key with an optional device id, label, role (sub-admin or user,
-never admin) and rooms (users only), enrolled under a fixed id. Bad entries
+never admin), rooms (users only) and camera access, enrolled under a fixed
+id. Bad entries
 are logged and skipped.
 """
 
@@ -20,7 +21,13 @@ from typing import Any
 try:
     from . import auth_keys
     from .auth_engine import AuthEngine, EnrollError
-    from .auth_tokens import ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER, VALID_ROLES
+    from .auth_tokens import (
+        ROLE_ADMIN,
+        ROLE_SUB_ADMIN,
+        ROLE_USER,
+        VALID_CAMERA_ACCESS,
+        VALID_ROLES,
+    )
 except ImportError:  # flat import in the test env (no HA package init)
     import auth_keys  # type: ignore[no-redef]
     from auth_engine import AuthEngine, EnrollError  # type: ignore[no-redef]
@@ -28,6 +35,7 @@ except ImportError:  # flat import in the test env (no HA package init)
         ROLE_ADMIN,
         ROLE_SUB_ADMIN,
         ROLE_USER,
+        VALID_CAMERA_ACCESS,
         VALID_ROLES,
     )
 
@@ -133,6 +141,14 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
             role,
         )
         return None
+    camera_access = entry.get("camera_access")
+    if camera_access is not None and camera_access not in VALID_CAMERA_ACCESS:
+        _LOGGER.error(
+            "Dev enroll: entry %s has unknown camera_access %r; skipped",
+            device_id,
+            camera_access,
+        )
+        return None
 
     return {
         "device_id": device_id.strip(),
@@ -140,6 +156,7 @@ def _normalize_entry(entry: Any) -> dict[str, Any] | None:
         "role": role,
         "public_key_pem": canonical_pem,
         "rooms": rooms,
+        "camera_access": camera_access,
     }
 
 
@@ -166,6 +183,7 @@ def ensure_dev_devices(data_dir: Path, auth: AuthEngine) -> list[str]:
                 role=normalized["role"],
                 public_key_pem=normalized["public_key_pem"],
                 rooms=normalized["rooms"],
+                camera_access=normalized["camera_access"],
             )
         except EnrollError as err:
             # One bad entry must not stop the others from being provisioned.
