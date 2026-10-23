@@ -27,9 +27,9 @@ from .const import (
     EVENT_REGISTRY_CHANGED,
     EVENT_SUGGESTIONS_CHANGED,
 )
-from .filtering import area_id_of, in_scope, is_served
+from .filtering import in_scope, is_served
 from .generated_suggestions import digest, make_suggestion, window
-from .now_data import is_room_activity_candidate
+from .room_intel.ranking import async_rank_rooms
 from .storage import StorageError
 from .suggestions import SuggestionError, evaluate, next_boundary, state_value
 
@@ -286,104 +286,11 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         self.now_data = now_data
 
     async def room_context(self, scope):
-        """Rank the caller's rooms by how many safe devices are on.
+        """The caller's rooms, busiest first (room_intel.ranking).
 
-        Only devices imported into the registry count. When any room has an
-        activity policy, only participating rooms and their approved devices
-        count; otherwise every visible room does. Returns (ranked rooms,
-        states by room, states by entity).
+        Returns (ranked rooms, states by room, states by entity).
         """
-
-        def read_stores():
-            rooms = self.registry.list_rooms()
-            policies = {
-                r["room_id"]: self.now_data.room_policy(r["room_id"]) for r in rooms
-            }
-            return rooms, policies, self.registry.list_user_devices()
-
-        rooms, policies, devices = await self.hass.async_add_executor_job(read_stores)
-        rooms = [r for r in rooms if scope is None or r["room_id"] in scope]
-        configured = any(
-            policies.get(r["room_id"], {}).get("participates") for r in rooms
-        )
-        gang_types = {}
-        control_ids = set()
-        # Older registry records key gang types by these channel names
-        # instead of by entity id.
-        suffixes = (
-            "left",
-            "right",
-            "center",
-            "l1",
-            "l2",
-            "l3",
-            "endpoint_1",
-            "endpoint_2",
-            "endpoint_3",
-            "gang_1",
-            "gang_2",
-            "gang_3",
-        )
-        for device in devices:
-            gangs = device.get("gangs", {})
-            legacy_types = device.get("gang_types", {})
-            config_ids = set(device.get("config_entity_ids", []))
-            for eid in device.get("control_entity_ids", device.get("entity_ids", [])):
-                gang = gangs.get(eid, {})
-                if eid in config_ids or gang.get("presentation") == "hidden":
-                    continue
-                control_ids.add(eid)
-                local = eid.split(".", 1)[-1]
-                key = next(
-                    (s for s in suffixes if local == s or local.endswith("_" + s)), eid
-                )
-                gang_types[eid] = gang.get("type", legacy_types.get(key))
-        visible = self.visible(scope)
-        states = {
-            s.entity_id: s
-            for s in self.hass.states.async_all()
-            if s.entity_id in control_ids and visible(s.entity_id)
-        }
-        grouped = {r["room_id"]: [] for r in rooms}
-        for state in states.values():
-            rid = area_id_of(self.hass, state.entity_id)
-            if rid in grouped:
-                grouped[rid].append(state)
-        ranked = []
-        for room in rooms:
-            rid = room["room_id"]
-            policy = policies.get(rid, {})
-            if configured and not policy.get("participates"):
-                continue
-            eligible = []
-            for state in grouped[rid]:
-                eid = state.entity_id
-                domain = eid.split(".")[0]
-                safe = domain in {"light", "fan"} or (
-                    domain == "switch"
-                    and gang_types.get(eid) in {"light", "fan", "switch", "outlet"}
-                )
-                if not safe or state.state in {"unknown", "unavailable"}:
-                    continue
-                if configured and (
-                    eid not in policy.get("eligible_entity_ids", [])
-                    or not is_room_activity_candidate(state)
-                ):
-                    continue
-                eligible.append(eid)
-            count = sum(states[eid].state == "on" for eid in eligible)
-            if count or configured:
-                ranked.append(
-                    {
-                        **room,
-                        "active_count": count,
-                        "eligible_entity_ids": eligible,
-                        "restore_pending_count": 0,
-                        "most_recent_activity_at": None,
-                    }
-                )
-        ranked.sort(key=lambda r: (-r["active_count"], r["room_id"]))
-        return ranked, grouped, states
+        return await async_rank_rooms(self.hass, self.registry, self.now_data, scope)
 
     async def context(self, scope=None):
         """Plan this window's room scenes for the scope.

@@ -50,13 +50,18 @@ def ha_area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
     return area_id
 
 
-def area_id_of(hass: HomeAssistant, entity_id: str) -> str | None:
+def area_id_of(
+    hass: HomeAssistant, entity_id: str, registry: RegistryEngine | None = None
+) -> str | None:
     """An entity's room: its registry assignment, else its HA area.
 
     An assignment to None (Unassigned) still wins over the HA area. Both paths
-    are in memory, since this runs on the event loop for every push.
+    are in memory, since this runs on the event loop for every push. registry
+    defaults to the loaded entry's; code that holds the engine passes it,
+    so the rule holds while the entry is still setting up.
     """
-    registry = get_registry_engine(hass)
+    if registry is None:
+        registry = get_registry_engine(hass)
     if registry is not None:
         room = registry.room_of(entity_id)
         if room is not UNSET:

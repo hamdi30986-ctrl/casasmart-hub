@@ -55,5 +55,30 @@ class RoomActivityRoutesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.status("PUT", f"{room}/activity"), 405)
 
 
+@unittest.skipIf(_SKIP, f"casasmart views unimportable: {_SKIP}")
+class HabitRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        hass = types.SimpleNamespace(data={})
+        self.app = web.Application()
+        for view in (
+            now_api.CasaSmartNowHabitsView(hass),
+            now_api.CasaSmartNowHabitsResetView(hass),
+        ):
+            view.register(hass, self.app, self.app.router)
+
+    status = RoomActivityRoutesTest.status
+
+    async def test_settings_are_read_and_changed_on_one_path_reset_on_another(
+        self,
+    ) -> None:
+        habits = "/api/casasmart/now/habits"
+        self.assertIsNone(await self.status("GET", habits))
+        self.assertIsNone(await self.status("PUT", habits))
+        self.assertIsNone(await self.status("POST", f"{habits}/reset"))
+        self.assertEqual(await self.status("POST", habits), 405)
+        self.assertEqual(await self.status("GET", f"{habits}/reset"), 405)
+        self.assertEqual(await self.status("PUT", f"{habits}/reset"), 405)
+
+
 if __name__ == "__main__":
     unittest.main()

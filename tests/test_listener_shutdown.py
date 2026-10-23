@@ -94,6 +94,7 @@ class TlsSocketUnloadTests(unittest.IsolatedAsyncioTestCase):
                     "athan_scheduler",
                     "audio_adapter",
                     "mdns",
+                    "room_activity",
                 )
             ),
         )

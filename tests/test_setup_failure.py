@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
 try:
+    from homeassistant.core import CoreState
     from homeassistant.exceptions import ConfigEntryError
 
     integration = H.import_integration()
@@ -55,7 +56,7 @@ class _Bus:
     def __init__(self) -> None:
         self.listeners: list[tuple[str, object]] = []
 
-    def async_listen(self, event_type, handler):
+    def async_listen(self, event_type, handler, event_filter=None):
         item = (event_type, handler)
         self.listeners.append(item)
         return lambda: self.listeners.remove(item)
@@ -147,6 +148,8 @@ class FailedSetupTests(unittest.IsolatedAsyncioTestCase):
             services=H.FakeServices(),
             data={},
             is_stopping=False,
+            # Still starting: the room activity recorder waits for "started".
+            state=CoreState.starting,
         )
         self.entry = _Entry()
         _Mdns.instances.clear()
@@ -181,9 +184,50 @@ class FailedSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_Mdns.instances[0].stopped)
         self.assertTrue(runtime.energy_controller.stopped)
         self.assertTrue(runtime.suggestions.stopped)
+        # The real room activity recorder started; its listeners must go too.
+        self.assertIsNotNone(runtime.room_activity)
         # The alarm adapter's listeners are what made a reload run two alarms.
         self.assertEqual(self.hass.bus.listeners, [])
         self.assertIsNone(runtime.storage._conn)
+
+    async def test_home_assistant_stop_writes_room_activity_before_closing(self):
+        # Home Assistant doesn't unload entries when it stops; the stop
+        # listener must write the recorder's buffer before closing storage.
+        test = self
+
+        class _StopsHomeAssistant(_FailingEnergyController):
+            async def async_start(self) -> None:
+                runtime = test.entry.runtime_data
+                runtime.room_activity._buffer.append(
+                    {
+                        "t": 1_800_000_000,
+                        "utc_offset_min": 180,
+                        "room_id": "majlis",
+                        "entity_id": "light.majlis",
+                        "action": "off",
+                        "source": "wall_switch",
+                        "member_id": None,
+                    }
+                )
+                (on_stop,) = [
+                    handler
+                    for event_type, handler in test.hass.bus.listeners
+                    if event_type == "homeassistant_stop"
+                ]
+                await on_stop(None)
+                self.closed = runtime.storage._conn is None
+                raise RuntimeError("Home Assistant stopped")
+
+        with mock.patch.object(integration, "EnergyController", _StopsHomeAssistant):
+            with self.assertRaises(RuntimeError):
+                await integration.async_setup_entry(self.hass, self.entry)
+        self.entry.run_on_unload()
+        self.assertTrue(self.entry.runtime_data.energy_controller.closed)
+
+        storage = integration.HubStorage(self.data_dir / "hub.db")
+        storage.open()
+        self.addCleanup(storage.close)
+        self.assertEqual(storage.room_activity().count(), 1)
 
     async def test_corrupt_identity_key_closes_storage(self) -> None:
         (self.data_dir / "identity_key.pem").write_text("not a key")

@@ -207,12 +207,48 @@ def _migration_v4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v5(conn: sqlite3.Connection) -> None:
+    """Append-only room activity events: what was switched, where, when, by whom.
+
+    One row per confirmed transition of a device the hub manages. Local day and
+    hour come from t plus the offset at the time, so they aren't stored. The
+    member index is partial: wall presses and automations carry no member.
+    IF NOT EXISTS makes the step safe to run on a file that already has them.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS room_activity_events (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            t              INTEGER NOT NULL,
+            utc_offset_min INTEGER NOT NULL,
+            room_id        TEXT NOT NULL,
+            entity_id      TEXT NOT NULL,
+            action         TEXT NOT NULL,
+            source         TEXT NOT NULL,
+            member_id      TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_room_activity_room_t "
+        "ON room_activity_events (room_id, t)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_room_activity_member_t "
+        "ON room_activity_events (member_id, t) WHERE member_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_room_activity_t ON room_activity_events (t)"
+    )
+
+
 #: Every migration, in order. Append new ones; never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
     Migration(2, "append-only tank_readings table", _migration_v2),
     Migration(3, "fold flat gang maps into nested gangs", _migration_v3),
     Migration(4, "append-only energy events table", _migration_v4),
+    Migration(5, "append-only room activity events table", _migration_v5),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)

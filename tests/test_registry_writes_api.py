@@ -18,6 +18,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -246,6 +247,26 @@ class RoomsCrud(RegistryWritesTestCase):
         # The per-user sensors repaint.
         self.assertIn(("casasmart_auth_changed", {}), self.hass.bus.fired)
 
+    async def test_delete_drops_the_rooms_now_policy_and_restore_set(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        den = self.rt.registry.create_room("Den")["room_id"]
+        hall = self.rt.registry.create_room("Hall")["room_id"]
+        for room in (den, hall):
+            self.rt.now_data.set_room_policy(room, True, [])
+            self.rt.now_data.extend_restore_set(room, ["light.lamp"])
+        with mock.patch.multiple(
+            "casasmart.registry_api", is_served=H.is_served_for([])
+        ):
+            resp = await CasaSmartRoomView(self.hass).delete(
+                H.FakeRequest(headers=hdr), room_id=den
+            )
+        self.assertEqual(H.read_response(resp)[0], 200)
+        self.assertNotIn(den, self.rt.now_data._policies)
+        self.assertEqual(self.rt.now_data.restore_set(den), [])
+        # Other rooms keep theirs.
+        self.assertTrue(self.rt.now_data.room_participates(hall))
+        self.assertEqual(self.rt.now_data.restore_set(hall), ["light.lamp"])
+
     async def test_delete_with_no_scoped_member_reports_nobody(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         room = self.rt.registry.create_room("Den")["room_id"]
@@ -467,7 +488,7 @@ class SceneActivation(RegistryWritesTestCase):
         )
         called = []
 
-        async def async_call(domain, service, data, *, blocking=False):
+        async def async_call(domain, service, data, *, blocking=False, context=None):
             called.append(data["entity_id"])
             if domain == "light":
                 raise vol.Invalid("extra keys not allowed")
@@ -488,6 +509,35 @@ class SceneActivation(RegistryWritesTestCase):
             [(r["entity_id"], r["ok"]) for r in body["results"]],
             [("light.a", False), ("switch.b", True)],
         )
+
+    async def test_every_step_carries_the_members_scene_context(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin", member_id="mem-a")
+        self.hass.states.add("light.a", state="off")
+        self.hass.states.add("switch.b", state="off")
+        scene = self.rt.registry.create_scene(
+            "Evening",
+            [
+                {"entity_id": "light.a", "action": "turn_on"},
+                {"entity_id": "switch.b", "action": "turn_on"},
+            ],
+        )
+        tagged = []
+        self.rt.room_activity = types.SimpleNamespace(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+        with mock.patch(
+            "casasmart.registry_api.is_served",
+            H.is_served_for(["light.a", "switch.b"]),
+        ):
+            resp = await CasaSmartSceneActivateView(self.hass).post(
+                H.FakeRequest(headers=hdr), scene["scene_id"]
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(tagged, [("scene", "mem-a")])
+        self.assertEqual(self.hass.services.contexts, ["context-1", "context-1"])
 
 
 # --------------------------------------------------------------------------- #

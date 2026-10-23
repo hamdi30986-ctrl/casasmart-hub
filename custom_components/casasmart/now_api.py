@@ -2,14 +2,25 @@
 
 - GET /api/casasmart/now (devices.read): the caller's Now page in one
   response (recent devices, scenes, room activity, weather, air quality,
-  doors and windows), filtered to their room scope.
+  doors and windows), filtered to their room scope. ?habits=household ranks
+  the off rooms on the household's habits (the shared tablet); the default,
+  personal, on the caller's own blended over them.
 - GET/PUT /api/casasmart/now/config (registry.manage): the sources the page
   shows. The hub never picks sensors by itself.
 - PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
   whether a room takes part in room commands, and which devices they switch.
+- GET/PUT/DELETE /api/casasmart/now/rooms/{room_id}/start-profile
+  (registry.manage): the lights and fans one tap "on" turns on when nothing
+  better is known.
 - POST /api/casasmart/now/rooms/{room_id}/activity (devices.control): switch
-  a room's approved devices off, or back on from what the last off captured.
-  Idempotent per client key, one command per room at a time.
+  a room's approved devices off, or its lights and fans back on: what the
+  hub's last off captured, else what was on before the room last went dark,
+  else the room's start profile (room_intel.one_tap; 409 nothing_to_turn_on
+  when there is nothing, and the app opens the room). Idempotent per client
+  key, one command per room at a time.
+- GET/PUT /api/casasmart/now/habits and POST /api/casasmart/now/habits/reset
+  (users.manage, admin only): room habit learning, which the all-off
+  ranking uses (room_intel.learner).
 """
 
 from __future__ import annotations
@@ -17,9 +28,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -37,17 +49,41 @@ from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .filtering import area_id_of, in_scope, is_served, serialize_device, visible_to
 from .now_data import (
+    MAX_START_PROFILE,
     NowDataEngine,
     NowDataError,
     is_room_activity_candidate,
     is_room_activity_eligible,
-    is_running_room_activity,
     room_activity_layout,
     summarize_openings,
 )
 from .registry import RegistryEngine
-from .runtime_lookup import loaded_runtime_data
+from .room_intel.activity import SOURCE_APP
+from .room_intel.habits import (
+    LAYER_HOUSEHOLD,
+    LAYERS,
+    STATUS_UNAVAILABLE,
+    HabitSettingsError,
+)
+from .room_intel.one_tap import (
+    SOURCE_CAPTURE,
+    RoomOnPlan,
+    capture_counts,
+    is_on_domain,
+    one_tap_summary,
+    plan_room,
+    present_ids,
+)
+from .room_intel.ranking import (
+    async_counted_controls,
+    async_rank_rooms,
+    ranking_summary,
+)
+from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
+
+if TYPE_CHECKING:
+    from homeassistant.core import Context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +104,12 @@ _AIR_QUALITY_DEVICE_CLASSES = frozenset(
     }
 )
 _CONTACT_DEVICE_CLASSES = frozenset({"door", "window", "opening"})
+# The 409 nothing_to_turn_on's message, by reason (room_intel.one_tap).
+_NOTHING_TO_TURN_ON = {
+    "nothing_saved": "Nothing to turn on: the hub doesn't know which lights "
+    "and fans this room had on, and it has no start profile",
+    "unavailable": "Nothing to turn on: this room's lights and fans are unavailable",
+}
 
 
 # -- helpers ------------------------------------------------------------------
@@ -86,6 +128,37 @@ def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
     listener, and a room's commands must queue whichever one they arrive on.
     """
     return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
+
+
+def _one_tap_devices(
+    hass: HomeAssistant, approved: dict[str, list[str]]
+) -> dict[str, dict[str, str]]:
+    """Each room's devices one tap "on" may switch, by entity id, with their state.
+
+    approved maps each room to the devices its policy approves. A device
+    counts in its room when it is approved there, a room-activity candidate,
+    served, and a light or fan (room_intel.one_tap.ON_DOMAINS). One scan.
+    """
+    devices: dict[str, dict[str, str]] = {room_id: {} for room_id in approved}
+    for state in hass.states.async_all():
+        entity_id = state.entity_id
+        if not is_on_domain(entity_id):
+            continue
+        room_id = area_id_of(hass, entity_id)
+        if (
+            room_id in approved
+            and entity_id in approved[room_id]
+            and is_room_activity_candidate(state)
+            and is_served(hass, entity_id)
+        ):
+            devices[room_id][entity_id] = state.state
+    return devices
+
+
+def _last_on(hass: HomeAssistant, room_id: str) -> Any:
+    """The room's last-on set (the recorder's), None without one."""
+    recorder = getattr(loaded_runtime_data(hass), "room_activity", None)
+    return recorder.last_on.get(room_id) if recorder is not None else None
 
 
 def _state_is_unavailable(state: Any) -> bool:
@@ -148,6 +221,11 @@ class CasaSmartNowView(_NowView):
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
+        layer = request.query.get("habits", "personal")
+        if layer not in LAYERS:
+            return self.json_message(
+                "habits must be household or personal", HTTPStatus.BAD_REQUEST
+            )
         now_data, not_ready = self._now_or_503()
         if not_ready is not None:
             return not_ready
@@ -179,18 +257,22 @@ class CasaSmartNowView(_NowView):
                 scenes,
                 favorites,
                 policies,
+                registry.list_user_devices(),
             )
 
         (
             recents,
             config,
             contacts_picked,
-            rooms,
+            all_rooms,
             scenes,
             favorites,
             policies,
+            devices,
         ) = await self._hass.async_add_executor_job(read_stores)
-        rooms = [room for room in rooms if scope is None or room["room_id"] in scope]
+        rooms = [
+            room for room in all_rooms if scope is None or room["room_id"] in scope
+        ]
         room_ids = {room["room_id"] for room in rooms}
 
         recent_items = [
@@ -207,58 +289,78 @@ class CasaSmartNowView(_NowView):
                 if (entry := self._recent_entry(entity_id, None, claims))
             ]
 
-        active_rooms: list[dict[str, Any]] = []
-        for room in rooms:
+        # The generated suggestions rank rooms with the same function, so both
+        # agree on the busiest rooms. The room activity log orders the off
+        # rooms that just went dark (the caller's own offs after the habits),
+        # and the habits the ones usually on around now: the household's for
+        # the shared tablet, the caller's own blended over them for a phone.
+        # The household's view has no "you": on a shared screen everyone's
+        # offs are just offs.
+        household = layer == LAYER_HOUSEHOLD
+        learner = getattr(loaded_runtime_data(self._hass), "room_habits", None)
+        habits = (
+            learner.query(None if household else member_id)
+            if learner is not None
+            else None
+        )
+        ranked, _, _ = await async_rank_rooms(
+            self._hass,
+            registry,
+            now_data,
+            scope,
+            activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),
+            member_id=None if household else member_id,
+            habits=habits,
+            # Read above, in the same executor job.
+            stores=(all_rooms, policies, devices),
+        )
+
+        # What one tap "on" would do in each room that takes part in room
+        # commands (the room command's own plan), so the apps show the ON
+        # button only when it turns something on. restore_pending_count is
+        # how many devices it would turn on, for apps that only read that.
+        approved = {
+            room["room_id"]: policies[room["room_id"]]["eligible_entity_ids"]
+            for room in ranked
+            if policies.get(room["room_id"], {}).get("participates", False)
+        }
+
+        def read_one_tap_sources() -> dict[str, tuple]:
+            return {
+                room_id: (
+                    now_data.restore_capture(room_id),
+                    now_data.start_profile(room_id),
+                )
+                for room_id in approved
+            }
+
+        one_tap_sources = await self._hass.async_add_executor_job(read_one_tap_sources)
+        devices_by_room = _one_tap_devices(self._hass, approved)
+        now_t = time.time()
+        active_rooms = []
+        for room in ranked:
             room_id = room["room_id"]
-            policy = policies.get(room_id, {})
-            if not policy.get("participates", False):
-                continue
-            eligible_entity_ids = policy.get("eligible_entity_ids", [])
-            devices = [
-                state
-                for state in self._hass.states.async_all()
-                if area_id_of(self._hass, state.entity_id) == room_id
-                and is_served(self._hass, state.entity_id)
-                and in_scope(self._hass, state.entity_id, scope)
-                and is_running_room_activity(state, eligible_entity_ids)
-            ]
-            timestamps = [
-                state.last_changed
-                for state in devices
-                if isinstance(state.last_changed, datetime)
-            ]
-            restore_pending_count = len(
-                await self._hass.async_add_executor_job(now_data.restore_set, room_id)
-            )
+            if room_id in approved:
+                capture, start_profile = one_tap_sources[room_id]
+                plan = plan_room(
+                    capture=capture,
+                    last_on=_last_on(self._hass, room_id),
+                    start_profile=start_profile,
+                    devices=devices_by_room[room_id],
+                    now_t=now_t,
+                )
+                one_tap = one_tap_summary(plan)
+                pending = len(plan.targets)
+            else:
+                one_tap = {"action": "open_room", "reason": "room_activity_disabled"}
+                pending = 0
             active_rooms.append(
                 {
-                    "room_id": room_id,
-                    "name": room["name"],
-                    "icon": room.get("icon"),
-                    # The tablet draws the room from its live state feed, so
-                    # it needs the approved list instead of guessing it.
-                    "eligible_entity_ids": list(eligible_entity_ids),
-                    "active_count": len(devices),
-                    "most_recent_activity_at": max(timestamps)
-                    .astimezone(UTC)
-                    .isoformat()
-                    if timestamps
-                    else None,
-                    "restore_pending_count": restore_pending_count,
+                    **room,
+                    "restore_pending_count": pending,
+                    "rank": {**room["rank"], "one_tap": one_tap},
                 }
             )
-        active_rooms.sort(
-            key=lambda room: (
-                -room["active_count"],
-                -(
-                    datetime.fromisoformat(room["most_recent_activity_at"]).timestamp()
-                    if room["most_recent_activity_at"]
-                    else 0
-                ),
-                room["name"].strip().casefold(),
-                room["room_id"],
-            )
-        )
 
         scenes_by_id = {scene["scene_id"]: scene for scene in scenes}
 
@@ -282,21 +384,6 @@ class CasaSmartNowView(_NowView):
             scope,
         )
         suggestions = getattr(loaded_runtime_data(self._hass), "suggestions", None)
-        generated = getattr(suggestions, "generated", None)
-        if generated is not None:
-            # Rank rooms as the generated suggestions do, so both agree on
-            # the busiest rooms.
-            ranked, _, _ = await generated.room_context(scope)
-            previous = {r["room_id"]: r for r in active_rooms}
-            active_rooms = [
-                {
-                    **r,
-                    "restore_pending_count": previous.get(r["room_id"], {}).get(
-                        "restore_pending_count", 0
-                    ),
-                }
-                for r in ranked
-            ]
         contextual = (
             await suggestions.payload(member_id, scope)
             if suggestions
@@ -332,6 +419,12 @@ class CasaSmartNowView(_NowView):
                         1
                         for room_id in room_ids
                         if policies.get(room_id, {}).get("participates", False)
+                    ),
+                    "ranking": ranking_summary(
+                        active_rooms,
+                        habits.summary
+                        if habits is not None
+                        else {"layer": layer, "status": STATUS_UNAVAILABLE},
                     ),
                 },
                 "outdoor_weather": weather,
@@ -554,6 +647,93 @@ class CasaSmartNowConfigView(_NowView):
         return self._device_class(entity_id, state) in _CONTACT_DEVICE_CLASSES
 
 
+class CasaSmartNowHabitsView(_NowView):
+    """GET/PUT /api/casasmart/now/habits: room habit learning (admin only).
+
+    GET answers the settings and how far learning is: {learning, paused,
+    status, weekend_days, self_scheduled_entity_ids, reset_at,
+    observed_days, warm_up_days, profile, ramadan}; profile is today's
+    (regular or ramadan), ramadan the current or next Ramadan with the
+    years kept for it. PUT changes any of learning, paused,
+    weekend_days (Monday = 0) and self_scheduled_entity_ids (devices the hub
+    manages whose wall-switch events are a schedule kept on the device), and
+    answers like GET.
+    """
+
+    url = f"/api/{DOMAIN}/now/habits"
+    name = f"api:{DOMAIN}:now:habits"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        return await self._answer()
+
+    async def put(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        learner, registry = self._learner(), self._registry()
+        if learner is None or registry is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
+        try:
+            _, managed = await async_counted_controls(self._hass, registry)
+            await learner.async_update(payload, managed_ids=managed)
+        except HabitSettingsError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return await self._answer()
+
+    def _learner(self) -> Any:
+        return getattr(loaded_runtime_data(self._hass), "room_habits", None)
+
+    async def _answer(self) -> web.Response:
+        """The settings and learning status, over every room."""
+        learner, registry = self._learner(), self._registry()
+        if learner is None or registry is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            counted, _ = await async_counted_controls(self._hass, registry)
+            rooms = await self._hass.async_add_executor_job(registry.list_rooms)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return self.json(
+            await learner.async_settings([room["room_id"] for room in rooms], counted)
+        )
+
+
+class CasaSmartNowHabitsResetView(CasaSmartNowHabitsView):
+    """POST /api/casasmart/now/habits/reset: forget every learned habit.
+
+    The kept Ramadans go too. Learning starts over the next day (warm-up
+    included); the activity log itself is kept. Answers like GET /now/habits.
+    """
+
+    url = f"/api/{DOMAIN}/now/habits/reset"
+    name = f"api:{DOMAIN}:now:habits:reset"
+    # Inherited for the answer only: settings are read and changed on
+    # /now/habits, so this path answers GET and PUT with 405.
+    get = None
+    put = None
+
+    async def post(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        learner = self._learner()
+        if learner is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            await learner.async_reset()
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return await self._answer()
+
+
 class CasaSmartRoomActivityPolicyView(_NowView):
     """PUT /api/casasmart/now/rooms/{room_id}/activity-policy."""
 
@@ -625,11 +805,117 @@ class CasaSmartRoomActivityPolicyView(_NowView):
         return any(room["room_id"] == room_id for room in rooms)
 
 
+class CasaSmartRoomStartProfileView(CasaSmartRoomActivityPolicyView):
+    """GET/PUT/DELETE /api/casasmart/now/rooms/{room_id}/start-profile.
+
+    The lights and fans one tap "on" turns on in a room that is off when the
+    hub knows nothing better (no recent capture, no last-on set). An
+    installer's choice, so registry.manage, like the room's policy. PUT
+    {entity_ids: [...]} sets it (1 to 64 of the room's lights and fans);
+    DELETE clears it. Each answers {room_id, entity_ids}. Only the devices
+    the room's policy approves ever come on.
+    """
+
+    url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/start-profile"
+    name = f"api:{DOMAIN}:now:room:start-profile"
+
+    async def _checked(
+        self, request: web.Request, room_id: str
+    ) -> tuple[NowDataEngine | None, web.Response | None]:
+        """The Now store, or the refusal (auth, unknown room, not ready)."""
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return None, error
+        if not await self._room_accessible(room_id, claims.get("rooms")):
+            return None, self.json_message("Unknown room", HTTPStatus.NOT_FOUND)
+        return self._now_or_503()
+
+    async def get(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        entity_ids = await self._hass.async_add_executor_job(
+            now_data.start_profile, room_id
+        )
+        return self.json({"room_id": room_id, "entity_ids": entity_ids})
+
+    async def put(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
+        unknown = sorted(set(payload) - {"entity_ids"})
+        if unknown:
+            return self.json_message(
+                f"Unknown start profile field: {unknown[0]!r}", HTTPStatus.BAD_REQUEST
+            )
+        entity_ids = payload.get("entity_ids")
+        if not isinstance(entity_ids, list) or not entity_ids:
+            return self.json_message(
+                "entity_ids must list the room's lights and fans "
+                "(DELETE clears the start profile)",
+                HTTPStatus.BAD_REQUEST,
+            )
+        invalid = self._invalid_start_profile(room_id, entity_ids)
+        if invalid is not None:
+            return self.json_message(invalid, HTTPStatus.BAD_REQUEST)
+        try:
+            profile = await self._hass.async_add_executor_job(
+                now_data.set_start_profile, room_id, entity_ids
+            )
+        except NowDataError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        return self.json(profile)
+
+    async def delete(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        return self.json(
+            await self._hass.async_add_executor_job(
+                now_data.clear_start_profile, room_id
+            )
+        )
+
+    def _invalid_start_profile(self, room_id: str, entity_ids: list[Any]) -> str | None:
+        """Why the list cannot be the room's start profile, or None if it can.
+
+        Every entity must be a light or fan in this room, served, and not
+        left out of room activity.
+        """
+        if len(entity_ids) > MAX_START_PROFILE or any(
+            not isinstance(entity_id, str) for entity_id in entity_ids
+        ):
+            return f"entity_ids must contain at most {MAX_START_PROFILE} entity ids"
+        if len(set(entity_ids)) != len(entity_ids):
+            return "entity_ids must not contain duplicates"
+        for entity_id in entity_ids:
+            if not is_on_domain(entity_id):
+                return (
+                    f"Entity {entity_id!r} is not a light or fan: one tap only "
+                    "turns on lights and fans"
+                )
+            state = self._hass.states.get(entity_id)
+            if (
+                state is None
+                or area_id_of(self._hass, entity_id) != room_id
+                or not is_served(self._hass, entity_id)
+                or not is_room_activity_candidate(state)
+            ):
+                return f"Entity {entity_id!r} is not a light or fan in this room"
+        return None
+
+
 class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
     """POST /api/casasmart/now/rooms/{room_id}/activity.
 
     The body is {action: turn_off|turn_on, idempotency_key}. Commands run one
-    at a time per room, and a retry with the same key replays the answer.
+    at a time per room, and a retry with the same key replays the answer. An
+    on turns on only lights and fans, from the room's plan
+    (room_intel.one_tap); with nothing to turn on it is refused with 409
+    nothing_to_turn_on and open_room: true, before anything is switched.
     """
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
@@ -695,7 +981,24 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                     },
                     HTTPStatus.CONFLICT,
                 )
-            result = await self._run(room_id, action, now_data)
+            result = await self._run(
+                room_id,
+                action,
+                now_data,
+                command_context(self._hass, SOURCE_APP, member_id),
+            )
+            if isinstance(result, RoomOnPlan):
+                # Nothing was switched, so there is no answer to replay. The
+                # app opens the room instead of saying it couldn't turn on.
+                return self.json(
+                    {
+                        "error": "nothing_to_turn_on",
+                        "reason": result.reason,
+                        "message": _NOTHING_TO_TURN_ON[result.reason],
+                        "open_room": True,
+                    },
+                    HTTPStatus.CONFLICT,
+                )
             result["idempotency_key"] = key
             await self._hass.async_add_executor_job(
                 now_data.save_idempotent_result, member_id, room_id, action, key, result
@@ -710,13 +1013,22 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             return self.json(result)
 
     async def _run(
-        self, room_id: str, action: str, now_data: NowDataEngine
-    ) -> dict[str, Any]:
+        self,
+        room_id: str,
+        action: str,
+        now_data: NowDataEngine,
+        context: Context | None = None,
+    ) -> dict[str, Any] | RoomOnPlan:
         """Switch the room's eligible devices and report each one's outcome.
 
-        Off targets every eligible device that is on; on targets what the
-        restore set holds and is still off. A device counts as changed only
-        when its state afterwards confirms it.
+        Off targets every eligible device that is on. On targets the room's
+        plan (room_intel.one_tap.plan_room: the hub's capture, the last-on
+        set or the start profile; lights and fans only) that is still off;
+        the plan's unavailable devices are reported, not switched. A device
+        counts as changed only when its state afterwards confirms it. An on
+        with nothing to turn on returns that plan (no source), before
+        anything is switched. The calls carry context (the member's, for the
+        room activity log).
         """
         policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
         eligible_entity_ids = policy["eligible_entity_ids"]
@@ -727,7 +1039,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             and is_served(self._hass, state.entity_id)
             and is_room_activity_eligible(state, eligible_entity_ids)
         }
-        restore_ids: list[str] = []
+        plan: RoomOnPlan | None = None
         if action == "turn_off":
             target_ids = [
                 entity_id
@@ -735,13 +1047,48 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 if state.state == "on"
             ]
         else:
-            restore_ids = await self._hass.async_add_executor_job(
-                now_data.restore_set, room_id
+            devices = {
+                entity_id: state.state
+                for entity_id, state in eligible.items()
+                if is_on_domain(entity_id)
+            }
+
+            def read_sources() -> tuple:
+                return now_data.restore_capture(room_id), now_data.start_profile(
+                    room_id
+                )
+
+            capture, start_profile = await self._hass.async_add_executor_job(
+                read_sources
             )
+            last_on = _last_on(self._hass, room_id)
+            now_t = time.time()
+            plan = plan_room(
+                capture=capture,
+                last_on=last_on,
+                start_profile=start_profile,
+                devices=devices,
+                now_t=now_t,
+            )
+            capture_ids, captured_at = capture
+            if (
+                capture_ids
+                and plan.source != SOURCE_CAPTURE
+                and (
+                    not capture_counts(captured_at, last_on, now_t)
+                    or not present_ids(capture_ids, devices)
+                )
+            ):
+                # Too old, outdated by a later dark room, or nothing in it
+                # is still one of the room's lights and fans: dropped, so it
+                # never comes back as the room's restore.
+                await self._hass.async_add_executor_job(
+                    now_data.consume_restore_set, room_id
+                )
+            if plan.source is None:
+                return plan
             target_ids = [
-                entity_id
-                for entity_id in restore_ids
-                if entity_id in eligible and eligible[entity_id].state != "on"
+                entity_id for entity_id in plan.targets if devices[entity_id] != "on"
             ]
         outcomes = [
             {"entity_id": entity_id, "outcome": "pending"} for entity_id in target_ids
@@ -753,7 +1100,11 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         for domain, entity_ids in by_domain.items():
             try:
                 await self._hass.services.async_call(
-                    domain, action, {"entity_id": entity_ids}, blocking=True
+                    domain,
+                    action,
+                    {"entity_id": entity_ids},
+                    blocking=True,
+                    context=context,
                 )
             except HomeAssistantError:
                 failures.update(entity_ids)
@@ -771,26 +1122,53 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 changed_ids.append(entity_id)
             else:
                 outcome["outcome"] = "failed"
-        restore_pending: list[str] = []
+        failed_ids = [
+            item["entity_id"] for item in outcomes if item["outcome"] == "failed"
+        ]
         if action == "turn_off":
             # Add to the capture rather than replace it: a repeated off finds
             # little still on and must not forget what the first one captured.
             restore_pending = await self._hass.async_add_executor_job(
                 now_data.extend_restore_set, room_id, changed_ids
             )
-        else:
-            # On clears the capture even if a device failed, so a later tap
-            # cannot replay stale work.
-            await self._hass.async_add_executor_job(
-                now_data.consume_restore_set, room_id
-            )
+            return {
+                "ok": not failed_ids,
+                "room_id": room_id,
+                "action": action,
+                "outcomes": outcomes,
+                "restore_pending_count": len(restore_pending),
+                "restored_from_capture_count": 0,
+            }
+        # Offline devices are reported, never sent a command.
+        outcomes.extend(
+            {"entity_id": entity_id, "outcome": "unavailable"}
+            for entity_id in plan.unavailable
+        )
+        not_on = [*failed_ids, *plan.unavailable]
+        restore_pending = not_on
+        if plan.source == SOURCE_CAPTURE:
+            if not_on:
+                # What didn't come on stays captured, so the next on retries
+                # just those; the rest of the capture is done.
+                restore_pending = await self._hass.async_add_executor_job(
+                    now_data.keep_in_restore_set, room_id, not_on
+                )
+            else:
+                await self._hass.async_add_executor_job(
+                    now_data.consume_restore_set, room_id
+                )
+        # The plan's devices that are on now: switched on here, or already on
+        # (not the ones that failed, are offline or left the room).
+        restored = len(plan.targets) - len(failed_ids)
         return {
-            "ok": not any(item["outcome"] == "failed" for item in outcomes),
+            "ok": not not_on,
             "room_id": room_id,
             "action": action,
             "outcomes": outcomes,
             "restore_pending_count": len(restore_pending),
-            "restored_from_capture_count": len(restore_ids)
-            if action == "turn_on"
+            "restored_from_capture_count": restored
+            if plan.source == SOURCE_CAPTURE
             else 0,
+            "source": plan.source,
+            "restored_count": restored,
         }

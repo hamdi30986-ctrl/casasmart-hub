@@ -7,6 +7,7 @@ import importlib.util
 import sqlite3
 import sys
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -107,6 +108,27 @@ def _load_now_api():
     sys.modules[now_spec.name] = now_data
     now_spec.loader.exec_module(now_data)
 
+    # The real room ranking, over the stub filtering above, and the real
+    # room activity, meter and all-off rules (Home Assistant-free).
+    _module("casasmart.room_intel", package=True)
+    for name in ("activity", "meters", "off_rooms", "hijri", "habits", "one_tap"):
+        rules_spec = importlib.util.spec_from_file_location(
+            f"casasmart.room_intel.{name}",
+            ROOT / "custom_components" / "casasmart" / "room_intel" / f"{name}.py",
+        )
+        assert rules_spec and rules_spec.loader
+        rules = importlib.util.module_from_spec(rules_spec)
+        sys.modules[rules_spec.name] = rules
+        rules_spec.loader.exec_module(rules)
+    ranking_spec = importlib.util.spec_from_file_location(
+        "casasmart.room_intel.ranking",
+        ROOT / "custom_components" / "casasmart" / "room_intel" / "ranking.py",
+    )
+    assert ranking_spec and ranking_spec.loader
+    ranking = importlib.util.module_from_spec(ranking_spec)
+    sys.modules[ranking_spec.name] = ranking
+    ranking_spec.loader.exec_module(ranking)
+
     api_spec = importlib.util.spec_from_file_location(
         "casasmart.now_api", ROOT / "custom_components" / "casasmart" / "now_api.py"
     )
@@ -151,7 +173,7 @@ class _Services:
         self._fail_domains = set(fail_domains)
         self.calls = []
 
-    async def async_call(self, domain, action, data, blocking=True):
+    async def async_call(self, domain, action, data, blocking=True, context=None):
         self.calls.append((domain, action, tuple(data["entity_id"])))
         if domain in self._fail_domains:
             raise _HOME_ASSISTANT_ERROR("simulated service failure")
@@ -349,6 +371,32 @@ class RepeatedRoomOffTest(unittest.TestCase):
             entity_id: self.states.get(entity_id).state for entity_id in self.ENTITIES
         }
 
+    def test_every_call_carries_the_members_app_context(self) -> None:
+        # The room activity log credits the room's changes to the member.
+        tagged, contexts = [], []
+
+        def command_context(hass, source, member_id=None):
+            tagged.append((source, member_id))
+            return "context-1"
+
+        original = self.hass.services.async_call
+
+        async def call(domain, action, data, blocking=True, context=None):
+            contexts.append(context)
+            await original(domain, action, data, blocking, context)
+
+        self.hass.services.async_call = call
+        with patch.object(_API, "command_context", command_context):
+            result = self.command("turn_off", "off-member-a-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(tagged, [("app", "member-a")])
+        self.assertEqual(contexts, ["context-1"])  # one call: both lights
+        # The 48-tap recents are recorded exactly as before.
+        self.assertEqual(
+            [item["entity_id"] for item in self.engine.recents_for("member-a")],
+            ["light.b", "light.a"],
+        )
+
     def test_off_off_on_from_two_members_restores_everything(self) -> None:
         self.command("turn_off", "off-member-a-1", member="member-a")
         second = self.command("turn_off", "off-member-b-1", member="member-b")
@@ -401,6 +449,151 @@ class RepeatedRoomOffTest(unittest.TestCase):
         self.assertEqual(self.engine.restore_set(self.ROOM), [])
 
 
+class _EntityFailingServices(_Services):
+    """Fails the calls of the domains in fail_domains, per action."""
+
+    def __init__(self, states: _States) -> None:
+        super().__init__(states)
+        self.fail_on: set[tuple[str, str]] = set()
+
+    async def async_call(self, domain, action, data, blocking=True, context=None):
+        self.calls.append((domain, action, tuple(data["entity_id"])))
+        if (domain, action) in self.fail_on:
+            raise _HOME_ASSISTANT_ERROR("simulated service failure")
+        target_state = "off" if action == "turn_off" else "on"
+        for entity_id in data["entity_id"]:
+            self._states.get(entity_id).state = target_state
+
+
+class RoomOnRestoreResultTest(unittest.TestCase):
+    """Room on answers what it did: a 409 when there is nothing to turn on, and
+    a device that failed stays captured for the next on."""
+
+    ROOM = "room-kitchen"
+    ENTITIES = ("light.a", "light.b", "fan.c")
+    # The room has no capture, no last-on set (no recorder here) and no
+    # start profile, so there is nothing to turn on and the app opens it.
+    NOTHING = {
+        "error": "nothing_to_turn_on",
+        "reason": "nothing_saved",
+        "message": "Nothing to turn on: the hub doesn't know which lights and "
+        "fans this room had on, and it has no start profile",
+        "open_room": True,
+    }
+
+    def setUp(self) -> None:
+        self.states = _States(
+            [
+                _State("light.a", "on", self.ROOM),
+                _State("light.b", "off", self.ROOM),
+                _State("fan.c", "on", self.ROOM),
+            ]
+        )
+        self.hass = _Hass(self.states)
+        self.hass.services = _EntityFailingServices(self.states)
+        self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.engine.set_room_policy(self.ROOM, True, list(self.ENTITIES))
+        self.view = _API.CasaSmartRoomActivityCommandView(self.hass)
+
+    def command(self, action: str, key: str) -> tuple[dict, object]:
+        """The answer and its HTTP status (None for 200)."""
+
+        async def body(view, request):
+            return {"action": action, "idempotency_key": key}, None
+
+        async def accessible(room_id, scope):
+            return True
+
+        with (
+            patch.multiple(
+                _API,
+                authenticate_request=lambda *args: ({"sub": "member-a"}, None),
+                read_json_object=body,
+                get_now_data=lambda hass: self.engine,
+            ),
+            patch.object(self.view, "_room_accessible", accessible),
+            patch.object(self.view, "json", lambda value, status=None: (value, status)),
+        ):
+            return asyncio.run(self.view.post(None, self.ROOM))
+
+    def test_on_with_nothing_captured_is_a_409_that_switches_nothing(self) -> None:
+        self.states.get("light.a").state = "off"
+        self.states.get("fan.c").state = "off"
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertEqual((answer, status), (self.NOTHING, HTTPStatus.CONFLICT))
+        self.assertEqual(self.hass.services.calls, [])
+        # Nothing ran, so nothing is stored for replay: once an off has
+        # captured something, the same key restores it.
+        self.assertIsNone(
+            self.engine.idempotent_result(
+                "member-a", self.ROOM, "turn_on", "on-key-0001"
+            )
+        )
+        self.states.get("light.a").state = "on"
+        self.command("turn_off", "off-key-0001")
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertTrue(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"], [{"entity_id": "light.a", "outcome": "changed"}]
+        )
+
+    def test_a_capture_with_no_device_left_in_the_room_is_a_409_and_is_dropped(
+        self,
+    ) -> None:
+        self.engine.save_restore_set(self.ROOM, ["light.moved", "switch.unlisted"])
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertEqual((answer, status), (self.NOTHING, HTTPStatus.CONFLICT))
+        self.assertEqual(self.hass.services.calls, [])
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+    def test_a_failed_device_stays_captured_for_the_next_on(self) -> None:
+        self.command("turn_off", "off-key-0001")
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["light.a", "fan.c"])
+        captured_at = self.engine._restores[self.ROOM]["captured_at"]
+        self.hass.services.fail_on.add(("fan", "turn_on"))
+
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"],
+            [
+                {"entity_id": "light.a", "outcome": "changed"},
+                {"entity_id": "fan.c", "outcome": "failed"},
+            ],
+        )
+        self.assertEqual(answer["restore_pending_count"], 1)
+        # Only the light came back (was the whole capture's 2).
+        self.assertEqual(answer["restored_from_capture_count"], 1)
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["fan.c"])
+        self.assertEqual(self.engine._restores[self.ROOM]["captured_at"], captured_at)
+
+        self.hass.services.fail_on.clear()
+        answer, _ = self.command("turn_on", "on-key-0002")
+        self.assertTrue(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"], [{"entity_id": "fan.c", "outcome": "changed"}]
+        )
+        self.assertEqual(answer["restore_pending_count"], 0)
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+        self.assertEqual(self.states.get("fan.c").state, "on")
+
+    def test_on_when_everything_captured_is_already_on_succeeds(self) -> None:
+        self.command("turn_off", "off-key-0001")
+        # Someone switched them back on at the wall.
+        self.states.get("light.a").state = "on"
+        self.states.get("fan.c").state = "on"
+        calls = list(self.hass.services.calls)
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["outcomes"], [])
+        self.assertEqual(answer["restored_from_capture_count"], 2)
+        self.assertEqual(self.hass.services.calls, calls)
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+
 class _ExecutorTrackingHass(_Hass):
     """Records whether a function runs as an executor job."""
 
@@ -437,7 +630,10 @@ class MemberLookupTest(unittest.TestCase):
             now_data=self.engine,
             energy=None,
             registry=SimpleNamespace(
-                list_rooms=list, list_scenes=list, get_favorites=lambda member: []
+                list_rooms=list,
+                list_scenes=list,
+                list_user_devices=list,
+                get_favorites=lambda member: [],
             ),
         )
         self.hass = _ExecutorTrackingHass(self.states, self.runtime)
@@ -477,7 +673,8 @@ class MemberLookupTest(unittest.TestCase):
 
     def _snapshot(self, lookup):
         with self._patched(lookup):
-            return asyncio.run(_API.CasaSmartNowView(self.hass).get(None))
+            request = SimpleNamespace(query={})
+            return asyncio.run(_API.CasaSmartNowView(self.hass).get(request))
 
     def test_room_command_looks_up_the_member_in_the_executor(self) -> None:
         result = self._room_command(self._lookup)
@@ -556,9 +753,9 @@ class NowConfigSceneValidationTest(unittest.TestCase):
 
 
 class _SteppedServices(_Services):
-    async def async_call(self, domain, action, data, blocking=True):
+    async def async_call(self, domain, action, data, blocking=True, context=None):
         await asyncio.sleep(0)
-        await super().async_call(domain, action, data, blocking)
+        await super().async_call(domain, action, data, blocking, context)
         await asyncio.sleep(0)
 
 

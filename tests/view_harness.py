@@ -44,12 +44,14 @@ try:  # Home Assistant + cryptography only exist in the container / CI.
     from casasmart import auth_tokens
     from casasmart.audio import AudioEngine
     from casasmart.auth_engine import AuthEngine
+    from casasmart.now_data import NowDataEngine
     from casasmart.registry import RegistryEngine
     from casasmart.storage import HubStorage
 
     IMPORT_ERROR: Exception | None = None
 except Exception as err:
     auth_tokens = AuthEngine = RegistryEngine = AudioEngine = HubStorage = None
+    NowDataEngine = None
     IMPORT_ERROR = err
 
 
@@ -124,6 +126,8 @@ class FakeBus:
 class FakeServices:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any], bool]] = []
+        # The context each call ran in, in call order (HA's context= keyword).
+        self.contexts: list[Any] = []
         self.handlers: dict[tuple[str, str], Any] = {}
 
     def has_service(self, domain, service):
@@ -132,8 +136,9 @@ class FakeServices:
     def async_register(self, domain, service, handler, *args, **kwargs):
         self.handlers[(domain, service)] = handler
 
-    async def async_call(self, domain, service, data, *, blocking=False):
+    async def async_call(self, domain, service, data, *, blocking=False, context=None):
         self.calls.append((domain, service, data, blocking))
+        self.contexts.append(context)
 
 
 class FakeStates:
@@ -204,6 +209,10 @@ class _Runtime:
         # None = relay push leg not running (mirrors CasaSmartRuntimeData's
         # default); the enroll view's device-paired push is skipped.
         self.push_dispatcher = None
+        # None = no room activity recorder: hub calls get no hub context.
+        self.room_activity = None
+        # None = no room habit learner: the Now page ranks without habits.
+        self.room_habits = None
 
 
 class _FakeHAConfig:
@@ -296,6 +305,16 @@ def make_hub(tmpdir) -> tuple[Any, Any]:
     )
     audio.warm_up()
     runtime = _Runtime(storage, auth, registry, audio, hub_config)
+    # Real, like the hub's: the unpair paths prune a departing member's
+    # recent devices through it.
+    runtime.now_data = NowDataEngine(
+        storage.table("now_recents"),
+        storage.table("now_room_policies"),
+        storage.table("now_config"),
+        storage.table("now_restore_sets"),
+        storage.table("now_idempotency"),
+        start_profiles_table=storage.table("now_room_start_profiles"),
+    )
     return FakeHass(runtime), runtime
 
 

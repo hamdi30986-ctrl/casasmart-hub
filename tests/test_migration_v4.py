@@ -29,9 +29,9 @@ class MigrationV4Tests(unittest.TestCase):
         self.db_path = self.dir / "casasmart.db"
         self.backup_dir = self.dir / "backups"
 
-    def test_v4_is_the_latest_append_only_step(self):
-        self.assertEqual(MIGRATIONS[-1].version, 4)
-        self.assertEqual(LATEST_VERSION, 4)
+    def test_v4_is_the_fourth_step(self):
+        self.assertEqual(MIGRATIONS[3].version, 4)
+        self.assertGreaterEqual(LATEST_VERSION, 4)
 
     def test_schema_has_event_columns_and_query_indexes(self):
         with sqlite3.connect(":memory:") as conn:
@@ -58,7 +58,7 @@ class MigrationV4Tests(unittest.TestCase):
             )
             conn.commit()
 
-        run_migrations(self.db_path, self.backup_dir, MIGRATIONS)
+        run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:4])
 
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(get_user_version(conn), 4)

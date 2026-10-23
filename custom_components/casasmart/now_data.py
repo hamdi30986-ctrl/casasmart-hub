@@ -3,9 +3,11 @@
 NowDataEngine keeps, each in its own table: each member's recently
 controlled devices (recorded after a command succeeds), each room's activity
 policy, the Now configuration, recent room-command answers for idempotent
-retries, and each room's restore set (what its last off switched off). The
-functions decide which devices may join a room command. Storage methods are
-synchronous; now_api runs them in the executor.
+retries, each room's restore set (what its last off switched off) and each
+room's start profile (the lights and fans an installer chose for one tap
+"on" when nothing else is known). The functions decide which devices may join
+a room command. Storage methods are synchronous; now_api runs them in the
+executor.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ _MAX_PINNED_MOMENTS = 12
 _MAX_CONTACTS = 64
 # Stored room-command answers per member; the oldest is dropped first.
 _MAX_IDEMPOTENCY_ENTRIES = 64
+# Devices in one room's start profile (as in a room policy).
+MAX_START_PROFILE = 64
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 # Domains a room command may switch.
@@ -79,14 +83,6 @@ def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) ->
     entity_id = _state_value(state, "entity_id", "")
     return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(
         state
-    )
-
-
-def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
-    """True for an eligible device that is on."""
-    return (
-        is_room_activity_eligible(state, eligible_entity_ids)
-        and _state_value(state, "state") == "on"
     )
 
 
@@ -155,12 +151,17 @@ class NowDataEngine:
         config_table: Any,
         restores_table: Any,
         idempotency_table: Any,
+        start_profiles_table: Any = None,
     ) -> None:
         self._recents = recents_table
         self._policies = policies_table
         self._config = config_table
         self._restores = restores_table
         self._idempotency = idempotency_table
+        # The hub passes its kv table; a test may leave it in memory.
+        self._start_profiles = (
+            start_profiles_table if start_profiles_table is not None else {}
+        )
         self._lock = threading.RLock()
 
     def record_successful_control(
@@ -179,6 +180,13 @@ class NowDataEngine:
             ]
             cleaned.insert(0, {"entity_id": entity_id, "at": _timestamp(at)})
             self._recents[member_id] = {"items": cleaned[:_MAX_RECENTS]}
+
+    def forget_member(self, member_id: str) -> None:
+        """Delete the member's recent controls and stored room-command
+        answers (their last device left)."""
+        with self._lock:
+            self._recents.pop(member_id, None)
+            self._idempotency.pop(member_id, None)
 
     def recents_for(self, member_id: str) -> list[dict[str, str]]:
         """The member's recent controls, newest first."""
@@ -348,9 +356,22 @@ class NowDataEngine:
 
     def restore_set(self, room_id: str) -> list[str]:
         """What the room's last off switched off and on has not yet restored."""
+        return self.restore_capture(room_id)[0]
+
+    def restore_capture(self, room_id: str) -> tuple[list[str], str | None]:
+        """The room's restore set and when it was first captured (ISO 8601 UTC,
+        None if unknown)."""
         record = self._restores.get(room_id) or {}
-        entities = (record.get("entity_ids") or []) if isinstance(record, dict) else []
-        return [item for item in entities if isinstance(item, str)]
+        if not isinstance(record, dict):
+            return [], None
+        entities = record.get("entity_ids") or []
+        captured_at = record.get("captured_at")
+        return (
+            [item for item in entities if isinstance(item, str)]
+            if isinstance(entities, list)
+            else [],
+            captured_at if isinstance(captured_at, str) else None,
+        )
 
     def save_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> None:
         """Replace the room's restore set; an empty set removes it."""
@@ -373,9 +394,76 @@ class NowDataEngine:
             self.save_restore_set(room_id, [*self.restore_set(room_id), *entity_ids])
             return self.restore_set(room_id)
 
+    def keep_in_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
+        """Keep only these ids in the room's restore set and return what is left.
+
+        They keep their captured order and the capture its captured_at; an
+        empty result removes the set.
+        """
+        keep = set(entity_ids)
+        with self._lock:
+            record = self._restores.get(room_id)
+            ids = [item for item in self.restore_set(room_id) if item in keep]
+            if ids:
+                captured_at = (
+                    record.get("captured_at") if isinstance(record, dict) else None
+                )
+                self._restores[room_id] = {
+                    "entity_ids": ids,
+                    "captured_at": captured_at or _timestamp(),
+                }
+            else:
+                self._restores.pop(room_id, None)
+            return ids
+
     def consume_restore_set(self, room_id: str) -> list[str]:
         """Return the room's restore set and clear it."""
         with self._lock:
             ids = self.restore_set(room_id)
             self._restores.pop(room_id, None)
             return ids
+
+    def start_profile(self, room_id: str) -> list[str]:
+        """The room's start profile, [] when it has none."""
+        record = self._start_profiles.get(room_id)
+        ids = record.get("entity_ids") if isinstance(record, dict) else None
+        if not isinstance(ids, list):
+            return []
+        return [item for item in ids if isinstance(item, str)]
+
+    def set_start_profile(self, room_id: str, entity_ids: Any) -> dict[str, Any]:
+        """Store the room's start profile and return it.
+
+        Checks the shape only (1 to MAX_START_PROFILE distinct entity ids);
+        now_api has already checked each is a light or fan in this room.
+        """
+        if (
+            not isinstance(entity_ids, list)
+            or not 0 < len(entity_ids) <= MAX_START_PROFILE
+            or any(
+                not isinstance(entity_id, str) or "." not in entity_id
+                for entity_id in entity_ids
+            )
+        ):
+            raise NowDataError(
+                f"entity_ids must list 1 to {MAX_START_PROFILE} entity ids"
+            )
+        if len(set(entity_ids)) != len(entity_ids):
+            raise NowDataError("entity_ids must not contain duplicates")
+        with self._lock:
+            self._start_profiles[room_id] = {"entity_ids": list(entity_ids)}
+        return {"room_id": room_id, "entity_ids": list(entity_ids)}
+
+    def clear_start_profile(self, room_id: str) -> dict[str, Any]:
+        """Delete the room's start profile (none is fine) and return it empty."""
+        with self._lock:
+            self._start_profiles.pop(room_id, None)
+        return {"room_id": room_id, "entity_ids": []}
+
+    def forget_room(self, room_id: str) -> None:
+        """Delete a deleted room's activity policy, restore set and start
+        profile."""
+        with self._lock:
+            self._policies.pop(room_id, None)
+            self._restores.pop(room_id, None)
+            self._start_profiles.pop(room_id, None)

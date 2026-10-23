@@ -104,6 +104,41 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             self.rt.auth.validate_token(token)
 
+    async def test_factory_reset_clears_the_room_activity_log(self) -> None:
+        # Written rows go in the wipe's transaction; the recorder then drops
+        # what it still had buffered.
+        self.rt.storage.room_activity().append_many(
+            [
+                {
+                    "t": 1_800_000_000,
+                    "utc_offset_min": 180,
+                    "room_id": "majlis",
+                    "entity_id": "light.majlis",
+                    "action": "on",
+                    "source": "app",
+                    "member_id": "mem-a",
+                }
+            ]
+        )
+        self.rt.room_activity = types.SimpleNamespace(async_clear=mock.AsyncMock())
+        await self._call("factory_reset", "admin")
+        self.assertEqual(self.rt.storage.room_activity().count(), 0)
+        self.rt.room_activity.async_clear.assert_awaited_once()
+
+    async def test_factory_reset_clears_the_room_habits(self) -> None:
+        # The learned model, the kept Ramadans and the admin's habit settings
+        # go in the wipe's transaction; the learner then drops what it holds
+        # in memory.
+        self.rt.storage.table("now_room_habits")["regular:household"] = {"v": 1}
+        self.rt.storage.table("now_ramadan_habits")["1447"] = {"v": 1, "rows": []}
+        self.rt.storage.table("now_habit_config")["global"] = {"learning": False}
+        self.rt.room_habits = types.SimpleNamespace(async_clear=mock.AsyncMock())
+        await self._call("factory_reset", "admin")
+        self.assertEqual(len(self.rt.storage.table("now_room_habits")), 0)
+        self.assertEqual(len(self.rt.storage.table("now_ramadan_habits")), 0)
+        self.assertEqual(len(self.rt.storage.table("now_habit_config")), 0)
+        self.rt.room_habits.async_clear.assert_awaited_once()
+
     async def test_any_user_can_run_a_scene(self) -> None:
         # The member gets past the admin gate to the handler's own refusal.
         with self.assertRaisesRegex(Exception, "Unknown scene"):

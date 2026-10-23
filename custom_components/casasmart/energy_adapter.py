@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import Event, HomeAssistant, callback
@@ -32,6 +32,9 @@ from .energy import (
     EnergyEngine,
 )
 from .registry import UNSET, RegistryEngine
+
+if TYPE_CHECKING:
+    from homeassistant.core import Context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -484,6 +487,8 @@ class EnergyAdapter:
 
     change_callback runs when the engine state changes outside a REST
     request: a release, an occupancy change or cleared releases.
+    command_context makes the context each device command runs in, so the
+    room activity log knows Energy Saving made the change.
     """
 
     def __init__(
@@ -497,6 +502,7 @@ class EnergyAdapter:
         wall_clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
         change_callback: Callable[[], None] | None = None,
+        command_context: Callable[[], Context | None] | None = None,
     ) -> None:
         self._hass = hass
         self._engine = engine
@@ -509,6 +515,7 @@ class EnergyAdapter:
         self._wall_clock = wall_clock
         self._monotonic_clock = monotonic_clock
         self._change_callback = change_callback
+        self._command_context = command_context
 
         self._unsub_state_changed: Callable[[], None] | None = None
         self._cancel_sun_timer: Callable[[], None] | None = None
@@ -1501,6 +1508,7 @@ class EnergyAdapter:
                 service,
                 {**(data or {}), "entity_id": entity_id},
                 blocking=True,
+                context=self._command_context() if self._command_context else None,
             )
         except Exception as err:
             self._failure_count += 1

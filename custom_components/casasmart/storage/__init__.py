@@ -6,7 +6,7 @@ Nothing outside this package touches SQLite directly.
 from .config_store import JsonConfigStore
 from .exceptions import ConfigError, MigrationError, StorageError
 from .migrations import LATEST_VERSION, MIGRATIONS, Migration
-from .store import EnergyEventsTable, HubStorage, KeyValueTable
+from .store import EnergyEventsTable, HubStorage, KeyValueTable, RoomActivityTable
 
 __all__ = [
     "LATEST_VERSION",
@@ -18,5 +18,6 @@ __all__ = [
     "KeyValueTable",
     "Migration",
     "MigrationError",
+    "RoomActivityTable",
     "StorageError",
 ]

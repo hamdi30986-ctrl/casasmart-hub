@@ -26,7 +26,8 @@ from .auth_api import async_member_id, authenticate_request, json_body
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
 from .registry_api import async_execute_registry_scene
-from .runtime_lookup import loaded_runtime_data
+from .room_intel.activity import SOURCE_SCENE
+from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
 from .suggestions import MAX_RULES, SuggestionError, evaluate, validate_rule
 
@@ -284,10 +285,10 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 fresh = await self.context(service, fresh_scope)
                 if self.find(service, fresh, fresh_scope, occurrence) is None:
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
+                member_id = await async_member_id(self.hass, fresh_claims)
                 suppressed = fresh[0]["suppressions"].get(
                     service.store.suppression_key(
-                        await async_member_id(self.hass, fresh_claims),
-                        candidate.get("suppression_id", occurrence),
+                        member_id, candidate.get("suppression_id", occurrence)
                     )
                 )
                 if (
@@ -298,7 +299,11 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 scene = fresh[1][candidate["scene_id"]]
                 self.energy_check(fresh_claims, scene)
                 dispatched = True
-                result = await async_execute_registry_scene(self.hass, scene)
+                result = await async_execute_registry_scene(
+                    self.hass,
+                    scene,
+                    context=command_context(self.hass, SOURCE_SCENE, member_id),
+                )
                 receipt = await self.hass.async_add_executor_job(
                     service.store.finish, occurrence, result
                 )

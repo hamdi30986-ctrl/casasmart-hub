@@ -155,6 +155,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.data.registry = self.registry
         self.registry.list_rooms = list
+        self.registry.list_user_devices = list
         self.registry.get_favorites = lambda member: []
         self.data.now_data = old._NOW.NowDataEngine({}, {}, {}, {}, {})
         self.data.now_data.configure({"suggested_scene_id": "scene-night"})
@@ -257,7 +258,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 10, 5, 23, 30, tzinfo=fixtures.UTC)
         self.calls = []
         self.gate = None
-        self.fail = set()
+        self.failing = set()
         self.tracked = {}
         self.states = NS(
             values={
@@ -269,11 +270,11 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.states.get = lambda eid: self.states.values.get(eid)
 
-        async def call(domain, service, data, blocking=True):
+        async def call(domain, service, data, blocking=True, context=None):
             self.calls.append((domain, service, data))
             if self.gate:
                 await self.gate.wait()
-            if data["entity_id"] in self.fail:
+            if data["entity_id"] in self.failing:
                 raise RuntimeError("offline")
             if service in {"turn_off", "turn_on"}:
                 self.states.get(data["entity_id"]).state = (
@@ -312,6 +313,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         return NS(
             body=body,
             claims={"sub": "alice:tablet", "role": "admin", "rooms": None, **claims},
+            query={},
         )
 
     async def selected(self, **claims):
@@ -503,6 +505,26 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.action("run", oid)).status, 200)
         self.assertEqual(len(lookups), 3)  # list, action, re-check before running
 
+    async def test_a_run_carries_the_members_scene_context(self):
+        # The room activity log credits the scene's changes to the member.
+        tagged, contexts = [], []
+        self.data.room_activity = NS(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+        original = self.hass.services.async_call
+
+        async def call(domain, service, data, blocking=True, context=None):
+            contexts.append(context)
+            await original(domain, service, data, blocking=blocking, context=context)
+
+        self.hass.services.async_call = call
+        oid = (await self.selected())["occurrence_id"]
+        self.assertEqual((await self.action("run", oid)).status, 200)
+        self.assertEqual(tagged, [("scene", "alice")])
+        self.assertEqual(contexts, ["context-1"])
+
     async def test_success_suppresses_globally_and_replay_does_not_execute(self):
         oid = (await self.selected())["occurrence_id"]
         result = await self.action("run", oid)
@@ -515,7 +537,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("entity_id", str(result.data))
 
     async def test_partial_is_visible_and_no_silent_retry(self):
-        self.fail.add("light.one")
+        self.failing.add("light.one")
         oid = (await self.selected())["occurrence_id"]
         result = await self.action("run", oid)
         self.assertFalse(result.data["ok"])

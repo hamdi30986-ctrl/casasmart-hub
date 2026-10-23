@@ -102,6 +102,77 @@ class TestWalAndLifecycle(StorageTestCase):
         storage.close()
 
 
+class TestScrub(StorageTestCase):
+    """compact() and delete_backups(): what a factory reset runs after its wipe."""
+
+    MARKER = b"mem-old-owner-zq7"
+
+    def disk(self) -> bytes:
+        wal = self.db_path.with_name(self.db_path.name + "-wal")
+        return self.db_path.read_bytes() + (wal.read_bytes() if wal.exists() else b"")
+
+    def test_deleted_rows_stay_on_disk_until_compacted(self):
+        storage = self.make_storage()
+        table = storage.table("now_recents")
+        for i in range(500):
+            table[f"member-{i}"] = {"who": self.MARKER.decode() * 4}
+        table.clear()
+        self.assertEqual(len(table), 0)
+        # SQLite's secure_delete is off: the bytes are still there.
+        self.assertIn(self.MARKER, self.disk())
+        storage.compact()
+        self.assertNotIn(self.MARKER, self.disk())
+        # The WAL is emptied, not just checkpointed.
+        wal = self.db_path.with_name(self.db_path.name + "-wal")
+        self.assertEqual(wal.stat().st_size if wal.exists() else 0, 0)
+        # Still a working database.
+        table["member-1"] = {"ok": True}
+        self.assertEqual(table["member-1"], {"ok": True})
+
+    def test_compact_refuses_inside_a_transaction(self):
+        storage = self.make_storage()
+        with storage.transaction():
+            with self.assertRaises(StorageError):
+                storage.compact()
+
+    def test_only_this_databases_migration_backups_are_deleted(self):
+        storage = self.make_storage()
+        # Opening a new file migrated it from v0, which left one backup.
+        (opened,) = self.backup_dir.iterdir()
+        ours = [
+            opened,
+            self.backup_dir / "casasmart-v4-20261023-131300.db",
+            self.backup_dir / "casasmart-v1-20250101-000000.db",
+        ]
+        others = [
+            self.backup_dir / "notes.txt",
+            self.backup_dir / "casasmart-v4-latest.db",
+            self.backup_dir / "other-v4-20261023-131300.db",
+            self.backup_dir / "casasmart-v4-20261023-131300.db.bak",
+        ]
+        for path in (*ours, *others):
+            path.write_bytes(self.MARKER)
+        self.assertEqual(storage.delete_backups(), 3)
+        self.assertEqual([p.exists() for p in ours], [False] * 3)
+        self.assertEqual([p.exists() for p in others], [True] * len(others))
+        self.assertEqual(storage.delete_backups(), 0)
+
+    def test_no_backup_folder_is_fine(self):
+        storage = self.make_storage()
+        shutil.rmtree(self.backup_dir)
+        self.assertEqual(storage.delete_backups(), 0)
+
+    def test_the_name_a_migration_gives_its_backup_is_deleted(self):
+        # A real migration backup (run_migrations' own name for it).
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA user_version = 0")
+        storage = self.make_storage()
+        names = [p.name for p in self.backup_dir.iterdir()]
+        self.assertEqual(len(names), 1, names)
+        self.assertEqual(storage.delete_backups(), 1)
+        self.assertEqual(list(self.backup_dir.iterdir()), [])
+
+
 class TestKeyValueTable(StorageTestCase):
     def test_set_get_roundtrip(self):
         users = self.make_storage().table("users")

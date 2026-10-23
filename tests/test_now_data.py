@@ -145,6 +145,69 @@ class NowDataEngineTest(unittest.TestCase):
         )
         self.assertEqual(engine.restore_set("room-kitchen"), [])
 
+    def test_keeping_part_of_a_restore_set_keeps_its_order_and_capture_time(
+        self,
+    ) -> None:
+        engine = make_engine()
+        self.assertEqual(engine.keep_in_restore_set("room-kitchen", ["fan.a"]), [])
+        engine.save_restore_set("room-kitchen", ["light.a", "fan.a", "switch.b"])
+        captured_at = engine._restores["room-kitchen"]["captured_at"]
+
+        self.assertEqual(
+            engine.keep_in_restore_set("room-kitchen", ["switch.b", "light.a", "x.y"]),
+            ["light.a", "switch.b"],
+        )
+        self.assertEqual(
+            engine._restores["room-kitchen"],
+            {"entity_ids": ["light.a", "switch.b"], "captured_at": captured_at},
+        )
+        self.assertEqual(engine.keep_in_restore_set("room-kitchen", []), [])
+        self.assertNotIn("room-kitchen", engine._restores)
+
+    def test_the_capture_says_when_it_was_made(self) -> None:
+        engine = make_engine()
+        self.assertEqual(engine.restore_capture("room-kitchen"), ([], None))
+        engine.extend_restore_set("room-kitchen", ["light.a"])
+        ids, captured_at = engine.restore_capture("room-kitchen")
+        self.assertEqual(ids, ["light.a"])
+        self.assertIsNotNone(datetime.fromisoformat(captured_at).tzinfo)
+        for record in ({"entity_ids": "light.a"}, ["light.a"], {"captured_at": 5}):
+            with self.subTest(record=record):
+                engine._restores["room-x"] = record
+                self.assertEqual(engine.restore_capture("room-x"), ([], None))
+
+    def test_start_profiles_are_per_room_and_go_with_the_room(self) -> None:
+        profiles = Table()
+        engine = _NOW.NowDataEngine(
+            Table(), Table(), Table(), Table(), Table(), start_profiles_table=profiles
+        )
+        self.assertEqual(engine.start_profile("room-kitchen"), [])
+        self.assertEqual(
+            engine.set_start_profile("room-kitchen", ["light.a", "fan.b"]),
+            {"room_id": "room-kitchen", "entity_ids": ["light.a", "fan.b"]},
+        )
+        engine.set_start_profile("room-majlis", ["light.m"])
+        self.assertEqual(profiles["room-kitchen"], {"entity_ids": ["light.a", "fan.b"]})
+        for bad in ([], ["light.a", "light.a"], ["nodot"], "light.a", [1], None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(_NOW.NowDataError):
+                    engine.set_start_profile("room-kitchen", bad)
+        with self.assertRaises(_NOW.NowDataError):
+            engine.set_start_profile("room-kitchen", [f"light.l{i}" for i in range(65)])
+        self.assertEqual(engine.start_profile("room-kitchen"), ["light.a", "fan.b"])
+        self.assertEqual(
+            engine.clear_start_profile("room-kitchen"),
+            {"room_id": "room-kitchen", "entity_ids": []},
+        )
+        self.assertEqual(engine.start_profile("room-kitchen"), [])
+        engine.forget_room("room-majlis")
+        self.assertEqual(engine.start_profile("room-majlis"), [])
+        self.assertEqual(dict(profiles), {})
+        # A member leaving doesn't touch them: they are the room's.
+        engine.set_start_profile("room-kitchen", ["light.a"])
+        engine.forget_member("member-a")
+        self.assertEqual(engine.start_profile("room-kitchen"), ["light.a"])
+
 
 class RoomActivityContractTest(unittest.TestCase):
     def test_opening_aggregate_distinguishes_lock_truth_from_transient_states(

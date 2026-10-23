@@ -37,6 +37,8 @@ API_VERSION_HEADER = "X-CasaSmart-API-Version"
 
 TLS_PORT_DEFAULT = 8443
 TLS_CERT_CHECK_INTERVAL_HOURS = 24
+# How often the room activity log applies its retention rules.
+ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS = 24
 TUNNEL_WATCHDOG_INTERVAL_MINUTES = 5
 MDNS_REFRESH_INTERVAL_MINUTES = 5
 
@@ -98,6 +100,11 @@ FACTORY_RESET_TABLES = (
     "now_config",
     "now_restore_sets",
     "now_idempotency",
+    "now_room_habits",
+    "now_habit_config",
+    "now_ramadan_habits",
+    "now_room_last_on",
+    "now_room_start_profiles",
     "suggestions_v1",
     "push_tokens",
     "hq_notifications",
