@@ -315,6 +315,7 @@ def _build_runtime_data(
         storage.table("now_config"),
         storage.table("now_restore_sets"),
         storage.table("now_idempotency"),
+        start_profiles_table=storage.table("now_room_start_profiles"),
     )
     push = PushTokenStore(storage.table("push_tokens"))
 

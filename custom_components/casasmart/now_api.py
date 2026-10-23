@@ -9,6 +9,9 @@
   shows. The hub never picks sensors by itself.
 - PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
   whether a room takes part in room commands, and which devices they switch.
+- GET/PUT/DELETE /api/casasmart/now/rooms/{room_id}/start-profile
+  (registry.manage): the lights and fans one tap "on" turns on when nothing
+  better is known.
 - POST /api/casasmart/now/rooms/{room_id}/activity (devices.control): switch
   a room's approved devices off, or back on from what the last off captured
   (409 nothing_to_restore when there is none). Idempotent per client key, one
@@ -43,6 +46,7 @@ from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .filtering import area_id_of, in_scope, is_served, serialize_device, visible_to
 from .now_data import (
+    MAX_START_PROFILE,
     NowDataEngine,
     NowDataError,
     is_room_activity_candidate,
@@ -58,6 +62,7 @@ from .room_intel.habits import (
     STATUS_UNAVAILABLE,
     HabitSettingsError,
 )
+from .room_intel.one_tap import is_on_domain
 from .room_intel.ranking import (
     async_counted_controls,
     async_rank_rooms,
@@ -716,6 +721,109 @@ class CasaSmartRoomActivityPolicyView(_NowView):
             return False
         rooms = await self._hass.async_add_executor_job(registry.list_rooms)
         return any(room["room_id"] == room_id for room in rooms)
+
+
+class CasaSmartRoomStartProfileView(CasaSmartRoomActivityPolicyView):
+    """GET/PUT/DELETE /api/casasmart/now/rooms/{room_id}/start-profile.
+
+    The lights and fans one tap "on" turns on in a room that is off when the
+    hub knows nothing better (no recent capture, no last-on set). An
+    installer's choice, so registry.manage, like the room's policy. PUT
+    {entity_ids: [...]} sets it (1 to 64 of the room's lights and fans);
+    DELETE clears it. Each answers {room_id, entity_ids}. Only the devices
+    the room's policy approves ever come on.
+    """
+
+    url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/start-profile"
+    name = f"api:{DOMAIN}:now:room:start-profile"
+
+    async def _checked(
+        self, request: web.Request, room_id: str
+    ) -> tuple[NowDataEngine | None, web.Response | None]:
+        """The Now store, or the refusal (auth, unknown room, not ready)."""
+        claims, error = authenticate_request(self._hass, request, "registry.manage")
+        if error is not None:
+            return None, error
+        if not await self._room_accessible(room_id, claims.get("rooms")):
+            return None, self.json_message("Unknown room", HTTPStatus.NOT_FOUND)
+        return self._now_or_503()
+
+    async def get(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        entity_ids = await self._hass.async_add_executor_job(
+            now_data.start_profile, room_id
+        )
+        return self.json({"room_id": room_id, "entity_ids": entity_ids})
+
+    async def put(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
+        unknown = sorted(set(payload) - {"entity_ids"})
+        if unknown:
+            return self.json_message(
+                f"Unknown start profile field: {unknown[0]!r}", HTTPStatus.BAD_REQUEST
+            )
+        entity_ids = payload.get("entity_ids")
+        if not isinstance(entity_ids, list) or not entity_ids:
+            return self.json_message(
+                "entity_ids must list the room's lights and fans "
+                "(DELETE clears the start profile)",
+                HTTPStatus.BAD_REQUEST,
+            )
+        invalid = self._invalid_start_profile(room_id, entity_ids)
+        if invalid is not None:
+            return self.json_message(invalid, HTTPStatus.BAD_REQUEST)
+        try:
+            profile = await self._hass.async_add_executor_job(
+                now_data.set_start_profile, room_id, entity_ids
+            )
+        except NowDataError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        return self.json(profile)
+
+    async def delete(self, request: web.Request, room_id: str) -> web.Response:
+        now_data, error = await self._checked(request, room_id)
+        if error is not None:
+            return error
+        return self.json(
+            await self._hass.async_add_executor_job(
+                now_data.clear_start_profile, room_id
+            )
+        )
+
+    def _invalid_start_profile(self, room_id: str, entity_ids: list[Any]) -> str | None:
+        """Why the list cannot be the room's start profile, or None if it can.
+
+        Every entity must be a light or fan in this room, served, and not
+        left out of room activity.
+        """
+        if len(entity_ids) > MAX_START_PROFILE or any(
+            not isinstance(entity_id, str) for entity_id in entity_ids
+        ):
+            return f"entity_ids must contain at most {MAX_START_PROFILE} entity ids"
+        if len(set(entity_ids)) != len(entity_ids):
+            return "entity_ids must not contain duplicates"
+        for entity_id in entity_ids:
+            if not is_on_domain(entity_id):
+                return (
+                    f"Entity {entity_id!r} is not a light or fan: one tap only "
+                    "turns on lights and fans"
+                )
+            state = self._hass.states.get(entity_id)
+            if (
+                state is None
+                or area_id_of(self._hass, entity_id) != room_id
+                or not is_served(self._hass, entity_id)
+                or not is_room_activity_candidate(state)
+            ):
+                return f"Entity {entity_id!r} is not a light or fan in this room"
+        return None
 
 
 class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):

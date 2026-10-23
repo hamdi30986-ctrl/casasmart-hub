@@ -104,6 +104,7 @@ FACTORY_RESET_TABLES = (
     "now_habit_config",
     "now_ramadan_habits",
     "now_room_last_on",
+    "now_room_start_profiles",
     "suggestions_v1",
     "push_tokens",
     "hq_notifications",

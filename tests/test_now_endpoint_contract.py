@@ -18,6 +18,7 @@ class NowEndpointContractTest(unittest.TestCase):
             "/api/{DOMAIN}/now/config",
             "/api/{DOMAIN}/now/rooms/{{room_id}}/activity-policy",
             "/api/{DOMAIN}/now/rooms/{{room_id}}/activity",
+            "/api/{DOMAIN}/now/rooms/{{room_id}}/start-profile",
         ):
             self.assertIn(path, source)
         self.assertIn(
@@ -34,6 +35,7 @@ class NowEndpointContractTest(unittest.TestCase):
             "CasaSmartNowConfigView(hass)",
             "CasaSmartRoomActivityPolicyView(hass)",
             "CasaSmartRoomActivityCommandView(hass)",
+            "CasaSmartRoomStartProfileView(hass)",
             "CasaSmartNowHabitsView(hass)",
             "CasaSmartNowHabitsResetView(hass)",
         ):
