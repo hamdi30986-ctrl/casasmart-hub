@@ -8,7 +8,8 @@ changes are attributed to the member, scene or Energy Saving behind them.
 
 Rows are buffered on the event loop and written in one transaction every few
 seconds, as Home Assistant's recorder commits. Nothing is logged until Home
-Assistant has started and settled, so restored states don't become events.
+Assistant has started and settled (10 minutes), so restored states and
+devices catching up don't become events.
 The room ranking reads the latest events back with async_recent_events,
 buffered ones included.
 """
@@ -42,7 +43,7 @@ from .activity import (
     prune,
     transition,
 )
-from .off_rooms import DARK_ACTIONS
+from .off_rooms import DARK_ACTIONS, STARTUP_QUIET_SECONDS
 from .ranking import imported_controls
 
 if TYPE_CHECKING:
@@ -56,8 +57,11 @@ _LOGGER = logging.getLogger(__name__)
 _FLUSH_SECONDS = 5.0
 _FLUSH_ROWS = 100
 # After Home Assistant reports started, integrations still replace restored
-# states with real ones for a while.
-_STARTUP_SETTLE_SECONDS = 120.0
+# states with real ones for a while, some only minutes later. Nothing is
+# logged for as long as the just_off tier ignores offs after a start, so a
+# late report never becomes a habit vote either (a nightly restart would
+# otherwise build a habit at that hour).
+_STARTUP_SETTLE_SECONDS = float(STARTUP_QUIET_SECONDS)
 _REGISTRY_DEBOUNCE_SECONDS = 1.0
 _CHATTER_WARN_SECONDS = 3600.0
 

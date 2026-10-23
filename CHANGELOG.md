@@ -8,9 +8,11 @@ What changed in each version of CasaSmart Hub.
   remembers it, so the next tap tries that device again.
 - The hub keeps a log of which room devices were switched, when, and how
   (the app, a wall switch, an automation), for the room suggestions coming
-  next. It stays on the hub. A member's entries are deleted with their last
-  phone, and a factory reset clears it. The database moves to schema v5: to
-  go back to 2.3.2, restore the copy the update saves in `casasmart/backups`.
+  next. It stays on the hub. It starts 10 minutes after Home Assistant
+  starts, while devices catch up. A member's entries are deleted with their
+  last phone, and a factory reset clears it. The database moves to schema
+  v5: to go back to 2.3.2, restore the copy the update saves in
+  `casasmart/backups`.
 - The Now page now counts a running AC as something on, so a room where only
   the AC runs is no longer hidden. When every room that is on has its own
   power meters, rooms are ordered by how much power they draw; otherwise by

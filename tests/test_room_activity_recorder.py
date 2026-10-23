@@ -18,6 +18,7 @@ import tempfile
 import threading
 import types
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -403,6 +404,42 @@ class StartupTests(RecorderTestCase):
             await self.rows(),
             [("light.majlis_spot", "on", "wall_switch", None, "majlis")],
         )
+
+    async def test_nothing_is_logged_for_ten_minutes_after_the_start(self):
+        # Some integrations restore "off" and report the real "on" minutes
+        # after Home Assistant started; logged, that "on" would vote for a
+        # habit at the restart hour every night.
+        await self.recorder.async_stop()
+        settles = []
+        call_later = recorder_module.async_call_later
+
+        def capture_settle(hass, delay, action):
+            if getattr(action, "__name__", None) == "_on_settled":
+                settles.append((delay, action))
+                return lambda: None
+            return call_later(hass, delay, action)
+
+        with mock.patch.object(recorder_module, "async_call_later", capture_settle):
+            self.recorder = ActivityRecorder(
+                self.hass, self.registry, self.storage.room_activity()
+            )
+            await self.recorder.async_start()
+            self.hass.set_state(CoreState.running)
+            self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+            await self.hass.async_block_till_done()
+            self.assertEqual([delay for delay, _ in settles], [600.0])
+
+            # Minutes later, the spot restored as off reports its real "on".
+            self.press("light.majlis_spot", "on")
+            self.assertEqual(await self.rows(), [])
+
+            # Ten minutes after the start.
+            settles[0][1](datetime.now(UTC))
+            self.press("light.majlis_spot", "off")
+            self.assertEqual(
+                await self.rows(),
+                [("light.majlis_spot", "off", "wall_switch", None, "majlis")],
+            )
 
     async def test_a_reload_of_a_running_hub_records_at_once_and_invents_nothing(self):
         await self.recorder.async_stop()
