@@ -148,6 +148,9 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
                 "ac_on_count": 1,
                 "watts": 1840.0,
                 "watts_quality": "complete",
+                # Why it's where it is.
+                "reason": "active",
+                "params": {},
             },
         )
         self.assertEqual(

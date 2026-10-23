@@ -109,9 +109,9 @@ def _load_now_api():
     now_spec.loader.exec_module(now_data)
 
     # The real room ranking, over the stub filtering above, and the real
-    # room activity and meter rules (Home Assistant-free).
+    # room activity, meter and all-off rules (Home Assistant-free).
     _module("casasmart.room_intel", package=True)
-    for name in ("activity", "meters"):
+    for name in ("activity", "meters", "off_rooms"):
         rules_spec = importlib.util.spec_from_file_location(
             f"casasmart.room_intel.{name}",
             ROOT / "custom_components" / "casasmart" / "room_intel" / f"{name}.py",

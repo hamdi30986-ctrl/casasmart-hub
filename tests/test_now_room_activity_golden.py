@@ -9,6 +9,10 @@ all pinned. Real-HA environment only, like the other view-layer suites.
 The ranking changed the answers on purpose: ties go to the room order (sort_order,
 name, room id), off rooms fill the five card slots, and every room carries a
 rank block, the block a ranking summary.
+
+Each room then gained its rank reason and params, and the summary's mode. The
+hub here has no room activity log, no meter and no media, so off rooms stay
+in the room order.
 """
 
 from __future__ import annotations
@@ -96,11 +100,15 @@ def room(
             "ac_on_count": 0,
             "watts": None,
             "watts_quality": "absent",
+            "reason": "active" if active_count > 0 else "room_order",
+            "params": {},
         },
     }
 
 
-RANKING = {"version": 1, "basis": "count", "slots": 5}
+RANKING = {"version": 1, "basis": "count", "slots": 5, "mode": "on"}
+# Nothing in the caller's rooms is on.
+RANKING_ALL_OFF = {**RANKING, "mode": "all_off"}
 
 
 @unittest.skipIf(
@@ -229,7 +237,7 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
                         "view_all_count": 0,
                     },
                     "configured_room_count": 1,
-                    "ranking": RANKING,
+                    "ranking": RANKING_ALL_OFF,
                 }
             ),
         )

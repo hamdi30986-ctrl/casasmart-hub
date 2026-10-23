@@ -11,6 +11,10 @@ The ranking changed three answers on purpose: ties go to the room order (sort_or
 name, room id) instead of the room id; a running AC makes its room active
 (room-c); and off rooms fill the Now page's five card slots (room-d). Every
 room also gained its rank block.
+
+Each room then gained its rank reason and params: "active" for a room that is on;
+this fixture has no meters, no media and no activity log, so every off room
+stays in the room order ("room_order"), as before.
 """
 
 import json
@@ -184,6 +188,8 @@ def room(room_id, active_count, eligible_entity_ids, *, ac_on=0, filler=False):
             "ac_on_count": ac_on,
             "watts": None,
             "watts_quality": "absent",
+            "reason": "active" if on_count > 0 else "room_order",
+            "params": {},
         },
     }
 

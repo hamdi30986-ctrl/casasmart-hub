@@ -16,6 +16,11 @@ What changed in each version of CasaSmart Hub.
   power meters, rooms are ordered by how much power they draw; otherwise by
   how many devices are on. Rooms that tie follow your room order. When fewer
   than five rooms are on, rooms that are off fill the empty cards.
+- Rooms that are off are now ordered too, each with its reason: first rooms
+  where something still runs (a TV or speaker playing, or a device drawing
+  real power), then rooms someone switched off in the last 30 minutes
+  (newest first; not by an automation or scene, and not the ones you switched
+  off yourself), then your room order.
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the

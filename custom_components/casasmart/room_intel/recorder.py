@@ -9,6 +9,8 @@ changes are attributed to the member, scene or Energy Saving behind them.
 Rows are buffered on the event loop and written in one transaction every few
 seconds, as Home Assistant's recorder commits. Nothing is logged until Home
 Assistant has started and settled, so restored states don't become events.
+The room ranking reads the latest events back with async_recent_events,
+buffered ones included.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -39,6 +42,7 @@ from .activity import (
     prune,
     transition,
 )
+from .off_rooms import DARK_ACTIONS
 from .ranking import imported_controls
 
 if TYPE_CHECKING:
@@ -102,6 +106,10 @@ class ActivityRecorder:
         self._unsubs: list[Callable[[], None]] = []
         self._ready = False
         self._stopped = False
+        self._read_failed = False
+        # When Home Assistant reported started (wall clock), None when this
+        # recorder started on a running Home Assistant (a reload).
+        self.started_at: float | None = None
 
         self._hub_contexts = RecentIds(_HUB_CONTEXT_TTL, _HUB_CONTEXT_MAX)
         self._automation_contexts = RecentIds(
@@ -152,6 +160,7 @@ class ActivityRecorder:
 
     @callback
     def _on_ha_started(self, _hass: HomeAssistant) -> None:
+        self.started_at = self._wall_clock()
         self._unsubs.append(
             async_call_later(self._hass, self._startup_settle, self._on_settled)
         )
@@ -291,6 +300,43 @@ class ActivityRecorder:
                 _LOGGER.warning(
                     "Room activity: %d events not saved: %s", len(rows), err
                 )
+
+    async def async_recent_events(
+        self, since_t: int, room_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """The rooms' on/off/set events since since_t, newest first.
+
+        Includes the events not written yet. Read under the flush lock, so
+        each event is seen once: written, or still buffered. A failed read
+        returns none (the ranking then has no just_off), warned once.
+        """
+        if not room_ids:
+            return []
+        rooms = set(room_ids)
+        async with self._flush_lock:
+            try:
+                rows = await self._hass.async_add_executor_job(
+                    partial(
+                        self._table.recent_in_rooms,
+                        room_ids,
+                        since_t=since_t,
+                        actions=DARK_ACTIONS,
+                    )
+                )
+            except (StorageError, sqlite3.Error, ValueError) as err:
+                log = _LOGGER.debug if self._read_failed else _LOGGER.warning
+                log("Room activity could not be read: %s", err)
+                self._read_failed = True
+                return []
+            pending = [
+                row
+                for row in self._buffer
+                if row["room_id"] in rooms
+                and row["t"] >= since_t
+                and row["action"] in DARK_ACTIONS
+            ]
+        self._read_failed = False
+        return [*reversed(pending), *rows]
 
     async def async_prune(self, _now: datetime | None = None) -> None:
         """Apply the retention rules (room_intel.activity.prune)."""

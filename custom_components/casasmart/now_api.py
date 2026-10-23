@@ -213,8 +213,16 @@ class CasaSmartNowView(_NowView):
             ]
 
         # The generated suggestions rank rooms with the same function, so both
-        # agree on the busiest rooms.
-        ranked, _, _ = await async_rank_rooms(self._hass, registry, now_data, scope)
+        # agree on the busiest rooms. The room activity log orders the off
+        # rooms that just went dark, minus the caller's own taps.
+        ranked, _, _ = await async_rank_rooms(
+            self._hass,
+            registry,
+            now_data,
+            scope,
+            activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),
+            member_id=member_id,
+        )
 
         def read_restore_counts() -> dict[str, int]:
             return {

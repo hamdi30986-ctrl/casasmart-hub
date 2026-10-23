@@ -12,18 +12,42 @@ Rooms with something on come first. When every one of them is fully metered
 (each on device's own power meters read valid), they rank by watts;
 otherwise the whole list ranks by how many devices are on. Ties go to the
 room order the registry serves the apps: sort_order, then name, then room
-id. Off rooms fill the Now page's empty card slots in order_off_rooms order.
-The Now page and the generated room suggestions use this one ranking
-(docs/api/NOW_ROOM_RANKING_V1.md, GENERATED_ROOM_SUGGESTIONS_V1.md).
+id. Off rooms fill the Now page's empty card slots in the all-off order
+(order_off_rooms, tiers in room_intel.off_rooms): something still running,
+then just went dark, then room order. Every room says why it is where it is
+(rank.reason). The Now page and the generated room suggestions use this one
+ranking (docs/api/NOW_ROOM_RANKING_V1.md, GENERATED_ROOM_SUGGESTIONS_V1.md);
+only the Now page passes the room activity log, which just_off needs.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NamedTuple
+import time
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from ..filtering import area_id_of, in_scope, is_served
 from ..now_data import is_room_activity_candidate
 from .meters import is_power_meter, watt_step, watts_of
+from .off_rooms import (
+    JUST_OFF_WINDOW_SECONDS,
+    REASON_ACTIVE,
+    REASON_JUST_OFF,
+    REASON_ROOM_ORDER,
+    REASON_RUNNING_LOAD,
+    TIER_JUST_OFF,
+    TIER_LEARNED,
+    TIER_ROOM_ORDER,
+    TIER_RUNNING_LOAD,
+    OffRoomFacts,
+    RecentActivity,
+    changed_at,
+    events_by_room,
+    is_playing,
+    iso_utc,
+    still_running,
+    went_dark_at,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -58,6 +82,22 @@ _UNAVAILABLE = frozenset({"unknown", "unavailable"})
 # fill the ones on rooms leave empty.
 NOW_ROOM_SLOTS = 5
 RANKING_VERSION = 1
+MODE_ON = "on"
+MODE_ALL_OFF = "all_off"
+
+# A learned all-off tier: the room's (reason, params, in-tier sort key),
+# or None when it doesn't qualify.
+LearnedTier = Callable[[dict[str, Any]], tuple[str, dict[str, Any], tuple] | None]
+
+
+class ActivitySource(Protocol):
+    """What the ranking reads the room activity log through (the recorder)."""
+
+    started_at: float | None
+
+    async def async_recent_events(
+        self, since_t: int, room_ids: list[str]
+    ) -> list[dict[str, Any]]: ...
 
 
 class RoomRanking(NamedTuple):
@@ -150,13 +190,47 @@ def room_order_key(room: dict[str, Any]) -> tuple[int, str, str]:
     return sort_order, str(room.get("name") or ""), room["room_id"]
 
 
-def order_off_rooms(rooms: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order the rooms with nothing on, for the slots on rooms leave empty.
+def _off_tier(
+    room: dict[str, Any], facts: OffRoomFacts, learned: LearnedTier | None
+) -> tuple[int, str, dict[str, Any], tuple]:
+    """An off room's tier: (sort slot, reason, params, in-tier sort key)."""
+    if facts.loads:
+        step = -2 if facts.watts is None else watt_step(facts.watts)
+        return TIER_RUNNING_LOAD, REASON_RUNNING_LOAD, {"loads": facts.loads}, (-step,)
+    if facts.went_dark_t is not None:
+        return (
+            TIER_JUST_OFF,
+            REASON_JUST_OFF,
+            {"went_dark_at": iso_utc(facts.went_dark_t)},
+            (-facts.went_dark_t,),
+        )
+    if learned is not None and (tier := learned(room)) is not None:
+        reason, params, key = tier
+        return TIER_LEARNED, reason, params, key
+    return TIER_ROOM_ORDER, REASON_ROOM_ORDER, {}, ()
 
-    The room order for now. The all-off ranking replaces this function;
-    rank_rooms takes the off rooms in whatever order it returns.
+
+def order_off_rooms(
+    rooms: list[dict[str, Any]],
+    facts: Mapping[str, OffRoomFacts],
+    learned: LearnedTier | None = None,
+) -> list[dict[str, Any]]:
+    """Order the rooms with nothing on, and give each its rank reason.
+
+    Tiers (room_intel.off_rooms), the first a room qualifies for wins:
+    running_load, just_off, then room_order; ties and the last tier go by
+    room order. learned is the hook for a tier between just_off and
+    room_order (habit, most used). rank_rooms fills the empty slots from
+    the front of this order.
     """
-    return sorted(rooms, key=room_order_key)
+    keyed = []
+    for room in rooms:
+        slot, reason, params, key = _off_tier(room, facts[room["room_id"]], learned)
+        room["rank"]["reason"] = reason
+        room["rank"]["params"] = params
+        keyed.append(((slot, key, room_order_key(room)), room))
+    keyed.sort(key=lambda item: item[0])
+    return [room for _, room in keyed]
 
 
 def ranking_basis(rooms: list[dict[str, Any]]) -> str:
@@ -169,11 +243,18 @@ def ranking_basis(rooms: list[dict[str, Any]]) -> str:
 
 
 def ranking_summary(rooms: list[dict[str, Any]]) -> dict[str, Any]:
-    """How the ranked rooms were ordered, for the Now page."""
+    """How the ranked rooms were ordered, for the Now page.
+
+    mode is "on" when a room is on, else "all_off" (the whole list is in
+    the all-off order).
+    """
     return {
         "version": RANKING_VERSION,
         "basis": ranking_basis(rooms),
         "slots": NOW_ROOM_SLOTS,
+        "mode": MODE_ON
+        if any(room["rank"]["active"] for room in rooms)
+        else MODE_ALL_OFF,
     }
 
 
@@ -181,8 +262,8 @@ def _room_watts(
     room_meters: dict[int, list[Any]],
     devices: list[int | None],
     on_devices: list[int | None],
-) -> tuple[float | None, str]:
-    """A room's watts and how complete they are.
+) -> tuple[float | None, str, float | None]:
+    """A room's watts, how complete they are, and its biggest reading.
 
     room_meters holds each device's meters in the room; devices are the keys
     of the room's counted devices, on_devices of those that are on. An on
@@ -197,7 +278,7 @@ def _room_watts(
     }
     valid = [watts for watts in readings.values() if watts is not None]
     if not valid:
-        return None, "absent"
+        return None, "absent", None
 
     def covered(key: int | None) -> bool:
         meters = room_meters.get(key, ())
@@ -206,7 +287,7 @@ def _room_watts(
         )
 
     complete = all(covered(key) for key in on_devices)
-    return round(sum(valid), 1), "complete" if complete else "partial"
+    return round(sum(valid), 1), "complete" if complete else "partial", max(valid)
 
 
 def _count_key(room: dict[str, Any]) -> tuple:
@@ -225,18 +306,23 @@ def rank_rooms(
     gang_types: dict[str, str | None],
     meters_by_room: dict[str, dict[int, list[Any]]],
     device_of: dict[str, int],
+    *,
+    activity: RecentActivity | None = None,
 ) -> list[dict[str, Any]]:
     """Rank the (already scoped) rooms, the ones with something on first.
 
     meters_by_room holds, per room, each device's power meters in that room;
-    device_of maps a control to its device. Each ranked room is its registry
-    record plus active_count, the eligible_entity_ids that were counted and
-    a rank block: active, filler, on_count, ac_on_count, watts and
-    watts_quality.
+    device_of maps a control to its device. activity is the room activity
+    the just_off tier needs; without it no room is just_off. Each ranked
+    room is its registry record plus active_count, the eligible_entity_ids
+    that were counted and a rank block: active, filler, on_count,
+    ac_on_count, watts, watts_quality, reason and params.
     """
     configured = any(policies.get(r["room_id"], {}).get("participates") for r in rooms)
+    events = events_by_room(activity.events) if activity is not None else {}
     on_rooms = []
     off_rooms = []
+    facts: dict[str, OffRoomFacts] = {}
     fill_ids = set()
     for room in rooms:
         rid = room["room_id"]
@@ -245,28 +331,41 @@ def rank_rooms(
             continue
         eligible = []
         acs = []
+        # Every device that counts the room as on, available or not, and
+        # when each unavailable one got so (for just_off).
+        counted_ids = set()
+        unavailable_since = []
+        media_playing = 0
         for state in states_by_room[rid]:
             eid = state.entity_id
-            if state.state in _UNAVAILABLE:
+            if is_playing(state):
+                media_playing += 1
                 continue
             if is_ac(state):
-                acs.append(state)
-                continue
-            if not counts_as_activity(eid, gang_types.get(eid)):
-                continue
-            if configured and (
-                eid not in policy.get("eligible_entity_ids", [])
-                or not is_room_activity_candidate(state)
+                kind = acs
+            elif counts_as_activity(eid, gang_types.get(eid)) and not (
+                configured
+                and (
+                    eid not in policy.get("eligible_entity_ids", [])
+                    or not is_room_activity_candidate(state)
+                )
             ):
+                kind = eligible
+            else:
                 continue
-            eligible.append(state)
+            counted_ids.add(eid)
+            if state.state in _UNAVAILABLE:
+                unavailable_since.append(changed_at(state))
+                continue
+            kind.append(state)
         on = [state for state in eligible if state.state == "on"]
         acs_on = [state for state in acs if state.state in _AC_ON_MODES]
-        watts, quality = _room_watts(
+        watts, quality, peak = _room_watts(
             meters_by_room.get(rid, {}),
             [device_of.get(state.entity_id) for state in [*eligible, *acs]],
             [device_of.get(state.entity_id) for state in [*on, *acs_on]],
         )
+        active = bool(on or acs_on)
         ranked = {
             **room,
             "active_count": len(on),
@@ -274,23 +373,34 @@ def rank_rooms(
             "restore_pending_count": 0,
             "most_recent_activity_at": None,
             "rank": {
-                "active": bool(on or acs_on),
+                "active": active,
                 "filler": False,
                 "on_count": len(on) + len(acs_on),
                 "ac_on_count": len(acs_on),
                 "watts": watts,
                 "watts_quality": quality,
+                "reason": REASON_ACTIVE,
+                "params": {},
             },
         }
-        if ranked["rank"]["active"]:
+        if active:
             on_rooms.append(ranked)
             continue
+        loads = still_running(media_playing, peak)
+        facts[rid] = OffRoomFacts(
+            loads,
+            watts,
+            went_dark_at(events.get(rid, ()), counted_ids, unavailable_since, activity)
+            if activity is not None
+            else None,
+        )
         off_rooms.append(ranked)
-        # Only a room with a device to switch fills a slot.
-        if eligible or acs:
+        # Only a room with a device to switch, or something still running,
+        # fills a slot.
+        if eligible or acs or loads:
             fill_ids.add(rid)
     on_rooms.sort(key=_watts_key if ranking_basis(on_rooms) == "watts" else _count_key)
-    off_rooms = order_off_rooms(off_rooms)
+    off_rooms = order_off_rooms(off_rooms, facts)
     fillers = [r for r in off_rooms if r["room_id"] in fill_ids]
     fillers = fillers[: max(0, NOW_ROOM_SLOTS - len(on_rooms))]
     for room in fillers:
@@ -306,10 +416,17 @@ async def async_rank_rooms(
     registry: RegistryEngine,
     now_data: NowDataEngine,
     scope: list[str] | None,
+    *,
+    activity: ActivitySource | None = None,
+    member_id: str | None = None,
+    now_t: float | None = None,
 ) -> RoomRanking:
     """Rank the caller's rooms; scope is their room ids, None for every room.
 
-    The stores are read in one executor job and the states in one scan.
+    activity is the room activity log (the recorder), for the just_off tier;
+    member_id is the caller, whose own app taps don't make a room just_off.
+    The stores are read in one executor job, the states in one scan and the
+    log in one query.
     """
 
     def read_stores():
@@ -349,9 +466,26 @@ async def async_rank_rooms(
             meters_by_room.setdefault(rid, {}).setdefault(
                 sensor_device[meter.entity_id], []
             ).append(meter)
+    recent = None
+    if activity is not None:
+        now_t = time.time() if now_t is None else now_t
+        recent = RecentActivity(
+            await activity.async_recent_events(
+                max(0, int(now_t) - JUST_OFF_WINDOW_SECONDS), list(states_by_room)
+            ),
+            now_t,
+            member_id,
+            activity.started_at,
+        )
     return RoomRanking(
         rank_rooms(
-            rooms, policies, states_by_room, gang_types, meters_by_room, device_of
+            rooms,
+            policies,
+            states_by_room,
+            gang_types,
+            meters_by_room,
+            device_of,
+            activity=recent,
         ),
         states_by_room,
         states,

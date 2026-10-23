@@ -163,7 +163,8 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
             ["rooms", "layout", "configured_room_count", "ranking"],
         )
         self.assertEqual(
-            activity["ranking"], {"version": 1, "basis": "watts", "slots": 5}
+            activity["ranking"],
+            {"version": 1, "basis": "watts", "slots": 5, "mode": "on"},
         )
         rooms = activity["rooms"]
         # The AC-only Majlis (2.1 kW) beats the Kitchen's two lights (45 W);
@@ -195,6 +196,8 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
                         "ac_on_count": 1,
                         "watts": 2100.0,
                         "watts_quality": "complete",
+                        "reason": "active",
+                        "params": {},
                     },
                 }
             ),

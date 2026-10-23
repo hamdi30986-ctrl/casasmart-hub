@@ -4,6 +4,11 @@ The golden NOW room_activity pins run again over a full log, and the whole
 NOW reply and the generated room suggestions are compared, as JSON text,
 with an empty log and with a full one. Real-HA environment only, like the
 golden suite.
+
+The NOW page reads the log through the recorder
+(runtime.room_activity) to order off rooms that just went dark; these hubs
+have none, so the table alone still moves nothing. The all-off ranking suites
+(test_room_off_ranking*) cover the log through the recorder.
 """
 
 from __future__ import annotations
