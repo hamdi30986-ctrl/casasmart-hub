@@ -145,6 +145,25 @@ class NowDataEngineTest(unittest.TestCase):
         )
         self.assertEqual(engine.restore_set("room-kitchen"), [])
 
+    def test_keeping_part_of_a_restore_set_keeps_its_order_and_capture_time(
+        self,
+    ) -> None:
+        engine = make_engine()
+        self.assertEqual(engine.keep_in_restore_set("room-kitchen", ["fan.a"]), [])
+        engine.save_restore_set("room-kitchen", ["light.a", "fan.a", "switch.b"])
+        captured_at = engine._restores["room-kitchen"]["captured_at"]
+
+        self.assertEqual(
+            engine.keep_in_restore_set("room-kitchen", ["switch.b", "light.a", "x.y"]),
+            ["light.a", "switch.b"],
+        )
+        self.assertEqual(
+            engine._restores["room-kitchen"],
+            {"entity_ids": ["light.a", "switch.b"], "captured_at": captured_at},
+        )
+        self.assertEqual(engine.keep_in_restore_set("room-kitchen", []), [])
+        self.assertNotIn("room-kitchen", engine._restores)
+
 
 class RoomActivityContractTest(unittest.TestCase):
     def test_opening_aggregate_distinguishes_lock_truth_from_transient_states(

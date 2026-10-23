@@ -365,6 +365,28 @@ class NowDataEngine:
             self.save_restore_set(room_id, [*self.restore_set(room_id), *entity_ids])
             return self.restore_set(room_id)
 
+    def keep_in_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
+        """Keep only these ids in the room's restore set and return what is left.
+
+        They keep their captured order and the capture its captured_at; an
+        empty result removes the set.
+        """
+        keep = set(entity_ids)
+        with self._lock:
+            record = self._restores.get(room_id)
+            ids = [item for item in self.restore_set(room_id) if item in keep]
+            if ids:
+                captured_at = (
+                    record.get("captured_at") if isinstance(record, dict) else None
+                )
+                self._restores[room_id] = {
+                    "entity_ids": ids,
+                    "captured_at": captured_at or _timestamp(),
+                }
+            else:
+                self._restores.pop(room_id, None)
+            return ids
+
     def consume_restore_set(self, room_id: str) -> list[str]:
         """Return the room's restore set and clear it."""
         with self._lock:

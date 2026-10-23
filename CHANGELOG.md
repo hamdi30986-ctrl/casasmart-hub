@@ -2,6 +2,11 @@
 
 What changed in each version of CasaSmart Hub.
 
+## [Unreleased]
+- Turning a room back on now says so when there is nothing to restore,
+  instead of reporting success. If a device fails to come back on, the room
+  remembers it, so the next tap tries that device again.
+
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the
   cameras in their rooms, or all of them. Existing members keep what they

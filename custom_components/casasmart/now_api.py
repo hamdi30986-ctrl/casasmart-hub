@@ -8,8 +8,9 @@
 - PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
   whether a room takes part in room commands, and which devices they switch.
 - POST /api/casasmart/now/rooms/{room_id}/activity (devices.control): switch
-  a room's approved devices off, or back on from what the last off captured.
-  Idempotent per client key, one command per room at a time.
+  a room's approved devices off, or back on from what the last off captured
+  (409 nothing_to_restore when there is none). Idempotent per client key, one
+  command per room at a time.
 """
 
 from __future__ import annotations
@@ -578,7 +579,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
     """POST /api/casasmart/now/rooms/{room_id}/activity.
 
     The body is {action: turn_off|turn_on, idempotency_key}. Commands run one
-    at a time per room, and a retry with the same key replays the answer.
+    at a time per room, and a retry with the same key replays the answer. An
+    on with nothing captured to restore is refused with 409
+    nothing_to_restore, before anything is switched.
     """
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
@@ -645,6 +648,16 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                     HTTPStatus.CONFLICT,
                 )
             result = await self._run(room_id, action, now_data)
+            if result is None:
+                # Nothing was switched, so there is no answer to replay.
+                return self.json(
+                    {
+                        "error": "nothing_to_restore",
+                        "message": "Nothing to restore: no device in this room "
+                        "was captured by a room off",
+                    },
+                    HTTPStatus.CONFLICT,
+                )
             result["idempotency_key"] = key
             await self._hass.async_add_executor_job(
                 now_data.save_idempotent_result, member_id, room_id, action, key, result
@@ -660,12 +673,13 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
 
     async def _run(
         self, room_id: str, action: str, now_data: NowDataEngine
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Switch the room's eligible devices and report each one's outcome.
 
         Off targets every eligible device that is on; on targets what the
         restore set holds and is still off. A device counts as changed only
-        when its state afterwards confirms it.
+        when its state afterwards confirms it. Returns None for an on with
+        nothing to restore.
         """
         policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
         eligible_entity_ids = policy["eligible_entity_ids"]
@@ -687,10 +701,22 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             restore_ids = await self._hass.async_add_executor_job(
                 now_data.restore_set, room_id
             )
+            restorable = [
+                entity_id for entity_id in restore_ids if entity_id in eligible
+            ]
+            if not restorable:
+                # Nothing captured, or nothing captured is still one of the
+                # room's devices. A stale capture is dropped, so the room stops
+                # offering a restore it cannot do.
+                if restore_ids:
+                    await self._hass.async_add_executor_job(
+                        now_data.consume_restore_set, room_id
+                    )
+                return None
             target_ids = [
                 entity_id
-                for entity_id in restore_ids
-                if entity_id in eligible and eligible[entity_id].state != "on"
+                for entity_id in restorable
+                if eligible[entity_id].state != "on"
             ]
         outcomes = [
             {"entity_id": entity_id, "outcome": "pending"} for entity_id in target_ids
@@ -728,11 +754,19 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 now_data.extend_restore_set, room_id, changed_ids
             )
         else:
-            # On clears the capture even if a device failed, so a later tap
-            # cannot replay stale work.
-            await self._hass.async_add_executor_job(
-                now_data.consume_restore_set, room_id
-            )
+            failed_ids = [
+                item["entity_id"] for item in outcomes if item["outcome"] == "failed"
+            ]
+            if failed_ids:
+                # A device that failed stays captured, so the next on retries
+                # just that one; the rest of the capture is done.
+                restore_pending = await self._hass.async_add_executor_job(
+                    now_data.keep_in_restore_set, room_id, failed_ids
+                )
+            else:
+                await self._hass.async_add_executor_job(
+                    now_data.consume_restore_set, room_id
+                )
         return {
             "ok": not any(item["outcome"] == "failed" for item in outcomes),
             "room_id": room_id,

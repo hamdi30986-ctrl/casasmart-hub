@@ -7,6 +7,7 @@ import importlib.util
 import sqlite3
 import sys
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -409,6 +410,145 @@ class RepeatedRoomOffTest(unittest.TestCase):
         self.assertEqual(
             self.state_of(), {"light.a": "on", "light.b": "on", "fan.c": "off"}
         )
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+
+class _EntityFailingServices(_Services):
+    """Fails the calls of the domains in fail_domains, per action."""
+
+    def __init__(self, states: _States) -> None:
+        super().__init__(states)
+        self.fail_on: set[tuple[str, str]] = set()
+
+    async def async_call(self, domain, action, data, blocking=True):
+        self.calls.append((domain, action, tuple(data["entity_id"])))
+        if (domain, action) in self.fail_on:
+            raise _HOME_ASSISTANT_ERROR("simulated service failure")
+        target_state = "off" if action == "turn_off" else "on"
+        for entity_id in data["entity_id"]:
+            self._states.get(entity_id).state = target_state
+
+
+class RoomOnRestoreResultTest(unittest.TestCase):
+    """Room on answers what it did: a 409 when there is nothing to restore, and
+    a device that failed stays captured for the next on."""
+
+    ROOM = "room-kitchen"
+    ENTITIES = ("light.a", "light.b", "fan.c")
+    NOTHING = {
+        "error": "nothing_to_restore",
+        "message": "Nothing to restore: no device in this room was captured "
+        "by a room off",
+    }
+
+    def setUp(self) -> None:
+        self.states = _States(
+            [
+                _State("light.a", "on", self.ROOM),
+                _State("light.b", "off", self.ROOM),
+                _State("fan.c", "on", self.ROOM),
+            ]
+        )
+        self.hass = _Hass(self.states)
+        self.hass.services = _EntityFailingServices(self.states)
+        self.engine = _NOW.NowDataEngine({}, {}, {}, {}, {})
+        self.engine.set_room_policy(self.ROOM, True, list(self.ENTITIES))
+        self.view = _API.CasaSmartRoomActivityCommandView(self.hass)
+
+    def command(self, action: str, key: str) -> tuple[dict, object]:
+        """The answer and its HTTP status (None for 200)."""
+
+        async def body(view, request):
+            return {"action": action, "idempotency_key": key}, None
+
+        async def accessible(room_id, scope):
+            return True
+
+        with (
+            patch.multiple(
+                _API,
+                authenticate_request=lambda *args: ({"sub": "member-a"}, None),
+                read_json_object=body,
+                get_now_data=lambda hass: self.engine,
+            ),
+            patch.object(self.view, "_room_accessible", accessible),
+            patch.object(self.view, "json", lambda value, status=None: (value, status)),
+        ):
+            return asyncio.run(self.view.post(None, self.ROOM))
+
+    def test_on_with_nothing_captured_is_a_409_that_switches_nothing(self) -> None:
+        self.states.get("light.a").state = "off"
+        self.states.get("fan.c").state = "off"
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertEqual((answer, status), (self.NOTHING, HTTPStatus.CONFLICT))
+        self.assertEqual(self.hass.services.calls, [])
+        # Nothing ran, so nothing is stored for replay: once an off has
+        # captured something, the same key restores it.
+        self.assertIsNone(
+            self.engine.idempotent_result(
+                "member-a", self.ROOM, "turn_on", "on-key-0001"
+            )
+        )
+        self.states.get("light.a").state = "on"
+        self.command("turn_off", "off-key-0001")
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertTrue(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"], [{"entity_id": "light.a", "outcome": "changed"}]
+        )
+
+    def test_a_capture_with_no_device_left_in_the_room_is_a_409_and_is_dropped(
+        self,
+    ) -> None:
+        self.engine.save_restore_set(self.ROOM, ["light.moved", "switch.unlisted"])
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertEqual((answer, status), (self.NOTHING, HTTPStatus.CONFLICT))
+        self.assertEqual(self.hass.services.calls, [])
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+
+    def test_a_failed_device_stays_captured_for_the_next_on(self) -> None:
+        self.command("turn_off", "off-key-0001")
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["light.a", "fan.c"])
+        captured_at = self.engine._restores[self.ROOM]["captured_at"]
+        self.hass.services.fail_on.add(("fan", "turn_on"))
+
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"],
+            [
+                {"entity_id": "light.a", "outcome": "changed"},
+                {"entity_id": "fan.c", "outcome": "failed"},
+            ],
+        )
+        self.assertEqual(answer["restore_pending_count"], 1)
+        self.assertEqual(self.engine.restore_set(self.ROOM), ["fan.c"])
+        self.assertEqual(self.engine._restores[self.ROOM]["captured_at"], captured_at)
+
+        self.hass.services.fail_on.clear()
+        answer, _ = self.command("turn_on", "on-key-0002")
+        self.assertTrue(answer["ok"])
+        self.assertEqual(
+            answer["outcomes"], [{"entity_id": "fan.c", "outcome": "changed"}]
+        )
+        self.assertEqual(answer["restore_pending_count"], 0)
+        self.assertEqual(self.engine.restore_set(self.ROOM), [])
+        self.assertEqual(self.states.get("fan.c").state, "on")
+
+    def test_on_when_everything_captured_is_already_on_succeeds(self) -> None:
+        self.command("turn_off", "off-key-0001")
+        # Someone switched them back on at the wall.
+        self.states.get("light.a").state = "on"
+        self.states.get("fan.c").state = "on"
+        calls = list(self.hass.services.calls)
+        answer, status = self.command("turn_on", "on-key-0001")
+        self.assertIsNone(status)
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["outcomes"], [])
+        self.assertEqual(answer["restored_from_capture_count"], 2)
+        self.assertEqual(self.hass.services.calls, calls)
         self.assertEqual(self.engine.restore_set(self.ROOM), [])
 
 
