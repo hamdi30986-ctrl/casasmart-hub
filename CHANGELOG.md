@@ -28,11 +28,15 @@ What changed in each version of CasaSmart Hub.
   last phone, and a factory reset clears it. The database moves to schema
   v5: to go back to 2.3.2, restore the copy the update saves in
   `casasmart/backups`.
-- The Now page now counts a running AC as something on, so a room where only
-  the AC runs is no longer hidden. When every room that is on has its own
-  power meters, rooms are ordered by how much power they draw; otherwise by
-  how many devices are on. Rooms that tie follow your room order. When fewer
-  than five rooms are on, rooms that are off fill the empty cards.
+- A room on the Now page is on only while a light or fan that room off
+  switches is on (wall relays typed Light or Fan included), so room off
+  always leaves the room off and a fridge plug no longer keeps the kitchen
+  on. Plugs, other switches, heaters and ACs never make a room on; a
+  running AC with its own power meter shows its room as still running.
+  When every room that is on has its own power meters, rooms are ordered
+  by how much power they draw; otherwise by how many lights and fans are
+  on. Rooms that tie follow your room order. When fewer than five rooms are
+  on, rooms that are off fill the empty cards.
 - Rooms that are off are now ordered too, each with its reason: first rooms
   where something still runs (a TV or speaker playing, or a device drawing
   real power), then rooms someone switched off in the last 30 minutes

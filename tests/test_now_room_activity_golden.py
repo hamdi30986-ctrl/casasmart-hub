@@ -29,6 +29,11 @@ room commands with its imported lights and fans, so its tap opens the room
 only because nothing is saved (not room_activity_disabled), and in a home
 with a stored policy it is listed with the participating rooms.
 configured_room_count still counts only stored policies.
+
+Then a room's on devices became the lights and fans room off switches: the
+Majlis's outlet no longer counts (one on, after the rooms with two), nor is
+it among its eligible devices; the Kitchen's heater never did, and its
+relay typed as a light still does.
 """
 
 from __future__ import annotations
@@ -212,17 +217,13 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             await self.room_activity(),
             json.dumps(
                 {
-                    # A three-way tie in the room order (Anteroom and
-                    # Kitchen have sort_order 0, Majlis 2), then Bedroom
-                    # fills a slot.
+                    # Anteroom and Kitchen tie on two (sort_order 0, then
+                    # name); the Majlis's outlet doesn't count, room off
+                    # never switches it. Then Bedroom fills a slot.
                     "rooms": [
                         room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
                         room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
-                        room(
-                            "room-a",
-                            2,
-                            ["light.a_ceiling", "switch.a_outlet", "fan.a_fan"],
-                        ),
+                        room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
                         room("room-c", 0, ["light.c_lamp"], filler=True),
                     ],
                     "layout": {
@@ -350,16 +351,18 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             self.hass.states.add(eid, state="on")
         self.runtime.registry.warm_up()
         body = json.loads(await self.room_activity())
-        # Seven rooms are on, so no off room fills a slot.
+        # Seven rooms are on, so no off room fills a slot. The Majlis has
+        # one on like the Z rooms (its outlet doesn't count) and comes last
+        # by its sort_order.
         self.assertEqual(
             [r["room_id"] for r in body["rooms"]],
-            ["room-e", "room-b", "room-a", "room-z0", "room-z1", "room-z2", "room-z3"],
+            ["room-e", "room-b", "room-z0", "room-z1", "room-z2", "room-z3", "room-a"],
         )
         self.assertEqual(
             body["layout"],
             {
                 "featured_room_id": "room-e",
-                "cards": ["room-b", "room-a", "room-z0", "room-z1"],
+                "cards": ["room-b", "room-z0", "room-z1", "room-z2"],
                 "view_all_count": 2,
             },
         )

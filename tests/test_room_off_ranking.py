@@ -230,7 +230,9 @@ class WholeHouseTest(OffRankingCase):
     async def test_on_rooms_come_first_and_the_off_rooms_fill_by_tier(self):
         self.home()
         self.values["light.guest"].state = "on"
-        self.device("hall", ac("climate.hall"))  # AC-only on
+        # An AC running alone, unmetered: not on (room off never
+        # switches an AC), so the Hall is an off room in the room order.
+        self.device("hall", ac("climate.hall"))
         self.device("majlis", media("media_player.majlis_tv"))
         self.log.add("bedroom", "light.bedroom", "off", 3 * MIN)
         self.log.add("kitchen", "light.kitchen", "off", 9 * MIN)
@@ -239,10 +241,10 @@ class WholeHouseTest(OffRankingCase):
             [(r["room_id"], r["rank"]["reason"], r["rank"]["filler"]) for r in ranked],
             [
                 ("guest", "active", False),
-                ("hall", "active", False),
                 ("majlis", "running_load", True),
                 ("bedroom", "just_off", True),
                 ("kitchen", "just_off", True),
+                ("office", "room_order", True),
             ],
         )
         self.assertEqual(ranking_summary(ranked)["mode"], "on")
@@ -547,7 +549,8 @@ class JustOffTest(OffRankingCase):
         # (logged nothing).
         self.log.add("kitchen", "light.kitchen", "off", 10 * MIN)
         self.log.add("kitchen", "light.kitchen", "on", 5 * MIN)
-        # Bedroom: its AC changed mode, then went off unlogged.
+        # Bedroom: its AC changed mode after the light's off; an AC doesn't
+        # make a room on, so the light's off is when it went dark.
         self.device("bedroom", ac("climate.bedroom", "off"))
         self.log.add("bedroom", "climate.bedroom", "on", 20 * MIN)
         self.log.add("bedroom", "light.bedroom", "off", 10 * MIN)
@@ -560,7 +563,7 @@ class JustOffTest(OffRankingCase):
         self.device("hall", relay("switch.hall_boiler", "on", "heater"))
         self.log.add("hall", "light.hall", "off", 8 * MIN)
         self.log.add("hall", "switch.hall_boiler", "on", 1 * MIN)
-        # Guest: its AC is what went off.
+        # Guest: only its AC went off, and an AC doesn't count.
         self.device("guest", ac("climate.guest", "off"))
         self.log.add("guest", "climate.guest", "off", 15 * MIN)
         self.participate_all()
@@ -569,11 +572,11 @@ class JustOffTest(OffRankingCase):
             [(r["room_id"], r["rank"]["reason"], r["rank"]["params"]) for r in ranked],
             [
                 ("hall", "just_off", {"went_dark_at": iso(NOW - 8 * MIN)}),
+                ("bedroom", "just_off", {"went_dark_at": iso(NOW - 10 * MIN)}),
                 ("office", "just_off", {"went_dark_at": iso(NOW - 10 * MIN)}),
-                ("guest", "just_off", {"went_dark_at": iso(NOW - 15 * MIN)}),
                 ("majlis", "room_order", {}),
                 ("kitchen", "room_order", {}),
-                ("bedroom", "room_order", {}),
+                ("guest", "room_order", {}),
             ],
         )
 
@@ -618,12 +621,21 @@ class UnavailableTest(OffRankingCase):
             },
         )
 
-    async def test_an_unavailable_ac_blocks_like_a_light(self):
+    async def test_only_a_device_that_counts_blocks_when_it_goes_unavailable(self):
         self.home()
+        # An AC doesn't make a room on, so one dropping off after the
+        # light's off says nothing about when the room went dark...
         self.device("kitchen", ac("climate.kitchen", "cool"))
         self.log.add("kitchen", "light.kitchen", "off", 10 * MIN)
         self.unavailable("climate.kitchen", since_ago=1 * MIN)
-        self.assertEqual((await self.reasons())["kitchen"], "room_order")
+        # ...a wall relay typed as a light does.
+        self.device("bedroom", relay("switch.bedroom_wall", "off"))
+        self.log.add("bedroom", "light.bedroom", "off", 10 * MIN)
+        self.unavailable("switch.bedroom_wall", since_ago=1 * MIN)
+        reasons = await self.reasons()
+        self.assertEqual(
+            (reasons["kitchen"], reasons["bedroom"]), ("just_off", "room_order")
+        )
 
 
 class RestartTest(OffRankingCase):
