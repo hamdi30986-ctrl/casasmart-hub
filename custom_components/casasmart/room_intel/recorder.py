@@ -13,8 +13,9 @@ devices catching up don't become events.
 The room ranking reads the latest events back with async_recent_events,
 buffered ones included. The recorder also follows the readings of the power
 meters on the hub's devices (held_meters), so a load that crossed 20 W stays
-running until it drops below 14 W, and which of the hub's lights and fans are
-on, for each room's last-on set (last_on, room_intel.one_tap): kept in memory,
+running until it drops below 14 W, and which of the hub's lights and fans
+(wall relays the installer typed as a light or fan included) are on, for each
+room's last-on set (last_on, room_intel.one_tap): kept in memory,
 saved to kv now_room_last_on with the events, read back at start. Nothing is
 followed until it has settled either, so a restart never replaces a set.
 """
@@ -38,6 +39,7 @@ from homeassistant.helpers.start import async_at_started
 
 from ..const import EVENT_REGISTRY_CHANGED
 from ..filtering import area_id_of, is_served
+from ..now_data import LIGHT_RELAY_GANG_TYPES, lighting_kind
 from ..storage import StorageError
 from .activity import (
     HUB_SOURCES,
@@ -50,7 +52,7 @@ from .activity import (
 )
 from .meters import is_power_meter, watts_of
 from .off_rooms import DARK_ACTIONS, STARTUP_QUIET_SECONDS, LoadLatch
-from .one_tap import LastOnSets, is_on_domain
+from .one_tap import RELAY_DOMAIN, LastOnSets, is_on_domain
 from .ranking import device_keys, imported_controls
 
 if TYPE_CHECKING:
@@ -115,8 +117,9 @@ class ActivityRecorder:
         self._meters: frozenset[str] = frozenset()
         self._watched: frozenset[str] = frozenset()
         self._loads = LoadLatch()
-        # The managed lights and fans, and each room's last-on set.
-        self._tracked: frozenset[str] = frozenset()
+        # The managed lights and fans (typed wall relays included), with
+        # their gang types, and each room's last-on set.
+        self._tracked: dict[str, str | None] = {}
         self.last_on = LastOnSets()
         self._rooms: frozenset[str] = frozenset()
         self._buffer: list[dict[str, Any]] = []
@@ -449,7 +452,12 @@ class ActivityRecorder:
         self._managed = frozenset(controls)
         self._meters = frozenset(sensors)
         self._watched = self._managed | self._meters
-        self._tracked = frozenset(eid for eid in self._managed if is_on_domain(eid))
+        self._tracked = {
+            eid: gang
+            for eid, gang in controls.items()
+            if is_on_domain(eid)
+            or (eid.split(".", 1)[0] == RELAY_DOMAIN and gang in LIGHT_RELAY_GANG_TYPES)
+        }
         self._rooms = frozenset(room["room_id"] for room in rooms)
         self._chatter.forget_except(self._managed)
         self._loads.forget_except(self._meters)
@@ -496,8 +504,8 @@ class ActivityRecorder:
     def _seed_lit(self) -> None:
         """Follow the lights and fans from what is on now (writes no set)."""
         lit = []
-        for entity_id in self._tracked:
-            if _is_lit(self._hass.states.get(entity_id)):
+        for entity_id, gang in self._tracked.items():
+            if _is_lit(self._hass.states.get(entity_id), gang):
                 room_id = self._room_now(entity_id)
                 if room_id is not None:
                     lit.append((entity_id, room_id))
@@ -508,6 +516,7 @@ class ActivityRecorder:
         self, entity_id: str, old_state: Any, new_state: Any, event: Event
     ) -> None:
         """Take a tracked light or fan's change; save its room's new set."""
+        gang = self._tracked[entity_id]
         turned_off = (
             old_state is not None
             and new_state is not None
@@ -517,7 +526,7 @@ class ActivityRecorder:
         if self.last_on.update(
             entity_id,
             None if new_state is None else self._room_now(entity_id),
-            _is_lit(new_state),
+            _is_lit(new_state, gang),
             turned_off=turned_off,
             t=int(event.time_fired_timestamp),
         ):
@@ -545,12 +554,13 @@ class ActivityRecorder:
         )
 
 
-def _is_lit(state: Any) -> bool:
-    """True for a light or fan that is on and not left out of room activity."""
+def _is_lit(state: Any, gang: str | None) -> bool:
+    """True for a light or fan (a typed wall relay too: now_data.lighting_kind)
+    that is on and not left out of room activity."""
     return (
         state is not None
         and state.state == "on"
-        and state.attributes.get("casasmart_room_activity_exclude") is not True
+        and lighting_kind(state, gang) is not None
     )
 
 

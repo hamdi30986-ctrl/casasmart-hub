@@ -6,8 +6,9 @@ active_count) plus every AC that is on. Only devices imported into the
 registry count. When an admin's stored policy makes any of the caller's rooms
 take part in room commands, only the rooms that take part count, with the
 devices their policies approve: a stored policy's list, or a room without
-one's lights and fans (an AC counts in every listed room: a policy can't
-approve one); otherwise every visible room does.
+one's lights and fans (wall relays typed as one included; an AC counts in
+every listed room: a policy can't approve one); otherwise every visible room
+does.
 
 Rooms with something on come first. When every one of them is fully metered
 (each on device's own power meters read valid), they rank by watts;
@@ -188,15 +189,19 @@ def counts_as_activity(entity_id: str, gang_type: str | None) -> bool:
     )
 
 
-def approved_by(policy: Mapping[str, Any], state: Any) -> bool:
+def approved_by(
+    policy: Mapping[str, Any], state: Any, gang_type: str | None = None
+) -> bool:
     """True when the room's policy lets room commands switch the device: on
     its stored policy's list (and a candidate), or, in a room without a
-    stored policy, one of its default devices (now_data.room_policy)."""
+    stored policy, one of its default devices (now_data.room_policy).
+    gang_type is the device's registry gang type (a wall relay typed as a
+    light or fan is a light or fan)."""
     if policy.get("default"):
-        return is_default_room_device(state)
+        return is_default_room_device(state, gang_type)
     return state.entity_id in policy.get(
         "eligible_entity_ids", []
-    ) and is_room_activity_candidate(state)
+    ) and is_room_activity_candidate(state, gang_type)
 
 
 def is_ac(state: Any) -> bool:
@@ -427,7 +432,7 @@ def rank_rooms(
             if is_ac(state):
                 kind = acs
             elif counts_as_activity(eid, gang_types.get(eid)) and not (
-                configured and not approved_by(policy, state)
+                configured and not approved_by(policy, state, gang_types.get(eid))
             ):
                 kind = eligible
             else:

@@ -31,10 +31,14 @@ _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 # Domains a room command may switch.
 _ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
 # A switch without a device class could be anything, so only switches with
-# device class "switch" may join a room command.
+# device class "switch" may join a room command, or a wall relay the
+# installer typed as a light or fan (lighting_kind).
 _SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
-# What a room without a stored policy switches (is_default_room_device).
-_DEFAULT_ROOM_DOMAINS = frozenset({"light", "fan"})
+# The registry gang types that make a wall relay (a switch) a light or a fan.
+# The installer sets them in the app's gang-type picker; Home Assistant has
+# no device class for a switch that drives a light. Outlets, heaters and
+# untyped switches ("switch", or none) never are.
+LIGHT_RELAY_GANG_TYPES = frozenset({"light", "fan"})
 
 
 class NowDataError(Exception):
@@ -67,8 +71,39 @@ def _state_attributes(state: Any) -> dict[str, Any]:
     return attributes if isinstance(attributes, dict) else {}
 
 
-def is_room_activity_candidate(state: Any) -> bool:
-    """True when an admin may approve this device for room commands."""
+def lighting_kind(state: Any, gang_type: str | None = None) -> str | None:
+    """ "light" or "fan" for a device that is a light or a fan to the hub, else
+    None.
+
+    A light or a fan entity, or a wall relay (a switch) whose registry gang
+    type the installer set to light or fan (gang_type), unless Home
+    Assistant calls it an outlet. Never a plug, outlet, heater, untyped
+    switch, AC, cover or TV, nor a device left out of room activity. What
+    one tap "on" may turn on, and what a room without a stored policy
+    switches.
+    """
+    entity_id = _state_value(state, "entity_id", "")
+    attributes = _state_attributes(state)
+    if attributes.get("casasmart_room_activity_exclude") is True:
+        return None
+    domain = entity_id.split(".", 1)[0]
+    if domain in ("light", "fan"):
+        return domain
+    if (
+        domain == "switch"
+        and gang_type in LIGHT_RELAY_GANG_TYPES
+        and attributes.get("device_class") != "outlet"
+    ):
+        return gang_type
+    return None
+
+
+def is_room_activity_candidate(state: Any, gang_type: str | None = None) -> bool:
+    """True when an admin may approve this device for room commands.
+
+    gang_type is the device's registry gang type (None: unknown), which
+    makes a wall relay typed as a light or fan a candidate (lighting_kind).
+    """
     entity_id = _state_value(state, "entity_id", "")
     domain = entity_id.split(".", 1)[0]
     if domain not in _ROOM_ACTIVITY_DOMAINS:
@@ -77,30 +112,33 @@ def is_room_activity_candidate(state: Any) -> bool:
     if attributes.get("casasmart_room_activity_exclude") is True:
         return False
     if domain == "switch":
-        return attributes.get("device_class") in _SAFE_SWITCH_DEVICE_CLASSES
+        return (
+            attributes.get("device_class") in _SAFE_SWITCH_DEVICE_CLASSES
+            or lighting_kind(state, gang_type) is not None
+        )
     return True
 
 
-def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
+def is_room_activity_eligible(
+    state: Any, eligible_entity_ids: Iterable[str], gang_type: str | None = None
+) -> bool:
     """True for a candidate device that the room's stored policy approves."""
     entity_id = _state_value(state, "entity_id", "")
     return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(
-        state
+        state, gang_type
     )
 
 
-def is_default_room_device(state: Any) -> bool:
-    """True for a device a room without a stored policy switches: a light or a
-    fan, not left out of room activity.
+def is_default_room_device(state: Any, gang_type: str | None = None) -> bool:
+    """True for a device a room without a stored policy switches: a light, a
+    fan, or a wall relay the installer typed as one (lighting_kind; gang_type
+    is its registry gang type).
 
     As in Apple Home and Google Home, a room's lights act together with no
     setup. Never a plug, outlet, heater, AC, cover or TV. The caller also
     checks the device is imported into the registry, served and in the room.
     """
-    entity_id = _state_value(state, "entity_id", "")
-    if _state_attributes(state).get("casasmart_room_activity_exclude") is True:
-        return False
-    return entity_id.split(".", 1)[0] in _DEFAULT_ROOM_DOMAINS
+    return lighting_kind(state, gang_type) is not None
 
 
 def summarize_openings(

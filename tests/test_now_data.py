@@ -75,22 +75,56 @@ class NowDataEngineTest(unittest.TestCase):
         self.assertTrue(engine.room_policy("room-kitchen")["default"])
 
     def test_a_room_without_a_policy_switches_its_lights_and_fans(self) -> None:
-        for entity_id, attributes, expected in (
-            ("light.kitchen", {}, True),
-            ("fan.kitchen", {}, True),
-            ("light.lamp", {"casasmart_room_activity_exclude": True}, False),
-            ("switch.kettle", {"device_class": "outlet"}, False),
-            ("switch.relay", {"device_class": "switch"}, False),
-            ("switch.untyped", {}, False),
-            ("climate.ac", {"hvac_modes": ["off", "cool"]}, False),
-            ("cover.curtain", {}, False),
-            ("media_player.tv", {}, False),
-            ("water_heater.tank", {}, False),
+        # (entity id, attributes, registry gang type, lighting_kind)
+        for entity_id, attributes, gang, kind in (
+            ("light.kitchen", {}, None, "light"),
+            ("fan.kitchen", {}, None, "fan"),
+            ("light.lamp", {"casasmart_room_activity_exclude": True}, None, None),
+            # Wall relays the installer typed as a light or fan.
+            ("switch.relay", {}, "light", "light"),
+            ("switch.relay", {"device_class": "switch"}, "light", "light"),
+            ("switch.fan_relay", {}, "fan", "fan"),
+            # Home Assistant says outlet: never, whatever the gang type.
+            ("switch.relay", {"device_class": "outlet"}, "light", None),
+            (
+                "switch.relay",
+                {"casasmart_room_activity_exclude": True},
+                "light",
+                None,
+            ),
+            ("switch.kettle", {"device_class": "outlet"}, "outlet", None),
+            ("switch.plug", {}, "outlet", None),
+            ("switch.heater", {"device_class": "switch"}, "heater", None),
+            ("switch.relay", {"device_class": "switch"}, "switch", None),
+            ("switch.untyped", {}, None, None),
+            ("climate.ac", {"hvac_modes": ["off", "cool"]}, "light", None),
+            ("cover.curtain", {}, None, None),
+            ("media_player.tv", {}, None, None),
+            ("water_heater.tank", {}, None, None),
         ):
-            with self.subTest(entity_id=entity_id):
+            with self.subTest(entity_id=entity_id, gang=gang, attributes=attributes):
+                state = {"entity_id": entity_id, "attributes": attributes}
+                self.assertEqual(_NOW.lighting_kind(state, gang), kind)
                 self.assertIs(
-                    _NOW.is_default_room_device(
-                        {"entity_id": entity_id, "attributes": attributes}
+                    _NOW.is_default_room_device(state, gang), kind is not None
+                )
+
+    def test_a_wall_relay_typed_as_a_light_is_a_room_activity_candidate(
+        self,
+    ) -> None:
+        for attributes, gang, expected in (
+            ({}, "light", True),
+            ({}, "fan", True),
+            ({"device_class": "switch"}, None, True),
+            ({}, None, False),
+            ({}, "outlet", False),
+            ({}, "heater", False),
+            ({"device_class": "outlet"}, "light", False),
+        ):
+            with self.subTest(attributes=attributes, gang=gang):
+                self.assertIs(
+                    _NOW.is_room_activity_candidate(
+                        {"entity_id": "switch.relay", "attributes": attributes}, gang
                     ),
                     expected,
                 )

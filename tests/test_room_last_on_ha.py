@@ -297,9 +297,9 @@ class LastOnFromEveryOrigin(LastOnHubCase):
 
 
 class WhatNeverJoinsASet(LastOnHubCase):
-    async def test_only_lights_and_fans_light_a_room(self):
-        # Relays, outlets, ACs, covers, TVs, heaters: never in a set and
-        # never keep a room lit.
+    async def test_only_lights_fans_and_typed_wall_relays_light_a_room(self):
+        # Outlets, ACs, covers, TVs, heaters: never in a set and never keep a
+        # room lit. A wall relay the installer typed as a light does.
         self.press("light.majlis_main", "on")
         for eid, state in (
             ("switch.majlis_relay", "on"),
@@ -323,7 +323,10 @@ class WhatNeverJoinsASet(LastOnHubCase):
         self.press("switch.kitchen_heater", "off")
         self.press("water_heater.kitchen_tank", "off")
         await self.hass.async_block_till_done()
-        self.assertEqual(self.last_on("majlis"), ["light.majlis_main"])
+        # The relay kept the Majlis lit after its light went off.
+        self.assertEqual(
+            self.last_on("majlis"), ["switch.majlis_relay", "light.majlis_main"]
+        )
         self.assertEqual(self.last_on("kitchen"), [])
 
     async def test_unimported_excluded_and_roomless_lights_are_not_followed(self):

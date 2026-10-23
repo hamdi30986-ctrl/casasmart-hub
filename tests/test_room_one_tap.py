@@ -82,6 +82,38 @@ class PlanTests(unittest.TestCase):
         for domain in ("switch", "climate", "water_heater", "cover", "media_player"):
             self.assertFalse(one_tap.is_on_domain(f"{domain}.x"))
 
+    def test_a_switch_comes_on_only_as_a_named_wall_relay(self):
+        # A wall relay the installer typed as a light or fan is one, when
+        # the caller names it in kinds; a plug passed without a kind never.
+        devices = {
+            "light.a": "off",
+            "switch.relay": "off",
+            "switch.fan_relay": "off",
+            "switch.plug": "off",
+        }
+        kinds = {"light.a": "light", "switch.relay": "light", "switch.fan_relay": "fan"}
+        plan = one_tap.plan_room_on(
+            [(LAST_ON, ["switch.plug", "switch.fan_relay", "switch.relay", "light.a"])],
+            devices,
+            kinds,
+        )
+        self.assertEqual(plan.targets, ["switch.fan_relay", "switch.relay", "light.a"])
+        self.assertEqual(
+            one_tap.one_tap_summary(plan, kinds),
+            {
+                "action": "turn_on",
+                "source": LAST_ON,
+                "light_count": 2,
+                "fan_count": 1,
+                "unavailable_count": 0,
+            },
+        )
+        only_plug = one_tap.plan_room_on([(LAST_ON, ["switch.plug"])], devices, kinds)
+        self.assertIsNone(only_plug.source)
+        self.assertTrue(one_tap.may_come_on("switch.relay", kinds))
+        self.assertFalse(one_tap.may_come_on("switch.plug", kinds))
+        self.assertFalse(one_tap.may_come_on("climate.ac", {"climate.ac": "light"}))
+
     def test_devices_gone_from_the_room_are_left_out(self):
         # Deleted, moved or unapproved: not among the room's devices.
         plan = self.plan(last_on=["light.deleted", "light.a", "light.moved"])

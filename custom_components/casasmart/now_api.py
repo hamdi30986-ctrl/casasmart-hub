@@ -30,7 +30,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Container
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -57,6 +57,7 @@ from .now_data import (
     is_default_room_device,
     is_room_activity_candidate,
     is_room_activity_eligible,
+    lighting_kind,
     room_activity_layout,
     summarize_openings,
 )
@@ -69,6 +70,7 @@ from .room_intel.habits import (
     HabitSettingsError,
 )
 from .room_intel.one_tap import (
+    RELAY_DOMAIN,
     SOURCE_CAPTURE,
     RoomOnPlan,
     capture_counts,
@@ -134,45 +136,58 @@ def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
     return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
 
 
-def _approved(state: Any, policy: dict[str, Any], imported: Container[str]) -> bool:
+def _approved(
+    state: Any, policy: dict[str, Any], gang_types: Mapping[str, str | None]
+) -> bool:
     """True when the room's policy lets room commands switch this device.
 
     A stored policy approves the candidates on its list. A room without one
     takes part with its default devices: its lights and fans imported into
-    the registry (now_data.is_default_room_device). The caller checks the
-    device is in the room and served.
+    the registry, wall relays the installer typed as one included
+    (now_data.is_default_room_device). gang_types are the registry's
+    imported controls with their gang types (ranking.imported_controls). The
+    caller checks the device is in the room and served.
     """
+    entity_id = state.entity_id
     if policy["default"]:
-        return state.entity_id in imported and is_default_room_device(state)
-    return is_room_activity_eligible(state, policy["eligible_entity_ids"])
+        return entity_id in gang_types and is_default_room_device(
+            state, gang_types[entity_id]
+        )
+    return is_room_activity_eligible(
+        state, policy["eligible_entity_ids"], gang_types.get(entity_id)
+    )
 
 
 def _one_tap_devices(
     hass: HomeAssistant,
     policies: dict[str, dict[str, Any]],
-    imported: Container[str],
-) -> dict[str, dict[str, str]]:
-    """Each room's devices one tap "on" may switch, by entity id, with their state.
+    gang_types: Mapping[str, str | None],
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    """Each room's devices one tap "on" may switch, by entity id, with their
+    state, and each one's kind ("light" or "fan").
 
     policies are the rooms that take part in room commands, with their
     policy. A device counts in its room when the policy approves it
-    (_approved), it is served, and it is a light or fan
-    (room_intel.one_tap.ON_DOMAINS). imported are the registry's imported
-    controls. One scan.
+    (_approved), it is served, and it is a light or fan to the hub
+    (now_data.lighting_kind: a wall relay the installer typed as one too).
+    One scan.
     """
     devices: dict[str, dict[str, str]] = {room_id: {} for room_id in policies}
+    kinds: dict[str, str] = {}
     for state in hass.states.async_all():
         entity_id = state.entity_id
-        if not is_on_domain(entity_id):
+        kind = lighting_kind(state, gang_types.get(entity_id))
+        if kind is None:
             continue
         room_id = area_id_of(hass, entity_id)
-        if (
-            room_id in policies
-            and _approved(state, policies[room_id], imported)
-            and is_served(hass, entity_id)
+        if room_id not in policies:
+            continue
+        if _approved(state, policies[room_id], gang_types) and is_served(
+            hass, entity_id
         ):
             devices[room_id][entity_id] = state.state
-    return devices
+            kinds[entity_id] = kind
+    return devices, kinds
 
 
 def _last_on(hass: HomeAssistant, room_id: str) -> Any:
@@ -356,7 +371,7 @@ class CasaSmartNowView(_NowView):
             }
 
         one_tap_sources = await self._hass.async_add_executor_job(read_one_tap_sources)
-        devices_by_room = _one_tap_devices(
+        devices_by_room, kinds = _one_tap_devices(
             self._hass, approved, imported_controls(devices)
         )
         now_t = time.time()
@@ -371,8 +386,9 @@ class CasaSmartNowView(_NowView):
                     start_profile=start_profile,
                     devices=devices_by_room[room_id],
                     now_t=now_t,
+                    kinds=kinds,
                 )
-                one_tap = one_tap_summary(plan)
+                one_tap = one_tap_summary(plan, kinds)
                 pending = len(plan.targets)
             else:
                 one_tap = {"action": "open_room", "reason": "room_activity_disabled"}
@@ -803,7 +819,8 @@ class CasaSmartRoomActivityPolicyView(_NowView):
     ) -> str | None:
         """Why the list cannot be the room's policy, or None if it can.
 
-        Every entity must be served, in this room, and a safe candidate.
+        Every entity must be served, in this room, and a safe candidate (a
+        wall relay typed as a light or fan is one).
         """
         if len(entity_ids) > 64 or any(
             not isinstance(entity_id, str) for entity_id in entity_ids
@@ -811,16 +828,27 @@ class CasaSmartRoomActivityPolicyView(_NowView):
             return "eligible_entity_ids must contain at most 64 entity ids"
         if len(set(entity_ids)) != len(entity_ids):
             return "eligible_entity_ids must not contain duplicates"
+        gang_types = await self._gang_types()
         for entity_id in entity_ids:
             state = self._hass.states.get(entity_id)
             if (
                 state is None
                 or area_id_of(self._hass, entity_id) != room_id
                 or not is_served(self._hass, entity_id)
-                or not is_room_activity_candidate(state)
+                or not is_room_activity_candidate(state, gang_types.get(entity_id))
             ):
                 return f"Entity {entity_id!r} is not an eligible room-activity device"
         return None
+
+    async def _gang_types(self) -> dict[str, str | None]:
+        """The registry's imported controls with their gang types ({} while
+        the hub isn't loaded)."""
+        registry = self._registry()
+        if registry is None:
+            return {}
+        return imported_controls(
+            await self._hass.async_add_executor_job(registry.list_user_devices)
+        )
 
     async def _room_accessible(self, room_id: str, scope: list[str] | None) -> bool:
         """True for a registry room inside the caller's scope."""
@@ -884,7 +912,7 @@ class CasaSmartRoomStartProfileView(CasaSmartRoomActivityPolicyView):
                 "(DELETE clears the start profile)",
                 HTTPStatus.BAD_REQUEST,
             )
-        invalid = self._invalid_start_profile(room_id, entity_ids)
+        invalid = await self._invalid_start_profile(room_id, entity_ids)
         if invalid is not None:
             return self.json_message(invalid, HTTPStatus.BAD_REQUEST)
         try:
@@ -905,10 +933,13 @@ class CasaSmartRoomStartProfileView(CasaSmartRoomActivityPolicyView):
             )
         )
 
-    def _invalid_start_profile(self, room_id: str, entity_ids: list[Any]) -> str | None:
+    async def _invalid_start_profile(
+        self, room_id: str, entity_ids: list[Any]
+    ) -> str | None:
         """Why the list cannot be the room's start profile, or None if it can.
 
-        Every entity must be a light or fan in this room, served, and not
+        Every entity must be a light or fan in this room (a wall relay the
+        installer typed as one too: now_data.lighting_kind), served, and not
         left out of room activity.
         """
         if len(entity_ids) > MAX_START_PROFILE or any(
@@ -917,18 +948,25 @@ class CasaSmartRoomStartProfileView(CasaSmartRoomActivityPolicyView):
             return f"entity_ids must contain at most {MAX_START_PROFILE} entity ids"
         if len(set(entity_ids)) != len(entity_ids):
             return "entity_ids must not contain duplicates"
+        gang_types = await self._gang_types()
         for entity_id in entity_ids:
-            if not is_on_domain(entity_id):
+            state = self._hass.states.get(entity_id)
+            gang_type = gang_types.get(entity_id)
+            if not is_on_domain(entity_id) and (
+                not entity_id.startswith(f"{RELAY_DOMAIN}.")
+                or state is None
+                or lighting_kind(state, gang_type) is None
+            ):
                 return (
                     f"Entity {entity_id!r} is not a light or fan: one tap only "
-                    "turns on lights and fans"
+                    "turns on lights and fans (a switch only when its installer "
+                    "typed it as a light or fan)"
                 )
-            state = self._hass.states.get(entity_id)
             if (
                 state is None
                 or area_id_of(self._hass, entity_id) != room_id
                 or not is_served(self._hass, entity_id)
-                or not is_room_activity_candidate(state)
+                or lighting_kind(state, gang_type) is None
             ):
                 return f"Entity {entity_id!r} is not a light or fan in this room"
         return None
@@ -1049,33 +1087,24 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
 
         Off targets every eligible device that is on. On targets the room's
         plan (room_intel.one_tap.plan_room: the hub's capture, the last-on
-        set or the start profile; lights and fans only) that is still off;
+        set or the start profile; lights and fans only, wall relays typed as
+        one included) that is still off;
         the plan's unavailable devices are reported, not switched. A device
         counts as changed only when its state afterwards confirms it. An on
         with nothing to turn on returns that plan (no source), before
         anything is switched. The calls carry context (the member's, for the
         room activity log).
         """
-        registry = self._registry()
-
-        def read_policy() -> tuple[dict[str, Any], dict[str, str | None]]:
-            policy = now_data.room_policy(room_id)
-            # A room without a stored policy switches its imported lights
-            # and fans.
-            imported = (
-                imported_controls(registry.list_user_devices())
-                if policy["default"] and registry is not None
-                else {}
-            )
-            return policy, imported
-
-        policy, imported = await self._hass.async_add_executor_job(read_policy)
+        policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
+        # Which wall relays the installer typed as a light or fan, and (in a
+        # room without a stored policy) which devices are imported.
+        gang_types = await self._gang_types()
         eligible = {
             state.entity_id: state
             for state in self._hass.states.async_all()
             if area_id_of(self._hass, state.entity_id) == room_id
             and is_served(self._hass, state.entity_id)
-            and _approved(state, policy, imported)
+            and _approved(state, policy, gang_types)
         }
         plan: RoomOnPlan | None = None
         if action == "turn_off":
@@ -1085,11 +1114,14 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 if state.state == "on"
             ]
         else:
-            devices = {
-                entity_id: state.state
+            # Lights and fans only: a switch only when it is a wall relay
+            # the installer typed as a light or fan.
+            kinds = {
+                entity_id: kind
                 for entity_id, state in eligible.items()
-                if is_on_domain(entity_id)
+                if (kind := lighting_kind(state, gang_types.get(entity_id))) is not None
             }
+            devices = {entity_id: eligible[entity_id].state for entity_id in kinds}
 
             def read_sources() -> tuple:
                 return now_data.restore_capture(room_id), now_data.start_profile(
@@ -1107,6 +1139,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 start_profile=start_profile,
                 devices=devices,
                 now_t=now_t,
+                kinds=kinds,
             )
             capture_ids, captured_at = capture
             if (
@@ -1114,7 +1147,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 and plan.source != SOURCE_CAPTURE
                 and (
                     not capture_counts(captured_at, last_on, now_t)
-                    or not present_ids(capture_ids, devices)
+                    or not present_ids(capture_ids, devices, kinds)
                 )
             ):
                 # Too old, outdated by a later dark room, or nothing in it

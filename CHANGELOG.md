@@ -9,9 +9,13 @@ What changed in each version of CasaSmart Hub.
   set it up, which no app could do. Plugs, heaters, ACs, covers and TVs are
   never switched this way. An admin can still take a room out or pick its
   devices.
+- Wall relays wired to lights or fans now count as lights and fans, when
+  the installer set the gang's type to Light or Fan in the app: one tap
+  brings them back with the room's other lights. Plugs, outlets, heaters
+  and relays without a type still never come on by themselves.
 - One tap on a room that is off now turns on the lights and fans that were
   on last time, however the room was switched off: at the wall, from Home
-  Assistant, by an automation or from the app. Never plugs, relays,
+  Assistant, by an automation or from the app. Never plugs, outlets,
   heaters, ACs, covers or TVs. An installer can give a room a start profile
   for when the hub doesn't know yet. With nothing to turn on, the app opens
   the room instead of saying it couldn't turn it on, and the Now page tells
