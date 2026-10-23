@@ -109,6 +109,66 @@ class NowDataEngineTest(unittest.TestCase):
                     _NOW.is_default_room_device(state, gang), kind is not None
                 )
 
+    def test_a_room_is_on_only_by_what_room_off_switches(self) -> None:
+        # room_light_kind is what makes a room on;
+        # it is always something room_command_approves (room off switches).
+        gang_types = {
+            "light.main": None,
+            "fan.hood": None,
+            "switch.wall": "light",
+            "switch.fridge": "outlet",
+            "switch.relay": "switch",
+            "switch.boiler": "heater",
+            "switch.socket": "light",
+            "climate.ac": None,
+        }
+        attributes = {
+            "switch.relay": {"device_class": "switch"},
+            "switch.boiler": {"device_class": "switch"},
+            "switch.socket": {"device_class": "outlet"},
+            "climate.ac": {"hvac_modes": ["off", "cool"]},
+        }
+
+        def state(entity_id):
+            return {"entity_id": entity_id, "attributes": attributes.get(entity_id, {})}
+
+        default = _NOW.default_room_policy()
+        self.assertEqual(default, _NOW.NowDataEngine(*[Table()] * 5).room_policy("r"))
+        stored = {
+            "participates": True,
+            "eligible_entity_ids": ["light.main", "switch.relay", "switch.boiler"],
+            "default": False,
+        }
+        # entity id -> (kind with no stored policy, kind under the stored list,
+        # room off switches it under the stored list)
+        expected = {
+            "light.main": ("light", "light", True),
+            "fan.hood": ("fan", None, False),
+            "switch.wall": ("light", None, False),
+            "switch.fridge": (None, None, False),
+            # Approved for room off by the admin, yet never makes it on.
+            "switch.relay": (None, None, True),
+            "switch.boiler": (None, None, True),
+            "switch.socket": (None, None, False),
+            "climate.ac": (None, None, False),
+            # Not imported into the registry.
+            "light.unimported": (None, None, False),
+        }
+        for entity_id, (kind, listed_kind, listed_off) in expected.items():
+            with self.subTest(entity_id=entity_id):
+                item = state(entity_id)
+                self.assertEqual(_NOW.room_light_kind(item, default, gang_types), kind)
+                self.assertIs(
+                    _NOW.room_command_approves(item, default, gang_types),
+                    kind is not None,
+                )
+                self.assertEqual(
+                    _NOW.room_light_kind(item, stored, gang_types), listed_kind
+                )
+                self.assertIs(
+                    _NOW.room_command_approves(item, stored, gang_types), listed_off
+                )
+
     def test_a_wall_relay_typed_as_a_light_is_a_room_activity_candidate(
         self,
     ) -> None:

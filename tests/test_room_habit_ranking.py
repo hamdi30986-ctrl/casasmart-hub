@@ -160,6 +160,8 @@ class HabitTierTest(HabitRankingCase):
             relay("switch.kitchen_light", "off", "light"),
             relay("switch.heater", "off", "heater"),
             relay("switch.mystery", "off", None),
+            relay("switch.kitchen_plug", "off", "outlet"),
+            relay("switch.kitchen_relay", "off", "switch"),
         )
         self.device("kitchen", ("climate.heat_only", "heat", {"hvac_modes": ["heat"]}))
         self.device("bedroom", media("media_player.bedroom_tv", "off"))
@@ -167,13 +169,12 @@ class HabitTierTest(HabitRankingCase):
         await self.ranked(["kitchen", "bedroom"], habits=habits, now=NOW + 7)
         rooms, counted, now_t = habits.asked[0]
         # Only the caller's rooms; the devices that make a room on, wherever
-        # they are (the model is the whole home's): lights, light/fan/switch/
-        # outlet gangs and ACs; never a heater gang, an unknown gang, a
-        # heat-only thermostat or a TV.
+        # they are (the model is the whole home's): lights, fans and relays
+        # typed as one (what room off switches); never an AC, an outlet
+        # or untyped gang, a heater gang, an unknown gang, a heat-only
+        # thermostat or a TV.
         self.assertEqual(rooms, ["kitchen", "bedroom"])
-        self.assertEqual(
-            counted, {"light.majlis", "climate.majlis", "switch.kitchen_light"}
-        )
+        self.assertEqual(counted, {"light.majlis", "switch.kitchen_light"})
         self.assertEqual(now_t, NOW + 7)
 
     def set_on(self, eid):

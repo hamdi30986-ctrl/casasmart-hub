@@ -4,11 +4,13 @@
 
 ## What counts as on
 
-A room's on devices are its safe controls that are on (lights, fans, and switches whose gang is a light, fan, switch or outlet; this is `active_count`, unchanged) plus every AC that is on. An AC is an imported `climate` entity with `cool` in its `hvac_modes` and no `casasmart_room_activity_exclude`; it is on in `cool`, `heat`, `auto`, `heat_cool`, `dry` or `fan_only`. Each running AC is one device. ACs count in homes with room policies too, since a policy can't approve one. Only devices imported into the registry count, and scope is applied first.
+A room is on only while something room off switches off is on, so room off always leaves the room off. Its on devices are its lights and fans that are on and that room commands switch in that room: in a room without a stored policy (or one whose stored policy doesn't take part) every light and fan, and every wall relay (`switch`) the installer typed as a light or fan unless Home Assistant calls it an `outlet` (as in "One tap" below); in a room with a stored policy that takes part, only the lights, fans and typed relays on its list. A light or fan with `casasmart_room_activity_exclude` never counts. That number is `active_count` (and `on_count`). A plug, an outlet, an untyped switch (gang type `switch` or none), a heater, an AC, a cover, a TV or a water heater never makes a room on, even when an admin's stored list lets room off switch it. Only devices imported into the registry count, and scope is applied first. (Earlier versions also counted outlet and untyped switch gangs and running ACs; `ac_on_count` is now always 0.)
+
+An AC is an imported `climate` entity with `cool` in its `hvac_modes` and no `casasmart_room_activity_exclude`. An AC doesn't make its room on, but its meters are the room's (below) and an available one gives an off room a card (below).
 
 ## Watts or count
 
-A room's power comes from its own devices' meters: a `sensor` with `device_class: power` on an imported device that has a counted control or AC in that room, and whose own room is that room. A standalone meter (a CT clamp or whole-home meter, whose device has no light, fan, switch or AC) never joins a room. A reading counts when it is available, numeric and in a power unit (mW, W, kW, MW, GW, TW, BTU/h, converted to W). Below −2 W it is invalid (wrong polarity; never made positive); between −2 W and 0 it reads 0. Reading age is not judged: Home Assistant writes a steady MQTT reading only when it changes.
+A room's power comes from its own devices' meters: a `sensor` with `device_class: power` on an imported device that has a counted control (a light or fan as above) or an AC in that room, and whose own room is that room. A standalone meter (a CT clamp or whole-home meter) never joins a room, nor does the meter of a device with nothing counted (a smart plug, an untyped or heater relay on its own). A reading counts when it is available, numeric and in a power unit (mW, W, kW, MW, GW, TW, BTU/h, converted to W). Below −2 W it is invalid (wrong polarity; never made positive); between −2 W and 0 it reads 0. Reading age is not judged: Home Assistant writes a steady MQTT reading only when it changes.
 
 An on device is covered when its device has a meter in the room and every one of them reads valid. `watts_quality` is `absent` with no valid reading, `complete` when every on device is covered, else `partial`.
 
@@ -22,7 +24,7 @@ When at least one room is on and every on room is `complete`, the on rooms rank 
 
 ## Filling empty slots
 
-The Now page has five room cards (a featured one and four more, as in `layout`). When fewer than five rooms are on, off rooms fill the empty cards, in the all-off order below. Only a room with a device to switch (an available counted control or AC, on or off) or something still running fills one. In a home where a stored room policy takes part every participating room is still listed (rooms without a stored policy take part too, below): the rooms that are on, then the fillers, then the other participating rooms in the same order. Without such a policy only the on rooms and the fillers are listed. When no room in the caller's scope is on, `ranking.mode` is `all_off` and every listed room is in the all-off order.
+The Now page has five room cards (a featured one and four more, as in `layout`). When fewer than five rooms are on, off rooms fill the empty cards, in the all-off order below. Only a room with a device to switch (an available counted light or fan, or an available AC, on or off) or something still running fills one. In a home where a stored room policy takes part every participating room is still listed (rooms without a stored policy take part too, below): the rooms that are on, then the fillers, then the other participating rooms in the same order. Without such a policy only the on rooms and the fillers are listed. When no room in the caller's scope is on, `ranking.mode` is `all_off` and every listed room is in the all-off order.
 
 ## The all-off order
 
@@ -38,7 +40,7 @@ Rooms that are on have `reason: "active"`. Within a tier, ties go to the room or
 
 ## Habits
 
-The hub learns when each room is usually switched on from its room activity log (never Home Assistant's recorder). A confirmed "on" of a device that makes the room on (as above: a light, a fan, a light/fan/switch/outlet switch, an AC) votes for that room, local date and local hour, once per hour however often it was tapped. An app tap, a scene a member ran, a Home Assistant user and a wall switch weigh 1, but a wall switch (no person behind it) votes only for the household, never in a member's own layer; automations and unnamed callers weigh nothing; a device an admin marked as running on its own schedule has its wall-switch events ignored. Nothing is logged in the first 10 minutes after Home Assistant starts, so a device reporting its real state late after a restart never votes.
+The hub learns when each room is usually switched on from its room activity log (never Home Assistant's recorder). A confirmed "on" of a device that makes the room on (as above: a light, a fan or a relay typed as one, in any room; never an AC, a plug or an untyped switch) votes for that room, local date and local hour, once per hour however often it was tapped. An app tap, a scene a member ran, a Home Assistant user and a wall switch weigh 1, but a wall switch (no person behind it) votes only for the household, never in a member's own layer; automations and unnamed callers weigh nothing; a device an admin marked as running on its own schedule has its wall-switch events ignored. Nothing is logged in the first 10 minutes after Home Assistant starts, so a device reporting its real state late after a restart never votes.
 
 For the current hour and day class (workday, or weekend: Friday and Saturday unless an admin changes it), over the last 56 days (today left out): each date's vote at that hour, or half a vote an hour either side (across midnight too), weighted by `2^(−age/14 days)`, divided by the same weights plus 4 empty days. A room is `habit_now` at 0.35 or more with evidence on at least 3 dates. A date counts only when someone did something by hand in one of the caller's rooms that day, so days away don't count against a habit and a scoped member's answer never depends on rooms they can't see. Nothing ranks on a habit until the caller's rooms have 14 such dates.
 
@@ -96,7 +98,7 @@ Each room gains, after its existing fields:
   "active": true,
   "filler": false,
   "on_count": 3,
-  "ac_on_count": 1,
+  "ac_on_count": 0,
   "watts": 1840.5,
   "watts_quality": "complete",
   "reason": "active",
@@ -107,7 +109,7 @@ Each room gains, after its existing fields:
 
 - `active`: something counted is on (`on_count > 0`).
 - `filler`: an off room placed in one of the five cards to fill it; show it dimmed.
-- `on_count`: `active_count` plus `ac_on_count`.
+- `on_count`: `active_count` plus `ac_on_count`, which is now always 0 (an AC doesn't make a room on; the field stays for apps that read it).
 - `watts`: the room's valid meter readings summed, in W, one decimal; `null` when none.
 - `reason`: `active`, `running_load`, `just_off`, `habit_now` or `room_order` (above). Later versions may add reasons between `just_off` and `room_order`; show an unknown reason like `room_order`.
 - `params`: `{}` for `active`, `habit_now` and `room_order`; `{"loads": [...]}` for `running_load`; `{"went_dark_at": "..."}` for `just_off`, plus `"by_you": true` when the caller switched it off.

@@ -7,7 +7,9 @@ configuration, recent room-command answers for idempotent retries, each
 room's restore set (what its last off switched off) and each room's start
 profile (the lights and fans an installer chose for one tap "on" when
 nothing else is known). The functions decide which devices may join
-a room command. Storage methods are synchronous; now_api runs them in the
+a room command (room_command_approves: what room off switches) and which of
+those make a room on (room_light_kind: its lights and fans, which one tap
+may turn back on). Storage methods are synchronous; now_api runs them in the
 executor.
 """
 
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -155,6 +157,54 @@ def is_default_room_device(state: Any, gang_type: str | None = None) -> bool:
     checks the device is imported into the registry, served and in the room.
     """
     return lighting_kind(state, gang_type) is not None
+
+
+def default_room_policy() -> dict[str, Any]:
+    """The policy of a room without a stored one (room_policy): it takes part
+    with its default devices (is_default_room_device)."""
+    return {"participates": True, "eligible_entity_ids": [], "default": True}
+
+
+def room_command_approves(
+    state: Any, policy: Mapping[str, Any], gang_types: Mapping[str, str | None]
+) -> bool:
+    """True when room commands in a room with this policy switch the device.
+
+    The one rule for what room off switches off. A stored policy approves
+    the candidates on its list. A room without one (policy default) takes
+    part with its default devices: its lights and fans imported into the
+    registry, wall relays the installer typed as one included
+    (is_default_room_device). gang_types are the registry's imported
+    controls with their gang types (ranking.imported_controls). The caller
+    checks the device is in the room and served, and that the room takes
+    part.
+    """
+    entity_id = _state_value(state, "entity_id", "")
+    if policy.get("default"):
+        return entity_id in gang_types and is_default_room_device(
+            state, gang_types[entity_id]
+        )
+    return is_room_activity_eligible(
+        state, policy.get("eligible_entity_ids") or [], gang_types.get(entity_id)
+    )
+
+
+def room_light_kind(
+    state: Any, policy: Mapping[str, Any], gang_types: Mapping[str, str | None]
+) -> str | None:
+    """ "light" or "fan" for a light or fan (lighting_kind) that room commands
+    switch in a room with this policy (room_command_approves), else None.
+
+    These are the devices that make a room on (room_intel.ranking: the Now
+    page's room cards, active rooms, the all-off tiers, the habits) and that
+    one tap "on" may turn back on, so a room card never counts a device room
+    off leaves on. Never a plug, outlet, heater, untyped switch, AC, cover
+    or TV: an admin's stored list may approve another switch for room off,
+    but it doesn't make the room on.
+    """
+    if not room_command_approves(state, policy, gang_types):
+        return None
+    return lighting_kind(state, gang_types.get(_state_value(state, "entity_id", "")))
 
 
 def summarize_openings(
@@ -304,7 +354,7 @@ class NowDataEngine:
         """
         record = self._policies.get(room_id)
         if not isinstance(record, dict):
-            return {"participates": True, "eligible_entity_ids": [], "default": True}
+            return default_room_policy()
         entity_ids = record.get("eligible_entity_ids")
         return {
             "participates": bool(record.get("participates") is True),

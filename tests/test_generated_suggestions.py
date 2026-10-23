@@ -226,7 +226,9 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         await self.setup_generated()
         self.states.values["light.two"].state = "off"
         ranked, _, _ = await self.runtime.generated.room_context(None)
-        self.assertEqual([r["room_id"] for r in ranked], ["a", "b"])
+        # One light on in each (the running AC doesn't make Living on: room
+        # off never switches it), so the tie goes to the room order.
+        self.assertEqual([r["room_id"] for r in ranked], ["b", "a"])
         self.runtime.generated.now_data.room_policy = lambda rid: {
             "participates": rid == "b",
             "eligible_entity_ids": ["light.other"],
@@ -260,16 +262,29 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         await self.setup_generated()
         self.states.values["switch.relay_left"] = light("switch.relay_left")
         self.hass.rooms["switch.relay_left"] = "b"
-        self.registry.list_user_devices = lambda: [
-            {
-                "control_entity_ids": list(self.states.values),
-                "gang_types": {"left": "switch"},
-            },
-        ]
+
+        def legacy(gang_type):
+            self.registry.list_user_devices = lambda: [
+                {
+                    "control_entity_ids": list(self.states.values),
+                    "gang_types": {"left": gang_type},
+                },
+            ]
+
+        # A relay typed as a light under its legacy channel name counts (a
+        # tie with Living's two lights: Kitchen first by room order)...
+        legacy("light")
         ranked, _, _ = await self.runtime.generated.room_context(None)
         self.assertEqual(
-            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 2), ("b", 2)]
+            [(r["room_id"], r["active_count"]) for r in ranked], [("b", 2), ("a", 2)]
         )
+        # ...an untyped one doesn't (room off doesn't switch it).
+        legacy("switch")
+        ranked, _, _ = await self.runtime.generated.room_context(None)
+        self.assertEqual(
+            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 2), ("b", 1)]
+        )
+        legacy("light")
         self.assertFalse(
             any(
                 a["entity_id"].startswith("switch.")
