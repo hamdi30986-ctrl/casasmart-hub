@@ -18,6 +18,9 @@
 - learner: builds that model from the log once a day and keeps it, with
   each finished Ramadan, in storage.
 - hijri: when Ramadan is, from the Umm al-Qura calendar, offline.
+- one_tap: what one tap "on" turns on in a room that is off (the hub's
+  capture, the lights and fans on before it last went dark, or an
+  installer's start profile), and those last-on sets; free of Home Assistant.
 
 Import the submodule you need (room_intel.ranking, room_intel.power, ...):
 this package exports nothing, so loading the ranking never loads Home
