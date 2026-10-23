@@ -717,6 +717,52 @@ class RoomActivityTable:
         )
         return [self._row(row) for row in rows]
 
+    def habit_rows(
+        self, *, first_day: int, last_day: int, sources: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        """Each device's activity per local date, for the room habit model.
+
+        One row per room, entity, source, member and local date from
+        first_day to last_day (local epoch days, inclusive), these sources
+        only: {room_id, entity_id, source, member_id, local_day, on_hours}.
+        on_hours is the mask of local hours (bit h) with at least one "on";
+        0 when the device only did something else that day. Local dates and
+        hours come from each row's own offset, so an event stays in the local
+        day it happened in. One query over the (t) index.
+        """
+        for value, field in ((first_day, "first_day"), (last_day, "last_day")):
+            if not _is_non_negative_int(value):
+                raise ValueError(f"{field} must be a non-negative integer")
+        clean = self._texts(sources, "source", max_length=32, allow_empty=True)
+        if not clean or first_day > last_day:
+            return []
+        # A local day starts within a day of the UTC day with the same number.
+        since_t = max(0, (first_day - 1) * 86400)
+        until_t = (last_day + 2) * 86400
+        rows = self._storage._fetchall(
+            "SELECT room_id, entity_id, source, member_id, day, "
+            "SUM(DISTINCT CASE WHEN action = 'on' THEN 1 << hour ELSE 0 END) "
+            "FROM (SELECT room_id, entity_id, source, member_id, action, "
+            f"{self._LOCAL} / 86400 AS day, ({self._LOCAL} / 3600) % 24 AS hour "
+            "FROM room_activity_events WHERE t >= ? AND t < ? "
+            f"AND source IN ({','.join('?' for _ in clean)})) "
+            "WHERE day BETWEEN ? AND ? "
+            "GROUP BY room_id, entity_id, source, member_id, day "
+            "ORDER BY room_id, day, entity_id, source, member_id",
+            (since_t, until_t, *clean, first_day, last_day),
+        )
+        return [
+            {
+                "room_id": room_id,
+                "entity_id": entity_id,
+                "source": source,
+                "member_id": member_id,
+                "local_day": int(day),
+                "on_hours": int(on_hours),
+            }
+            for room_id, entity_id, source, member_id, day, on_hours in rows
+        ]
+
     def last_off_by_room(
         self, room_ids: Iterable[str], *, since_t: int | None = None
     ) -> dict[str, dict[str, Any]]:

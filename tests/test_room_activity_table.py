@@ -351,6 +351,98 @@ class RoomActivityTableTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.table.recent_in_rooms("majlis", since_t=0)
 
+    def test_habit_rows_one_row_per_device_and_local_date(self):
+        # The habit model's read: per room, device, source and member,
+        # each local date, the local hours with an "on".
+        fri = (FRI_00_UTC + RIYADH * 60) // 86400
+        self.table.append_many(
+            [
+                # Friday 19:05 and 19:40 local: one hour, one bit.
+                event(FRI_00_UTC + 16 * 3600 + 300),
+                event(FRI_00_UTC + 16 * 3600 + 2400),
+                event(FRI_00_UTC + 18 * 3600, action="off"),  # 21:00, no bit
+                event(FRI_00_UTC + 17 * 3600, source="app", member_id="mem-a"),
+                event(FRI_00_UTC + 17 * 3600, source="app", member_id="mem-b"),
+                event(FRI_00_UTC + 3600, entity="cover.majlis", action="open"),
+                event(FRI_00_UTC + 3600, room="kitchen", source="automation"),
+                event(FRI_00_UTC + 3600, room="kitchen", source="ha_user"),
+            ]
+        )
+        rows = self.table.habit_rows(
+            first_day=fri,
+            last_day=fri,
+            sources=["app", "scene", "ha_user", "wall_switch"],
+        )
+        self.assertEqual(
+            [
+                (
+                    r["room_id"],
+                    r["entity_id"],
+                    r["source"],
+                    r["member_id"],
+                    r["local_day"],
+                    r["on_hours"],
+                )
+                for r in rows
+            ],
+            [
+                ("kitchen", "light.majlis", "ha_user", None, fri, 1 << 4),
+                ("majlis", "cover.majlis", "wall_switch", None, fri, 0),
+                ("majlis", "light.majlis", "app", "mem-a", fri, 1 << 20),
+                ("majlis", "light.majlis", "app", "mem-b", fri, 1 << 20),
+                ("majlis", "light.majlis", "wall_switch", None, fri, 1 << 19),
+            ],
+        )
+        # Dates outside the range, and no sources, read nothing.
+        self.assertEqual(
+            self.table.habit_rows(
+                first_day=fri + 1, last_day=fri + 3, sources=["wall_switch"]
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.table.habit_rows(first_day=fri, last_day=fri, sources=[]), []
+        )
+        self.assertEqual(
+            self.table.habit_rows(first_day=fri, last_day=fri - 1, sources=["app"]),
+            [],
+        )
+        for bad in (
+            {"first_day": -1, "last_day": fri, "sources": ["app"]},
+            {"first_day": True, "last_day": fri, "sources": ["app"]},
+            {"first_day": fri, "last_day": "x", "sources": ["app"]},
+            {"first_day": fri, "last_day": fri, "sources": "app"},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.table.habit_rows(**bad)
+
+    def test_habit_rows_bucket_by_each_rows_own_offset_riyadh_has_no_dst(self):
+        fri = (FRI_00_UTC + RIYADH * 60) // 86400
+        # Riyadh is UTC+3 all year: 20:59:59 UTC is Friday 23:59:59, 21:00:00
+        # UTC is Saturday 00:00. The same UTC second logged with offset 0
+        # (the hub was set to UTC then) stays Friday 21:00.
+        self.table.append_many(
+            [
+                event(FRI_00_UTC + 21 * 3600 - 1, entity="light.a"),
+                event(FRI_00_UTC + 21 * 3600, entity="light.b"),
+                {**event(FRI_00_UTC + 21 * 3600, entity="light.c"), "utc_offset_min": 0},
+                # Mid-March and mid-October: the same local hour in Riyadh.
+                event(1773572400, entity="light.march"),  # 2026-03-15 11:00 UTC
+                event(1792234800, entity="light.october"),  # 2026-10-17 11:00 UTC
+            ]
+        )  # fmt: skip
+        rows = {
+            r["entity_id"]: (r["local_day"], r["on_hours"])
+            for r in self.table.habit_rows(
+                first_day=0, last_day=fri + 10, sources=["wall_switch"]
+            )
+        }
+        self.assertEqual(rows["light.a"], (fri, 1 << 23))
+        self.assertEqual(rows["light.b"], (fri + 1, 1 << 0))
+        self.assertEqual(rows["light.c"], (fri, 1 << 21))
+        self.assertEqual(rows["light.march"][1], 1 << 14)
+        self.assertEqual(rows["light.october"][1], 1 << 14)
+
     # -- query plans -----------------------------------------------------------
 
     def test_room_and_member_queries_use_their_indexes(self):
@@ -388,6 +480,22 @@ class RoomActivityTableTests(unittest.TestCase):
         )
         self.assertIn(
             "SEARCH room_activity_events USING INDEX idx_room_activity_room_t", recent
+        )
+        # habit_rows' query searches the time index for its window.
+        local = "(t + utc_offset_min * 60)"
+        habits = plan(
+            "SELECT room_id, entity_id, source, member_id, day, "
+            "SUM(DISTINCT CASE WHEN action = 'on' THEN 1 << hour ELSE 0 END) "
+            "FROM (SELECT room_id, entity_id, source, member_id, action, "
+            f"{local} / 86400 AS day, ({local} / 3600) % 24 AS hour "
+            "FROM room_activity_events WHERE t >= ? AND t < ? "
+            "AND source IN (?, ?)) WHERE day BETWEEN ? AND ? "
+            "GROUP BY room_id, entity_id, source, member_id, day "
+            "ORDER BY room_id, day, entity_id, source, member_id",
+            (0, 86400, "app", "wall_switch", 0, 1),
+        )
+        self.assertIn(
+            "SEARCH room_activity_events USING INDEX idx_room_activity_t", habits
         )
 
 
