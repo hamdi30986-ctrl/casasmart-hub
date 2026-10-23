@@ -54,6 +54,9 @@ class MemberLeaveTests(unittest.IsolatedAsyncioTestCase):
         )
         for member_id in ("mem-a", "mem-b", "mem-keep"):
             self.rt.now_data.record_successful_control(member_id, "light.majlis")
+            self.rt.now_data.save_idempotent_result(
+                member_id, "room-majlis", "turn_off", "key-12345678", {"ok": True}
+            )
         _, self.admin_headers = H.session(self.rt.auth, role="admin")
 
     async def unpair_self(self, headers):
@@ -69,10 +72,18 @@ class MemberLeaveTests(unittest.IsolatedAsyncioTestCase):
         return H.read_response(resp)[0]
 
     def recents(self):
-        return {
+        """Each member's recent devices; their stored room-command answers
+        must go with them."""
+        recents = {
             member: [item["entity_id"] for item in self.rt.now_data.recents_for(member)]
             for member in ("mem-a", "mem-b", "mem-keep")
         }
+        for member, items in recents.items():
+            stored = self.rt.now_data.idempotent_result(
+                member, "room-majlis", "turn_off", "key-12345678"
+            )
+            self.assertEqual(stored is not None, bool(items), member)
+        return recents
 
     async def test_self_unpair_of_the_last_device_forgets_the_member(self):
         _, headers = H.session(self.rt.auth, role="user", member_id="mem-a")
