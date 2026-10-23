@@ -100,6 +100,8 @@ FACTORY_RESET_TABLES = (
     "now_config",
     "now_restore_sets",
     "now_idempotency",
+    "now_room_habits",
+    "now_habit_config",
     "suggestions_v1",
     "push_tokens",
     "hq_notifications",

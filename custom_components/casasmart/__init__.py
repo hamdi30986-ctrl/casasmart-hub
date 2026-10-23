@@ -132,6 +132,7 @@ from .relay_config import (
 )
 from .relay_registration import RelayRegistrar, is_activation_code_format
 from .room_intel.activity import SOURCE_AUTOMATION
+from .room_intel.learner import HabitLearner
 from .room_intel.recorder import ActivityRecorder
 from .runtime_lookup import loaded_entry
 from .storage import ConfigError, HubStorage, JsonConfigStore, StorageError
@@ -207,6 +208,7 @@ class CasaSmartRuntimeData:
     alarm_adapter: AlarmAdapter | None = None
     suggestions: SuggestionRuntime | None = None
     room_activity: ActivityRecorder | None = None
+    room_habits: HabitLearner | None = None
 
     audio_adapter: AudioAdapter | None = None
 
@@ -502,6 +504,16 @@ async def _async_start_hub(
     )
     entry.runtime_data.room_activity = room_activity
     await room_activity.async_start()
+    # Learns from that log; builds its model when the Now page first asks.
+    room_habits = HabitLearner(
+        hass,
+        runtime_data.storage.table("now_room_habits"),
+        runtime_data.storage.table("now_habit_config"),
+        runtime_data.storage.room_activity(),
+        recorder=room_activity,
+    )
+    entry.runtime_data.room_habits = room_habits
+    await room_habits.async_start()
     entry.async_on_unload(
         async_track_time_interval(
             hass,
@@ -1507,6 +1519,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if runtime_data.room_activity is not None:
                 # Events still buffered (or being written) predate the reset.
                 await runtime_data.room_activity.async_clear()
+            if runtime_data.room_habits is not None:
+                # And so does the model it holds in memory.
+                await runtime_data.room_habits.async_clear()
         except (StorageError, sqlite3.Error) as err:
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
         # Every phone is unpaired now; don't leave closing them to the reload.

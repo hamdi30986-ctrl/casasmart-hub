@@ -209,6 +209,8 @@ class _Runtime:
         self.push_dispatcher = None
         # None = no room activity recorder: hub calls get no hub context.
         self.room_activity = None
+        # None = no room habit learner: the Now page ranks without habits.
+        self.room_habits = None
 
 
 class _FakeHAConfig:
