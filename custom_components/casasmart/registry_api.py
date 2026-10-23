@@ -586,11 +586,16 @@ class CasaSmartRoomView(_RegistryView):
 
         runtime = loaded_runtime_data(self._hass)
         auth = getattr(runtime, "auth", None)
+        now_data = getattr(runtime, "now_data", None)
 
         def _delete() -> tuple[int, list[dict[str, Any]]]:
             unassigned = registry.delete_room(room_id)
             for entity_id in ha_orphans:
                 registry.assign_device(entity_id, room_id=None)
+            # Its Now policy and restore capture go with it: an imported
+            # room's id is an HA area id and could come back.
+            if now_data is not None:
+                now_data.forget_room(room_id)
             # The room's id leaves every member's scope with it; a member whose
             # scope ends up empty is reported so the admin can fix it.
             changed = []

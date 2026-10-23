@@ -247,6 +247,26 @@ class RoomsCrud(RegistryWritesTestCase):
         # The per-user sensors repaint.
         self.assertIn(("casasmart_auth_changed", {}), self.hass.bus.fired)
 
+    async def test_delete_drops_the_rooms_now_policy_and_restore_set(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin")
+        den = self.rt.registry.create_room("Den")["room_id"]
+        hall = self.rt.registry.create_room("Hall")["room_id"]
+        for room in (den, hall):
+            self.rt.now_data.set_room_policy(room, True, [])
+            self.rt.now_data.extend_restore_set(room, ["light.lamp"])
+        with mock.patch.multiple(
+            "casasmart.registry_api", is_served=H.is_served_for([])
+        ):
+            resp = await CasaSmartRoomView(self.hass).delete(
+                H.FakeRequest(headers=hdr), room_id=den
+            )
+        self.assertEqual(H.read_response(resp)[0], 200)
+        self.assertNotIn(den, self.rt.now_data._policies)
+        self.assertEqual(self.rt.now_data.restore_set(den), [])
+        # Other rooms keep theirs.
+        self.assertTrue(self.rt.now_data.room_participates(hall))
+        self.assertEqual(self.rt.now_data.restore_set(hall), ["light.lamp"])
+
     async def test_delete_with_no_scoped_member_reports_nobody(self) -> None:
         _, hdr = H.session(self.rt.auth, role="admin")
         room = self.rt.registry.create_room("Den")["room_id"]

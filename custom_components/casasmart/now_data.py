@@ -400,3 +400,9 @@ class NowDataEngine:
             ids = self.restore_set(room_id)
             self._restores.pop(room_id, None)
             return ids
+
+    def forget_room(self, room_id: str) -> None:
+        """Delete a deleted room's activity policy and restore set."""
+        with self._lock:
+            self._policies.pop(room_id, None)
+            self._restores.pop(room_id, None)
