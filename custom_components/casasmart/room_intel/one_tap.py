@@ -336,14 +336,13 @@ class LastOnSets:
                 ]:
                     del fading[other]
         if new_room is not None:
-            if new_room not in self._lit:
-                # The room lights up: what went off before belongs to the
-                # last time it was lit.
-                self._fading.pop(new_room, None)
+            # A room's fading devices exist only while it is lit (they go
+            # when it goes dark), so a room lighting up starts with none.
             self._lit.setdefault(new_room, set()).add(entity_id)
             self._room_of[entity_id] = new_room
             fading = self._fading.get(new_room)
             if fading is not None:
+                # On again: not fading any more.
                 fading.pop(entity_id, None)
         return changed
 
