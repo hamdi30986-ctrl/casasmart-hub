@@ -103,6 +103,7 @@ FACTORY_RESET_TABLES = (
     "now_room_habits",
     "now_habit_config",
     "now_ramadan_habits",
+    "now_room_last_on",
     "suggestions_v1",
     "push_tokens",
     "hq_notifications",

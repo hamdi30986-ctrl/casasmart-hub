@@ -500,7 +500,10 @@ async def _async_start_hub(
     # After the registry seed, so it sees every room; before anything that
     # sends commands, so their changes are attributed.
     room_activity = ActivityRecorder(
-        hass, runtime_data.registry, runtime_data.storage.room_activity()
+        hass,
+        runtime_data.registry,
+        runtime_data.storage.room_activity(),
+        last_on_table=runtime_data.storage.table("now_room_last_on"),
     )
     entry.runtime_data.room_activity = room_activity
     await room_activity.async_start()

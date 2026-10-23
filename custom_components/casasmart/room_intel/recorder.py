@@ -13,7 +13,10 @@ devices catching up don't become events.
 The room ranking reads the latest events back with async_recent_events,
 buffered ones included. The recorder also follows the readings of the power
 meters on the hub's devices (held_meters), so a load that crossed 20 W stays
-running until it drops below 14 W.
+running until it drops below 14 W, and which of the hub's lights and fans are
+on, for each room's last-on set (last_on, room_intel.one_tap): kept in memory,
+saved to kv now_room_last_on with the events, read back at start. Nothing is
+followed until it has settled either, so a restart never replaces a set.
 """
 
 from __future__ import annotations
@@ -47,11 +50,12 @@ from .activity import (
 )
 from .meters import is_power_meter, watts_of
 from .off_rooms import DARK_ACTIONS, STARTUP_QUIET_SECONDS, LoadLatch
+from .one_tap import LastOnSets, is_on_domain
 from .ranking import device_keys, imported_controls
 
 if TYPE_CHECKING:
     from ..registry import RegistryEngine
-    from ..storage import RoomActivityTable
+    from ..storage import KeyValueTable, RoomActivityTable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +97,7 @@ class ActivityRecorder:
         registry: RegistryEngine,
         table: RoomActivityTable,
         *,
+        last_on_table: KeyValueTable | None = None,
         startup_settle: float = _STARTUP_SETTLE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
@@ -100,6 +105,7 @@ class ActivityRecorder:
         self._hass = hass
         self._registry = registry
         self._table = table
+        self._last_on_table = last_on_table
         self._startup_settle = startup_settle
         self._clock = clock
         self._wall_clock = wall_clock
@@ -109,6 +115,9 @@ class ActivityRecorder:
         self._meters: frozenset[str] = frozenset()
         self._watched: frozenset[str] = frozenset()
         self._loads = LoadLatch()
+        # The managed lights and fans, and each room's last-on set.
+        self._tracked: frozenset[str] = frozenset()
+        self.last_on = LastOnSets()
         self._rooms: frozenset[str] = frozenset()
         self._buffer: list[dict[str, Any]] = []
         self._flush_lock = asyncio.Lock()
@@ -137,6 +146,7 @@ class ActivityRecorder:
 
         The owner runs async_prune on a timer after that.
         """
+        await self._async_load_last_on()
         await self._async_load_managed()
         bus = self._hass.bus
         self._unsubs.extend(
@@ -155,6 +165,7 @@ class ActivityRecorder:
         if self._hass.state is CoreState.running:
             # A reload: states are live, nothing is being restored.
             self._ready = True
+            self._seed_lit()
         else:
             self._unsubs.append(async_at_started(self._hass, self._on_ha_started))
         await self.async_prune()
@@ -179,6 +190,7 @@ class ActivityRecorder:
     @callback
     def _on_settled(self, _now: datetime) -> None:
         self._ready = True
+        self._seed_lit()
 
     # -- the hub's own calls -----------------------------------------------
 
@@ -212,6 +224,8 @@ class ActivityRecorder:
                 self._loads.update(entity_id, _watts(state))
         if not self._ready or entity_id not in self._managed:
             return
+        if entity_id in self._tracked:
+            self._follow_lit(entity_id, old_state, new_state, event)
         if old_state is None or new_state is None:
             return
         action = transition(entity_id, old_state.state, new_state.state)
@@ -304,20 +318,30 @@ class ActivityRecorder:
         )
 
     async def async_flush(self) -> None:
-        """Write the buffered events now, in one transaction."""
+        """Write the buffered events now, in one transaction, and the last-on
+        sets that changed in another."""
         async with self._flush_lock:
             if self._cancel_flush is not None:
                 self._cancel_flush()
                 self._cancel_flush = None
             rows, self._buffer = self._buffer, []
-            if not rows:
-                return
-            try:
-                await self._hass.async_add_executor_job(self._table.append_many, rows)
-            except (StorageError, sqlite3.Error, ValueError) as err:
-                _LOGGER.warning(
-                    "Room activity: %d events not saved: %s", len(rows), err
-                )
+            changes = self.last_on.drain()
+            if rows:
+                try:
+                    await self._hass.async_add_executor_job(
+                        self._table.append_many, rows
+                    )
+                except (StorageError, sqlite3.Error, ValueError) as err:
+                    _LOGGER.warning(
+                        "Room activity: %d events not saved: %s", len(rows), err
+                    )
+            if changes and self._last_on_table is not None:
+                try:
+                    await self._hass.async_add_executor_job(self._save_last_on, changes)
+                except (StorageError, sqlite3.Error) as err:
+                    # Memory still has them; the next flush tries again.
+                    _LOGGER.warning("Room last-on sets not saved: %s", err)
+                    self.last_on.mark_unsaved(changes)
 
     async def async_recent_events(
         self, since_t: int, room_ids: list[str]
@@ -389,10 +413,18 @@ class ActivityRecorder:
             )
 
     async def async_clear(self) -> None:
-        """Delete every event, including any not written yet (factory reset)."""
+        """Delete every event and every last-on set, including any not written
+        yet (factory reset)."""
         async with self._flush_lock:
             self._buffer.clear()
-            await self._hass.async_add_executor_job(self._table.clear)
+            self.last_on.clear()
+
+            def clear() -> None:
+                self._table.clear()
+                if self._last_on_table is not None:
+                    self._last_on_table.clear()
+
+            await self._hass.async_add_executor_job(clear)
 
     # -- helpers -----------------------------------------------------------
 
@@ -417,9 +449,80 @@ class ActivityRecorder:
         self._managed = frozenset(controls)
         self._meters = frozenset(sensors)
         self._watched = self._managed | self._meters
+        self._tracked = frozenset(eid for eid in self._managed if is_on_domain(eid))
         self._rooms = frozenset(room["room_id"] for room in rooms)
         self._chatter.forget_except(self._managed)
         self._loads.forget_except(self._meters)
+        # A deleted room's set goes with it (an imported room's id is an HA
+        # area id and could come back).
+        self.last_on.forget_rooms_except(self._rooms)
+        if self.last_on.unsaved and self._cancel_flush is None:
+            self._schedule_flush(_FLUSH_SECONDS)
+        if self._ready:
+            # Which devices count, and their rooms, may have changed.
+            self._seed_lit()
+
+    # -- last-on sets ------------------------------------------------------
+
+    async def _async_load_last_on(self) -> None:
+        """Read the saved last-on sets (none: start empty)."""
+        if self._last_on_table is None:
+            return
+        try:
+            items = await self._hass.async_add_executor_job(self._last_on_table.items)
+        except (StorageError, sqlite3.Error) as err:
+            _LOGGER.warning("Room last-on sets could not be read: %s", err)
+            return
+        self.last_on.load(items)
+
+    def _save_last_on(self, changes: dict[str, dict[str, Any] | None]) -> None:
+        """Write the changed sets in one transaction (blocking: executor)."""
+        table = self._last_on_table
+        with table.transaction():
+            for room_id, doc in changes.items():
+                if doc is None:
+                    table.pop(room_id, None)
+                else:
+                    table[room_id] = doc
+
+    def _room_now(self, entity_id: str) -> str | None:
+        """The device's registry room, None when it has none or isn't served."""
+        room_id = area_id_of(self._hass, entity_id, self._registry)
+        if room_id not in self._rooms or not is_served(self._hass, entity_id):
+            return None
+        return room_id
+
+    @callback
+    def _seed_lit(self) -> None:
+        """Follow the lights and fans from what is on now (writes no set)."""
+        lit = []
+        for entity_id in self._tracked:
+            if _is_lit(self._hass.states.get(entity_id)):
+                room_id = self._room_now(entity_id)
+                if room_id is not None:
+                    lit.append((entity_id, room_id))
+        self.last_on.seed(lit)
+
+    @callback
+    def _follow_lit(
+        self, entity_id: str, old_state: Any, new_state: Any, event: Event
+    ) -> None:
+        """Take a tracked light or fan's change; save its room's new set."""
+        turned_off = (
+            old_state is not None
+            and new_state is not None
+            and old_state.state == "on"
+            and new_state.state == "off"
+        )
+        if self.last_on.update(
+            entity_id,
+            None if new_state is None else self._room_now(entity_id),
+            _is_lit(new_state),
+            turned_off=turned_off,
+            t=int(event.time_fired_timestamp),
+        ):
+            if self._cancel_flush is None:
+                self._schedule_flush(_FLUSH_SECONDS)
 
     def _utc_offset_min(self, t: float) -> int:
         """The hub time zone's UTC offset at t, in minutes (0 if unknown)."""
@@ -440,6 +543,15 @@ class ActivityRecorder:
             "logged (a faulty device or an automation loop?)",
             entity_id,
         )
+
+
+def _is_lit(state: Any) -> bool:
+    """True for a light or fan that is on and not left out of room activity."""
+    return (
+        state is not None
+        and state.state == "on"
+        and state.attributes.get("casasmart_room_activity_exclude") is not True
+    )
 
 
 def _watts(state: Any) -> float | None:
