@@ -116,17 +116,18 @@ class RankingOverTheRecorder(_RankingCase):
         self.hass.bus.async_fire("automation_triggered", {}, context=run)
         await self.call("switch", "turn_on", "switch.kitchen_left", run)
         await self.call("switch", "turn_off", "switch.kitchen_left", run)
-        for member, majlis in (
-            ("mem-a", "room_order"),  # their own tap
-            ("mem-b", "just_off"),
-            (None, "just_off"),
+        for member, by_you in (
+            ("mem-a", True),  # their own tap: after the habits
+            ("mem-b", False),
+            (None, False),
         ):
             with self.subTest(member=member):
                 reasons = await self.rank(member=member)
                 self.assertEqual(
                     (reasons["majlis"][0], reasons["kitchen"][0]),
-                    (majlis, "room_order"),
+                    ("just_off", "room_order"),
                 )
+                self.assertEqual(reasons["majlis"][1].get("by_you", False), by_you)
                 self.assertNotIn("mem-", json.dumps(reasons))
 
     async def test_on_unavailable_off_is_not_just_off(self):
@@ -353,7 +354,14 @@ class NowPageOffRooms(unittest.IsolatedAsyncioTestCase):
         activity_block = await self.room_activity(member_id="mem-other")
         self.assertEqual(
             activity_block["ranking"],
-            {"version": 1, "basis": "count", "slots": 5, "mode": "all_off"},
+            {
+                "version": 1,
+                "basis": "count",
+                "slots": 5,
+                "mode": "all_off",
+                # No habit learner on this hub.
+                "habits": {"layer": "personal", "status": "unavailable"},
+            },
         )
         self.assertEqual(
             [
@@ -370,17 +378,20 @@ class NowPageOffRooms(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(r["rank"]["filler"] for r in activity_block["rooms"]))
         self.assertNotIn("mem-", json.dumps(activity_block))
 
-    async def test_the_member_who_switched_a_room_off_doesnt_get_it_back(self):
+    async def test_the_members_own_off_comes_after_everyone_elses(self):
+        # Still just_off, marked by_you, below the habits (none here) and
+        # above the room order.
         rooms = (await self.room_activity(member_id="mem-owner"))["rooms"]
         self.assertEqual(
-            [(r["room_id"], r["rank"]["reason"]) for r in rooms],
+            [(r["room_id"], r["rank"]["reason"], r["rank"]["params"]) for r in rooms],
             [
-                ("room-majlis", "running_load"),
-                ("room-kitchen", "just_off"),
-                ("room-bedroom", "room_order"),
-                ("room-office", "room_order"),
+                ("room-majlis", "running_load", {"loads": ["media"]}),
+                ("room-kitchen", "just_off", {"went_dark_at": iso(self.kitchen_dark)}),
+                ("room-bedroom", "just_off",
+                 {"went_dark_at": iso(self.bedroom_dark), "by_you": True}),
+                ("room-office", "room_order", {}),
             ],
-        )
+        )  # fmt: skip
 
     async def test_a_scoped_member_gets_only_their_rooms(self):
         rooms = (

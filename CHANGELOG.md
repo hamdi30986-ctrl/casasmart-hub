@@ -19,8 +19,14 @@ What changed in each version of CasaSmart Hub.
 - Rooms that are off are now ordered too, each with its reason: first rooms
   where something still runs (a TV or speaker playing, or a device drawing
   real power), then rooms someone switched off in the last 30 minutes
-  (newest first; not by an automation or scene, and not the ones you switched
-  off yourself), then your room order.
+  (newest first; not by an automation or scene), then your room order.
+- The hub now learns when each room is usually switched on, from its own
+  activity log, and puts those rooms after the ones just switched off, with
+  "Usually on around now". Wall switches count at half weight, automations
+  not at all. It waits for two weeks of history first. The wall tablet uses
+  the whole household's habits; each phone blends in its own person's app
+  taps. Rooms you switched off yourself in the last 30 minutes come right
+  after those, marked as yours.
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the

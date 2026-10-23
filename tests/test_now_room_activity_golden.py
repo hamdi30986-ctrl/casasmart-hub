@@ -13,6 +13,10 @@ rank block, the block a ranking summary.
 Each room then gained its rank reason and params, and the summary's mode. The
 hub here has no room activity log, no meter and no media, so off rooms stay
 in the room order.
+
+The summary then gained habits: which layer ranked and how far learning is.
+This hub has no habit learner, so it says "unavailable" for the default
+(personal) layer.
 """
 
 from __future__ import annotations
@@ -106,7 +110,13 @@ def room(
     }
 
 
-RANKING = {"version": 1, "basis": "count", "slots": 5, "mode": "on"}
+RANKING = {
+    "version": 1,
+    "basis": "count",
+    "slots": 5,
+    "mode": "on",
+    "habits": {"layer": "personal", "status": "unavailable"},
+}
 # Nothing in the caller's rooms is on.
 RANKING_ALL_OFF = {**RANKING, "mode": "all_off"}
 

@@ -164,7 +164,14 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             activity["ranking"],
-            {"version": 1, "basis": "watts", "slots": 5, "mode": "on"},
+            {
+                "version": 1,
+                "basis": "watts",
+                "slots": 5,
+                "mode": "on",
+                # No habit learner on this hub.
+                "habits": {"layer": "personal", "status": "unavailable"},
+            },
         )
         rooms = activity["rooms"]
         # The AC-only Majlis (2.1 kW) beats the Kitchen's two lights (45 W);

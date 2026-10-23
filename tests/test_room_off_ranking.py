@@ -421,7 +421,7 @@ class JustOffTest(OffRankingCase):
             [("kitchen", "just_off"), ("office", "just_off")],
         )
 
-    async def test_only_offs_a_person_made_count_and_never_the_viewers_own(self):
+    async def test_only_offs_a_person_made_count_and_the_viewers_own_sort_last(self):
         self.home()
         self.participate_all()
         self.log.add("kitchen", "light.kitchen", "off", 1 * MIN, "automation")
@@ -433,16 +433,29 @@ class JustOffTest(OffRankingCase):
         just_off = {"majlis", "guest", "hall"}
         for member, own in (("mem-1", "office"), ("mem-2", "guest"), (None, None)):
             with self.subTest(member=member):
-                expected = (just_off | {"office", "guest"}) - {own}
-                reasons = await self.reasons(member=member)
-                self.assertEqual(
-                    {rid for rid, reason in reasons.items() if reason == "just_off"},
-                    expected,
-                )
+                ranked = await self.ranked(member=member)
+                theirs = {
+                    r["room_id"]
+                    for r in ranked
+                    if r["rank"]["reason"] == "just_off"
+                    and "by_you" not in r["rank"]["params"]
+                }
+                self.assertEqual(theirs, (just_off | {"office", "guest"}) - {own})
+                # Own-tap demotion: the room the viewer switched
+                # off from the app is still just_off, marked by_you, after
+                # everyone else's and before the room order.
+                order = [r["room_id"] for r in ranked]
+                mine = [r for r in ranked if r["rank"]["params"].get("by_you")]
+                self.assertEqual([r["room_id"] for r in mine], [own] if own else [])
+                if own:
+                    self.assertEqual(mine[0]["rank"]["reason"], "just_off")
+                    self.assertEqual(
+                        mine[0]["rank"]["params"],
+                        {"went_dark_at": iso(NOW - MIN), "by_you": True},
+                    )
+                    self.assertEqual(order.index(own), len(theirs))
                 # No member (or entity) id ever goes into a reason.
-                ranked = json.dumps(
-                    [r["rank"] for r in await self.ranked(member=member)]
-                )
+                ranked = json.dumps([r["rank"] for r in ranked])
                 self.assertNotIn("mem-", ranked)
                 self.assertNotIn("light.", ranked)
 

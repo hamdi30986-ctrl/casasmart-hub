@@ -7,13 +7,17 @@ first one a room qualifies for wins:
    player playing, or one of the room's own meters drawing at least
    RUNNING_LOAD_MIN_W. Higher watts first.
 2. just_off: the room went dark less than JUST_OFF_WINDOW_SECONDS ago, by an
-   off someone made (not an automation, not a hub scene, not the viewer's
-   own app tap). Newest first. Taken from the room activity log.
-3. room_order: sort_order, then name, then room id.
+   off someone made (not an automation, not a hub scene). Newest first. Taken
+   from the room activity log.
+3. The learned tier, in its sub-slots: habit_now (room_intel.habits, through
+   ranking.order_off_rooms' learned argument), then the rooms the viewer
+   switched off themselves from the app in the same window (just_off with
+   by_you: their own tap is demoted, so the room they just left doesn't lead
+   their page, and never reads "usually on around now" either), then most
+   used (not built).
+4. room_order: sort_order, then name, then room id.
 
-The learned tiers (habit, most used) go between just_off and room_order,
-through ranking.order_off_rooms' learned argument. Nothing here imports Home
-Assistant, like activity and meters.
+Nothing here imports Home Assistant, like activity and meters.
 """
 
 from __future__ import annotations
@@ -91,7 +95,17 @@ class OffRoomFacts(NamedTuple):
 
     loads: list[str]
     watts: float | None
+    # When it went dark by someone else's off (or no one's in particular)...
     went_dark_t: int | None
+    # ...or by the viewer's own app tap.
+    own_off_t: int | None = None
+
+
+class WentDark(NamedTuple):
+    """When an off room went dark, and whether the viewer did it from the app."""
+
+    t: int
+    by_viewer: bool
 
 
 def still_running(media_playing: int, peak_watts: float | None) -> list[str]:
@@ -134,12 +148,12 @@ def events_by_room(
     return grouped
 
 
-def went_dark_at(
+def went_dark(
     events: Iterable[Mapping[str, Any]],
     counted_ids: set[str],
     unavailable_since: Iterable[float | None],
     activity: RecentActivity,
-) -> int | None:
+) -> WentDark | None:
     """When an off room went dark by an off that counts, or None.
 
     events are the room's, newest first. counted_ids are the devices that
@@ -151,6 +165,7 @@ def went_dark_at(
     Assistant started is a device catching up with what happened while it
     was down, at no known time. A counted device that went unavailable at or
     after the off may be what made the room look dark, so it blocks too.
+    by_viewer says the off was the viewing member's own app tap.
     """
     newest = next(
         (
@@ -176,15 +191,14 @@ def went_dark_at(
     source = newest["source"]
     if source in _UNCOUNTED_OFF_SOURCES:
         return None
-    if (
-        activity.member_id is not None
-        and source == SOURCE_APP
-        and newest.get("member_id") == activity.member_id
-    ):
-        return None
     if any(since is None or since >= t for since in unavailable_since):
         return None
-    return int(t)
+    return WentDark(
+        int(t),
+        activity.member_id is not None
+        and source == SOURCE_APP
+        and newest.get("member_id") == activity.member_id,
+    )
 
 
 def iso_utc(t: float) -> str:

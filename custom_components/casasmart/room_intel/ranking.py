@@ -14,10 +14,12 @@ otherwise the whole list ranks by how many devices are on. Ties go to the
 room order the registry serves the apps: sort_order, then name, then room
 id. Off rooms fill the Now page's empty card slots in the all-off order
 (order_off_rooms, tiers in room_intel.off_rooms): something still running,
-then just went dark, then room order. Every room says why it is where it is
-(rank.reason). The Now page and the generated room suggestions use this one
-ranking (docs/api/NOW_ROOM_RANKING_V1.md, GENERATED_ROOM_SUGGESTIONS_V1.md);
-only the Now page passes the room activity log, which just_off needs.
+then just went dark, then usually on around now (room_intel.habits), then
+the rooms the viewer switched off themselves, then room order. Every room
+says why it is where it is (rank.reason). The Now page and the generated room
+suggestions use this one ranking (docs/api/NOW_ROOM_RANKING_V1.md,
+GENERATED_ROOM_SUGGESTIONS_V1.md); only the Now page passes the room activity
+log, which just_off needs, and the habits.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from ..now_data import is_room_activity_candidate
 from .meters import is_power_meter, watt_step, watts_of
 from .off_rooms import (
     JUST_OFF_WINDOW_SECONDS,
+    LEARNED_OWN_OFF,
     REASON_ACTIVE,
     REASON_JUST_OFF,
     REASON_ROOM_ORDER,
@@ -46,7 +49,7 @@ from .off_rooms import (
     is_playing,
     iso_utc,
     still_running,
-    went_dark_at,
+    went_dark,
 )
 
 if TYPE_CHECKING:
@@ -86,7 +89,8 @@ MODE_ON = "on"
 MODE_ALL_OFF = "all_off"
 
 # A learned all-off tier: the room's (reason, params, in-tier sort key),
-# or None when it doesn't qualify.
+# or None when it doesn't qualify. The key starts with the sub-slot
+# (off_rooms.LEARNED_HABIT, ...).
 LearnedTier = Callable[[dict[str, Any]], tuple[str, dict[str, Any], tuple] | None]
 
 
@@ -98,6 +102,14 @@ class ActivitySource(Protocol):
     async def async_recent_events(
         self, since_t: int, room_ids: list[str]
     ) -> list[dict[str, Any]]: ...
+
+
+class HabitSource(Protocol):
+    """What the ranking asks the room habits through (learner.HabitQuery)."""
+
+    async def async_learned(
+        self, room_ids: list[str], counted: frozenset[str], now_t: float | None
+    ) -> LearnedTier | None: ...
 
 
 class RoomRanking(NamedTuple):
@@ -182,6 +194,35 @@ def is_ac(state: Any) -> bool:
     )
 
 
+def counted_controls(
+    gang_types: Mapping[str, str | None], state_of: Callable[[str], Any]
+) -> frozenset[str]:
+    """The imported controls that make their room on when they are on.
+
+    Safe controls (counts_as_activity) and ACs (is_ac, judged from the
+    state: an unavailable AC keeps its hvac_modes), wherever they are and
+    whatever room policies say. The habits learn from these devices' "on"s.
+    """
+    counted = set()
+    for entity_id, gang in gang_types.items():
+        if counts_as_activity(entity_id, gang):
+            counted.add(entity_id)
+        elif entity_id.startswith("climate."):
+            state = state_of(entity_id)
+            if state is not None and is_ac(state):
+                counted.add(entity_id)
+    return frozenset(counted)
+
+
+async def async_counted_controls(
+    hass: HomeAssistant, registry: RegistryEngine
+) -> tuple[frozenset[str], frozenset[str]]:
+    """(counted_controls, every imported control) from the registry now."""
+    devices = await hass.async_add_executor_job(registry.list_user_devices)
+    gang_types = imported_controls(devices)
+    return counted_controls(gang_types, hass.states.get), frozenset(gang_types)
+
+
 def room_order_key(room: dict[str, Any]) -> tuple[int, str, str]:
     """The registry's room order: sort_order, then name, then room id."""
     sort_order = room.get("sort_order")
@@ -204,6 +245,14 @@ def _off_tier(
             {"went_dark_at": iso_utc(facts.went_dark_t)},
             (-facts.went_dark_t,),
         )
+    if facts.own_off_t is not None:
+        # The viewer's own off: below the habits, never one of them.
+        return (
+            TIER_LEARNED,
+            REASON_JUST_OFF,
+            {"went_dark_at": iso_utc(facts.own_off_t), "by_you": True},
+            (LEARNED_OWN_OFF, -facts.own_off_t),
+        )
     if learned is not None and (tier := learned(room)) is not None:
         reason, params, key = tier
         return TIER_LEARNED, reason, params, key
@@ -218,10 +267,10 @@ def order_off_rooms(
     """Order the rooms with nothing on, and give each its rank reason.
 
     Tiers (room_intel.off_rooms), the first a room qualifies for wins:
-    running_load, just_off, then room_order; ties and the last tier go by
-    room order. learned is the hook for a tier between just_off and
-    room_order (habit, most used). rank_rooms fills the empty slots from
-    the front of this order.
+    running_load, just_off, the viewer's own off, learned (habit_now), then
+    room_order; the viewer's own offs sort after the habits. Ties and the
+    last tier go by room order. learned is the habits' hook (None: no
+    habits). rank_rooms fills the empty slots from the front of this order.
     """
     keyed = []
     for room in rooms:
@@ -242,13 +291,16 @@ def ranking_basis(rooms: list[dict[str, Any]]) -> str:
     return "count"
 
 
-def ranking_summary(rooms: list[dict[str, Any]]) -> dict[str, Any]:
+def ranking_summary(
+    rooms: list[dict[str, Any]], habits: dict[str, str] | None = None
+) -> dict[str, Any]:
     """How the ranked rooms were ordered, for the Now page.
 
     mode is "on" when a room is on, else "all_off" (the whole list is in
-    the all-off order).
+    the all-off order). habits, when given, says which habit layer ranked
+    and how far learning is (learner.HabitQuery.summary).
     """
-    return {
+    summary = {
         "version": RANKING_VERSION,
         "basis": ranking_basis(rooms),
         "slots": NOW_ROOM_SLOTS,
@@ -256,6 +308,9 @@ def ranking_summary(rooms: list[dict[str, Any]]) -> dict[str, Any]:
         if any(room["rank"]["active"] for room in rooms)
         else MODE_ALL_OFF,
     }
+    if habits is not None:
+        summary["habits"] = dict(habits)
+    return summary
 
 
 def _room_watts(
@@ -308,12 +363,14 @@ def rank_rooms(
     device_of: dict[str, int],
     *,
     activity: RecentActivity | None = None,
+    learned: LearnedTier | None = None,
 ) -> list[dict[str, Any]]:
     """Rank the (already scoped) rooms, the ones with something on first.
 
     meters_by_room holds, per room, each device's power meters in that room;
     device_of maps a control to its device. activity is the room activity
-    the just_off tier needs; without it no room is just_off. Each ranked
+    the just_off tier needs; without it no room is just_off. learned is the
+    habit tier (None: no room is habit_now). Each ranked
     room is its registry record plus active_count, the eligible_entity_ids
     that were counted and a rank block: active, filler, on_count,
     ac_on_count, watts, watts_quality, reason and params.
@@ -387,12 +444,16 @@ def rank_rooms(
             on_rooms.append(ranked)
             continue
         loads = still_running(media_playing, peak)
+        dark = (
+            went_dark(events.get(rid, ()), counted_ids, unavailable_since, activity)
+            if activity is not None
+            else None
+        )
         facts[rid] = OffRoomFacts(
             loads,
             watts,
-            went_dark_at(events.get(rid, ()), counted_ids, unavailable_since, activity)
-            if activity is not None
-            else None,
+            dark.t if dark is not None and not dark.by_viewer else None,
+            dark.t if dark is not None and dark.by_viewer else None,
         )
         off_rooms.append(ranked)
         # Only a room with a device to switch, or something still running,
@@ -400,7 +461,7 @@ def rank_rooms(
         if eligible or acs or loads:
             fill_ids.add(rid)
     on_rooms.sort(key=_watts_key if ranking_basis(on_rooms) == "watts" else _count_key)
-    off_rooms = order_off_rooms(off_rooms, facts)
+    off_rooms = order_off_rooms(off_rooms, facts, learned)
     fillers = [r for r in off_rooms if r["room_id"] in fill_ids]
     fillers = fillers[: max(0, NOW_ROOM_SLOTS - len(on_rooms))]
     for room in fillers:
@@ -420,13 +481,16 @@ async def async_rank_rooms(
     activity: ActivitySource | None = None,
     member_id: str | None = None,
     now_t: float | None = None,
+    habits: HabitSource | None = None,
 ) -> RoomRanking:
     """Rank the caller's rooms; scope is their room ids, None for every room.
 
     activity is the room activity log (the recorder), for the just_off tier;
-    member_id is the caller, whose own app taps don't make a room just_off.
-    The stores are read in one executor job, the states in one scan and the
-    log in one query.
+    member_id is the caller, whose own app-tap offs sort below the habits.
+    habits answers the habit tier for the caller's rooms (a
+    learner.HabitQuery; None: no habits). The stores are read in one
+    executor job, the states in one scan and the log in one query; the
+    habits are served from memory (read from the log once a day).
     """
 
     def read_stores():
@@ -467,8 +531,8 @@ async def async_rank_rooms(
                 sensor_device[meter.entity_id], []
             ).append(meter)
     recent = None
+    now_t = time.time() if now_t is None else now_t
     if activity is not None:
-        now_t = time.time() if now_t is None else now_t
         recent = RecentActivity(
             await activity.async_recent_events(
                 max(0, int(now_t) - JUST_OFF_WINDOW_SECONDS), list(states_by_room)
@@ -476,6 +540,13 @@ async def async_rank_rooms(
             now_t,
             member_id,
             activity.started_at,
+        )
+    learned = None
+    if habits is not None:
+        learned = await habits.async_learned(
+            list(states_by_room),
+            counted_controls(gang_types, hass.states.get),
+            now_t,
         )
     return RoomRanking(
         rank_rooms(
@@ -486,6 +557,7 @@ async def async_rank_rooms(
             meters_by_room,
             device_of,
             activity=recent,
+            learned=learned,
         ),
         states_by_room,
         states,

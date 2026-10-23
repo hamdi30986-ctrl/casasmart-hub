@@ -26,13 +26,23 @@ The Now page has five room cards (a featured one and four more, as in `layout`).
 
 ## The all-off order
 
-Off rooms go in tiers; a room takes the first it qualifies for, and its `rank.reason` says which:
+Off rooms go in tiers; a room takes the first it qualifies for, and its `rank.reason` says which (the viewer's own off, 4, is checked before 3 but sorts after it):
 
 1. `running_load`: something still runs although nothing counted is on. `params.loads` lists what, in this order: `power` (one of the room's own meters, as above, reads at least 20 W; `rank.watts` has the room's total) and `media` (a media player is `playing`; `on`, `idle` and `paused` don't count, nor one with `casasmart_room_activity_exclude`). Higher watts first (10 % steps; no reading last). Open or moving covers and unmetered heater gangs never count.
-2. `just_off`: the room went dark in the last 30 minutes. `params.went_dark_at` is when (ISO 8601, UTC); newest first. Taken from the hub's room activity log: the newest on/off of the devices that count the room as on must be an off made by a person (wall switch, Home Assistant user, another integration, or a member's app tap), not by an automation or a hub scene, and not by the member asking (their own app tap). Not just_off: a device that went dark through `unavailable`/`unknown`; a counted device that is unavailable or unknown and changed at or after the off; an off logged in the first 10 minutes after Home Assistant started (devices catching up); a device's old room after it moved.
-3. `room_order`: `sort_order`, then `name`, then `room_id`.
+2. `just_off`: the room went dark in the last 30 minutes. `params.went_dark_at` is when (ISO 8601, UTC); newest first. Taken from the hub's room activity log: the newest on/off of the devices that count the room as on must be an off made by a person (wall switch, Home Assistant user, another integration, or a member's app tap), not by an automation or a hub scene. Not just_off: a device that went dark through `unavailable`/`unknown`; a counted device that is unavailable or unknown and changed at or after the off; an off logged in the first 10 minutes after Home Assistant started (devices catching up); a device's old room after it moved.
+3. `habit_now`: the room is usually switched on around this hour (label "Usually on around now"); strongest first. See "Habits" below.
+4. `just_off` with `params.by_you: true`: the member asking switched it off from the app in the last 30 minutes (label "You turned this off"); newest first. Same rules as 2. Such a room is never `habit_now`.
+5. `room_order`: `sort_order`, then `name`, then `room_id`.
 
-Rooms that are on have `reason: "active"`. Within a tier, ties go to the room order. `params` never holds a member id or an entity id. The just_off tier depends on who asks, so two members can see the off rooms in a different order; everything else is the same for every member with the same scope. The generated room suggestions rank without the activity log (they only use rooms that are on).
+Rooms that are on have `reason: "active"`. Within a tier, ties go to the room order. `params` never holds a member id, an entity id or a score. The just_off tiers and the habits depend on who asks, so two members can see the off rooms in a different order; everything else is the same for every member with the same scope. The generated room suggestions rank without the activity log and without habits (they only use rooms that are on).
+
+## Habits
+
+The hub learns when each room is usually switched on from its room activity log (never Home Assistant's recorder). A confirmed "on" of a device that makes the room on (as above: a light, a fan, a light/fan/switch/outlet switch, an AC) votes for that room, local date and local hour, once per hour however often it was tapped. An app tap, a scene a member ran and a Home Assistant user weigh 1; a wall switch (no person behind it) weighs ½ and only for the household; automations and unnamed callers weigh nothing; a device an admin marked as running on its own schedule has its wall-switch events ignored.
+
+For the current hour and day class (workday, or weekend: Friday and Saturday unless an admin changes it), over the last 56 days (today left out): each date's vote at that hour, or half a vote an hour either side (across midnight too), weighted by `2^(−age/14 days)`, divided by the same weights plus 4 empty days. A room is `habit_now` at 0.35 or more with evidence on at least 3 dates. A date counts only when someone did something by hand in one of the caller's rooms that day, so days away don't count against a habit and a scoped member's answer never depends on rooms they can't see. Nothing ranks on a habit until the caller's rooms have 14 such dates.
+
+Whose habits: `GET /api/casasmart/now?habits=household` (the shared tablet) ranks on the household's. Without the parameter, or with `habits=personal`, the caller's own app taps are blended over the household's: `λ·own + (1−λ)·household`, `λ = min(0.8, N/(N+10))`, N = dates the caller switched something on from the app in their rooms. Any other value is a 400.
 
 ## Fields
 
@@ -55,7 +65,7 @@ Each room gains, after its existing fields:
 - `filler`: an off room placed in one of the five cards to fill it; show it dimmed.
 - `on_count`: `active_count` plus `ac_on_count`.
 - `watts`: the room's valid meter readings summed, in W, one decimal; `null` when none.
-- `reason`: `active`, `running_load`, `just_off` or `room_order` (above). Later versions may add reasons between `just_off` and `room_order`; show an unknown reason like `room_order`.
-- `params`: `{}` for `active` and `room_order`; `{"loads": [...]}` for `running_load`; `{"went_dark_at": "..."}` for `just_off`.
+- `reason`: `active`, `running_load`, `just_off`, `habit_now` or `room_order` (above). Later versions may add reasons between `just_off` and `room_order`; show an unknown reason like `room_order`.
+- `params`: `{}` for `active`, `habit_now` and `room_order`; `{"loads": [...]}` for `running_load`; `{"went_dark_at": "..."}` for `just_off`, plus `"by_you": true` when the caller switched it off.
 
-`room_activity` gains `"ranking": {"version": 1, "basis": "watts" | "count", "slots": 5, "mode": "on" | "all_off"}`. Apps detect the ranking by this object.
+`room_activity` gains `"ranking": {"version": 1, "basis": "watts" | "count", "slots": 5, "mode": "on" | "all_off", "habits": {"layer": "household" | "personal", "status": "off" | "paused" | "warming_up" | "learning" | "unavailable"}}`. Apps detect the ranking by this object. `habits.status`: `off` (an admin turned learning off), `paused` (ranking on what was learned before the pause), `warming_up` (fewer than 14 dates yet), `learning`, `unavailable` (the hub couldn't read its log). Label the section "Rooms", not "Suggested", unless the status is `learning` or `paused`.

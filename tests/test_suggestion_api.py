@@ -313,6 +313,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         return NS(
             body=body,
             claims={"sub": "alice:tablet", "role": "admin", "rooms": None, **claims},
+            query={},
         )
 
     async def selected(self, **claims):

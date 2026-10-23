@@ -2,7 +2,9 @@
 
 - GET /api/casasmart/now (devices.read): the caller's Now page in one
   response (recent devices, scenes, room activity, weather, air quality,
-  doors and windows), filtered to their room scope.
+  doors and windows), filtered to their room scope. ?habits=household ranks
+  the off rooms on the household's habits (the shared tablet); the default,
+  personal, on the caller's own blended over them.
 - GET/PUT /api/casasmart/now/config (registry.manage): the sources the page
   shows. The hub never picks sensors by itself.
 - PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
@@ -47,6 +49,7 @@ from .now_data import (
 )
 from .registry import RegistryEngine
 from .room_intel.activity import SOURCE_APP
+from .room_intel.habits import LAYER_HOUSEHOLD, LAYERS, STATUS_UNAVAILABLE
 from .room_intel.ranking import async_rank_rooms, ranking_summary
 from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
@@ -153,6 +156,11 @@ class CasaSmartNowView(_NowView):
         claims, error = authenticate_request(self._hass, request, "devices.read")
         if error is not None:
             return error
+        layer = request.query.get("habits", "personal")
+        if layer not in LAYERS:
+            return self.json_message(
+                "habits must be household or personal", HTTPStatus.BAD_REQUEST
+            )
         now_data, not_ready = self._now_or_503()
         if not_ready is not None:
             return not_ready
@@ -214,7 +222,15 @@ class CasaSmartNowView(_NowView):
 
         # The generated suggestions rank rooms with the same function, so both
         # agree on the busiest rooms. The room activity log orders the off
-        # rooms that just went dark, minus the caller's own taps.
+        # rooms that just went dark (the caller's own offs after the habits),
+        # and the habits the ones usually on around now: the household's for
+        # the shared tablet, the caller's own blended over them for a phone.
+        learner = getattr(loaded_runtime_data(self._hass), "room_habits", None)
+        habits = (
+            learner.query(None if layer == LAYER_HOUSEHOLD else member_id)
+            if learner is not None
+            else None
+        )
         ranked, _, _ = await async_rank_rooms(
             self._hass,
             registry,
@@ -222,6 +238,7 @@ class CasaSmartNowView(_NowView):
             scope,
             activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),
             member_id=member_id,
+            habits=habits,
         )
 
         def read_restore_counts() -> dict[str, int]:
@@ -295,7 +312,12 @@ class CasaSmartNowView(_NowView):
                         for room_id in room_ids
                         if policies.get(room_id, {}).get("participates", False)
                     ),
-                    "ranking": ranking_summary(active_rooms),
+                    "ranking": ranking_summary(
+                        active_rooms,
+                        habits.summary
+                        if habits is not None
+                        else {"layer": layer, "status": STATUS_UNAVAILABLE},
+                    ),
                 },
                 "outdoor_weather": weather,
                 "air_quality": air_quality,

@@ -111,7 +111,7 @@ def _load_now_api():
     # The real room ranking, over the stub filtering above, and the real
     # room activity, meter and all-off rules (Home Assistant-free).
     _module("casasmart.room_intel", package=True)
-    for name in ("activity", "meters", "off_rooms"):
+    for name in ("activity", "meters", "off_rooms", "habits"):
         rules_spec = importlib.util.spec_from_file_location(
             f"casasmart.room_intel.{name}",
             ROOT / "custom_components" / "casasmart" / "room_intel" / f"{name}.py",
@@ -667,7 +667,8 @@ class MemberLookupTest(unittest.TestCase):
 
     def _snapshot(self, lookup):
         with self._patched(lookup):
-            return asyncio.run(_API.CasaSmartNowView(self.hass).get(None))
+            request = SimpleNamespace(query={})
+            return asyncio.run(_API.CasaSmartNowView(self.hass).get(request))
 
     def test_room_command_looks_up_the_member_in_the_executor(self) -> None:
         result = self._room_command(self._lookup)

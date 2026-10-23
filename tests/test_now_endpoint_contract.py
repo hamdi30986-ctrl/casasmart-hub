@@ -59,8 +59,8 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn('"restore_pending_count"', source)
         # The rooms, with the devices each one counts, come from the ranking
         # the generated suggestions use (pinned in test_room_ranking_golden
-        # and test_now_room_activity_golden), with the room activity log and
-        # the caller for the all-off order.
+        # and test_now_room_activity_golden), with the room activity log, the
+        # caller and their habits for the all-off order.
         self.assertIn(
             "await async_rank_rooms(\n"
             "            self._hass,\n"
@@ -68,7 +68,8 @@ class NowEndpointContractTest(unittest.TestCase):
             "            now_data,\n"
             "            scope,\n"
             '            activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),\n'
-            "            member_id=member_id,\n",
+            "            member_id=member_id,\n"
+            "            habits=habits,\n",
             source,
         )
 
