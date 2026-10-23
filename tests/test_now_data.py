@@ -200,6 +200,33 @@ class NowDataEngineTest(unittest.TestCase):
         )
         self.assertEqual(engine.restore_set("room-kitchen"), [])
 
+    def test_a_later_room_off_never_makes_an_old_capture_new(self) -> None:
+        # Every room off used to restamp the capture, so
+        # a tap that switched nothing kept yesterday's capture "fresh".
+        from datetime import timedelta
+
+        engine = make_engine()
+        t = datetime(2026, 10, 23, 17, tzinfo=UTC)
+        engine.extend_restore_set("room-kitchen", ["light.main", "light.spot"], t)
+        stamp = t.isoformat()
+        # A second tap a minute later adds to it and keeps the time.
+        engine.extend_restore_set(
+            "room-kitchen", ["fan.hood"], t + timedelta(seconds=60)
+        )
+        self.assertEqual(
+            engine.restore_capture("room-kitchen"),
+            (["light.main", "light.spot", "fan.hood"], stamp),
+        )
+        # A tap that switches nothing, a day later: the capture is untouched.
+        engine.extend_restore_set("room-kitchen", [], t + timedelta(hours=25))
+        self.assertEqual(engine.restore_capture("room-kitchen")[1], stamp)
+        # A later off is what was on last time: a new capture.
+        later = t + timedelta(hours=25)
+        engine.extend_restore_set("room-kitchen", ["light.lamp"], later)
+        self.assertEqual(
+            engine.restore_capture("room-kitchen"), (["light.lamp"], later.isoformat())
+        )
+
     def test_extending_a_restore_set_keeps_what_is_outstanding(self) -> None:
         engine = make_engine()
         self.assertEqual(engine.extend_restore_set("room-kitchen", []), [])

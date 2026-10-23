@@ -26,6 +26,10 @@ _MAX_CONTACTS = 64
 _MAX_IDEMPOTENCY_ENTRIES = 64
 # Devices in one room's start profile (as in a room policy).
 MAX_START_PROFILE = 64
+# A room off this soon after the room's capture adds to it (a second tap
+# finds little still on); a later one is a new off and starts a new capture.
+# As room_intel.one_tap.OFF_SEQUENCE_SECONDS.
+_CAPTURE_EXTEND_SECONDS = 120
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 # Domains a room command may switch.
@@ -57,6 +61,18 @@ def _optional_entity_id(value: Any, field: str) -> str | None:
 def _timestamp(value: datetime | None = None) -> str:
     """The time (default: now) as an ISO 8601 UTC string."""
     return (value or datetime.now(UTC)).astimezone(UTC).isoformat()
+
+
+def _within(stamp: str | None, at: datetime, seconds: float) -> bool:
+    """True when the ISO 8601 stamp is at most seconds before at (and not
+    after it); an unreadable one is not."""
+    try:
+        then = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+    except ValueError:
+        return False
+    if then is None or then.tzinfo is None:
+        return False
+    return 0 <= (at - then).total_seconds() <= seconds
 
 
 def _state_value(state: Any, field: str, default: Any = None) -> Any:
@@ -447,13 +463,37 @@ class NowDataEngine:
             else:
                 self._restores.pop(room_id, None)
 
-    def extend_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
-        """Add newly switched-off ids to the room's restore set and return it.
+    def extend_restore_set(
+        self,
+        room_id: str,
+        entity_ids: Iterable[str],
+        at: datetime | None = None,
+    ) -> list[str]:
+        """Take what a room off just switched off (at: now) and return the
+        room's restore set.
 
-        Ids keep their first-captured order, each once.
+        An off that switched nothing leaves the capture as it is. One within
+        _CAPTURE_EXTEND_SECONDS of the capture adds to it (ids keep their
+        first-captured order, each once) and keeps when it was captured, so
+        a repeated tap never makes an old capture new. A later one is what
+        the room had on last time: it replaces the capture.
         """
+        ids = list(dict.fromkeys(entity_ids))
+        at = at or datetime.now(UTC)
         with self._lock:
-            self.save_restore_set(room_id, [*self.restore_set(room_id), *entity_ids])
+            if not ids:
+                return self.restore_set(room_id)
+            current, captured_at = self.restore_capture(room_id)
+            if current and _within(captured_at, at, _CAPTURE_EXTEND_SECONDS):
+                self._restores[room_id] = {
+                    "entity_ids": list(dict.fromkeys([*current, *ids])),
+                    "captured_at": captured_at,
+                }
+            else:
+                self._restores[room_id] = {
+                    "entity_ids": ids,
+                    "captured_at": _timestamp(at),
+                }
             return self.restore_set(room_id)
 
     def keep_in_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
