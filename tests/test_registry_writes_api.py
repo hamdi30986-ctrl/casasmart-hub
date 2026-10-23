@@ -18,6 +18,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -467,7 +468,7 @@ class SceneActivation(RegistryWritesTestCase):
         )
         called = []
 
-        async def async_call(domain, service, data, *, blocking=False):
+        async def async_call(domain, service, data, *, blocking=False, context=None):
             called.append(data["entity_id"])
             if domain == "light":
                 raise vol.Invalid("extra keys not allowed")
@@ -488,6 +489,35 @@ class SceneActivation(RegistryWritesTestCase):
             [(r["entity_id"], r["ok"]) for r in body["results"]],
             [("light.a", False), ("switch.b", True)],
         )
+
+    async def test_every_step_carries_the_members_scene_context(self) -> None:
+        _, hdr = H.session(self.rt.auth, role="admin", member_id="mem-a")
+        self.hass.states.add("light.a", state="off")
+        self.hass.states.add("switch.b", state="off")
+        scene = self.rt.registry.create_scene(
+            "Evening",
+            [
+                {"entity_id": "light.a", "action": "turn_on"},
+                {"entity_id": "switch.b", "action": "turn_on"},
+            ],
+        )
+        tagged = []
+        self.rt.room_activity = types.SimpleNamespace(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+        with mock.patch(
+            "casasmart.registry_api.is_served",
+            H.is_served_for(["light.a", "switch.b"]),
+        ):
+            resp = await CasaSmartSceneActivateView(self.hass).post(
+                H.FakeRequest(headers=hdr), scene["scene_id"]
+            )
+        status, body = H.read_response(resp)
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(tagged, [("scene", "mem-a")])
+        self.assertEqual(self.hass.services.contexts, ["context-1", "context-1"])
 
 
 # --------------------------------------------------------------------------- #

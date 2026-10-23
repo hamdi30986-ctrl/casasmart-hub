@@ -40,17 +40,25 @@ class SceneAutomationServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         _async_register_services(self.hass)
         handler = self.hass.services.handlers[(DOMAIN, "activate_scene")]
+        caller = types.SimpleNamespace(id="ctx-automation", user_id=None)
 
         with mock.patch(
             "casasmart.registry_api.is_served",
             H.is_served_for(["switch.corridor"]),
         ):
-            await handler(types.SimpleNamespace(data={"scene_id": scene["scene_id"]}))
+            await handler(
+                types.SimpleNamespace(
+                    data={"scene_id": scene["scene_id"]}, context=caller
+                )
+            )
 
         self.assertEqual(
             self.hass.services.calls,
             [("switch", "turn_off", {"entity_id": "switch.corridor"}, True)],
         )
+        # Each step runs in the caller's context, as Home Assistant services
+        # pass it on, so the room activity log credits the caller.
+        self.assertEqual(self.hass.services.contexts, [caller])
 
     async def test_service_rejects_unknown_scene(self) -> None:
         _async_register_services(self.hass)

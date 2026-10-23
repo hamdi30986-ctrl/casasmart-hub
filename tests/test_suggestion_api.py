@@ -270,7 +270,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.states.get = lambda eid: self.states.values.get(eid)
 
-        async def call(domain, service, data, blocking=True):
+        async def call(domain, service, data, blocking=True, context=None):
             self.calls.append((domain, service, data))
             if self.gate:
                 await self.gate.wait()
@@ -503,6 +503,26 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             oid = (await self.selected())["occurrence_id"]
             self.assertEqual((await self.action("run", oid)).status, 200)
         self.assertEqual(len(lookups), 3)  # list, action, re-check before running
+
+    async def test_a_run_carries_the_members_scene_context(self):
+        # The room activity log credits the scene's changes to the member.
+        tagged, contexts = [], []
+        self.data.room_activity = NS(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+        original = self.hass.services.async_call
+
+        async def call(domain, service, data, blocking=True, context=None):
+            contexts.append(context)
+            await original(domain, service, data, blocking=blocking, context=context)
+
+        self.hass.services.async_call = call
+        oid = (await self.selected())["occurrence_id"]
+        self.assertEqual((await self.action("run", oid)).status, 200)
+        self.assertEqual(tagged, [("scene", "alice")])
+        self.assertEqual(contexts, ["context-1"])
 
     async def test_success_suppresses_globally_and_replay_does_not_execute(self):
         oid = (await self.selected())["occurrence_id"]

@@ -64,7 +64,7 @@ class _Services:
         self.calls = []
         self.fail: set[tuple[str, str]] = set()
 
-    async def async_call(self, domain, service, data, blocking=False):
+    async def async_call(self, domain, service, data, blocking=False, context=None):
         entity_id = data["entity_id"]
         self.calls.append((domain, service, entity_id, blocking))
         if (service, entity_id) in self.fail:
@@ -153,7 +153,7 @@ class _SteppedServices(_Services):
         self._states = states
         self._steps = steps
 
-    async def async_call(self, domain, service, data, blocking=False):
+    async def async_call(self, domain, service, data, blocking=False, context=None):
         entity_id = data["entity_id"]
         self.calls.append((domain, service, entity_id, blocking))
         await self._steps.step(f"{domain}.{service} {entity_id}")

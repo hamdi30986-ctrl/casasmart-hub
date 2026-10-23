@@ -20,7 +20,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -46,9 +46,13 @@ from .now_data import (
     summarize_openings,
 )
 from .registry import RegistryEngine
+from .room_intel.activity import SOURCE_APP
 from .room_intel.ranking import async_rank_rooms
-from .runtime_lookup import loaded_runtime_data
+from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
+
+if TYPE_CHECKING:
+    from homeassistant.core import Context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -647,7 +651,12 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                     },
                     HTTPStatus.CONFLICT,
                 )
-            result = await self._run(room_id, action, now_data)
+            result = await self._run(
+                room_id,
+                action,
+                now_data,
+                command_context(self._hass, SOURCE_APP, member_id),
+            )
             if result is None:
                 # Nothing was switched, so there is no answer to replay.
                 return self.json(
@@ -672,14 +681,19 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             return self.json(result)
 
     async def _run(
-        self, room_id: str, action: str, now_data: NowDataEngine
+        self,
+        room_id: str,
+        action: str,
+        now_data: NowDataEngine,
+        context: Context | None = None,
     ) -> dict[str, Any] | None:
         """Switch the room's eligible devices and report each one's outcome.
 
         Off targets every eligible device that is on; on targets what the
         restore set holds and is still off. A device counts as changed only
         when its state afterwards confirms it. Returns None for an on with
-        nothing to restore.
+        nothing to restore. The calls carry context (the member's, for the
+        room activity log).
         """
         policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
         eligible_entity_ids = policy["eligible_entity_ids"]
@@ -728,7 +742,11 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         for domain, entity_ids in by_domain.items():
             try:
                 await self._hass.services.async_call(
-                    domain, action, {"entity_id": entity_ids}, blocking=True
+                    domain,
+                    action,
+                    {"entity_id": entity_ids},
+                    blocking=True,
+                    context=context,
                 )
             except HomeAssistantError:
                 failures.update(entity_ids)

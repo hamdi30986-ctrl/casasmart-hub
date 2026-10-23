@@ -292,8 +292,8 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         plan = (await self.plans())[0]
         original = self.hass.services.async_call
 
-        async def call(domain, service, data, blocking=True):
-            await original(domain, service, data, blocking=blocking)
+        async def call(domain, service, data, blocking=True, context=None):
+            await original(domain, service, data, blocking=blocking, context=context)
             self.hass.rooms["climate.ac"] = "b"
 
         self.hass.services.async_call = call

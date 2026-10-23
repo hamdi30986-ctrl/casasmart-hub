@@ -17,6 +17,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ from .const import (
     PROVISION_SECRET_CONFIG_KEY,
     PUSH_RELAY_URL_CONFIG_KEY,
     RECOVERY_CODE_HASH_CONFIG_KEY,
+    ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS,
     TLS_CERT_CHECK_INTERVAL_HOURS,
     TLS_PORT_DEFAULT,
     TUNNEL_WATCHDOG_INTERVAL_MINUTES,
@@ -129,6 +131,8 @@ from .relay_config import (
     without_relay_activation,
 )
 from .relay_registration import RelayRegistrar, is_activation_code_format
+from .room_intel.activity import SOURCE_AUTOMATION
+from .room_intel.recorder import ActivityRecorder
 from .runtime_lookup import loaded_entry
 from .storage import ConfigError, HubStorage, JsonConfigStore, StorageError
 from .suggestion_runtime import SuggestionRuntime
@@ -202,6 +206,7 @@ class CasaSmartRuntimeData:
 
     alarm_adapter: AlarmAdapter | None = None
     suggestions: SuggestionRuntime | None = None
+    room_activity: ActivityRecorder | None = None
 
     audio_adapter: AudioAdapter | None = None
 
@@ -470,10 +475,25 @@ async def _async_start_hub(
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
 
+    # Before anything that sends commands, so their changes are attributed.
+    room_activity = ActivityRecorder(
+        hass, runtime_data.registry, runtime_data.storage.room_activity()
+    )
+    entry.runtime_data.room_activity = room_activity
+    await room_activity.async_start()
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            room_activity.async_prune,
+            timedelta(hours=ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS),
+        )
+    )
+
     # Home Assistant doesn't unload config entries when it stops, so the
     # database is checkpointed and closed here instead.
     async def _async_close_storage_on_stop(_event: Event) -> None:
         entry.runtime_data.suggestions.stop()
+        await room_activity.async_stop()
         await hass.async_add_executor_job(runtime_data.storage.close)
         _LOGGER.info("CasaSmart Hub storage checkpointed and closed on HA stop")
 
@@ -525,6 +545,7 @@ async def _async_start_hub(
         energy,
         runtime_data.registry,
         change_callback=lambda: hass.bus.async_fire(EVENT_ENERGY_CHANGED),
+        command_context=partial(room_activity.command_context, SOURCE_AUTOMATION),
     )
     energy_automations = EnergyAutomationManager(
         hass, energy, runtime_data.energy_flags
@@ -1335,7 +1356,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             and not scene.get("works_during_energy_saving", False)
         ):
             raise HomeAssistantError("Scene is disabled while Energy Saving is active")
-        result = await async_execute_registry_scene(hass, scene)
+        # The caller's context, as Home Assistant services pass on: the room
+        # activity log then credits the person or automation that called.
+        result = await async_execute_registry_scene(hass, scene, context=call.context)
         if not result["ok"]:
             failed = [item["entity_id"] for item in result["results"] if not item["ok"]]
             raise HomeAssistantError(
@@ -1461,6 +1484,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 for table in FACTORY_RESET_TABLES:
                     runtime_data.storage.table(table).clear()
                 runtime_data.storage.energy_events().clear()
+                runtime_data.storage.room_activity().clear()
             # Outside the transaction: the engine locks itself before storage,
             # and taking its lock while holding storage's could deadlock.
             runtime_data.auth.wipe_all_devices()
@@ -1478,6 +1502,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         try:
             await hass.async_add_executor_job(_wipe_tables)
+            if runtime_data.room_activity is not None:
+                # Events still buffered (or being written) predate the reset.
+                await runtime_data.room_activity.async_clear()
         except (StorageError, sqlite3.Error) as err:
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
         # Every phone is unpaired now; don't leave closing them to the reload.
@@ -1491,7 +1518,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.warning(
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
-            "audio config + speakers, Energy Saving data, and the registry "
+            "audio config + speakers, Energy Saving data, room activity log, "
+            "and the registry "
             "org layer (floors/rooms/tags/"
             "assignments/grouping). Re-seeding from HA on reload; printed "
             "codes rotated"
@@ -1566,6 +1594,8 @@ async def _async_stop_hub(
         await runtime_data.mdns.async_stop()
     if runtime_data.tls is not None:
         await runtime_data.tls.async_stop()
+    if runtime_data.room_activity is not None:
+        await runtime_data.room_activity.async_stop()
     await hass.async_add_executor_job(runtime_data.storage.close)
 
 

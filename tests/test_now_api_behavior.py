@@ -108,8 +108,17 @@ def _load_now_api():
     sys.modules[now_spec.name] = now_data
     now_spec.loader.exec_module(now_data)
 
-    # The real room ranking, over the stub filtering above.
+    # The real room ranking, over the stub filtering above, and the real
+    # room activity rules (Home Assistant-free).
     _module("casasmart.room_intel", package=True)
+    activity_spec = importlib.util.spec_from_file_location(
+        "casasmart.room_intel.activity",
+        ROOT / "custom_components" / "casasmart" / "room_intel" / "activity.py",
+    )
+    assert activity_spec and activity_spec.loader
+    activity = importlib.util.module_from_spec(activity_spec)
+    sys.modules[activity_spec.name] = activity
+    activity_spec.loader.exec_module(activity)
     ranking_spec = importlib.util.spec_from_file_location(
         "casasmart.room_intel.ranking",
         ROOT / "custom_components" / "casasmart" / "room_intel" / "ranking.py",
@@ -163,7 +172,7 @@ class _Services:
         self._fail_domains = set(fail_domains)
         self.calls = []
 
-    async def async_call(self, domain, action, data, blocking=True):
+    async def async_call(self, domain, action, data, blocking=True, context=None):
         self.calls.append((domain, action, tuple(data["entity_id"])))
         if domain in self._fail_domains:
             raise _HOME_ASSISTANT_ERROR("simulated service failure")
@@ -361,6 +370,32 @@ class RepeatedRoomOffTest(unittest.TestCase):
             entity_id: self.states.get(entity_id).state for entity_id in self.ENTITIES
         }
 
+    def test_every_call_carries_the_members_app_context(self) -> None:
+        # The room activity log credits the room's changes to the member.
+        tagged, contexts = [], []
+
+        def command_context(hass, source, member_id=None):
+            tagged.append((source, member_id))
+            return "context-1"
+
+        original = self.hass.services.async_call
+
+        async def call(domain, action, data, blocking=True, context=None):
+            contexts.append(context)
+            await original(domain, action, data, blocking, context)
+
+        self.hass.services.async_call = call
+        with patch.object(_API, "command_context", command_context):
+            result = self.command("turn_off", "off-member-a-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(tagged, [("app", "member-a")])
+        self.assertEqual(contexts, ["context-1"])  # one call: both lights
+        # The 48-tap recents are recorded exactly as before.
+        self.assertEqual(
+            [item["entity_id"] for item in self.engine.recents_for("member-a")],
+            ["light.b", "light.a"],
+        )
+
     def test_off_off_on_from_two_members_restores_everything(self) -> None:
         self.command("turn_off", "off-member-a-1", member="member-a")
         second = self.command("turn_off", "off-member-b-1", member="member-b")
@@ -420,7 +455,7 @@ class _EntityFailingServices(_Services):
         super().__init__(states)
         self.fail_on: set[tuple[str, str]] = set()
 
-    async def async_call(self, domain, action, data, blocking=True):
+    async def async_call(self, domain, action, data, blocking=True, context=None):
         self.calls.append((domain, action, tuple(data["entity_id"])))
         if (domain, action) in self.fail_on:
             raise _HOME_ASSISTANT_ERROR("simulated service failure")
@@ -710,9 +745,9 @@ class NowConfigSceneValidationTest(unittest.TestCase):
 
 
 class _SteppedServices(_Services):
-    async def async_call(self, domain, action, data, blocking=True):
+    async def async_call(self, domain, action, data, blocking=True, context=None):
         await asyncio.sleep(0)
-        await super().async_call(domain, action, data, blocking)
+        await super().async_call(domain, action, data, blocking, context)
         await asyncio.sleep(0)
 
 

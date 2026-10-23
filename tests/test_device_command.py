@@ -50,8 +50,9 @@ class CommandRecencyTests(unittest.IsolatedAsyncioTestCase):
             listeners.append(handler)
             return lambda: listeners.remove(handler)
 
-        async def _call(domain, service, data, *, blocking=False):
+        async def _call(domain, service, data, *, blocking=False, context=None):
             self.hass.services.calls.append((domain, service, data, blocking))
+            self.hass.services.contexts.append(context)
             for handler in list(listeners):
                 handler(types.SimpleNamespace(data={"entity_id": data["entity_id"]}))
 
@@ -107,6 +108,44 @@ class CommandRecencyTests(unittest.IsolatedAsyncioTestCase):
             [("light", "turn_off")],
         )
         self.assertEqual(self.recorded, [])
+
+    async def test_the_call_carries_the_members_app_context(self) -> None:
+        # The room activity log credits the change to the member: the view
+        # asks the recorder for a context and Home Assistant gets that one.
+        tagged = []
+        self.rt.room_activity = types.SimpleNamespace(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+        status, _body = await self._turn_off()
+        self.assertEqual(status, 200)
+        self.assertEqual(tagged, [("app", "mem-a")])
+        self.assertEqual(self.hass.services.contexts, ["context-1"])
+        # The 48-tap recents are recorded exactly as before.
+        self.assertEqual(self.recorded, [("mem-a", "light.lamp")])
+
+    async def test_a_failed_member_lookup_still_runs_the_command_untagged(self) -> None:
+        tagged = []
+        self.rt.room_activity = types.SimpleNamespace(
+            command_context=lambda source, member_id=None: (
+                tagged.append((source, member_id)) or "context-1"
+            )
+        )
+
+        def _unavailable(_device_id):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with mock.patch.object(self.rt.auth, "member_id_for", _unavailable):
+            status, body = await self._turn_off()
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(tagged, [("app", None)])
+        self.assertEqual(self.recorded, [])
+
+    async def test_without_a_recorder_home_assistant_makes_the_context(self) -> None:
+        status, _body = await self._turn_off()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.hass.services.contexts, [None])
 
 
 if __name__ == "__main__":

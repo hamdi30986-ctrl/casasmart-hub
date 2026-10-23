@@ -15,7 +15,7 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from aiohttp import web
@@ -51,8 +51,12 @@ from .registry import (
     RoomMoveDenied,
     UnknownItemError,
 )
-from .runtime_lookup import loaded_runtime_data
+from .room_intel.activity import SOURCE_SCENE
+from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
+
+if TYPE_CHECKING:
+    from homeassistant.core import Context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,14 +83,15 @@ def _scene_entity_ids(entities: Any) -> list[str]:
 
 
 async def async_execute_registry_scene(
-    hass: HomeAssistant, scene: dict[str, Any]
+    hass: HomeAssistant, scene: dict[str, Any], *, context: Context | None = None
 ) -> dict[str, Any]:
     """Run a scene's commands in order and report a result per entity.
 
     Each step is checked again as it runs: the entity must exist and be served,
     and its command passes the same whitelist as a single-device command. A
     failing or timed-out step is reported and the rest still run. Callers own
-    the scope and Energy Saving checks.
+    the scope and Energy Saving checks. Every call carries context: who ran
+    the scene, for the room activity log.
     """
     scene_id = scene["scene_id"]
     generated = scene.get("generated_room_v1", False)
@@ -173,6 +178,7 @@ async def async_execute_registry_scene(
                     service,
                     {**service_data, "entity_id": entity_id},
                     blocking=True,
+                    context=context,
                 ),
                 timeout=_SCENE_CALL_TIMEOUT,
             )
@@ -1148,7 +1154,17 @@ class CasaSmartSceneActivateView(_RegistryView):
                 HTTPStatus.CONFLICT,
             )
 
-        return self.json(await async_execute_registry_scene(self._hass, scene))
+        try:
+            member_id: str | None = await async_member_id(self._hass, claims)
+        except (StorageError, sqlite3.Error):
+            member_id = None
+        return self.json(
+            await async_execute_registry_scene(
+                self._hass,
+                scene,
+                context=command_context(self._hass, SOURCE_SCENE, member_id),
+            )
+        )
 
 
 class CasaSmartFavoritesView(_RegistryView):

@@ -124,6 +124,8 @@ class FakeBus:
 class FakeServices:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any], bool]] = []
+        # The context each call ran in, in call order (HA's context= keyword).
+        self.contexts: list[Any] = []
         self.handlers: dict[tuple[str, str], Any] = {}
 
     def has_service(self, domain, service):
@@ -132,8 +134,9 @@ class FakeServices:
     def async_register(self, domain, service, handler, *args, **kwargs):
         self.handlers[(domain, service)] = handler
 
-    async def async_call(self, domain, service, data, *, blocking=False):
+    async def async_call(self, domain, service, data, *, blocking=False, context=None):
         self.calls.append((domain, service, data, blocking))
+        self.contexts.append(context)
 
 
 class FakeStates:
@@ -204,6 +207,8 @@ class _Runtime:
         # None = relay push leg not running (mirrors CasaSmartRuntimeData's
         # default); the enroll view's device-paired push is skipped.
         self.push_dispatcher = None
+        # None = no room activity recorder: hub calls get no hub context.
+        self.room_activity = None
 
 
 class _FakeHAConfig:

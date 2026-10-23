@@ -79,7 +79,13 @@ def load_api():
             ]
         ),
     )
-    module("room_api_fixture.runtime_lookup", loaded_runtime_data=None)
+    module(
+        "room_api_fixture.runtime_lookup",
+        loaded_runtime_data=None,
+        command_context=lambda hass, source, member_id=None: None,
+    )
+    module("room_api_fixture.room_intel", __path__=[])
+    module("room_api_fixture.room_intel.activity", SOURCE_SCENE="scene")
     modules["room_api_fixture.registry"] = _REGISTRY
     modules["room_api_fixture.storage"] = storage_module
     path = Path(__file__).parents[1] / "custom_components/casasmart/registry_api.py"

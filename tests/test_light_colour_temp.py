@@ -101,7 +101,7 @@ class LightCommandTests(unittest.IsolatedAsyncioTestCase):
             listeners.append(handler)
             return lambda: listeners.remove(handler)
 
-        async def _call(domain, service, data, *, blocking=False):
+        async def _call(domain, service, data, *, blocking=False, context=None):
             # HA validates a light call against the service schema before
             # anything else; anything it rejects raises vol.Invalid here.
             if (domain, service) == ("light", "turn_on"):

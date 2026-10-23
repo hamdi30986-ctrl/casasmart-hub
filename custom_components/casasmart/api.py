@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from functools import partial
 from http import HTTPStatus
 from typing import Any
@@ -127,8 +128,10 @@ from .registry_api import (
     CasaSmartUserDeviceGangView,
     CasaSmartUserDeviceView,
 )
-from .runtime_lookup import loaded_runtime_data
+from .room_intel.activity import SOURCE_APP
+from .runtime_lookup import command_context, loaded_runtime_data
 from .settings_api import CasaSmartUserSettingsView
+from .storage import StorageError
 from .suggestion_api import (
     CasaSmartGeneratedSuggestionActionView,
     CasaSmartGeneratedSuggestionsView,
@@ -501,6 +504,14 @@ class CasaSmartCommandView(HomeAssistantView):
         except CommandError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
+        # The call carries the member's context, so the room activity log
+        # credits the change to them; a failed lookup doesn't stop the command.
+        try:
+            member_id: str | None = await async_member_id(self._hass, claims)
+        except (StorageError, sqlite3.Error):
+            member_id = None
+        context = command_context(self._hass, SOURCE_APP, member_id)
+
         # Listen before the call so a change during it isn't missed, then wait
         # up to 2 s for the new state to include in the reply.
         changed = asyncio.Event()
@@ -517,6 +528,7 @@ class CasaSmartCommandView(HomeAssistantView):
                 service,
                 {**service_data, "entity_id": entity_id},
                 blocking=True,
+                context=context,
             )
             try:
                 async with asyncio.timeout(2.0):
@@ -533,7 +545,8 @@ class CasaSmartCommandView(HomeAssistantView):
         now_data = getattr(loaded_runtime_data(self._hass), "now_data", None)
         if now_data is not None:
             try:
-                member_id = await async_member_id(self._hass, claims)
+                if member_id is None:
+                    member_id = await async_member_id(self._hass, claims)
                 await self._hass.async_add_executor_job(
                     now_data.record_successful_control, member_id, entity_id
                 )

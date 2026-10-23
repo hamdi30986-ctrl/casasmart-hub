@@ -35,7 +35,14 @@ _SYNC_STOPS = {
     "relay_registrar": "stop",
     "push_dispatcher": "async_stop",
 }
-_ASYNC_STOPS = ("energy_controller", "athan_scheduler", "audio_adapter", "mdns", "tls")
+_ASYNC_STOPS = (
+    "energy_controller",
+    "athan_scheduler",
+    "audio_adapter",
+    "mdns",
+    "tls",
+    "room_activity",
+)
 
 
 @unittest.skipIf(_ERR, f"CasaSmart unimportable: {_ERR}")
@@ -82,6 +89,8 @@ class UnloadEntryTests(unittest.IsolatedAsyncioTestCase):
         names = [c[0] for c in calls.mock_calls]
         self.assertEqual(names[0], "unload_platforms")
         self.assertEqual(names[-1], "storage.close")
+        # Buffered room activity is written before storage closes.
+        self.assertEqual(names[-2], "room_activity.async_stop")
         for name, method in _SYNC_STOPS.items():
             self.assertIn(f"{name}.{method}", names)
         for name in _ASYNC_STOPS:

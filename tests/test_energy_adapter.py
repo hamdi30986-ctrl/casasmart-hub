@@ -108,10 +108,12 @@ class _Bus:
 class _Services:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict, bool]] = []
+        self.contexts: list = []
         self.fail_entities: set[str] = set()
 
-    async def async_call(self, domain, service, data, blocking=False):
+    async def async_call(self, domain, service, data, blocking=False, context=None):
         self.calls.append((domain, service, dict(data), blocking))
+        self.contexts.append(context)
         if data["entity_id"] in self.fail_entities:
             raise RuntimeError("simulated service failure")
 
@@ -245,7 +247,9 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 coro.close()
             self.hass.pending.clear()
 
-    def make_adapter(self, states, rooms, groups=None, change_callback=None):
+    def make_adapter(
+        self, states, rooms, groups=None, change_callback=None, command_context=None
+    ):
         self.hass = _Hass(states)
         registry = _Registry(rooms, groups)
         adapter = EnergyAdapter(
@@ -256,6 +260,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             wall_clock=self.wall,
             monotonic_clock=self.monotonic,
             change_callback=change_callback,
+            command_context=command_context,
         )
         return adapter, registry
 
@@ -432,6 +437,38 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     # -- static Low / Medium ----------------------------------------------
+
+    async def test_every_command_runs_in_a_fresh_energy_saving_context(self):
+        # The room activity log files Energy Saving's changes as automation:
+        # each command gets a context from the factory the hub passes in.
+        states = [
+            _State("switch.plug", "on"),
+            _State("switch.kettle", "on"),
+            _sun(self.now, day=True),
+        ]
+        made = []
+        adapter, _ = self.make_adapter(
+            states,
+            {"switch.plug": "living", "switch.kettle": "living"},
+            command_context=lambda: made.append(len(made)) or f"context-{len(made)}",
+        )
+        self.activate(LEVEL_LOW, plug_offs=["switch.plug", "switch.kettle"])
+        await adapter.async_apply()
+        await self.drain()
+        self.assert_command("switch.plug", "turn_off")
+        self.assert_command("switch.kettle", "turn_off")
+        self.assertEqual(
+            self.hass.services.contexts,
+            [f"context-{i + 1}" for i in range(len(self.hass.services.calls))],
+        )
+
+    async def test_without_a_context_factory_home_assistant_makes_one(self):
+        states = [_State("switch.plug", "on"), _sun(self.now, day=True)]
+        adapter, _ = self.make_adapter(states, {"switch.plug": "living"})
+        self.activate(LEVEL_LOW, plug_offs=["switch.plug"])
+        await adapter.async_apply()
+        await self.drain()
+        self.assertEqual(self.hass.services.contexts, [None])
 
     async def test_low_applies_full_static_matrix_without_resurrection(self):
         states = [
@@ -1334,7 +1371,7 @@ class EnergyAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         record = self.hass.services.async_call
 
         async def deactivate_during_first_command(
-            domain, service, data, blocking=False
+            domain, service, data, blocking=False, context=None
         ):
             # The owner stops Energy Saving (what EnergyController does) while
             # the empty room's first turn_off is still in flight.

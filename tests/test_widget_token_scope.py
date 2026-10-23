@@ -237,8 +237,8 @@ class WidgetTokenKeepsItsDeviceSurfaceTests(_HubTestCase):
 
         record_call = self.hass.services.async_call
 
-        async def _call(domain, service, data, *, blocking=False):
-            await record_call(domain, service, data, blocking=blocking)
+        async def _call(domain, service, data, *, blocking=False, context=None):
+            await record_call(domain, service, data, blocking=blocking, context=context)
             for handler in list(listeners):
                 handler(types.SimpleNamespace(data={"entity_id": data["entity_id"]}))
 
