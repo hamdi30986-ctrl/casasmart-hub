@@ -175,13 +175,17 @@ class ActivityRecorder:
 
     async def async_stop(self) -> None:
         """Stop listening and write what is buffered. Safe to call twice."""
+        self._stop_listening()
+        await self.async_flush()
+
+    def _stop_listening(self) -> None:
+        """Take no more changes (idempotent)."""
         self._stopped = True
         while self._unsubs:
             self._unsubs.pop()()
         if self._registry_debounce is not None:
             self._registry_debounce.cancel()
             self._registry_debounce = None
-        await self.async_flush()
 
     @callback
     def _on_ha_started(self, _hass: HomeAssistant) -> None:
@@ -417,10 +421,18 @@ class ActivityRecorder:
 
     async def async_clear(self) -> None:
         """Delete every event and every last-on set, including any not written
-        yet (factory reset)."""
+        yet, and stop recording (factory reset).
+
+        The reload that follows a reset starts a new recorder. A change
+        before then is the old owner's (their app tap, their automation), so
+        this one takes no more: otherwise the unload's flush would write it
+        after the wipe.
+        """
+        self._stop_listening()
         async with self._flush_lock:
             self._buffer.clear()
             self.last_on.clear()
+            self._hub_contexts.discard_values(lambda _origin: True)
 
             def clear() -> None:
                 self._table.clear()
