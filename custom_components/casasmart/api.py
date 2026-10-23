@@ -106,6 +106,8 @@ from .history import (
 )
 from .now_api import (
     CasaSmartNowConfigView,
+    CasaSmartNowHabitsResetView,
+    CasaSmartNowHabitsView,
     CasaSmartNowView,
     CasaSmartRoomActivityCommandView,
     CasaSmartRoomActivityPolicyView,
@@ -241,6 +243,8 @@ def build_views(hass: HomeAssistant, hub_version: str) -> list[HomeAssistantView
         CasaSmartSuggestionActionView(hass),
         CasaSmartRoomActivityPolicyView(hass),
         CasaSmartRoomActivityCommandView(hass),
+        CasaSmartNowHabitsView(hass),
+        CasaSmartNowHabitsResetView(hass),
         CasaSmartUpdateStatusView(hass, get_or_create_checker(hass, hub_version)),
         CasaSmartUpdateInstallView(hass, get_or_create_checker(hass, hub_version)),
         CasaSmartAlarmStateView(hass),

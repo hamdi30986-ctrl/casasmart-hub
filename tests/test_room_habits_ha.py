@@ -22,7 +22,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
 try:
-    from casasmart.now_api import CasaSmartNowView
+    from casasmart.now_api import (
+        CasaSmartNowHabitsResetView,
+        CasaSmartNowHabitsView,
+        CasaSmartNowView,
+    )
     from casasmart.now_data import NowDataEngine
     from casasmart.room_intel.habits import local_day
     from casasmart.room_intel.learner import HabitLearner
@@ -226,6 +230,126 @@ class NowPageHabits(HabitHubCase):
             await self.room_activity(member_id=member)
         await self.room_activity(member_id="mem-a", query={"habits": "household"})
         self.assertEqual(self.runtime.room_habits.builds, 1)
+
+
+@unittest.skipIf(
+    IMPORT_ERROR is not None, f"Home Assistant unavailable: {IMPORT_ERROR}"
+)
+class HabitSettingsEndpoints(HabitHubCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        _, self.admin = H.session(self.runtime.auth, role="admin", member_id="mem-a")
+
+    async def call(self, method, headers=None, body=None, view=None):
+        view = view or CasaSmartNowHabitsView(self.hass)
+        request = H.FakeRequest(
+            headers=self.admin if headers is None else headers, body=body
+        )
+        return H.read_response(await getattr(view, method)(request))
+
+    async def reset(self, headers=None):
+        return await self.call(
+            "post", headers, view=CasaSmartNowHabitsResetView(self.hass)
+        )
+
+    async def test_the_admin_reads_the_settings_and_the_learning_status(self):
+        status, body = await self.call("get")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            body,
+            {
+                "learning": True,
+                "paused": False,
+                "status": "learning",
+                "weekend_days": [4, 5],
+                "self_scheduled_entity_ids": [],
+                "reset_at": None,
+                "observed_days": 56,
+                "warm_up_days": 14,
+            },
+        )
+
+    async def test_only_the_admin(self):
+        for role in ("sub-admin", "user"):
+            _, headers = H.session(self.runtime.auth, role=role)
+            with self.subTest(role=role):
+                self.assertEqual((await self.call("get", headers))[0], 403)
+                put = await self.call("put", headers, body={"learning": False})
+                self.assertEqual(put[0], 403)
+                self.assertEqual((await self.reset(headers))[0], 403)
+        self.assertEqual((await self.call("get", {}))[0], 401)
+        self.assertTrue(self.runtime.room_habits.settings.learning)
+
+    async def test_changing_the_settings(self):
+        status, body = await self.call(
+            "put",
+            body={
+                "weekend_days": [6, 5],
+                "self_scheduled_entity_ids": ["light.kitchen"],
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["weekend_days"], [5, 6])
+        self.assertEqual(body["self_scheduled_entity_ids"], ["light.kitchen"])
+        # Saved: what a restart would read.
+        self.assertEqual(
+            self.storage.table("now_habit_config")["global"]["weekend_days"], [5, 6]
+        )
+        # The kitchen's only activity was its own schedule: no presence there.
+        block = await self.room_activity(
+            member_id="mem-c", rooms=["room-kitchen"], role="user"
+        )
+        self.assertEqual(block["ranking"]["habits"]["status"], "warming_up")
+
+    async def test_bad_settings_are_a_400_and_change_nothing(self):
+        for body in (
+            {"learn": True},
+            {"learning": "no"},
+            {"weekend_days": [7]},
+            {"self_scheduled_entity_ids": ["light.not_a_hub_device"]},
+            {"self_scheduled_entity_ids": ["sensor.majlis_power"]},
+            ["learning"],
+        ):
+            with self.subTest(body=body):
+                status, answer = await self.call("put", body=body)
+                self.assertEqual(status, 400)
+                self.assertTrue(answer["message"])
+        self.assertEqual(len(self.storage.table("now_habit_config")), 0)
+
+    async def test_pause_keeps_the_habits_and_off_hides_them(self):
+        status, body = await self.call("put", body={"paused": True})
+        self.assertEqual(
+            (status, body["status"], body["paused"]), (200, "paused", True)
+        )
+        block = await self.room_activity(member_id="mem-b")
+        self.assertEqual(block["ranking"]["habits"]["status"], "paused")
+        self.assertIn("habit_now", json.dumps(block))
+        status, body = await self.call("put", body={"learning": False})
+        self.assertEqual((body["status"], body["observed_days"]), ("off", None))
+        self.assertEqual(len(self.storage.table("now_room_habits")), 0)
+        block = await self.room_activity(member_id="mem-b")
+        self.assertEqual(block["ranking"]["habits"]["status"], "off")
+        self.assertNotIn("habit_now", json.dumps(block))
+        status, body = await self.call("put", body={"learning": True, "paused": False})
+        self.assertEqual(body["status"], "learning")
+
+    async def test_reset_forgets_every_habit(self):
+        await self.room_activity(member_id="mem-b")
+        status, body = await self.reset()
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "warming_up")
+        self.assertEqual(body["observed_days"], 0)
+        self.assertIsNotNone(body["reset_at"])
+        block = await self.room_activity(member_id="mem-b")
+        self.assertEqual(block["ranking"]["habits"]["status"], "warming_up")
+        self.assertNotIn("habit_now", json.dumps(block))
+        # The log itself is kept.
+        self.assertGreater(self.storage.room_activity().count(), 0)
+
+    async def test_without_a_learner_it_is_a_503(self):
+        self.runtime.room_habits = None
+        self.assertEqual((await self.call("get"))[0], 503)
+        self.assertEqual((await self.reset())[0], 503)
 
 
 if __name__ == "__main__":

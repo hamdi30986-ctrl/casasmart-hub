@@ -28,6 +28,9 @@ ORBIT_CAPABILITIES: Final = (
     # Per-member camera access (none / rooms / all) on users, pairing codes
     # and every camera path; room ids are validated and pruned on delete.
     "member_camera_access_v1",
+    # Room habits: GET/PUT /now/habits, POST /now/habits/reset (admin), and
+    # GET /now?habits=household|personal.
+    "now_room_habits_v1",
 )
 
 # Features whose server-side enforcement is complete. admin_password_v1 and
@@ -40,6 +43,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
         "contextual_suggestions_v1",
         "generated_room_suggestions_v1",
         "member_camera_access_v1",
+        "now_room_habits_v1",
     }
 )
 

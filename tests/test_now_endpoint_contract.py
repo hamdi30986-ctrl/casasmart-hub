@@ -34,8 +34,16 @@ class NowEndpointContractTest(unittest.TestCase):
             "CasaSmartNowConfigView(hass)",
             "CasaSmartRoomActivityPolicyView(hass)",
             "CasaSmartRoomActivityCommandView(hass)",
+            "CasaSmartNowHabitsView(hass)",
+            "CasaSmartNowHabitsResetView(hass)",
         ):
             self.assertIn(view, api)
+        # Room habit learning is the admin's (users.manage).
+        for path in ("/api/{DOMAIN}/now/habits", "/api/{DOMAIN}/now/habits/reset"):
+            self.assertIn(path, source)
+        self.assertIn(
+            'authenticate_request(self._hass, request, "users.manage")', source
+        )
 
     def test_bulk_contract_uses_idempotency_and_hub_owned_restore_state(self) -> None:
         source = (ROOT / "custom_components" / "casasmart" / "now_api.py").read_text()

@@ -44,6 +44,14 @@ For the current hour and day class (workday, or weekend: Friday and Saturday unl
 
 Whose habits: `GET /api/casasmart/now?habits=household` (the shared tablet) ranks on the household's. Without the parameter, or with `habits=personal`, the caller's own app taps are blended over the household's: `λ·own + (1−λ)·household`, `λ = min(0.8, N/(N+10))`, N = dates the caller switched something on from the app in their rooms. Any other value is a 400.
 
+### Habit settings (admin)
+
+Capability `now_room_habits_v1`. All three need `users.manage` (admin only).
+
+- `GET /api/casasmart/now/habits` → `{"learning": true, "paused": false, "status": "learning", "weekend_days": [4, 5], "self_scheduled_entity_ids": [], "reset_at": null, "observed_days": 31, "warm_up_days": 14}`. `status` is `off`, `paused`, `warming_up`, `learning` or `unavailable`; `observed_days` counts the whole home's (null while learning is off); `reset_at` is ISO 8601 UTC or null.
+- `PUT /api/casasmart/now/habits` with any of: `learning` (bool; off shows no habits and keeps no learned model, and the days while off are never learned), `paused` (bool; keeps ranking on what was learned, and the paused days are never learned), `weekend_days` (weekdays, Monday = 0 … Sunday = 6; applies at once), `self_scheduled_entity_ids` (at most 256 devices the hub manages that run on their own schedule: their wall-switch events stop counting). Answers like GET. An unknown field or a bad value is a 400 and changes nothing.
+- `POST /api/casasmart/now/habits/reset` forgets every learned habit: nothing before the reset counts and learning starts over the next day, warm-up included. The activity log itself is kept. Answers like GET.
+
 ## Fields
 
 Each room gains, after its existing fields:

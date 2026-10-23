@@ -27,6 +27,9 @@ What changed in each version of CasaSmart Hub.
   the whole household's habits; each phone blends in its own person's app
   taps. Rooms you switched off yourself in the last 30 minutes come right
   after those, marked as yours.
+- Admins can turn room habit learning off, pause it, reset it, set the
+  weekend days (Friday and Saturday by default), and mark devices that run on
+  their own schedule so their timers don't look like habits.
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the

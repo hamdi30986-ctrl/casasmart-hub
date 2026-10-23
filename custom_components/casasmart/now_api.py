@@ -13,6 +13,9 @@
   a room's approved devices off, or back on from what the last off captured
   (409 nothing_to_restore when there is none). Idempotent per client key, one
   command per room at a time.
+- GET/PUT /api/casasmart/now/habits and POST /api/casasmart/now/habits/reset
+  (users.manage, admin only): room habit learning, which the all-off
+  ranking uses (room_intel.learner).
 """
 
 from __future__ import annotations
@@ -49,8 +52,17 @@ from .now_data import (
 )
 from .registry import RegistryEngine
 from .room_intel.activity import SOURCE_APP
-from .room_intel.habits import LAYER_HOUSEHOLD, LAYERS, STATUS_UNAVAILABLE
-from .room_intel.ranking import async_rank_rooms, ranking_summary
+from .room_intel.habits import (
+    LAYER_HOUSEHOLD,
+    LAYERS,
+    STATUS_UNAVAILABLE,
+    HabitSettingsError,
+)
+from .room_intel.ranking import (
+    async_counted_controls,
+    async_rank_rooms,
+    ranking_summary,
+)
 from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
 
@@ -537,6 +549,91 @@ class CasaSmartNowConfigView(_NowView):
         if not entity_id.startswith("binary_sensor."):
             return False
         return self._device_class(entity_id, state) in _CONTACT_DEVICE_CLASSES
+
+
+class CasaSmartNowHabitsView(_NowView):
+    """GET/PUT /api/casasmart/now/habits: room habit learning (admin only).
+
+    GET answers the settings and how far learning is: {learning, paused,
+    status, weekend_days, self_scheduled_entity_ids, reset_at,
+    observed_days, warm_up_days}. PUT changes any of learning, paused,
+    weekend_days (Monday = 0) and self_scheduled_entity_ids (devices the hub
+    manages whose wall-switch events are a schedule kept on the device), and
+    answers like GET.
+    """
+
+    url = f"/api/{DOMAIN}/now/habits"
+    name = f"api:{DOMAIN}:now:habits"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        return await self._answer()
+
+    async def put(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        learner, registry = self._learner(), self._registry()
+        if learner is None or registry is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        payload, error = await read_json_object(self, request)
+        if error is not None:
+            return error
+        try:
+            _, managed = await async_counted_controls(self._hass, registry)
+            await learner.async_update(payload, managed_ids=managed)
+        except HabitSettingsError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return await self._answer()
+
+    def _learner(self) -> Any:
+        return getattr(loaded_runtime_data(self._hass), "room_habits", None)
+
+    async def _answer(self) -> web.Response:
+        """The settings and learning status, over every room."""
+        learner, registry = self._learner(), self._registry()
+        if learner is None or registry is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            counted, _ = await async_counted_controls(self._hass, registry)
+            rooms = await self._hass.async_add_executor_job(registry.list_rooms)
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return self.json(
+            await learner.async_settings([room["room_id"] for room in rooms], counted)
+        )
+
+
+class CasaSmartNowHabitsResetView(CasaSmartNowHabitsView):
+    """POST /api/casasmart/now/habits/reset: forget every learned habit.
+
+    Learning starts over the next day (warm-up included); the activity log
+    itself is kept. Answers like GET /now/habits.
+    """
+
+    url = f"/api/{DOMAIN}/now/habits/reset"
+    name = f"api:{DOMAIN}:now:habits:reset"
+    # Inherited for the answer only: settings are read and changed on
+    # /now/habits, so this path answers GET and PUT with 405.
+    get = None
+    put = None
+
+    async def post(self, request: web.Request) -> web.Response:
+        _, error = authenticate_request(self._hass, request, "users.manage")
+        if error is not None:
+            return error
+        learner = self._learner()
+        if learner is None:
+            return self.json_message("Hub not ready", HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            await learner.async_reset()
+        except (StorageError, sqlite3.Error) as err:
+            return self._storage_failure(err)
+        return await self._answer()
 
 
 class CasaSmartRoomActivityPolicyView(_NowView):
