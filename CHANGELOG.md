@@ -28,6 +28,11 @@ What changed in each version of CasaSmart Hub.
   habits; each phone blends in its own person's app taps. Rooms you
   switched off yourself in the last 30 minutes come right after those,
   marked as yours.
+- Ramadan has habits of its own. The hub knows when Ramadan is from the
+  Umm al-Qura calendar, offline, and learns those days apart: during
+  Ramadan the rooms are ranked on Ramadan habits, and the day after it the
+  rest of the year's habits are back exactly as they were before it. Each
+  Ramadan is kept for the next one, so next year's starts from day one.
 - Admins can turn room habit learning off, pause it, reset it, set the
   weekend days (Friday and Saturday by default), and mark devices that run on
   their own schedule so their timers don't look like habits.

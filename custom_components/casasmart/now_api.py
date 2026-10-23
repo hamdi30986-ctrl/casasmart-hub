@@ -556,7 +556,9 @@ class CasaSmartNowHabitsView(_NowView):
 
     GET answers the settings and how far learning is: {learning, paused,
     status, weekend_days, self_scheduled_entity_ids, reset_at,
-    observed_days, warm_up_days}. PUT changes any of learning, paused,
+    observed_days, warm_up_days, profile, ramadan}; profile is today's
+    (regular or ramadan), ramadan the current or next Ramadan with the
+    years kept for it. PUT changes any of learning, paused,
     weekend_days (Monday = 0) and self_scheduled_entity_ids (devices the hub
     manages whose wall-switch events are a schedule kept on the device), and
     answers like GET.
@@ -611,8 +613,8 @@ class CasaSmartNowHabitsView(_NowView):
 class CasaSmartNowHabitsResetView(CasaSmartNowHabitsView):
     """POST /api/casasmart/now/habits/reset: forget every learned habit.
 
-    Learning starts over the next day (warm-up included); the activity log
-    itself is kept. Answers like GET /now/habits.
+    The kept Ramadans go too. Learning starts over the next day (warm-up
+    included); the activity log itself is kept. Answers like GET /now/habits.
     """
 
     url = f"/api/{DOMAIN}/now/habits/reset"

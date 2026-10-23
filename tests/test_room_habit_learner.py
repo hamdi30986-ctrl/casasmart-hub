@@ -106,6 +106,7 @@ class LearnerCase(unittest.IsolatedAsyncioTestCase):
             self.storage.table("now_room_habits"),
             self.storage.table("now_habit_config"),
             self.table,
+            ramadan_table=self.storage.table("now_ramadan_habits"),
             recorder=self.recorder,
             wall_clock=lambda: self.now,
         )
@@ -139,6 +140,9 @@ class LearnerCase(unittest.IsolatedAsyncioTestCase):
     def docs(self):
         return dict(self.storage.table("now_room_habits").items())
 
+    def kept(self):
+        return dict(self.storage.table("now_ramadan_habits").items())
+
 
 class BuildAndCacheTests(LearnerCase):
     async def test_the_log_is_read_once_a_day(self):
@@ -152,29 +156,36 @@ class BuildAndCacheTests(LearnerCase):
 
         with mock.patch.object(self.table, "habit_rows", counting):
             summary, reasons = await self.ask()
-            self.assertEqual(summary, {"layer": "household", "status": "learning"})
+            self.assertEqual(
+                summary,
+                {"layer": "household", "status": "learning", "profile": "regular"},
+            )
             self.assertEqual(reasons, {"majlis": "habit_now"})
-            # The window: the 56 dates before today, every human source.
+            sources = ("app", "scene", "ha_user", "wall_switch")
+            # Once: the last Ramadan (1447, 2026-02-18 to 03-19) is copied out
+            # of the log to be kept. Then the window: the 56 dates before
+            # today, every human source.
             self.assertEqual(
                 reads,
                 [
+                    {"first_day": 20502, "last_day": 20531, "sources": sources},
                     {
                         "first_day": TODAY - 56,
                         "last_day": TODAY - 1,
-                        "sources": ("app", "scene", "ha_user", "wall_switch"),
-                    }
+                        "sources": sources,
+                    },
                 ],
             )
             # The rest of the day is answered from memory...
             for hour in (21, 22, 23):
                 self.now = at(TODAY, hour, 10)
                 await self.ask()
-            self.assertEqual(len(reads), 1)
-            # ...and the next day reads the log again.
+            self.assertEqual(len(reads), 2)
+            # ...and the next day reads the window again, not the Ramadan.
             self.now = at(TODAY + 1, 7, 10)
             await self.ask()
-            self.assertEqual(len(reads), 2)
-            self.assertEqual(reads[1]["last_day"], TODAY)
+            self.assertEqual(len(reads), 3)
+            self.assertEqual(reads[2]["last_day"], TODAY)
             self.assertEqual(self.learner.builds, 2)
         # The buffered seconds were written before each read.
         self.assertEqual(self.recorder.flushes, 2)
@@ -281,6 +292,15 @@ class StatusTests(LearnerCase):
                 "reset_at": None,
                 "observed_days": 13,
                 "warm_up_days": 14,
+                "profile": "regular",
+                # The next Ramadan, and the last one kept for it (Ramadan
+                # 1447 ended 2026-03-19; nothing was logged then).
+                "ramadan": {
+                    "year": 1448,
+                    "first_day": "2027-02-08",
+                    "last_day": "2027-03-08",
+                    "kept_years": [1447],
+                },
             },
         )
         self.household_routine(workdays(1, before=workdays(13)[-1]))
@@ -364,8 +384,10 @@ class StatusTests(LearnerCase):
             {"paused": True}, managed_ids=(), now_t=self.now
         )
         await self.ask()
+        self.assertTrue(self.kept())
         await self.learner.async_clear()
         self.assertEqual(self.docs(), {})
+        self.assertEqual(self.kept(), {})
         self.assertEqual(dict(self.storage.table("now_habit_config").items()), {})
         self.assertEqual(self.learner.settings, habits.HabitSettings())
 
@@ -396,7 +418,9 @@ class LayerAndMemberTests(LearnerCase):
         self.assertEqual(household["layer"], "household")
         self.assertEqual(reasons, {"majlis": "habit_now", "bedroom": "habit_now"})
         mine, reasons = await self.ask("mem-a")
-        self.assertEqual(mine, {"layer": "personal", "status": "learning"})
+        self.assertEqual(
+            mine, {"layer": "personal", "status": "learning", "profile": "regular"}
+        )
         # A's own taps say bedroom; the majlis' wall-press habit is narrowed.
         self.assertEqual(reasons, {"bedroom": "habit_now"})
         # Someone with no app history gets the household's.
@@ -453,3 +477,243 @@ class LocalTimeTests(LearnerCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Ramadan 1448 by Umm al-Qura: 2027-02-08 (Monday) to 2027-03-08; 1 Shawwal
+# (Eid) 2027-03-09, a Tuesday. Ramadan 1447: 2026-02-18 to 2026-03-19.
+SHABAN_29 = 20856  # Sunday 2027-02-07
+RAMADAN_1 = 20857
+RAMADAN_LAST = 20885
+EID = 20886
+RAMADAN = range(RAMADAN_1, RAMADAN_LAST + 1)
+LAST_RAMADAN = range(20502, 20532)
+
+
+class RamadanTests(LearnerCase):
+    """Ramadan on the hub: detected by date, learned apart, the
+    regular model back after it, the Ramadan kept for next year."""
+
+    def regular_routine(self, days):
+        """The rest of the year: member A switches the majlis on from the
+        app at 20:05 on workdays; the kitchen gets a wall press at 07:05."""
+        events = []
+        for day in days:
+            if habits.weekday(day) not in (4, 5):
+                events.append(event(day, 20, source="app", member="mem-a"))
+            events.append(event(day, 7, room="kitchen", entity="light.kitchen"))
+        self.log(events)
+
+    def ramadan_routine(self, days, member="mem-a"):
+        """Ramadan: the majlis on at 21:05 (after Taraweeh) from the app, the
+        kitchen at 03:05 (suhoor) from the wall, every day."""
+        self.log(
+            [event(day, 21, source="app", member=member) for day in days]
+            + [event(day, 3, room="kitchen", entity="light.kitchen") for day in days]
+        )
+
+    async def ask_at(self, day, hour, member=None, learner=None):
+        self.now = at(day, hour, 30)
+        return await self.ask(member, learner=learner)
+
+    async def test_ramadan_has_its_own_habits_and_eid_brings_the_regular_ones_back(
+        self,
+    ):
+        self.regular_routine(range(SHABAN_29 - 70, SHABAN_29 + 1))
+        self.ramadan_routine(RAMADAN)
+        eve = {h: await self.ask_at(SHABAN_29, h) for h in (7, 20, 21, 3)}
+        self.assertEqual(eve[7], ({"layer": "household", "status": "learning",
+                                   "profile": "regular"}, {"kitchen": "habit_now"}))  # fmt: skip
+        self.assertEqual(eve[20][1], {"majlis": "habit_now"})
+        self.assertEqual(eve[3][1], {})
+        # A first Ramadan: it warms up on its own days, like any new start.
+        summary, reasons = await self.ask_at(RAMADAN_1 + 5, 21)
+        self.assertEqual(
+            (summary["profile"], summary["status"], reasons),
+            ("ramadan", "warming_up", {}),
+        )
+        for hour, expected in ((21, {"majlis": "habit_now"}),
+                               (3, {"kitchen": "habit_now"}), (7, {}), (20, {})):  # fmt: skip
+            with self.subTest(hour=hour):
+                summary, reasons = await self.ask_at(RAMADAN_1 + 20, hour)
+                self.assertEqual(summary["status"], "learning")
+                self.assertEqual(reasons, expected)
+        self.assertEqual(
+            sorted(self.docs()),
+            ["ramadan:household", "ramadan:member:mem-a"],
+        )
+        model = self.learner._model
+        self.assertEqual(set(model.household["majlis"].seen), set(RAMADAN[:20]))
+        # 1 Shawwal: the regular model as it was on the eve, Ramadan unseen.
+        for hour in (7, 20, 21, 3):
+            with self.subTest(hour=hour):
+                self.assertEqual(await self.ask_at(EID, hour), eve[hour])
+        model = self.learner._model
+        self.assertEqual(model.ages[SHABAN_29], 1)
+        self.assertFalse(set(model.household["kitchen"].seen) & set(RAMADAN))
+        self.assertEqual(
+            sorted(self.docs()), ["regular:household", "regular:member:mem-a"]
+        )
+        # A phone: member A's own Ramadan taps, blended (personal layer).
+        summary, reasons = await self.ask_at(RAMADAN_1 + 20, 21, member="mem-a")
+        self.assertEqual(
+            (summary["layer"], summary["profile"], reasons),
+            ("personal", "ramadan", {"majlis": "habit_now"}),
+        )
+
+    async def test_a_finished_ramadan_is_kept_and_answers_next_year(self):
+        self.ramadan_routine(LAST_RAMADAN)
+        await self.ask()  # 2026-10-22: Ramadan 1447 ended in March
+        kept = self.kept()
+        self.assertEqual(list(kept), ["1447"])
+        copy = kept["1447"]
+        self.assertEqual(
+            {k: copy[k] for k in ("v", "year", "first_day", "last_day")},
+            {"v": 1, "year": 1447, "first_day": 20502, "last_day": 20531},
+        )
+        self.assertEqual(len(copy["rows"]), 60)  # two devices a day, 30 days
+        self.assertEqual(
+            copy["rows"][0][:5], ["kitchen", "light.kitchen", "wall_switch", None, 20502]
+        )  # fmt: skip
+        # The log loses them (its row cap, or its 400 days)...
+        self.table.prune(before_t=at(LAST_RAMADAN[-1] + 1, 0))
+        self.assertEqual(
+            self.table.habit_rows(first_day=0, last_day=TODAY, sources=["app"]), []
+        )
+        # ...and 1 Ramadan next year still knows Ramadan, from the first day.
+        for learner in (self.learner, await self.make_learner()):
+            summary, reasons = await self.ask_at(RAMADAN_1, 21, learner=learner)
+            self.assertEqual(
+                (summary["profile"], summary["status"], reasons),
+                ("ramadan", "learning", {"majlis": "habit_now"}),
+            )
+            _, reasons = await self.ask_at(RAMADAN_1, 3, learner=learner)
+            self.assertEqual(reasons, {"kitchen": "habit_now"})
+        body = await self.learner.async_settings(ROOMS, COUNTED, self.now)
+        self.assertEqual(
+            (body["profile"], body["observed_days"], body["ramadan"]),
+            ("ramadan", 30, {"year": 1448, "first_day": "2027-02-08",
+                              "last_day": "2027-03-08", "kept_years": [1447]}),
+        )  # fmt: skip
+        # Copied once: a second year's days don't rewrite it.
+        self.assertEqual(self.kept()["1447"], copy)
+
+    async def test_a_restart_in_ramadan_reuses_the_saved_model(self):
+        self.ramadan_routine(RAMADAN)
+        first = await self.ask_at(RAMADAN_1 + 20, 21)
+        self.assertEqual(first[1], {"majlis": "habit_now"})
+        restarted = await self.make_learner()
+        self.assertEqual(
+            await self.ask_at(RAMADAN_1 + 20, 21, learner=restarted), first
+        )
+        self.assertEqual((restarted.builds, restarted.loads), (0, 1))
+
+    async def test_the_hub_off_across_the_end_of_ramadan(self):
+        self.regular_routine(range(SHABAN_29 - 70, SHABAN_29 + 1))
+        eve = await self.ask_at(SHABAN_29, 20)
+        # Last seen on day 27; back two days after Eid.
+        self.ramadan_routine(RAMADAN[:27])
+        await self.ask_at(RAMADAN_1 + 26, 21)
+        self.assertEqual(list(self.kept()), ["1447"])
+        restarted = await self.make_learner()
+        self.assertEqual(await self.ask_at(EID + 2, 20, learner=restarted), eve)
+        copy = self.kept()["1448"]
+        self.assertEqual(
+            {row[4] for row in copy["rows"]}, set(RAMADAN[:27])
+        )  # fmt: skip
+
+    async def test_first_installed_during_ramadan(self):
+        # The log starts on day 10 of Ramadan 1448: nothing before.
+        self.ramadan_routine(RAMADAN[9:])
+        self.regular_routine(range(EID, EID + 20))
+        statuses = {}
+        for n in (15, 22, 23):
+            summary, _ = await self.ask_at(RAMADAN_1 + n, 21)
+            statuses[n + 1] = summary["status"]
+        # Days 10 to 23 are 14 Ramadan days: habits from the 24th.
+        self.assertEqual(statuses, {16: "warming_up", 23: "warming_up", 24: "learning"})
+        # After it, the regular year starts from nothing: Ramadan didn't
+        # count towards it.
+        summary, reasons = await self.ask_at(EID + 10, 20)
+        self.assertEqual((summary["status"], reasons), ("warming_up", {}))
+        self.assertEqual(
+            min(row[4] for row in self.kept()["1448"]["rows"]), RAMADAN[9]
+        )  # fmt: skip
+
+    async def test_pause_learning_off_and_reset(self):
+        self.ramadan_routine(RAMADAN)
+        # Paused from day 5 to day 7 of Ramadan.
+        await self.learner.async_update(
+            {"paused": True}, managed_ids=(), now_t=at(RAMADAN[4], 10)
+        )
+        await self.learner.async_update(
+            {"paused": False}, managed_ids=(), now_t=at(RAMADAN[6], 10)
+        )
+        await self.ask_at(EID, 20)
+        days = {row[4] for row in self.kept()["1448"]["rows"]}
+        self.assertEqual(set(RAMADAN) - days, set(RAMADAN[4:7]))
+        # Learning off keeps the kept Ramadans, as it keeps the log.
+        await self.learner.async_update(
+            {"learning": False}, managed_ids=(), now_t=self.now
+        )
+        self.assertEqual(self.docs(), {})
+        self.assertIn("1448", self.kept())
+        # A reset forgets them with everything else.
+        await self.learner.async_reset(now_t=self.now)
+        self.assertEqual(self.kept(), {})
+
+    async def test_a_departing_member_leaves_nothing_in_the_kept_ramadans(self):
+        self.ramadan_routine(LAST_RAMADAN, member="mem-a")
+        self.log([event(day, 22, room="bedroom", entity="light.bedroom",
+                        source="scene", member="mem-a") for day in LAST_RAMADAN[:5]]
+                 + [event(day, 22, room="bedroom", entity="light.bedroom",
+                          source="app", member="mem-b") for day in LAST_RAMADAN])  # fmt: skip
+        await self.ask()
+        rows = self.kept()["1447"]["rows"]
+        self.assertEqual({row[3] for row in rows}, {None, "mem-a", "mem-b"})
+        # Leave path: the recorder deletes the rows, then the learner forgets.
+        self.table.delete_member("mem-a")
+        await self.learner.async_forget_member("mem-a")
+        rows = self.kept()["1447"]["rows"]
+        self.assertEqual({row[3] for row in rows}, {None, "mem-b"})
+        self.assertEqual(len(rows), 60)  # the wall presses and B's taps stay
+        _, reasons = await self.ask_at(RAMADAN_1, 21)
+        self.assertNotIn("majlis", reasons)  # the majlis was A's
+        _, reasons = await self.ask_at(RAMADAN_1, 22)
+        self.assertEqual(reasons, {"bedroom": "habit_now"})
+        self.assertNotIn("ramadan:member:mem-a", self.docs())
+
+    async def test_copies_no_window_reaches_are_deleted(self):
+        table = self.storage.table("now_ramadan_habits")
+        for year, first, last in ((1445, 19793, 19822), (1446, 20148, 20176)):
+            table[str(year)] = {"v": 1, "year": year, "first_day": first,
+                                "last_day": last, "rows": []}  # fmt: skip
+        await self.ask()
+        # Ramadan 1448's window reaches back to 1446, not 1445. 1447 is
+        # copied from the log; 1446 ended over 400 days ago, so it is only
+        # kept if it already was.
+        self.assertEqual(sorted(self.kept()), ["1446", "1447"])
+        await self.ask_at(EID + 1, 20)
+        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+        self.storage.table("now_ramadan_habits").clear()
+        await self.ask_at(EID + 2, 20)
+        # 1447 ended 2026-03-19, within 400 days of 2027-03-11: copied again
+        # from the log.
+        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+        # A clock gone back years (a board without a clock, before NTP)
+        # deletes nothing newer; a key that isn't a year goes.
+        self.storage.table("now_ramadan_habits")["junk"] = {}
+        await self.ask_at(17000, 20)  # 2016
+        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+
+    async def test_an_unreadable_copy_is_ignored(self):
+        self.ramadan_routine(LAST_RAMADAN)
+        await self.ask()
+        table = self.storage.table("now_ramadan_habits")
+        table["1447"] = {**table["1447"], "rows": [["majlis", "light.majlis"]]}
+        with self.assertLogs(learner_module.__name__, "DEBUG") as logs:
+            summary, reasons = await self.ask_at(RAMADAN_1, 21)
+        self.assertEqual((summary["status"], reasons), ("warming_up", {}))
+        self.assertIn("kept Ramadan 1447 unreadable", "\n".join(logs.output))
+        # A member leaving drops such a copy rather than keep it.
+        await self.learner.async_forget_member("mem-a")
+        self.assertEqual(self.kept()["1447"]["rows"], [])

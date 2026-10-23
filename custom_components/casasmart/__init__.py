@@ -510,6 +510,7 @@ async def _async_start_hub(
         runtime_data.storage.table("now_room_habits"),
         runtime_data.storage.table("now_habit_config"),
         runtime_data.storage.room_activity(),
+        ramadan_table=runtime_data.storage.table("now_ramadan_habits"),
         recorder=room_activity,
     )
     entry.runtime_data.room_habits = room_habits

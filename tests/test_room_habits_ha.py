@@ -30,7 +30,8 @@ try:
         CasaSmartNowView,
     )
     from casasmart.now_data import NowDataEngine
-    from casasmart.room_intel.habits import local_day
+    from casasmart.room_intel.habits import local_day, profile_of, profile_window
+    from casasmart.room_intel.hijri import next_ramadan, ramadan_of, ramadans_before
     from casasmart.room_intel.learner import HabitLearner
     from casasmart.room_intel.recorder import ActivityRecorder
     from homeassistant.helpers import entity_registry as er
@@ -40,6 +41,41 @@ except Exception as err:
     IMPORT_ERROR = err
 
 RIYADH = 180
+# These tests run on today's real date: Ramadan or not, the history is laid
+# on today's profile's dates.
+PROFILE = (
+    None if IMPORT_ERROR else profile_of(int((time.time() + RIYADH * 60) // 86400))
+)
+
+
+def kept_years(today):
+    """The finished Ramadans the log's 400 days still reach, of those the
+    next Ramadan's window reaches."""
+    upcoming = next_ramadan(today)
+    needed = {ramadan_of(day).year for day in profile_window(upcoming.first, "ramadan")}
+    return sorted(
+        month.year
+        for month in ramadans_before(today)
+        if today - 400 <= month.last < today and month.year in needed
+    )
+
+
+def observed_days(today):
+    """The window's dates the hub reads: a finished Ramadan's only when it
+    was kept."""
+    return sum(
+        1
+        for day in profile_window(today, PROFILE)
+        if (month := ramadan_of(day)) is None
+        or month.last >= today
+        or month.year in kept_years(today)
+    )
+
+
+def iso_day(day):
+    return time.strftime("%Y-%m-%d", time.gmtime(day * 86400))
+
+
 ROOMS = {
     "room-majlis": {"name": "Majlis", "floor_id": None, "icon": None, "sort_order": 0},
     "room-kitchen": {"name": "Kitchen", "floor_id": None, "icon": None, "sort_order": 1},
@@ -97,6 +133,7 @@ class HabitHubCase(unittest.IsolatedAsyncioTestCase):
             storage.table("now_room_habits"),
             storage.table("now_habit_config"),
             storage.room_activity(),
+            ramadan_table=storage.table("now_ramadan_habits"),
             recorder=self.runtime.room_activity,
         )
         await self.runtime.room_habits.async_start()
@@ -111,7 +148,9 @@ class HabitHubCase(unittest.IsolatedAsyncioTestCase):
         today = local_day(now, RIYADH)
         hour = int((now + RIYADH * 60) // 3600) % 24
         events = []
-        for day in range(today - 56, today):
+        # Today's profile's dates (in Ramadan, the Ramadans'), so the test
+        # means the same whenever it runs.
+        for day in profile_window(today, profile_of(today)):
             for h in (hour - 1, hour, hour + 1):
                 t = day * 86400 + (h % 24) * 3600 + 600 - RIYADH * 60
                 events.append(self.event("room-majlis", "light.majlis", t, "ha_user"))
@@ -163,7 +202,8 @@ class NowPageHabits(HabitHubCase):
             member_id="mem-a", query={"habits": "household"}
         )
         self.assertEqual(
-            block["ranking"]["habits"], {"layer": "household", "status": "learning"}
+            block["ranking"]["habits"],
+            {"layer": "household", "status": "learning", "profile": PROFILE},
         )
         self.assertEqual(
             self.reasons(block),
@@ -181,7 +221,8 @@ class NowPageHabits(HabitHubCase):
         # drops back for them.
         block = await self.room_activity(member_id="mem-a")
         self.assertEqual(
-            block["ranking"]["habits"], {"layer": "personal", "status": "learning"}
+            block["ranking"]["habits"],
+            {"layer": "personal", "status": "learning", "profile": PROFILE},
         )
         self.assertEqual(
             self.reasons(block),
@@ -223,7 +264,8 @@ class NowPageHabits(HabitHubCase):
         await self.runtime.room_habits.async_update({"learning": False}, managed_ids=())
         block = await self.room_activity(member_id="mem-b")
         self.assertEqual(
-            block["ranking"]["habits"], {"layer": "personal", "status": "off"}
+            block["ranking"]["habits"],
+            {"layer": "personal", "status": "off", "profile": PROFILE},
         )
         self.assertNotIn("habit_now", json.dumps(block))
 
@@ -257,6 +299,8 @@ class HabitSettingsEndpoints(HabitHubCase):
     async def test_the_admin_reads_the_settings_and_the_learning_status(self):
         status, body = await self.call("get")
         self.assertEqual(status, 200)
+        today = local_day(time.time(), RIYADH)
+        month = next_ramadan(today)
         self.assertEqual(
             body,
             {
@@ -266,8 +310,15 @@ class HabitSettingsEndpoints(HabitHubCase):
                 "weekend_days": [4, 5],
                 "self_scheduled_entity_ids": [],
                 "reset_at": None,
-                "observed_days": 56,
+                "observed_days": observed_days(today),
                 "warm_up_days": 14,
+                "profile": PROFILE,
+                "ramadan": {
+                    "year": month.year,
+                    "first_day": iso_day(month.first),
+                    "last_day": iso_day(month.last),
+                    "kept_years": kept_years(today),
+                },
             },
         )
 
@@ -363,12 +414,24 @@ class MemberLeaves(HabitHubCase):
         H.session(self.runtime.auth, role="admin")
         _, headers = H.session(self.runtime.auth, role="user", member_id="mem-a")
         self.runtime.now_data.record_successful_control("mem-a", "light.bedroom")
+        # Last Ramadan, A switched the bedroom on from the app every night.
+        now = time.time()
+        today = local_day(now, RIYADH)
+        last = next(m for m in ramadans_before(today) if m.last < today)
+        self.storage.room_activity().append_many(
+            self.event("room-bedroom", "light.bedroom", day * 86400 + 18 * 3600,
+                       "app", "mem-a")
+            for day in range(last.first, last.last + 1)
+        )  # fmt: skip
         # Learned: A's own layer, and the household's bedroom habit is A's.
         block = await self.room_activity(member_id="mem-b")
         self.assertIn(("room-bedroom", "habit_now"), self.reasons(block))
         self.assertIn(
-            "regular:member:mem-a", dict(self.storage.table("now_room_habits").items())
+            f"{PROFILE}:member:mem-a",
+            dict(self.storage.table("now_room_habits").items()),
         )
+        kept = self.storage.table("now_ramadan_habits")
+        self.assertIn("mem-a", json.dumps(dict(kept.items())))
         status, _ = H.read_response(
             await CasaSmartUnpairSelfView(self.hass).post(
                 H.FakeRequest(headers=headers)
@@ -385,9 +448,12 @@ class MemberLeaves(HabitHubCase):
             ["room-majlis"],
         )
         docs = dict(self.storage.table("now_room_habits").items())
-        self.assertEqual(sorted(docs), ["regular:household"])
+        self.assertEqual(sorted(docs), [f"{PROFILE}:household"])
         self.assertNotIn("mem-a", json.dumps(docs))
-        self.assertNotIn("room-bedroom", docs["regular:household"]["layer"])
+        self.assertNotIn("room-bedroom", docs[f"{PROFILE}:household"]["layer"])
+        # And from the kept Ramadans.
+        self.assertTrue(dict(kept.items()))
+        self.assertNotIn("mem-a", json.dumps(dict(kept.items())))
 
 
 if __name__ == "__main__":
