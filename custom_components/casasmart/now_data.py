@@ -2,10 +2,11 @@
 
 NowDataEngine keeps, each in its own table: each member's recently
 controlled devices (recorded after a command succeeds), each room's activity
-policy, the Now configuration, recent room-command answers for idempotent
-retries, each room's restore set (what its last off switched off) and each
-room's start profile (the lights and fans an installer chose for one tap
-"on" when nothing else is known). The functions decide which devices may join
+policy (a room without one takes part with its lights and fans), the Now
+configuration, recent room-command answers for idempotent retries, each
+room's restore set (what its last off switched off) and each room's start
+profile (the lights and fans an installer chose for one tap "on" when
+nothing else is known). The functions decide which devices may join
 a room command. Storage methods are synchronous; now_api runs them in the
 executor.
 """
@@ -32,6 +33,8 @@ _ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
 # A switch without a device class could be anything, so only switches with
 # device class "switch" may join a room command.
 _SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
+# What a room without a stored policy switches (is_default_room_device).
+_DEFAULT_ROOM_DOMAINS = frozenset({"light", "fan"})
 
 
 class NowDataError(Exception):
@@ -84,6 +87,20 @@ def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) ->
     return entity_id in frozenset(eligible_entity_ids) and is_room_activity_candidate(
         state
     )
+
+
+def is_default_room_device(state: Any) -> bool:
+    """True for a device a room without a stored policy switches: a light or a
+    fan, not left out of room activity.
+
+    As in Apple Home and Google Home, a room's lights act together with no
+    setup. Never a plug, outlet, heater, AC, cover or TV. The caller also
+    checks the device is imported into the registry, served and in the room.
+    """
+    entity_id = _state_value(state, "entity_id", "")
+    if _state_attributes(state).get("casasmart_room_activity_exclude") is True:
+        return False
+    return entity_id.split(".", 1)[0] in _DEFAULT_ROOM_DOMAINS
 
 
 def summarize_openings(
@@ -224,10 +241,16 @@ class NowDataEngine:
         return {"room_id": room_id, **policy}
 
     def room_policy(self, room_id: str) -> dict[str, Any]:
-        """The room's policy; a room without a valid one does not take part."""
+        """The room's policy: {participates, eligible_entity_ids, default}.
+
+        A room without a valid stored policy takes part with its default
+        devices (default: True, eligible_entity_ids empty): the caller derives
+        them with is_default_room_device. A stored policy always wins, so an
+        admin can take a room out (participates false) or pick its devices.
+        """
         record = self._policies.get(room_id)
         if not isinstance(record, dict):
-            record = {}
+            return {"participates": True, "eligible_entity_ids": [], "default": True}
         entity_ids = record.get("eligible_entity_ids")
         return {
             "participates": bool(record.get("participates") is True),
@@ -236,6 +259,7 @@ class NowDataEngine:
             ]
             if isinstance(entity_ids, list)
             else [],
+            "default": False,
         }
 
     def room_participates(self, room_id: str) -> bool:

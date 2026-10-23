@@ -3,6 +3,12 @@
 What changed in each version of CasaSmart Hub.
 
 ## [Unreleased]
+- Every room's lights and fans now work together from the start, as in
+  Apple Home and Google Home: room off switches them off and one tap turns
+  them back on, with no setup. Before, a room did nothing until an admin
+  set it up, which no app could do. Plugs, heaters, ACs, covers and TVs are
+  never switched this way. An admin can still take a room out or pick its
+  devices.
 - One tap on a room that is off now turns on the lights and fans that were
   on last time, however the room was switched off: at the wall, from Home
   Assistant, by an automation or from the app. Never plugs, relays,

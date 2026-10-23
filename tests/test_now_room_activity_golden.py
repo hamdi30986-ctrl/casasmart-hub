@@ -23,6 +23,12 @@ restore_pending_count the number of devices it would turn on. Here: rooms
 without a policy say room_activity_disabled; a room with a fresh capture
 restores it; a policy room with nothing saved opens the room. This hub has
 no recorder, so no last-on sets.
+
+Room policies then became opt-out: a room without a stored policy takes part in
+room commands with its imported lights and fans, so its tap opens the room
+only because nothing is saved (not room_activity_disabled), and in a home
+with a stored policy it is listed with the participating rooms.
+configured_room_count still counts only stored policies.
 """
 
 from __future__ import annotations
@@ -92,8 +98,8 @@ USER_DEVICES = {
 }
 
 
-# rank.one_tap of a room that doesn't take part in room commands, and of one
-# that does but has nothing saved.
+# rank.one_tap of a room an admin took out of room commands, and of one that
+# takes part (by a stored policy or by default) but has nothing saved.
 DISABLED = {"action": "open_room", "reason": "room_activity_disabled"}
 NOTHING_SAVED = {"action": "open_room", "reason": "nothing_saved"}
 
@@ -115,7 +121,7 @@ def room(
     restore_pending_count=0,
     *,
     filler=False,
-    one_tap=DISABLED,
+    one_tap=NOTHING_SAVED,
 ):
     """A room as the Now page sends it (this fixture has no AC and no meter)."""
     return {
@@ -286,7 +292,10 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             await self.room_activity(rooms=["room-c", "room-e"], role="user"),
             json.dumps(
                 {
+                    # The Anteroom has no stored policy: it takes part with
+                    # its imported light and fan, so it is listed.
                     "rooms": [
+                        room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
                         room(
                             "room-c",
                             0,
@@ -294,17 +303,30 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
                             1,
                             filler=True,
                             one_tap=restores(1),
-                        )
+                        ),
                     ],
                     "layout": {
                         "featured_room_id": None,
-                        "cards": ["room-c"],
+                        "cards": ["room-e", "room-c"],
                         "view_all_count": 0,
                     },
                     "configured_room_count": 1,
-                    "ranking": RANKING_ALL_OFF,
+                    "ranking": RANKING,
                 }
             ),
+        )
+
+    async def test_a_room_taken_out_of_room_commands(self):
+        self.now_data.set_room_policy("room-e", False, [])
+        rooms = json.loads(await self.room_activity())["rooms"]
+        self.assertEqual(
+            {r["room_id"]: r["rank"]["one_tap"] for r in rooms},
+            {
+                "room-e": DISABLED,
+                "room-b": NOTHING_SAVED,
+                "room-a": NOTHING_SAVED,
+                "room-c": NOTHING_SAVED,
+            },
         )
 
     async def test_more_than_four_rooms_feature_the_first(self):

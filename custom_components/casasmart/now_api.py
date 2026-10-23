@@ -9,6 +9,7 @@
   shows. The hub never picks sensors by itself.
 - PUT /api/casasmart/now/rooms/{room_id}/activity-policy (registry.manage):
   whether a room takes part in room commands, and which devices they switch.
+  A room without one takes part with its lights and fans.
 - GET/PUT/DELETE /api/casasmart/now/rooms/{room_id}/start-profile
   (registry.manage): the lights and fans one tap "on" turns on when nothing
   better is known.
@@ -29,6 +30,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections.abc import Container
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -52,6 +54,7 @@ from .now_data import (
     MAX_START_PROFILE,
     NowDataEngine,
     NowDataError,
+    is_default_room_device,
     is_room_activity_candidate,
     is_room_activity_eligible,
     room_activity_layout,
@@ -77,6 +80,7 @@ from .room_intel.one_tap import (
 from .room_intel.ranking import (
     async_counted_controls,
     async_rank_rooms,
+    imported_controls,
     ranking_summary,
 )
 from .runtime_lookup import command_context, loaded_runtime_data
@@ -130,25 +134,41 @@ def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
     return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
 
 
+def _approved(state: Any, policy: dict[str, Any], imported: Container[str]) -> bool:
+    """True when the room's policy lets room commands switch this device.
+
+    A stored policy approves the candidates on its list. A room without one
+    takes part with its default devices: its lights and fans imported into
+    the registry (now_data.is_default_room_device). The caller checks the
+    device is in the room and served.
+    """
+    if policy["default"]:
+        return state.entity_id in imported and is_default_room_device(state)
+    return is_room_activity_eligible(state, policy["eligible_entity_ids"])
+
+
 def _one_tap_devices(
-    hass: HomeAssistant, approved: dict[str, list[str]]
+    hass: HomeAssistant,
+    policies: dict[str, dict[str, Any]],
+    imported: Container[str],
 ) -> dict[str, dict[str, str]]:
     """Each room's devices one tap "on" may switch, by entity id, with their state.
 
-    approved maps each room to the devices its policy approves. A device
-    counts in its room when it is approved there, a room-activity candidate,
-    served, and a light or fan (room_intel.one_tap.ON_DOMAINS). One scan.
+    policies are the rooms that take part in room commands, with their
+    policy. A device counts in its room when the policy approves it
+    (_approved), it is served, and it is a light or fan
+    (room_intel.one_tap.ON_DOMAINS). imported are the registry's imported
+    controls. One scan.
     """
-    devices: dict[str, dict[str, str]] = {room_id: {} for room_id in approved}
+    devices: dict[str, dict[str, str]] = {room_id: {} for room_id in policies}
     for state in hass.states.async_all():
         entity_id = state.entity_id
         if not is_on_domain(entity_id):
             continue
         room_id = area_id_of(hass, entity_id)
         if (
-            room_id in approved
-            and entity_id in approved[room_id]
-            and is_room_activity_candidate(state)
+            room_id in policies
+            and _approved(state, policies[room_id], imported)
             and is_served(hass, entity_id)
         ):
             devices[room_id][entity_id] = state.state
@@ -319,8 +339,9 @@ class CasaSmartNowView(_NowView):
         # commands (the room command's own plan), so the apps show the ON
         # button only when it turns something on. restore_pending_count is
         # how many devices it would turn on, for apps that only read that.
+        # A room without a stored policy takes part with its lights and fans.
         approved = {
-            room["room_id"]: policies[room["room_id"]]["eligible_entity_ids"]
+            room["room_id"]: policies[room["room_id"]]
             for room in ranked
             if policies.get(room["room_id"], {}).get("participates", False)
         }
@@ -335,7 +356,9 @@ class CasaSmartNowView(_NowView):
             }
 
         one_tap_sources = await self._hass.async_add_executor_job(read_one_tap_sources)
-        devices_by_room = _one_tap_devices(self._hass, approved)
+        devices_by_room = _one_tap_devices(
+            self._hass, approved, imported_controls(devices)
+        )
         now_t = time.time()
         active_rooms = []
         for room in ranked:
@@ -415,10 +438,13 @@ class CasaSmartNowView(_NowView):
                 "room_activity": {
                     "rooms": active_rooms,
                     "layout": room_activity_layout(active_rooms),
+                    # Rooms an admin's stored policy makes take part (rooms
+                    # without one take part too, but aren't configured).
                     "configured_room_count": sum(
                         1
                         for room_id in room_ids
                         if policies.get(room_id, {}).get("participates", False)
+                        and not policies[room_id]["default"]
                     ),
                     "ranking": ranking_summary(
                         active_rooms,
@@ -1030,14 +1056,26 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         anything is switched. The calls carry context (the member's, for the
         room activity log).
         """
-        policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
-        eligible_entity_ids = policy["eligible_entity_ids"]
+        registry = self._registry()
+
+        def read_policy() -> tuple[dict[str, Any], dict[str, str | None]]:
+            policy = now_data.room_policy(room_id)
+            # A room without a stored policy switches its imported lights
+            # and fans.
+            imported = (
+                imported_controls(registry.list_user_devices())
+                if policy["default"] and registry is not None
+                else {}
+            )
+            return policy, imported
+
+        policy, imported = await self._hass.async_add_executor_job(read_policy)
         eligible = {
             state.entity_id: state
             for state in self._hass.states.async_all()
             if area_id_of(self._hass, state.entity_id) == room_id
             and is_served(self._hass, state.entity_id)
-            and is_room_activity_eligible(state, eligible_entity_ids)
+            and _approved(state, policy, imported)
         }
         plan: RoomOnPlan | None = None
         if action == "turn_off":

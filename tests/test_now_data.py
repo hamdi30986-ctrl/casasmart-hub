@@ -47,15 +47,56 @@ class NowDataEngineTest(unittest.TestCase):
         for record in (["light.kitchen"], "participates", 1):
             with self.subTest(record=record):
                 engine._policies["room-kitchen"] = record
+                # As if there were none: the room's default.
                 self.assertEqual(
                     engine.room_policy("room-kitchen"),
-                    {"participates": False, "eligible_entity_ids": []},
+                    {"participates": True, "eligible_entity_ids": [], "default": True},
                 )
-                self.assertFalse(engine.room_participates("room-kitchen"))
+                self.assertTrue(engine.room_participates("room-kitchen"))
 
-    def test_room_policy_and_config_are_explicit_not_auto_discovered(self) -> None:
+    def test_a_room_takes_part_by_default_and_a_stored_policy_wins(self) -> None:
         engine = make_engine()
+        self.assertEqual(
+            engine.room_policy("room-kitchen"),
+            {"participates": True, "eligible_entity_ids": [], "default": True},
+        )
+        self.assertTrue(engine.room_participates("room-kitchen"))
+        engine.set_room_policy("room-kitchen", False, ["light.kitchen"])
+        self.assertEqual(
+            engine.room_policy("room-kitchen"),
+            {
+                "participates": False,
+                "eligible_entity_ids": ["light.kitchen"],
+                "default": False,
+            },
+        )
         self.assertFalse(engine.room_participates("room-kitchen"))
+        engine.forget_room("room-kitchen")
+        self.assertTrue(engine.room_policy("room-kitchen")["default"])
+
+    def test_a_room_without_a_policy_switches_its_lights_and_fans(self) -> None:
+        for entity_id, attributes, expected in (
+            ("light.kitchen", {}, True),
+            ("fan.kitchen", {}, True),
+            ("light.lamp", {"casasmart_room_activity_exclude": True}, False),
+            ("switch.kettle", {"device_class": "outlet"}, False),
+            ("switch.relay", {"device_class": "switch"}, False),
+            ("switch.untyped", {}, False),
+            ("climate.ac", {"hvac_modes": ["off", "cool"]}, False),
+            ("cover.curtain", {}, False),
+            ("media_player.tv", {}, False),
+            ("water_heater.tank", {}, False),
+        ):
+            with self.subTest(entity_id=entity_id):
+                self.assertIs(
+                    _NOW.is_default_room_device(
+                        {"entity_id": entity_id, "attributes": attributes}
+                    ),
+                    expected,
+                )
+
+    def test_room_policy_and_config_are_stored_as_given(self) -> None:
+        engine = make_engine()
         self.assertEqual(
             engine.set_room_policy(
                 "room-kitchen", True, ["light.kitchen", "fan.kitchen"]
