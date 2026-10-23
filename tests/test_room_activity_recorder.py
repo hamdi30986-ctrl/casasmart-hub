@@ -433,6 +433,18 @@ class RegistryTests(RecorderTestCase):
             [("light.kitchen_unimported", "off", "wall_switch", None, "kitchen")],
         )
 
+    async def test_rooms_resolve_while_the_entry_is_still_loading(self):
+        # During a reload the entry isn't "loaded" yet, so a lookup through
+        # the loaded entry finds no registry; the recorder uses its own.
+        self.hass.config_entries = types.SimpleNamespace(
+            async_loaded_entries=lambda domain: []
+        )
+        self.press("light.majlis", "on")
+        self.assertEqual(
+            await self.rows(),
+            [("light.majlis", "on", "wall_switch", None, "majlis")],
+        )
+
     async def test_a_moved_device_keeps_its_history_and_a_deleted_room_too(self):
         table = self.storage.room_activity()
         self.press("light.majlis", "on")

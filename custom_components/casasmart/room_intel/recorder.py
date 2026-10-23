@@ -190,7 +190,7 @@ class ActivityRecorder:
         action = transition(entity_id, old_state.state, new_state.state)
         if action is None:
             return
-        room_id = area_id_of(self._hass, entity_id)
+        room_id = area_id_of(self._hass, entity_id, self._registry)
         if room_id not in self._rooms or not is_served(self._hass, entity_id):
             return
         now = self._clock()

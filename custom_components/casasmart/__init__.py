@@ -475,25 +475,12 @@ async def _async_start_hub(
     await entry.runtime_data.suggestions.start()
     entry.async_on_unload(entry.runtime_data.suggestions.stop)
 
-    # Before anything that sends commands, so their changes are attributed.
-    room_activity = ActivityRecorder(
-        hass, runtime_data.registry, runtime_data.storage.room_activity()
-    )
-    entry.runtime_data.room_activity = room_activity
-    await room_activity.async_start()
-    entry.async_on_unload(
-        async_track_time_interval(
-            hass,
-            room_activity.async_prune,
-            timedelta(hours=ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS),
-        )
-    )
-
     # Home Assistant doesn't unload config entries when it stops, so the
     # database is checkpointed and closed here instead.
     async def _async_close_storage_on_stop(_event: Event) -> None:
         entry.runtime_data.suggestions.stop()
-        await room_activity.async_stop()
+        if entry.runtime_data.room_activity is not None:
+            await entry.runtime_data.room_activity.async_stop()
         await hass.async_add_executor_job(runtime_data.storage.close)
         _LOGGER.info("CasaSmart Hub storage checkpointed and closed on HA stop")
 
@@ -507,6 +494,21 @@ async def _async_start_hub(
     await _async_sync_tunnel_url(hass, entry)
 
     await _async_import_registry(hass, runtime_data.hub_config, runtime_data.registry)
+
+    # After the registry seed, so it sees every room; before anything that
+    # sends commands, so their changes are attributed.
+    room_activity = ActivityRecorder(
+        hass, runtime_data.registry, runtime_data.storage.room_activity()
+    )
+    entry.runtime_data.room_activity = room_activity
+    await room_activity.async_start()
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            room_activity.async_prune,
+            timedelta(hours=ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS),
+        )
+    )
 
     await _async_setup_dev_enroll(hass, entry, data_dir)
 
