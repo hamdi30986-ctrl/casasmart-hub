@@ -248,6 +248,20 @@ class BuildAndCacheTests(LearnerCase):
         _, reasons = await self.ask(learner=restarted)
         self.assertEqual(reasons, {"majlis": "habit_now"})
         self.assertEqual(restarted.builds, 1)
+        # So is one with the right header and no layer, or a member doc
+        # whose layer isn't an object.
+        docs = self.docs()
+        for key, bad in (
+            ("regular:household", {k: v for k, v in docs["regular:household"].items()
+                                   if k != "layer"}),
+            ("regular:member:mem-a", {**docs["regular:member:mem-a"], "layer": None}),
+        ):  # fmt: skip
+            with self.subTest(key=key):
+                self.storage.table("now_room_habits")[key] = bad
+                restarted = await self.make_learner()
+                _, reasons = await self.ask(learner=restarted)
+                self.assertEqual(reasons, {"majlis": "habit_now"})
+                self.assertEqual((restarted.builds, restarted.loads), (1, 0))
 
     async def test_a_storage_failure_means_no_habits_warned_once(self):
         self.household_routine()

@@ -449,7 +449,8 @@ class HabitLearner:
                     ),
                     False,
                 )
-            except ValueError as err:
+            except (KeyError, TypeError, ValueError) as err:
+                # A doc with the right header but a bad or missing layer.
                 _LOGGER.debug(
                     "Room habits: saved model unreadable, rebuilding: %s", err
                 )
