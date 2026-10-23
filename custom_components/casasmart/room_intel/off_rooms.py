@@ -36,6 +36,7 @@ REASON_ACTIVE = "active"
 REASON_RUNNING_LOAD = "running_load"
 REASON_JUST_OFF = "just_off"
 REASON_ROOM_ORDER = "room_order"
+REASON_HABIT_NOW = "habit_now"
 
 # The tiers' sort positions. A learned tier sorts in its own slot
 # between just_off and room_order.
@@ -43,6 +44,12 @@ TIER_RUNNING_LOAD = 0
 TIER_JUST_OFF = 1
 TIER_LEARNED = 2
 TIER_ROOM_ORDER = 3
+# Within the learned slot, the first item of a room's sort key: a habit for
+# this hour, then a room the viewer switched off themselves, then most
+# used (not built yet).
+LEARNED_HABIT = 0
+LEARNED_OWN_OFF = 1
+LEARNED_MOST_USED = 2
 
 LOAD_POWER = "power"
 LOAD_MEDIA = "media"
