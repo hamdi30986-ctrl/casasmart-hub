@@ -82,14 +82,6 @@ def is_room_activity_eligible(state: Any, eligible_entity_ids: Iterable[str]) ->
     )
 
 
-def is_running_room_activity(state: Any, eligible_entity_ids: Iterable[str]) -> bool:
-    """True for an eligible device that is on."""
-    return (
-        is_room_activity_eligible(state, eligible_entity_ids)
-        and _state_value(state, "state") == "on"
-    )
-
-
 def summarize_openings(
     entity_states: Iterable[tuple[str, str | None]],
 ) -> dict[str, str | int]:

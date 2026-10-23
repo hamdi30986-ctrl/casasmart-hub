@@ -57,7 +57,10 @@ class NowEndpointContractTest(unittest.TestCase):
         self.assertIn("member_id, room_id, action, key", source)
         self.assertIn('f"{room_id}:{action}:{key}"', data)
         self.assertIn('"restore_pending_count"', source)
-        self.assertIn('"eligible_entity_ids": list(eligible_entity_ids)', source)
+        # The rooms, with the devices each one counts, come from the ranking
+        # the generated suggestions use (pinned in test_room_ranking_golden
+        # and test_now_room_activity_golden).
+        self.assertIn("async_rank_rooms(self._hass, registry, now_data, scope)", source)
 
     def test_history_requests_full_rows_for_the_public_wire_contract(self) -> None:
         api = (ROOT / "custom_components" / "casasmart" / "api.py").read_text()

@@ -155,6 +155,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.data.registry = self.registry
         self.registry.list_rooms = list
+        self.registry.list_user_devices = list
         self.registry.get_favorites = lambda member: []
         self.data.now_data = old._NOW.NowDataEngine({}, {}, {}, {}, {})
         self.data.now_data.configure({"suggested_scene_id": "scene-night"})

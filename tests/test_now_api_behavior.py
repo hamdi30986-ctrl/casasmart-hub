@@ -107,6 +107,17 @@ def _load_now_api():
     sys.modules[now_spec.name] = now_data
     now_spec.loader.exec_module(now_data)
 
+    # The real room ranking, over the stub filtering above.
+    _module("casasmart.room_intel", package=True)
+    ranking_spec = importlib.util.spec_from_file_location(
+        "casasmart.room_intel.ranking",
+        ROOT / "custom_components" / "casasmart" / "room_intel" / "ranking.py",
+    )
+    assert ranking_spec and ranking_spec.loader
+    ranking = importlib.util.module_from_spec(ranking_spec)
+    sys.modules[ranking_spec.name] = ranking
+    ranking_spec.loader.exec_module(ranking)
+
     api_spec = importlib.util.spec_from_file_location(
         "casasmart.now_api", ROOT / "custom_components" / "casasmart" / "now_api.py"
     )
@@ -437,7 +448,10 @@ class MemberLookupTest(unittest.TestCase):
             now_data=self.engine,
             energy=None,
             registry=SimpleNamespace(
-                list_rooms=list, list_scenes=list, get_favorites=lambda member: []
+                list_rooms=list,
+                list_scenes=list,
+                list_user_devices=list,
+                get_favorites=lambda member: [],
             ),
         )
         self.hass = _ExecutorTrackingHass(self.states, self.runtime)

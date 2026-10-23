@@ -41,11 +41,11 @@ from .now_data import (
     NowDataError,
     is_room_activity_candidate,
     is_room_activity_eligible,
-    is_running_room_activity,
     room_activity_layout,
     summarize_openings,
 )
 from .registry import RegistryEngine
+from .room_intel.ranking import async_rank_rooms
 from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
 
@@ -207,58 +207,22 @@ class CasaSmartNowView(_NowView):
                 if (entry := self._recent_entry(entity_id, None, claims))
             ]
 
-        active_rooms: list[dict[str, Any]] = []
-        for room in rooms:
-            room_id = room["room_id"]
-            policy = policies.get(room_id, {})
-            if not policy.get("participates", False):
-                continue
-            eligible_entity_ids = policy.get("eligible_entity_ids", [])
-            devices = [
-                state
-                for state in self._hass.states.async_all()
-                if area_id_of(self._hass, state.entity_id) == room_id
-                and is_served(self._hass, state.entity_id)
-                and in_scope(self._hass, state.entity_id, scope)
-                and is_running_room_activity(state, eligible_entity_ids)
-            ]
-            timestamps = [
-                state.last_changed
-                for state in devices
-                if isinstance(state.last_changed, datetime)
-            ]
-            restore_pending_count = len(
-                await self._hass.async_add_executor_job(now_data.restore_set, room_id)
-            )
-            active_rooms.append(
-                {
-                    "room_id": room_id,
-                    "name": room["name"],
-                    "icon": room.get("icon"),
-                    # The tablet draws the room from its live state feed, so
-                    # it needs the approved list instead of guessing it.
-                    "eligible_entity_ids": list(eligible_entity_ids),
-                    "active_count": len(devices),
-                    "most_recent_activity_at": max(timestamps)
-                    .astimezone(UTC)
-                    .isoformat()
-                    if timestamps
-                    else None,
-                    "restore_pending_count": restore_pending_count,
-                }
-            )
-        active_rooms.sort(
-            key=lambda room: (
-                -room["active_count"],
-                -(
-                    datetime.fromisoformat(room["most_recent_activity_at"]).timestamp()
-                    if room["most_recent_activity_at"]
-                    else 0
-                ),
-                room["name"].strip().casefold(),
-                room["room_id"],
-            )
-        )
+        # The generated suggestions rank rooms with the same function, so both
+        # agree on the busiest rooms.
+        ranked, _, _ = await async_rank_rooms(self._hass, registry, now_data, scope)
+
+        def read_restore_counts() -> dict[str, int]:
+            return {
+                room["room_id"]: len(now_data.restore_set(room["room_id"]))
+                for room in ranked
+                if policies.get(room["room_id"], {}).get("participates", False)
+            }
+
+        restore_counts = await self._hass.async_add_executor_job(read_restore_counts)
+        active_rooms = [
+            {**room, "restore_pending_count": restore_counts.get(room["room_id"], 0)}
+            for room in ranked
+        ]
 
         scenes_by_id = {scene["scene_id"]: scene for scene in scenes}
 
@@ -282,21 +246,6 @@ class CasaSmartNowView(_NowView):
             scope,
         )
         suggestions = getattr(loaded_runtime_data(self._hass), "suggestions", None)
-        generated = getattr(suggestions, "generated", None)
-        if generated is not None:
-            # Rank rooms as the generated suggestions do, so both agree on
-            # the busiest rooms.
-            ranked, _, _ = await generated.room_context(scope)
-            previous = {r["room_id"]: r for r in active_rooms}
-            active_rooms = [
-                {
-                    **r,
-                    "restore_pending_count": previous.get(r["room_id"], {}).get(
-                        "restore_pending_count", 0
-                    ),
-                }
-                for r in ranked
-            ]
         contextual = (
             await suggestions.payload(member_id, scope)
             if suggestions
