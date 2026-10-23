@@ -330,6 +330,34 @@ class LastOnTests(unittest.TestCase):
         self.assertTrue(self.off("light.b", t=NOW + 2))
         self.assertEqual(self.sets.entity_ids("kitchen"), ["light.b"])
 
+    def test_a_reseed_while_a_plate_is_switched_off_keeps_the_gangs_already_off(
+        self,
+    ):
+        # The recorder reseeds on every registry edit.
+        for eid in ("light.a", "light.b", "light.c", "light.d"):
+            self.on(eid)
+        self.off("light.a", t=NOW + 1)
+        self.off("light.b", t=NOW + 2)
+        # A setting saved in the app: c and d still on, b back on meanwhile.
+        self.sets.seed(
+            [("light.c", "kitchen"), ("light.d", "kitchen"), ("light.b", "kitchen")]
+        )
+        self.off("light.d", t=NOW + 3)
+        self.off("light.b", t=NOW + 4)
+        self.assertTrue(self.off("light.c", t=NOW + 5))
+        self.assertEqual(
+            self.sets.entity_ids("kitchen"),
+            ["light.c", "light.b", "light.d", "light.a"],
+        )
+        # A room dark at the reseed keeps nothing of its fading devices.
+        self.on("light.m", room="majlis")
+        self.on("light.n", room="majlis")
+        self.off("light.m", room="majlis", t=NOW + 6)
+        self.sets.seed([])
+        self.on("light.n", room="majlis", t=NOW + 7)
+        self.off("light.n", room="majlis", t=NOW + 8)
+        self.assertEqual(self.sets.entity_ids("majlis"), ["light.n"])
+
     def test_drain_saves_each_changed_room_once(self):
         self.on("light.a")
         self.off("light.a", t=NOW + 1)

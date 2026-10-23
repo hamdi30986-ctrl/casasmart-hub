@@ -323,14 +323,22 @@ class LastOnSets:
     def seed(self, lit: Iterable[tuple[str, str]]) -> None:
         """Start following from the devices that are on now: (entity id, room id).
 
-        Writes no set: whatever happened before is unknown.
+        Writes no set: whatever happened before is unknown. A room that is
+        still lit keeps its fading devices that are still off, so a registry
+        edit while a wall plate is switched off gang by gang (the recorder
+        reseeds on each) doesn't drop the gangs already off.
         """
+        fading = self._fading
         self._lit.clear()
         self._room_of.clear()
-        self._fading.clear()
+        self._fading = {}
         for entity_id, room_id in lit:
             self._lit.setdefault(room_id, set()).add(entity_id)
             self._room_of[entity_id] = room_id
+        for room_id, offs in fading.items():
+            kept = {e: off for e, off in offs.items() if e not in self._room_of}
+            if room_id in self._lit and kept:
+                self._fading[room_id] = kept
 
     def update(
         self,
