@@ -105,6 +105,41 @@ class HubStorage:
             self._conn = None
             self._tables.clear()
 
+    def compact(self) -> None:
+        """Rewrite the file without its free pages and empty the WAL.
+
+        SQLite leaves a deleted row's bytes in the file's free pages and in
+        old WAL frames (secure_delete is off), where they can be read back;
+        a factory reset runs this after its wipe. Blocking; not inside a
+        transaction(). StorageError when the WAL couldn't be emptied.
+        """
+        with self._lock:
+            if self._transaction_depth:
+                raise StorageError("compact() can't run inside a transaction")
+            conn = self._connection
+            conn.execute("VACUUM")
+            busy, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if busy:
+                raise StorageError("The WAL is in use and couldn't be emptied")
+
+    def delete_backups(self) -> int:
+        """Delete this database's migration backups and say how many went.
+
+        Only the files backup_database names ({stem}-v{N}-{UTC stamp}.db);
+        anything else in the folder stays. Blocking.
+        """
+        if not self._backup_dir.is_dir():
+            return 0
+        pattern = re.compile(
+            rf"^{re.escape(self._db_path.stem)}-v\d+-\d{{8}}-\d{{6}}\.db$"
+        )
+        deleted = 0
+        for path in sorted(self._backup_dir.iterdir()):
+            if path.is_file() and pattern.match(path.name):
+                path.unlink()
+                deleted += 1
+        return deleted
+
     @property
     def schema_version(self) -> int:
         """The schema version recorded in the database (a real read)."""

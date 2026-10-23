@@ -1488,10 +1488,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
         Energy Saving is stopped first so the automations it disabled come
         back; if any can't, the reset stops before wiping anything. The tables
         are wiped in one transaction, then the auth engine forgets its device
-        cache, so the wiped phones' tokens die even if the reload fails. The
-        owner code hashes are deleted next, so the reload mints a new pairing
-        code and recovery card; if that fails, the reload still runs, and
-        running the reset again finishes it.
+        cache, so the wiped phones' tokens die even if the reload fails. A
+        reset is for a new owner, so what was deleted must not stay readable
+        on the disk either: the database is compacted (free pages, WAL) and
+        the migration backups, whole copies of the old database, are
+        deleted. The owner code hashes are deleted next, so the reload mints
+        a new pairing code and recovery card; if that, or the disk scrub,
+        fails, the reload still runs, and running the reset again finishes
+        it.
         """
         entry = _loaded_entry()
         runtime_data: CasaSmartRuntimeData = entry.runtime_data
@@ -1538,6 +1542,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 await runtime_data.room_habits.async_clear()
         except (StorageError, sqlite3.Error) as err:
             raise HomeAssistantError(f"Factory reset could not finish: {err}") from err
+
+        def _scrub_disk() -> int:
+            runtime_data.storage.compact()
+            return runtime_data.storage.delete_backups()
+
+        scrub_error: Exception | None = None
+        try:
+            backups = await hass.async_add_executor_job(_scrub_disk)
+            _LOGGER.info(
+                "Factory reset: database compacted, %d migration backups deleted",
+                backups,
+            )
+        except (StorageError, sqlite3.Error, OSError) as err:
+            # The data is deleted; only its traces on the disk may remain.
+            _LOGGER.error("Factory reset could not scrub the disk: %s", err)
+            scrub_error = err
         # Every phone is unpaired now; don't leave closing them to the reload.
         await async_close_connections(hass)
         try:
@@ -1550,7 +1570,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
             "CasaSmart factory reset (full blank): wiped devices, pairing, "
             "recovery, favorites, scenes, settings, push, alarm log/state, "
             "audio config + speakers, Energy Saving data, room activity log, "
-            "and the registry "
+            "room habits (Ramadan included), last-on sets, start profiles, "
+            "migration backups, and the registry "
             "org layer (floors/rooms/tags/"
             "assignments/grouping). Re-seeding from HA on reload; printed "
             "codes rotated"
@@ -1560,6 +1581,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError(
                 "Factory reset wiped the data, but the hub did not reload; "
                 "restart Home Assistant"
+            )
+        if scrub_error is not None:
+            raise HomeAssistantError(
+                "Factory reset wiped the data, but deleted data may still be "
+                f"readable on the disk ({scrub_error}); run it again"
             )
 
     admin_handlers = {

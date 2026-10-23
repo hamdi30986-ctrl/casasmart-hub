@@ -47,6 +47,13 @@ What changed in each version of CasaSmart Hub.
 - When a member's last phone leaves the hub, what was learned from them,
   their recently used devices and the room-command answers kept for their
   retries are deleted too.
+- A factory reset is for a new owner, so it now leaves nothing of the old
+  one to read back: everything the hub learned about rooms goes (the
+  activity log, habits, Ramadan habits, last-on lights, start profiles),
+  the database is compacted so deleted data doesn't linger on the disk,
+  and the database copies earlier updates saved in `casasmart/backups` are
+  deleted (after a reset there is no going back to an older version with
+  them).
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the
