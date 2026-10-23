@@ -12,6 +12,12 @@
   long it is kept), free of Home Assistant.
 - recorder: logs those events from Home Assistant's state changes into
   storage.RoomActivityTable.
+- habits: the room habit model (when each room is usually on), its layers,
+  profiles (Ramadan apart from the rest of the year) and settings, free of
+  Home Assistant.
+- learner: builds that model from the log once a day and keeps it, with
+  each finished Ramadan, in storage.
+- hijri: when Ramadan is, from the Umm al-Qura calendar, offline.
 
 Import the submodule you need (room_intel.ranking, room_intel.power, ...):
 this package exports nothing, so loading the ranking never loads Home
