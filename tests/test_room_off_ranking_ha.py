@@ -251,6 +251,94 @@ class RankingAfterARestart(_RankingCase):
         self.assertEqual((await self.rank())["majlis"][0], "just_off")
 
 
+@unittest.skipIf(
+    IMPORT_ERROR is not None, f"Home Assistant unavailable: {IMPORT_ERROR}"
+)
+class RunningLoadHysteresis(_RankingCase):
+    """A meter that crossed 20 W keeps its room running until below 14 W."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # The kitchen switch's device reports its power (a 1PM-style relay).
+        self.registry.assign_device("sensor.kitchen_power", room_id="kitchen")
+        record = dict(self.storage.table("registry_user_devices")["dev-kitchen"])
+        record["config_entity_ids"] = [
+            *record["config_entity_ids"],
+            "sensor.kitchen_power",
+        ]
+        self.storage.table("registry_user_devices")["dev-kitchen"] = record
+        await self.registry_changed()
+
+    async def registry_changed(self):
+        with mock.patch.object(recorder_module, "_REGISTRY_DEBOUNCE_SECONDS", 0):
+            self.hass.bus.async_fire("casasmart_registry_changed", {"kind": "devices"})
+            await self.hass.async_block_till_done()
+            await asyncio.sleep(0.01)
+            await self.hass.async_block_till_done()
+
+    def read(self, watts):
+        self.hass.states.async_set(
+            "sensor.kitchen_power",
+            watts,
+            {"device_class": "power", "unit_of_measurement": "W"},
+        )
+
+    async def kitchen(self):
+        return (await self.rank())["kitchen"][0]
+
+    async def test_a_load_that_crossed_20_w_runs_until_it_drops_below_14_w(self):
+        for watts, reason in (
+            ("16", "room_order"),
+            ("25", "running_load"),
+            ("16", "running_load"),
+            ("14", "running_load"),
+            ("13", "room_order"),
+            ("16", "room_order"),
+            ("20", "running_load"),
+            ("unavailable", "room_order"),
+            ("16", "room_order"),
+        ):
+            with self.subTest(watts=watts):
+                self.read(watts)
+                self.assertEqual(await self.kitchen(), reason)
+        # Readings are not room activity.
+        self.assertEqual(await self.rows(), [])
+
+    async def test_after_a_restart_a_meter_holds_from_its_first_change(self):
+        self.read("25")
+        await self.hass.async_block_till_done()
+        await self.recorder.async_stop()
+        self.recorder = ActivityRecorder(
+            self.hass, self.registry, self.storage.room_activity()
+        )
+        await self.recorder.async_start()
+        # Never seen: 25 W runs on its own reading.
+        self.assertEqual(await self.kitchen(), "running_load")
+        # The first change counts the reading before it.
+        self.read("16")
+        self.assertEqual(await self.kitchen(), "running_load")
+
+        # Restarted again at 16 W: nothing holds it.
+        await self.recorder.async_stop()
+        self.recorder = ActivityRecorder(
+            self.hass, self.registry, self.storage.room_activity()
+        )
+        await self.recorder.async_start()
+        self.read("17")
+        self.assertEqual(await self.kitchen(), "room_order")
+
+    async def test_a_meter_no_longer_on_a_hub_device_is_let_go(self):
+        self.read("25")
+        self.read("16")
+        self.assertEqual(await self.kitchen(), "running_load")
+        self.assertEqual(self.recorder.held_meters(), {"sensor.kitchen_power"})
+        record = dict(self.storage.table("registry_user_devices")["dev-kitchen"])
+        record["config_entity_ids"] = ["switch.kitchen_lock"]
+        self.storage.table("registry_user_devices")["dev-kitchen"] = record
+        await self.registry_changed()
+        self.assertEqual(self.recorder.held_meters(), frozenset())
+
+
 class _NoEntityRegistry:
     def async_get(self, entity_id):
         return None

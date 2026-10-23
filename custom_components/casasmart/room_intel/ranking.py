@@ -25,7 +25,7 @@ log, which just_off needs, and the habits.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Container, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from ..filtering import area_id_of, in_scope, is_served
@@ -102,6 +102,10 @@ class ActivitySource(Protocol):
     async def async_recent_events(
         self, since_t: int, room_ids: list[str]
     ) -> list[dict[str, Any]]: ...
+
+    def held_meters(self) -> frozenset[str]:
+        """The power meters holding a running load (off_rooms.LoadLatch)."""
+        ...
 
 
 class HabitSource(Protocol):
@@ -317,23 +321,24 @@ def _room_watts(
     room_meters: dict[int, list[Any]],
     devices: list[int | None],
     on_devices: list[int | None],
-) -> tuple[float | None, str, float | None]:
-    """A room's watts, how complete they are, and its biggest reading.
+) -> tuple[float | None, str, dict[str, float]]:
+    """A room's watts, how complete they are, and its valid readings.
 
     room_meters holds each device's meters in the room; devices are the keys
     of the room's counted devices, on_devices of those that are on. An on
     device is covered when its device has a meter in the room and every one
     of them reads valid. Quality is "absent" with no valid reading,
-    "complete" when every on device is covered, else "partial".
+    "complete" when every on device is covered, else "partial". The valid
+    readings are by meter entity id.
     """
     readings = {
         meter.entity_id: watts_of(meter)
         for key in dict.fromkeys(devices)
         for meter in room_meters.get(key, ())
     }
-    valid = [watts for watts in readings.values() if watts is not None]
+    valid = {eid: watts for eid, watts in readings.items() if watts is not None}
     if not valid:
-        return None, "absent", None
+        return None, "absent", {}
 
     def covered(key: int | None) -> bool:
         meters = room_meters.get(key, ())
@@ -342,7 +347,8 @@ def _room_watts(
         )
 
     complete = all(covered(key) for key in on_devices)
-    return round(sum(valid), 1), "complete" if complete else "partial", max(valid)
+    quality = "complete" if complete else "partial"
+    return round(sum(valid.values()), 1), quality, valid
 
 
 def _count_key(room: dict[str, Any]) -> tuple:
@@ -364,13 +370,16 @@ def rank_rooms(
     *,
     activity: RecentActivity | None = None,
     learned: LearnedTier | None = None,
+    held_meters: Container[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Rank the (already scoped) rooms, the ones with something on first.
 
     meters_by_room holds, per room, each device's power meters in that room;
     device_of maps a control to its device. activity is the room activity
     the just_off tier needs; without it no room is just_off. learned is the
-    habit tier (None: no room is habit_now). Each ranked
+    habit tier (None: no room is habit_now). held_meters are the meters
+    holding a running load (off_rooms.LoadLatch; none: a meter runs from
+    RUNNING_LOAD_MIN_W only). Each ranked
     room is its registry record plus active_count, the eligible_entity_ids
     that were counted and a rank block: active, filler, on_count,
     ac_on_count, watts, watts_quality, reason and params.
@@ -417,7 +426,7 @@ def rank_rooms(
             kind.append(state)
         on = [state for state in eligible if state.state == "on"]
         acs_on = [state for state in acs if state.state in _AC_ON_MODES]
-        watts, quality, peak = _room_watts(
+        watts, quality, readings = _room_watts(
             meters_by_room.get(rid, {}),
             [device_of.get(state.entity_id) for state in [*eligible, *acs]],
             [device_of.get(state.entity_id) for state in [*on, *acs_on]],
@@ -443,7 +452,7 @@ def rank_rooms(
         if active:
             on_rooms.append(ranked)
             continue
-        loads = still_running(media_playing, peak)
+        loads = still_running(media_playing, readings, held_meters)
         dark = (
             went_dark(events.get(rid, ()), counted_ids, unavailable_since, activity)
             if activity is not None
@@ -486,8 +495,9 @@ async def async_rank_rooms(
 ) -> RoomRanking:
     """Rank the caller's rooms; scope is their room ids, None for every room.
 
-    activity is the room activity log (the recorder), for the just_off tier;
-    member_id is the caller, whose own app-tap offs sort below the habits.
+    activity is the room activity log (the recorder), for the just_off tier
+    and the meters holding a running load; member_id is the caller, whose
+    own app-tap offs sort below the habits.
     habits answers the habit tier for the caller's rooms (a
     learner.HabitQuery; None: no habits). The stores are read in one
     executor job, the states in one scan and the log in one query; the
@@ -564,6 +574,7 @@ async def async_rank_rooms(
             device_of,
             activity=recent,
             learned=learned,
+            held_meters=activity.held_meters() if activity is not None else (),
         ),
         states_by_room,
         states,

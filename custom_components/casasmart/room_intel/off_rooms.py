@@ -5,7 +5,8 @@ first one a room qualifies for wins:
 
 1. running_load: something still runs while nothing counted is on: a media
    player playing, or one of the room's own meters drawing at least
-   RUNNING_LOAD_MIN_W. Higher watts first.
+   RUNNING_LOAD_MIN_W (and, once it has, until it drops below
+   RUNNING_LOAD_CLEAR_W: LoadLatch). Higher watts first.
 2. just_off: the room went dark less than JUST_OFF_WINDOW_SECONDS ago, by an
    off someone made (not an automation, not a hub scene). Newest first. Taken
    from the room activity log.
@@ -23,7 +24,7 @@ Nothing here imports Home Assistant, like activity and meters.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
@@ -62,6 +63,10 @@ LOAD_MEDIA = "media"
 # a few watts and a router under 10 W, while a fan, a TV or a heater is well
 # above it.
 RUNNING_LOAD_MIN_W = 20.0
+# Once it has, the meter keeps the room running until it reads below this, so
+# a device idling around 20 W (a fridge, an AV rack) doesn't flip in and out
+# of running_load from one refresh to the next.
+RUNNING_LOAD_CLEAR_W = 14.0
 # How long a room stays "just off" (30 minutes).
 JUST_OFF_WINDOW_SECONDS = 1800
 # After Home Assistant starts, devices still report the state they reached
@@ -108,10 +113,54 @@ class WentDark(NamedTuple):
     by_viewer: bool
 
 
-def still_running(media_playing: int, peak_watts: float | None) -> list[str]:
-    """The loads still running in a room with nothing counted on."""
+def meter_runs(watts: float, held: bool) -> bool:
+    """True for a meter reading that is a running load.
+
+    held says the meter read RUNNING_LOAD_MIN_W or more and hasn't read below
+    RUNNING_LOAD_CLEAR_W since (LoadLatch).
+    """
+    return watts >= RUNNING_LOAD_MIN_W or (held and watts >= RUNNING_LOAD_CLEAR_W)
+
+
+class LoadLatch:
+    """The power meters holding a running load (meter_runs' held).
+
+    Fed each reading as it comes (the recorder, from Home Assistant's state
+    changes), so whether a meter holds depends on its readings, not on when
+    someone looked. In memory only: it starts empty.
+    """
+
+    def __init__(self) -> None:
+        self._held: set[str] = set()
+
+    def update(self, entity_id: str, watts: float | None) -> None:
+        """Take a meter's reading; None (no valid reading) lets go."""
+        if watts is not None and meter_runs(watts, entity_id in self._held):
+            self._held.add(entity_id)
+        else:
+            self._held.discard(entity_id)
+
+    def held(self) -> frozenset[str]:
+        """The meters holding now."""
+        return frozenset(self._held)
+
+    def forget_except(self, entity_ids: Iterable[str]) -> None:
+        """Let go of every meter not in entity_ids."""
+        self._held.intersection_update(entity_ids)
+
+
+def still_running(
+    media_playing: int,
+    meter_watts: Mapping[str, float],
+    held: Container[str] = frozenset(),
+) -> list[str]:
+    """The loads still running in a room with nothing counted on.
+
+    meter_watts are the room's valid meter readings by entity id; held are
+    the meters holding a running load (LoadLatch.held).
+    """
     loads = []
-    if peak_watts is not None and peak_watts >= RUNNING_LOAD_MIN_W:
+    if any(meter_runs(watts, eid in held) for eid, watts in meter_watts.items()):
         loads.append(LOAD_POWER)
     if media_playing:
         loads.append(LOAD_MEDIA)

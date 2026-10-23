@@ -22,6 +22,7 @@ async_rank_rooms = _RANKING["async_rank_rooms"]
 order_off_rooms = _RANKING["order_off_rooms"]
 ranking_summary = _RANKING["ranking_summary"]
 OffRoomFacts = _RANKING["OffRoomFacts"]
+LoadLatch = _RANKING["still_running"].__globals__["LoadLatch"]
 
 NOW = 1_800_000_000
 MIN = 60
@@ -46,6 +47,8 @@ class Log:
         self.events = []
         self.started_at = None
         self.reads = []
+        # The meters holding a running load (the recorder's LoadLatch).
+        self.held = set()
 
     def add(self, room_id, entity_id, action, ago, source="wall_switch", member=None):
         self.events.append(
@@ -71,6 +74,9 @@ class Log:
         ]
         rows.sort(key=lambda item: (-item[1]["t"], -item[0]))
         return [dict(event) for _, event in rows]
+
+    def held_meters(self):
+        return frozenset(self.held)
 
 
 class OffRankingCase(unittest.IsolatedAsyncioTestCase):
@@ -357,6 +363,39 @@ class StillRunningTest(OffRankingCase):
         self.assertTrue(all(not r["rank"]["active"] for r in ranked))
         self.assertEqual(ranked[-1]["rank"]["watts"], 22.5)
 
+    async def test_a_meter_that_crossed_20_w_runs_until_it_drops_below_14_w(self):
+        # A fridge or an AV rack idling around 20 W flipped between
+        # running_load and room_order on every refresh.
+        self.room("kitchen")
+        self.device(
+            "kitchen", relay("switch.k_light", "off"), power("sensor.k_fridge", "16")
+        )
+        self.room("study")
+        self.device(
+            "study", relay("switch.s_light", "off"), power("sensor.s_rack", "16")
+        )
+        # The fridge crossed 20 W and hasn't read below 14 W since; the rack
+        # never crossed 20 W.
+        self.log.held = {"sensor.k_fridge"}
+        for watts, kitchen in (
+            ("16", "running_load"),
+            ("14", "running_load"),
+            ("13.9", "room_order"),
+            ("unavailable", "room_order"),
+        ):
+            with self.subTest(watts=watts):
+                self.values["sensor.k_fridge"].state = watts
+                self.assertEqual(
+                    await self.order(), [("kitchen", kitchen), ("study", "room_order")]
+                )
+        # Without the log (the generated suggestions) a meter runs from 20 W
+        # only.
+        self.values["sensor.k_fridge"].state = "16"
+        self.assertEqual(
+            await self.order(log=False),
+            [("kitchen", "room_order"), ("study", "room_order")],
+        )
+
     async def test_a_room_with_only_a_playing_tv_fills_a_slot(self):
         self.room("majlis")
         self.device("majlis", media("media_player.majlis_tv"))
@@ -372,6 +411,33 @@ class StillRunningTest(OffRankingCase):
             (await self.order())[:2],
             [("hall", "running_load"), ("kitchen", "just_off")],
         )
+
+
+class LoadLatchTest(unittest.TestCase):
+    def test_a_meter_holds_from_20_w_until_it_reads_below_14_w(self):
+        latch = LoadLatch()
+        for watts, held in (
+            (16.0, False),  # never crossed 20 W
+            (19.9, False),
+            (20.0, True),
+            (16.0, True),
+            (14.0, True),
+            (13.9, False),
+            (16.0, False),  # has to cross 20 W again
+            (25.0, True),
+            (None, False),  # no valid reading lets go
+            (16.0, False),
+        ):
+            with self.subTest(watts=watts):
+                latch.update("sensor.fridge", watts)
+                self.assertEqual("sensor.fridge" in latch.held(), held)
+
+    def test_meters_no_longer_watched_are_let_go(self):
+        latch = LoadLatch()
+        latch.update("sensor.a", 25.0)
+        latch.update("sensor.b", 25.0)
+        latch.forget_except({"sensor.b", "sensor.c"})
+        self.assertEqual(latch.held(), frozenset({"sensor.b"}))
 
 
 class JustOffTest(OffRankingCase):

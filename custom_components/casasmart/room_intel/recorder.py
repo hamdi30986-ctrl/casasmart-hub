@@ -11,7 +11,9 @@ seconds, as Home Assistant's recorder commits. Nothing is logged until Home
 Assistant has started and settled (10 minutes), so restored states and
 devices catching up don't become events.
 The room ranking reads the latest events back with async_recent_events,
-buffered ones included.
+buffered ones included. The recorder also follows the readings of the power
+meters on the hub's devices (held_meters), so a load that crossed 20 W stays
+running until it drops below 14 W.
 """
 
 from __future__ import annotations
@@ -43,8 +45,9 @@ from .activity import (
     prune,
     transition,
 )
-from .off_rooms import DARK_ACTIONS, STARTUP_QUIET_SECONDS
-from .ranking import imported_controls
+from .meters import is_power_meter, watts_of
+from .off_rooms import DARK_ACTIONS, STARTUP_QUIET_SECONDS, LoadLatch
+from .ranking import device_keys, imported_controls
 
 if TYPE_CHECKING:
     from ..registry import RegistryEngine
@@ -102,6 +105,10 @@ class ActivityRecorder:
         self._wall_clock = wall_clock
 
         self._managed: frozenset[str] = frozenset()
+        # The sensors on the hub's devices: the power meter candidates.
+        self._meters: frozenset[str] = frozenset()
+        self._watched: frozenset[str] = frozenset()
+        self._loads = LoadLatch()
         self._rooms: frozenset[str] = frozenset()
         self._buffer: list[dict[str, Any]] = []
         self._flush_lock = asyncio.Lock()
@@ -189,17 +196,24 @@ class ActivityRecorder:
     @callback
     def _is_managed(self, event_data: dict[str, Any]) -> bool:
         """Cheap first check, run for every state change in Home Assistant."""
-        return event_data.get("entity_id") in self._managed
+        return event_data.get("entity_id") in self._watched
 
     @callback
     def _on_state_changed(self, event: Event) -> None:
-        if not self._ready or self._stopped:
-            return
-        old_state = event.data.get("old_state")
-        new_state = event.data.get("new_state")
-        if old_state is None or new_state is None:
+        if self._stopped:
             return
         entity_id = event.data["entity_id"]
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        if entity_id in self._meters:
+            # Readings, not events: followed from the start. The reading
+            # before the change counts too, for a meter's first change.
+            for state in (old_state, new_state):
+                self._loads.update(entity_id, _watts(state))
+        if not self._ready or entity_id not in self._managed:
+            return
+        if old_state is None or new_state is None:
+            return
         action = transition(entity_id, old_state.state, new_state.state)
         if action is None:
             return
@@ -342,6 +356,10 @@ class ActivityRecorder:
         self._read_failed = False
         return [*reversed(pending), *rows]
 
+    def held_meters(self) -> frozenset[str]:
+        """The power meters holding a running load (off_rooms.LoadLatch)."""
+        return self._loads.held()
+
     async def async_prune(self, _now: datetime | None = None) -> None:
         """Apply the retention rules (room_intel.activity.prune)."""
         try:
@@ -381,20 +399,27 @@ class ActivityRecorder:
     async def _async_load_managed(self) -> None:
         """Read which entities and rooms the hub manages (one executor job)."""
 
-        def read() -> tuple[dict[str, str | None], list[dict[str, Any]]]:
+        def read() -> tuple[
+            dict[str, str | None], dict[str, int], list[dict[str, Any]]
+        ]:
+            devices = self._registry.list_user_devices()
             return (
-                imported_controls(self._registry.list_user_devices()),
+                imported_controls(devices),
+                device_keys(devices)[1],
                 self._registry.list_rooms(),
             )
 
         try:
-            controls, rooms = await self._hass.async_add_executor_job(read)
+            controls, sensors, rooms = await self._hass.async_add_executor_job(read)
         except (StorageError, sqlite3.Error) as err:
             _LOGGER.warning("Room activity could not read the registry: %s", err)
             return
         self._managed = frozenset(controls)
+        self._meters = frozenset(sensors)
+        self._watched = self._managed | self._meters
         self._rooms = frozenset(room["room_id"] for room in rooms)
         self._chatter.forget_except(self._managed)
+        self._loads.forget_except(self._meters)
 
     def _utc_offset_min(self, t: float) -> int:
         """The hub time zone's UTC offset at t, in minutes (0 if unknown)."""
@@ -415,3 +440,10 @@ class ActivityRecorder:
             "logged (a faulty device or an automation loop?)",
             entity_id,
         )
+
+
+def _watts(state: Any) -> float | None:
+    """A power meter state's reading in watts, None when it has none."""
+    if state is None or not is_power_meter(state):
+        return None
+    return watts_of(state)
