@@ -621,11 +621,17 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.excluded[-1], (t1 + 86400, t1 + 3 * 86400))
 
-    def test_old_periods_fall_out_of_the_window(self):
+    def test_old_periods_go_once_no_date_in_them_can_be_read(self):
+        # Kept as long as the log keeps human rows (400 days): the regular
+        # window reaches back past a Ramadan, and a finished Ramadan is only
+        # copied out of the log when the hub next learns.
         now = TODAY * 86400
-        old = habits.HabitSettings(excluded=((now - 90 * 86400, now - 80 * 86400),))
-        settings = self.update(old, {"weekend_days": [4, 5]}, now)
-        self.assertEqual(settings.excluded, ())
+        recent = (now - 90 * 86400, now - 80 * 86400)
+        old = (now - 420 * 86400, now - 410 * 86400)
+        settings = self.update(
+            habits.HabitSettings(excluded=(old, recent)), {"weekend_days": [4, 5]}, now
+        )
+        self.assertEqual(settings.excluded, (recent,))
 
     def test_reset_forgets_everything_before_it(self):
         t = (TODAY - 5) * 86400 - RIYADH * 60 + 10 * 3600  # 10:00 local
@@ -653,6 +659,189 @@ class SettingsTests(unittest.TestCase):
             settings, {"self_scheduled_entity_ids": ["switch.heater"]}
         )
         self.assertNotEqual(settings.model_key(), scheduled.model_key())
+
+
+# Ramadan 1448 by Umm al-Qura: 2027-02-08 (Monday) to 2027-03-08 (Monday);
+# 1 Shawwal (Eid) is 2027-03-09, a Tuesday. Ramadan 1447: 2026-02-18 to
+# 2026-03-19; 1446: 2025-03-01 to 2025-03-29.
+SHABAN_29 = 20856  # 2027-02-07, the eve of Ramadan 1448
+RAMADAN_1 = 20857
+RAMADAN_LAST = 20885
+EID = 20886
+LAST_RAMADAN = range(20502, 20532)  # 1447
+RAMADAN_1446 = range(20148, 20177)
+
+
+def daily(days, hours, **kwargs):
+    return [row(day, hours, **kwargs) for day in days]
+
+
+class RamadanProfileTests(unittest.TestCase):
+    """Ramadan is detected by itself (Umm al-Qura),
+    learned apart for its 30 days, and the pre-Ramadan model is back after
+    it; the Ramadan profile is kept for the next year."""
+
+    def usable(self, today, profile=None, settings=None):
+        return (settings or habits.HabitSettings()).usable_days(today, RIYADH, profile)
+
+    def model(self, rows, today, profile=None):
+        usable = self.usable(today, profile)
+        model = habits.build_model(
+            rows, counted=COUNTED, self_scheduled=frozenset(), usable=usable
+        )
+        model.ages = usable.ages
+        return model
+
+    def test_each_date_has_a_profile(self):
+        self.assertEqual(habits.weekday(RAMADAN_1), 0)  # Monday
+        for day, profile in (
+            (SHABAN_29, "regular"),
+            (RAMADAN_1, "ramadan"),
+            (RAMADAN_LAST, "ramadan"),
+            (EID, "regular"),
+            (TODAY, "regular"),
+        ):
+            with self.subTest(day=day):
+                self.assertEqual(habits.profile_of(day), profile)
+                self.assertEqual(self.usable(day).profile, profile)
+
+    def test_the_regular_window_steps_over_ramadan(self):
+        window = habits.profile_window(EID, "regular")
+        self.assertEqual(len(window), 56)
+        self.assertEqual(window[0], SHABAN_29)
+        self.assertEqual(window[-1], SHABAN_29 - 55)
+        self.assertFalse(set(window) & set(range(RAMADAN_1, EID)))
+        # With no Ramadan in it, it is the 56 dates before today (as before).
+        self.assertEqual(
+            habits.profile_window(TODAY, "regular"), list(range(TODAY - 1, TODAY - 57, -1))
+        )  # fmt: skip
+
+    def test_the_ramadan_window_reaches_back_to_the_last_ramadans(self):
+        first = habits.profile_window(RAMADAN_1, "ramadan")
+        # On 1 Ramadan: last year's 30 days (its last day is the newest),
+        # then the last 26 of the year before.
+        self.assertEqual(first[:30], list(reversed(LAST_RAMADAN)))
+        self.assertEqual(first[30:], list(reversed(RAMADAN_1446))[:26])
+        usable = self.usable(RAMADAN_1)
+        self.assertEqual(usable.ages[LAST_RAMADAN[-1]], 1)
+        self.assertEqual(usable.ages[LAST_RAMADAN[0]], 30)
+        self.assertEqual(
+            usable.spans(),
+            [(RAMADAN_1446[3], RAMADAN_1446[-1]), (LAST_RAMADAN[0], LAST_RAMADAN[-1])],
+        )
+        # On day 10: this Ramadan's nine days first.
+        tenth = habits.profile_window(RAMADAN_1 + 9, "ramadan")
+        self.assertEqual(tenth[:9], list(range(RAMADAN_1 + 8, RAMADAN_1 - 1, -1)))
+        self.assertEqual(tenth[9], LAST_RAMADAN[-1])
+
+    def test_each_profile_learns_only_its_own_dates(self):
+        rows = daily(range(SHABAN_29 - 80, EID + 20), [H])
+        regular = self.model(rows, EID)
+        ramadan = self.model(rows, RAMADAN_LAST)
+        self.assertFalse(
+            set(regular.household["majlis"].seen) & set(range(RAMADAN_1, EID))
+        )
+        self.assertEqual(
+            set(ramadan.household["majlis"].seen), set(range(RAMADAN_1, RAMADAN_LAST))
+        )
+
+    def test_the_regular_model_is_frozen_on_1_ramadan_and_back_on_1_shawwal(self):
+        # Before Ramadan the majlis is on at 20:00 on workdays; during
+        # Ramadan at 21:00 (after Taraweeh) every day.
+        before = [
+            d
+            for d in range(SHABAN_29 - 70, RAMADAN_1)
+            if habits.weekday(d) not in (4, 5)
+        ]
+        rows = daily(before, [H]) + daily(range(RAMADAN_1, EID), [21, 2])
+        rows += presence(range(SHABAN_29 - 70, EID))
+        on_1_ramadan = self.usable(RAMADAN_1, "regular")
+        on_eid = self.usable(EID, "regular")
+        self.assertEqual(
+            (on_eid.first, on_eid.last, dict(on_eid.ages)),
+            (on_1_ramadan.first, on_1_ramadan.last, dict(on_1_ramadan.ages)),
+        )
+        frozen = self.model(rows, RAMADAN_1, "regular")
+        back = self.model(rows, EID)
+        self.assertEqual(frozen, back)
+        # Monday 1 Ramadan and Tuesday Eid are both workdays: the same answer.
+        self.assertEqual(
+            scorer(frozen, today=RAMADAN_1).score("majlis"),
+            scorer(back, today=EID).score("majlis"),
+        )
+        self.assertIsNotNone(scorer(back, today=EID).learned({"room_id": "majlis"}))
+        # Ramadan's suhoor at 02:00 never reached it.
+        self.assertIsNone(
+            scorer(back, today=EID, hour=2).learned({"room_id": "majlis"})
+        )
+        # Aged by the calendar instead, Ramadan's 29 days would have faded it.
+        calendar = scorer(habits.HabitModel(back.household), today=EID)
+        self.assertLess(
+            calendar.score("majlis")[0], scorer(back, today=EID).score("majlis")[0]
+        )
+
+    def test_last_years_ramadan_answers_from_the_first_day(self):
+        # Ramadan 1447: the majlis on at 21:00 every day; the rest of the
+        # year at 20:00 on workdays.
+        rows = daily(LAST_RAMADAN, [21]) + presence(LAST_RAMADAN)
+        rows += daily(range(RAMADAN_1 - 60, RAMADAN_1), [H]) + presence(
+            range(RAMADAN_1 - 60, RAMADAN_1)
+        )
+        ramadan = self.model(rows, RAMADAN_1)
+        s = scorer(ramadan, today=RAMADAN_1, hour=21)
+        self.assertTrue(s.ready)
+        self.assertEqual(s.observed_days, 30)
+        self.assertIsNotNone(s.learned({"room_id": "majlis"}))
+        # The regular evening isn't a Ramadan habit.
+        self.assertIsNone(
+            scorer(ramadan, today=RAMADAN_1, hour=19).learned({"room_id": "majlis"})
+        )
+
+    def test_this_ramadan_takes_over_from_the_last(self):
+        # Last Ramadan the majlis was on at 21:00; this one at 23:00. Last
+        # year's 30 days are evidence like any other, so the change takes
+        # about as long as any changed habit (about 10 days).
+        rows = daily(LAST_RAMADAN, [21]) + presence(LAST_RAMADAN)
+        this = range(RAMADAN_1, RAMADAN_LAST + 1)
+        rows += daily(this, [23]) + presence(this)
+        shows = {21: [], 23: []}
+        for n in range(29):
+            today = RAMADAN_1 + n
+            if habits.weekday(today) in (4, 5):
+                continue  # weekends have fewer dates of their own; see below
+            model = self.model(rows, today)
+            for hour in shows:
+                learned = scorer(model, today=today, hour=hour).learned(
+                    {"room_id": "majlis"}
+                )
+                shows[hour].append((n + 1, learned is not None))
+        # On workdays: 21:00 from day 1 to day 14; 23:00 from day 11 on.
+        self.assertEqual(
+            [d for d, on in shows[21] if on], [1, 2, 3, 4, 7, 8, 9, 10, 11, 14]
+        )
+        self.assertEqual(
+            [d for d, on in shows[23] if not on], [1, 2, 3, 4, 7, 8, 9, 10]
+        )
+
+    def test_pauses_and_resets_block_dates_in_either_profile(self):
+        t = (RAMADAN_1 + 4) * 86400 - RIYADH * 60 + 15 * 3600  # day 5, 15:00
+        settings = habits.HabitSettings(excluded=((t, t + 2 * 86400),))
+        blocked = settings.blocked_days(range(RAMADAN_1, EID), RIYADH)
+        self.assertEqual(blocked, {RAMADAN_1 + 4, RAMADAN_1 + 5, RAMADAN_1 + 6})
+        usable = self.usable(RAMADAN_1 + 10, settings=settings)
+        self.assertEqual(
+            [d for d in range(RAMADAN_1, RAMADAN_1 + 10) if not usable(d)],
+            [RAMADAN_1 + 4, RAMADAN_1 + 5, RAMADAN_1 + 6],
+        )
+        reset = habits.HabitSettings().reset(t)
+        self.assertEqual(
+            reset.blocked_days(range(RAMADAN_1, EID), RIYADH),
+            set(range(RAMADAN_1, RAMADAN_1 + 5)),
+        )
+        # Nothing of last Ramadan counts after a reset this one.
+        self.assertFalse(
+            any(self.usable(RAMADAN_1 + 10, settings=reset)(d) for d in LAST_RAMADAN)
+        )
 
 
 class LocalDayTests(unittest.TestCase):

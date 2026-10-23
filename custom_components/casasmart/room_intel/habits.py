@@ -40,6 +40,17 @@ about "on at this hour on more than half of the recent days". A room is
 usually on around now with habit >= MIN_STRENGTH on at least
 MIN_EVIDENCE_DAYS dates, and only once the asker's rooms have WARM_UP_DAYS
 observed dates.
+
+Ramadan (no switch, detected by itself). The dates of
+Ramadan by the Umm al-Qura calendar (room_intel.hijri) are a profile of their
+own, learned apart from the rest of the year (the regular profile). Each
+profile has its own window and its own clock: its WINDOW_DAYS most recent
+dates before today, an age counted in its own dates only. So the regular
+model doesn't learn or age during Ramadan: on 1 Shawwal it is exactly the
+model it was on 1 Ramadan. And the Ramadan model doesn't age between one
+Ramadan and the next: next year's first day starts from this year's
+Ramadan, which newer Ramadan days then outweigh. While it is Ramadan the
+ranking asks the Ramadan profile, else the regular one.
 """
 
 from __future__ import annotations
@@ -50,11 +61,13 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .activity import (
+    HUMAN_RETENTION_DAYS,
     SOURCE_APP,
     SOURCE_HA_USER,
     SOURCE_SCENE,
     SOURCE_WALL_SWITCH,
 )
+from .hijri import ramadan_of, ramadans_before
 from .off_rooms import LEARNED_HABIT, REASON_HABIT_NOW
 
 HALF_LIFE_DAYS = 14
@@ -101,12 +114,18 @@ STATUS_WARMING_UP = "warming_up"
 STATUS_LEARNING = "learning"
 STATUS_UNAVAILABLE = "unavailable"
 
-# One profile today. Ramadan can be learned as a profile of its own (its dates
-# leave the regular profile's usable days); the model docs carry it in their
-# key so the two never mix.
+# The profiles: Ramadan's dates, and every other date. The model docs carry
+# the profile in their key so the two never mix.
 PROFILE_REGULAR = "regular"
-# 2: wall switches vote at full weight (a saved v1 model has them at half).
+PROFILE_RAMADAN = "ramadan"
+PROFILES = (PROFILE_REGULAR, PROFILE_RAMADAN)
+# 2: wall switches vote at full weight (a saved v1 model has them at half);
+# ages counted in the profile's own dates.
 MODEL_VERSION = 2
+# Off and paused periods are kept while a date in them may still be read:
+# the log's human rows live HUMAN_RETENTION_DAYS (a finished Ramadan is
+# copied out of the log when it ends, learner.HabitLearner).
+_EXCLUDED_HORIZON_DAYS = HUMAN_RETENTION_DAYS + 2
 
 _SETTINGS_FIELDS = frozenset(
     {"learning", "paused", "weekend_days", "self_scheduled_entity_ids"}
@@ -130,6 +149,36 @@ def weekday(day: int) -> int:
 def personal_weight(dates: int) -> float:
     """How much a member's own layer counts after `dates` dates of taps."""
     return min(PERSONAL_WEIGHT_MAX, dates / (dates + PERSONAL_WEIGHT_HALF))
+
+
+def profile_of(day: int) -> str:
+    """The profile a local date belongs to: ramadan or regular."""
+    return PROFILE_RAMADAN if ramadan_of(day) is not None else PROFILE_REGULAR
+
+
+def profile_window(today: int, profile: str) -> list[int]:
+    """The profile's last WINDOW_DAYS dates before today, newest first.
+
+    Regular dates step over every Ramadan; Ramadan dates step back from one
+    Ramadan to the one before (as far as the Umm al-Qura table goes).
+    """
+    dates: list[int] = []
+    if profile == PROFILE_RAMADAN:
+        for month in ramadans_before(today):
+            for day in range(min(month.last, today - 1), month.first - 1, -1):
+                dates.append(day)
+                if len(dates) == WINDOW_DAYS:
+                    return dates
+        return dates
+    day = today - 1
+    while len(dates) < WINDOW_DAYS:
+        month = ramadan_of(day)
+        if month is None:
+            dates.append(day)
+            day -= 1
+        else:
+            day = month.first - 1
+    return dates
 
 
 # -- the model ------------------------------------------------------------------
@@ -175,10 +224,15 @@ Layer = dict[str, RoomEvidence]
 
 @dataclass
 class HabitModel:
-    """Every layer, for the dates of one window."""
+    """Every layer, for the dates of one window.
+
+    ages maps each of the window's dates to its age in the profile's own
+    dates (UsableDays.ages); None ages a date by the calendar (today - date).
+    """
 
     household: Layer = field(default_factory=dict)
     members: dict[str, Layer] = field(default_factory=dict)
+    ages: Mapping[int, int] | None = None
 
 
 def build_model(
@@ -231,12 +285,17 @@ def strength(
     hour: int,
     today: int,
     half_weight: bool = True,
+    ages: Mapping[int, int] | None = None,
 ) -> tuple[float, int]:
-    """(habit, dates with evidence) for a room at an hour, over observed dates."""
+    """(habit, dates with evidence) for a room at an hour, over observed dates.
+
+    ages, when given, ages each date in its profile's own dates.
+    """
     weighted = total = 0.0
     dates = 0
     for day in observed:
-        weight = 2.0 ** (-(today - day) / HALF_LIFE_DAYS)
+        age = today - day if ages is None else ages.get(day, today - day)
+        weight = 2.0 ** (-age / HALF_LIFE_DAYS)
         total += weight
         if evidence is None:
             continue
@@ -304,6 +363,7 @@ class HabitScorer:
             self._observed,
             hour=self._hour,
             today=self._today,
+            ages=self._model.ages,
         )
         weight = self.personal_weight
         if weight:
@@ -313,6 +373,7 @@ class HabitScorer:
                 hour=self._hour,
                 today=self._today,
                 half_weight=False,
+                ages=self._model.ages,
             )
             habit = weight * mine + (1 - weight) * habit
         return habit, dates
@@ -516,22 +577,56 @@ class HabitSettings:
             excluded.append((now_t, None))
         elif learning and excluded and excluded[-1][1] is None:
             excluded[-1] = (excluded[-1][0], now_t)
-        # Periods that ended before the window can't matter any more.
-        oldest = now_t - (WINDOW_DAYS + 2) * 86400
+        # Periods that ended before any date still read can't matter any more.
+        oldest = now_t - _EXCLUDED_HORIZON_DAYS * 86400
         excluded = [p for p in excluded if p[1] is None or p[1] >= oldest]
         return replace(self, excluded=tuple(excluded[-_MAX_EXCLUDED:]))
 
-    def usable_days(self, today: int, utc_offset_min: int) -> UsableDays:
-        """The local dates the model may learn from, for today."""
-        excluded: set[int] = set()
-        for start, end in self.excluded:
-            first = max(local_day(start, utc_offset_min), today - WINDOW_DAYS)
-            last = today if end is None else local_day(end, utc_offset_min)
-            excluded.update(range(first, last + 1))
-        first = today - WINDOW_DAYS
+    def usable_days(
+        self, today: int, utc_offset_min: int, profile: str | None = None
+    ) -> UsableDays:
+        """The local dates a profile's model may learn from, for today.
+
+        profile None is today's (Ramadan or regular).
+        """
+        profile = profile_of(today) if profile is None else profile
+        window = profile_window(today, profile)
+        ages = {day: age for age, day in enumerate(window, start=1)}
+        if not window:
+            return UsableDays(today, today - 1, frozenset(), ages, profile)
+        first = window[-1]
         if self.reset_at is not None:
             first = max(first, local_day(self.reset_at, utc_offset_min) + 1)
-        return UsableDays(first, today - 1, frozenset(excluded))
+        return UsableDays(
+            first,
+            window[0],
+            frozenset(self.blocked_days(window, utc_offset_min)),
+            ages,
+            profile,
+        )
+
+    def blocked_days(self, days: Iterable[int], utc_offset_min: int) -> set[int]:
+        """The dates among days that may never be learned: touched by an off
+        or paused period, or not after the last reset's date."""
+        reset_day = (
+            None if self.reset_at is None else local_day(self.reset_at, utc_offset_min)
+        )
+        periods = [
+            (
+                local_day(start, utc_offset_min),
+                None if end is None else local_day(end, utc_offset_min),
+            )
+            for start, end in self.excluded
+        ]
+        return {
+            day
+            for day in days
+            if (reset_day is not None and day <= reset_day)
+            or any(
+                first <= day and (last is None or day <= last)
+                for first, last in periods
+            )
+        }
 
     def model_key(self) -> tuple:
         """What in the settings changes the learned model (weekend days don't)."""
@@ -540,14 +635,36 @@ class HabitSettings:
 
 @dataclass(frozen=True)
 class UsableDays:
-    """The window's dates, first to last, minus the excluded ones."""
+    """One profile's window: its dates from first to last, minus the
+    excluded ones.
+
+    ages maps every date of the window (excluded ones too) to its age in the
+    profile's own dates, 1 for the newest; first is the oldest date that may
+    be learned (after a reset), last the newest.
+    """
 
     first: int
     last: int
     excluded: frozenset[int]
+    ages: Mapping[int, int] = field(default_factory=dict)
+    profile: str = PROFILE_REGULAR
 
     def __call__(self, day: int) -> bool:
-        return self.first <= day <= self.last and day not in self.excluded
+        return (
+            self.first <= day <= self.last
+            and day in self.ages
+            and day not in self.excluded
+        )
+
+    def spans(self) -> list[tuple[int, int]]:
+        """The learnable dates as runs of consecutive dates, oldest first."""
+        runs: list[tuple[int, int]] = []
+        for day in sorted(d for d in self.ages if self(d)):
+            if runs and runs[-1][1] == day - 1:
+                runs[-1] = (runs[-1][0], day)
+            else:
+                runs.append((day, day))
+        return runs
 
 
 def _weekend_days(value: Any) -> tuple[int, ...]:
