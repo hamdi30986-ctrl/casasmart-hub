@@ -522,6 +522,15 @@ async def _async_start_hub(
             timedelta(hours=ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS),
         )
     )
+    # Each finished Ramadan is copied out of the log (and old copies go) on
+    # the same daily beat, learning on or off.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            room_habits.async_maintain,
+            timedelta(hours=ROOM_ACTIVITY_PRUNE_INTERVAL_HOURS),
+        )
+    )
 
     await _async_setup_dev_enroll(hass, entry, data_dir)
 

@@ -716,19 +716,21 @@ class RamadanProfileTests(unittest.TestCase):
             habits.profile_window(TODAY, "regular"), list(range(TODAY - 1, TODAY - 57, -1))
         )  # fmt: skip
 
-    def test_the_ramadan_window_reaches_back_to_the_last_ramadans(self):
+    def test_the_ramadan_window_reaches_back_to_last_ramadan_only(self):
         first = habits.profile_window(RAMADAN_1, "ramadan")
-        # On 1 Ramadan: last year's 30 days (its last day is the newest),
-        # then the last 26 of the year before.
-        self.assertEqual(first[:30], list(reversed(LAST_RAMADAN)))
-        self.assertEqual(first[30:], list(reversed(RAMADAN_1446))[:26])
+        # On 1 Ramadan: last year's 30 days, its last day the newest. The
+        # one before (1446) is older than the log's 400 days: never reached,
+        # so no one's activity is learned from for longer than that.
+        self.assertEqual(first, list(reversed(LAST_RAMADAN)))
+        self.assertGreater(RAMADAN_1 - RAMADAN_1446[-1], 400)
         usable = self.usable(RAMADAN_1)
         self.assertEqual(usable.ages[LAST_RAMADAN[-1]], 1)
         self.assertEqual(usable.ages[LAST_RAMADAN[0]], 30)
-        self.assertEqual(
-            usable.spans(),
-            [(RAMADAN_1446[3], RAMADAN_1446[-1]), (LAST_RAMADAN[0], LAST_RAMADAN[-1])],
-        )
+        self.assertEqual(usable.spans(), [(LAST_RAMADAN[0], LAST_RAMADAN[-1])])
+        # On its last day it still holds all of last year's (384 days back).
+        last = habits.profile_window(RAMADAN_LAST, "ramadan")
+        self.assertEqual(len(last), 56)
+        self.assertEqual(last[28:], list(reversed(LAST_RAMADAN))[:28])
         # On day 10: this Ramadan's nine days first.
         tenth = habits.profile_window(RAMADAN_1 + 9, "ramadan")
         self.assertEqual(tenth[:9], list(range(RAMADAN_1 + 8, RAMADAN_1 - 1, -1)))

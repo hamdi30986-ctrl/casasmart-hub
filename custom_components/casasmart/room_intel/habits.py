@@ -49,8 +49,11 @@ dates before today, an age counted in its own dates only. So the regular
 model doesn't learn or age during Ramadan: on 1 Shawwal it is exactly the
 model it was on 1 Ramadan. And the Ramadan model doesn't age between one
 Ramadan and the next: next year's first day starts from this year's
-Ramadan, which newer Ramadan days then outweigh. While it is Ramadan the
-ranking asks the Ramadan profile, else the regular one.
+Ramadan, which newer Ramadan days then outweigh. A Ramadan window reaches
+back no further than the log keeps human rows (HUMAN_RETENTION_DAYS): last
+year's Ramadan, never the one before, so nothing anyone did is learned from
+for longer than the log keeps it. While it is Ramadan the ranking asks the
+Ramadan profile, else the regular one.
 """
 
 from __future__ import annotations
@@ -159,13 +162,18 @@ def profile_of(day: int) -> str:
 def profile_window(today: int, profile: str) -> list[int]:
     """The profile's last WINDOW_DAYS dates before today, newest first.
 
-    Regular dates step over every Ramadan; Ramadan dates step back from one
-    Ramadan to the one before (as far as the Umm al-Qura table goes).
+    Regular dates step over every Ramadan; Ramadan dates step back from this
+    Ramadan to last year's, no further back than HUMAN_RETENTION_DAYS.
     """
     dates: list[int] = []
     if profile == PROFILE_RAMADAN:
+        oldest = today - HUMAN_RETENTION_DAYS
         for month in ramadans_before(today):
-            for day in range(min(month.last, today - 1), month.first - 1, -1):
+            if month.last < oldest:
+                break
+            for day in range(
+                min(month.last, today - 1), max(month.first, oldest) - 1, -1
+            ):
                 dates.append(day)
                 if len(dates) == WINDOW_DAYS:
                     return dates

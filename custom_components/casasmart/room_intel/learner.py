@@ -10,16 +10,17 @@ devices that count change, and after a member's data is deleted. Each Now
 page request gets a HabitQuery for its layer; the all-off ranking asks it
 which of the caller's rooms are usually on around now.
 
-Each finished Ramadan is kept for the next ones in kv now_ramadan_habits
+Each finished Ramadan is kept for the next one in kv now_ramadan_habits
 (key: its Hijri year): the log's rows of its dates, grouped per room, device,
 source, member and date as habit_rows reads them, minus the dates that may
-not be learned. A Ramadan's window reaches back into the last two Ramadans,
-which the log's 400 days only just cover and its row cap may not; the copy
-is written the first time the hub learns after Ramadan ends (also after a
-restart, or days later if the hub was off), read only while it is Ramadan,
-and the ones no window can reach any more are deleted. It goes with a
-member's last device (their rows), a reset and a factory reset; turning
-learning off keeps it, as it keeps the log.
+not be learned. Next Ramadan's window reaches back to it, which the log's
+400 days just cover and its row cap may not. The copy is written the day
+after Ramadan ends (async_maintain, daily, whether learning is on or not;
+every build checks too, so a restart or a hub that was off catches up),
+read only while it is Ramadan, and deleted once no window reaches it (when
+the next Ramadan ends), so it never holds anyone's activity longer than the
+log's 400 days. It goes with a member's last device (their rows), a reset
+and a factory reset; turning learning off keeps it, as it keeps the log.
 
 The admin settings (learning on or off, pause, weekend days, devices on their
 own schedule, reset) are kept in kv now_habit_config.
@@ -274,6 +275,23 @@ class HabitLearner:
             if not after.learning or after.model_key() != before.model_key():
                 self._drop_model()
         return after
+
+    async def async_maintain(self, _now: datetime | None = None) -> None:
+        """Keep each finished Ramadan and delete the copies no window reaches.
+
+        Daily, whether learning is on or not, so a Ramadan that ends while
+        learning is off is still kept for when it comes back on.
+        """
+        today, _, offset = self._local_now(self._wall_clock())
+        async with self._lock:
+            try:
+                if self._recorder is not None:
+                    await self._recorder.async_flush()
+                await self._hass.async_add_executor_job(
+                    self._keep_finished_ramadans, today, offset
+                )
+            except (StorageError, sqlite3.Error) as err:
+                _LOGGER.warning("Room habits: Ramadan could not be kept: %s", err)
 
     async def async_reset(self, now_t: float | None = None) -> HabitSettings:
         """Forget every habit learned so far, the kept Ramadans too; learning
@@ -577,13 +595,15 @@ def _matches(doc: Any, header: Mapping[str, Any]) -> bool:
 
 def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
     """A kept Ramadan's rows as habit_rows gives them, or None when the doc
-    isn't a copy of that month."""
-    if not isinstance(doc, dict) or doc.get("v") != _RAMADAN_VERSION:
-        return None
-    if (doc.get("year"), doc.get("first_day"), doc.get("last_day")) != (
-        month.year,
-        month.first,
-        month.last,
+    isn't a copy of that Hijri year.
+
+    Rows outside the month's dates are dropped, so a later correction of a
+    year in the Umm al-Qura table keeps the copy (minus a day at most).
+    """
+    if (
+        not isinstance(doc, dict)
+        or doc.get("v") != _RAMADAN_VERSION
+        or doc.get("year") != month.year
     ):
         return None
     rows = doc.get("rows")
@@ -600,11 +620,11 @@ def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
             and isinstance(source, str)
             and (member_id is None or isinstance(member_id, str))
             and _is_day(day)
-            and month.first <= day <= month.last
             and _is_day(on_hours)
         ):
             return None
-        kept.append(dict(zip(_ROW_FIELDS, row, strict=True)))
+        if month.first <= day <= month.last:
+            kept.append(dict(zip(_ROW_FIELDS, row, strict=True)))
     return kept
 
 

@@ -688,22 +688,68 @@ class RamadanTests(LearnerCase):
             table[str(year)] = {"v": 1, "year": year, "first_day": first,
                                 "last_day": last, "rows": []}  # fmt: skip
         await self.ask()
-        # Ramadan 1448's window reaches back to 1446, not 1445. 1447 is
-        # copied from the log; 1446 ended over 400 days ago, so it is only
-        # kept if it already was.
-        self.assertEqual(sorted(self.kept()), ["1446", "1447"])
+        # Ramadan 1448's window reaches back to 1447 only (1446 is older than
+        # the log's 400 days): 1447 is copied from the log, older ones go.
+        self.assertEqual(sorted(self.kept()), ["1447"])
+        # Once 1448 is over, 1449's window reaches 1448 only: 1447 goes too,
+        # so no one's rows are kept longer than the log keeps them.
         await self.ask_at(EID + 1, 20)
-        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+        self.assertEqual(sorted(self.kept()), ["1448"])
         self.storage.table("now_ramadan_habits").clear()
         await self.ask_at(EID + 2, 20)
-        # 1447 ended 2026-03-19, within 400 days of 2027-03-11: copied again
-        # from the log.
-        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+        self.assertEqual(sorted(self.kept()), ["1448"])  # copied again
         # A clock gone back years (a board without a clock, before NTP)
         # deletes nothing newer; a key that isn't a year goes.
         self.storage.table("now_ramadan_habits")["junk"] = {}
         await self.ask_at(17000, 20)  # 2016
-        self.assertEqual(sorted(self.kept()), ["1447", "1448"])
+        self.assertEqual(sorted(self.kept()), ["1448"])
+
+    async def test_ramadan_is_kept_daily_even_while_learning_is_off(self):
+        self.ramadan_routine(RAMADAN)
+        self.now = at(RAMADAN_1 + 26, 21)
+        await self.learner.async_update(
+            {"learning": False}, managed_ids=(), now_t=self.now
+        )
+        self.now = at(EID, 9)
+        await self.learner.async_maintain()
+        # Learned while learning was on: days 1 to 26; the rest never.
+        self.assertEqual(
+            {row[4] for row in self.kept()["1448"]["rows"]}, set(RAMADAN[:26])
+        )
+        table = self.storage.table("now_ramadan_habits")
+        written = table.updated_at("1448")
+        await self.learner.async_maintain()  # nothing new: no rewrite
+        self.assertEqual(table.updated_at("1448"), written)
+        # A storage failure is a warning, not an exception.
+        with (
+            mock.patch.object(
+                self.table, "habit_rows", side_effect=sqlite3.OperationalError("x")
+            ),
+            self.assertLogs(learner_module.__name__, "WARNING"),
+        ):
+            self.storage.table("now_ramadan_habits").clear()
+            await self.learner.async_maintain()
+
+    async def test_a_copy_outlives_a_correction_of_the_calendar(self):
+        self.ramadan_routine(LAST_RAMADAN)
+        await self.ask()
+        table = self.storage.table("now_ramadan_habits")
+        copy = table["1447"]
+        # Written when the table said 1447 began a day later: same year, a
+        # row a day outside today's dates (dropped), the rest still used.
+        table["1447"] = {
+            **copy,
+            "first_day": LAST_RAMADAN[0] + 1,
+            "rows": copy["rows"] + [["majlis", "light.majlis", "app", "mem-a",
+                                     LAST_RAMADAN[0] - 1, 1 << 21]],
+        }  # fmt: skip
+        summary, reasons = await self.ask_at(RAMADAN_1, 21)
+        self.assertEqual(
+            (summary["status"], reasons), ("learning", {"majlis": "habit_now"})
+        )
+        self.assertEqual(
+            self.learner._model.household["majlis"].seen, set(LAST_RAMADAN)
+        )
 
     async def test_an_unreadable_copy_is_ignored(self):
         self.ramadan_routine(LAST_RAMADAN)

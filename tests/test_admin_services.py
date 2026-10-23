@@ -126,13 +126,16 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.rt.room_activity.async_clear.assert_awaited_once()
 
     async def test_factory_reset_clears_the_room_habits(self) -> None:
-        # The learned model and the admin's habit settings go in the wipe's
-        # transaction; the learner then drops what it holds in memory.
+        # The learned model, the kept Ramadans and the admin's habit settings
+        # go in the wipe's transaction; the learner then drops what it holds
+        # in memory.
         self.rt.storage.table("now_room_habits")["regular:household"] = {"v": 1}
+        self.rt.storage.table("now_ramadan_habits")["1447"] = {"v": 1, "rows": []}
         self.rt.storage.table("now_habit_config")["global"] = {"learning": False}
         self.rt.room_habits = types.SimpleNamespace(async_clear=mock.AsyncMock())
         await self._call("factory_reset", "admin")
         self.assertEqual(len(self.rt.storage.table("now_room_habits")), 0)
+        self.assertEqual(len(self.rt.storage.table("now_ramadan_habits")), 0)
         self.assertEqual(len(self.rt.storage.table("now_habit_config")), 0)
         self.rt.room_habits.async_clear.assert_awaited_once()
 
