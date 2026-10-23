@@ -560,6 +560,8 @@ class RoomOnRestoreResultTest(unittest.TestCase):
             ],
         )
         self.assertEqual(answer["restore_pending_count"], 1)
+        # Only the light came back (was the whole capture's 2).
+        self.assertEqual(answer["restored_from_capture_count"], 1)
         self.assertEqual(self.engine.restore_set(self.ROOM), ["fan.c"])
         self.assertEqual(self.engine._restores[self.ROOM]["captured_at"], captured_at)
 

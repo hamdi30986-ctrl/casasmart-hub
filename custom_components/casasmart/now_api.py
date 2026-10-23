@@ -843,7 +843,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             and is_served(self._hass, state.entity_id)
             and is_room_activity_eligible(state, eligible_entity_ids)
         }
-        restore_ids: list[str] = []
+        restorable: list[str] = []
         if action == "turn_off":
             target_ids = [
                 entity_id
@@ -904,6 +904,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             else:
                 outcome["outcome"] = "failed"
         restore_pending: list[str] = []
+        failed_ids = [
+            item["entity_id"] for item in outcomes if item["outcome"] == "failed"
+        ]
         if action == "turn_off":
             # Add to the capture rather than replace it: a repeated off finds
             # little still on and must not forget what the first one captured.
@@ -911,9 +914,6 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 now_data.extend_restore_set, room_id, changed_ids
             )
         else:
-            failed_ids = [
-                item["entity_id"] for item in outcomes if item["outcome"] == "failed"
-            ]
             if failed_ids:
                 # A device that failed stays captured, so the next on retries
                 # just that one; the rest of the capture is done.
@@ -930,7 +930,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             "action": action,
             "outcomes": outcomes,
             "restore_pending_count": len(restore_pending),
-            "restored_from_capture_count": len(restore_ids)
+            # The captured devices that are on now: switched on here, or
+            # already on (not the ones that failed or left the room).
+            "restored_from_capture_count": len(restorable) - len(failed_ids)
             if action == "turn_on"
             else 0,
         }
