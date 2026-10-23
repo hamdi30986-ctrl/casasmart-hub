@@ -30,6 +30,8 @@ What changed in each version of CasaSmart Hub.
 - Admins can turn room habit learning off, pause it, reset it, set the
   weekend days (Friday and Saturday by default), and mark devices that run on
   their own schedule so their timers don't look like habits.
+- When a member's last phone leaves the hub, what was learned from them and
+  their recently used devices are deleted too.
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the

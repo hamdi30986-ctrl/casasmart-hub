@@ -172,6 +172,11 @@ class NowDataEngine:
             cleaned.insert(0, {"entity_id": entity_id, "at": _timestamp(at)})
             self._recents[member_id] = {"items": cleaned[:_MAX_RECENTS]}
 
+    def forget_member(self, member_id: str) -> None:
+        """Delete the member's recent controls (their last device left)."""
+        with self._lock:
+            self._recents.pop(member_id, None)
+
     def recents_for(self, member_id: str) -> list[dict[str, str]]:
         """The member's recent controls, newest first."""
         record = self._recents.get(member_id) or {}

@@ -2,8 +2,10 @@
 
 Self unpair (POST /auth/unpair-self) and an admin deleting a device
 (DELETE /users/{device_id}) run through the real views and AuthEngine over a
-temp HubStorage; the recorder is a stand-in that records what it was asked
-to forget (its own deletion is tested in test_room_activity_recorder).
+temp HubStorage; the recorder and the habit learner are stand-ins that
+record what they were asked to forget (their own deletion is tested in
+test_room_activity_recorder and test_room_habit_learner, the whole path in
+test_room_habits_ha). The member's recent devices (now_recents) go too.
 """
 
 from __future__ import annotations
@@ -36,9 +38,22 @@ class MemberLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.hass, self.rt = H.make_hub(self._tmp.name)
         self.addCleanup(self.rt.storage.close)
         self.rt.user_settings = types.SimpleNamespace(delete=lambda member_id: None)
+        self.forgotten = []
+
+        def forgetter(name):
+            async def forget(member_id):
+                self.forgotten.append((name, member_id))
+
+            return mock.AsyncMock(side_effect=forget)
+
         self.rt.room_activity = types.SimpleNamespace(
-            async_forget_member=mock.AsyncMock()
+            async_forget_member=forgetter("activity")
         )
+        self.rt.room_habits = types.SimpleNamespace(
+            async_forget_member=forgetter("habits")
+        )
+        for member_id in ("mem-a", "mem-b", "mem-keep"):
+            self.rt.now_data.record_successful_control(member_id, "light.majlis")
         _, self.admin_headers = H.session(self.rt.auth, role="admin")
 
     async def unpair_self(self, headers):
@@ -53,32 +68,57 @@ class MemberLeaveTests(unittest.IsolatedAsyncioTestCase):
         )
         return H.read_response(resp)[0]
 
+    def recents(self):
+        return {
+            member: [item["entity_id"] for item in self.rt.now_data.recents_for(member)]
+            for member in ("mem-a", "mem-b", "mem-keep")
+        }
+
     async def test_self_unpair_of_the_last_device_forgets_the_member(self):
         _, headers = H.session(self.rt.auth, role="user", member_id="mem-a")
         self.assertEqual(await self.unpair_self(headers), 200)
-        self.rt.room_activity.async_forget_member.assert_awaited_once_with("mem-a")
+        # The log rows first, then what was learned from them.
+        self.assertEqual(self.forgotten, [("activity", "mem-a"), ("habits", "mem-a")])
+        self.assertEqual(
+            self.recents(),
+            {"mem-a": [], "mem-b": ["light.majlis"], "mem-keep": ["light.majlis"]},
+        )
 
     async def test_self_unpair_with_another_device_left_keeps_the_history(self):
         H.session(self.rt.auth, role="user", member_id="mem-a")
         _, headers = H.session(self.rt.auth, role="user", member_id="mem-a")
         self.assertEqual(await self.unpair_self(headers), 200)
-        self.rt.room_activity.async_forget_member.assert_not_awaited()
+        self.assertEqual(self.forgotten, [])
+        self.assertEqual(self.recents()["mem-a"], ["light.majlis"])
 
     async def test_admin_delete_of_the_last_device_forgets_the_member(self):
         device_id, _ = H.session(self.rt.auth, role="user", member_id="mem-b")
         self.assertEqual(await self.admin_delete(device_id), 200)
-        self.rt.room_activity.async_forget_member.assert_awaited_once_with("mem-b")
+        self.assertEqual(self.forgotten, [("activity", "mem-b"), ("habits", "mem-b")])
+        self.assertEqual(
+            self.recents(),
+            {"mem-a": ["light.majlis"], "mem-b": [], "mem-keep": ["light.majlis"]},
+        )
 
     async def test_admin_delete_with_another_device_left_keeps_the_history(self):
         device_id, _ = H.session(self.rt.auth, role="user", member_id="mem-b")
         H.session(self.rt.auth, role="user", member_id="mem-b")
         self.assertEqual(await self.admin_delete(device_id), 200)
-        self.rt.room_activity.async_forget_member.assert_not_awaited()
+        self.assertEqual(self.forgotten, [])
+        self.assertEqual(self.recents()["mem-b"], ["light.majlis"])
 
     async def test_without_a_recorder_leaving_still_works(self):
         self.rt.room_activity = None
         _, headers = H.session(self.rt.auth, role="user", member_id="mem-a")
         self.assertEqual(await self.unpair_self(headers), 200)
+        self.assertEqual(self.forgotten, [("habits", "mem-a")])
+
+    async def test_without_a_learner_leaving_still_works(self):
+        self.rt.room_habits = None
+        device_id, _ = H.session(self.rt.auth, role="user", member_id="mem-b")
+        self.assertEqual(await self.admin_delete(device_id), 200)
+        self.assertEqual(self.forgotten, [("activity", "mem-b")])
+        self.assertEqual(self.recents()["mem-b"], [])
 
 
 if __name__ == "__main__":

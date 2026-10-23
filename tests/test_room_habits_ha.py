@@ -16,12 +16,14 @@ import os
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import view_harness as H
 
 try:
+    from casasmart.auth_api import CasaSmartUnpairSelfView
     from casasmart.now_api import (
         CasaSmartNowHabitsResetView,
         CasaSmartNowHabitsView,
@@ -350,6 +352,42 @@ class HabitSettingsEndpoints(HabitHubCase):
         self.runtime.room_habits = None
         self.assertEqual((await self.call("get"))[0], 503)
         self.assertEqual((await self.reset())[0], 503)
+
+
+@unittest.skipIf(
+    IMPORT_ERROR is not None, f"Home Assistant unavailable: {IMPORT_ERROR}"
+)
+class MemberLeaves(HabitHubCase):
+    async def test_a_member_who_leaves_takes_their_habits_with_them(self):
+        self.runtime.user_settings = types.SimpleNamespace(delete=lambda member: None)
+        H.session(self.runtime.auth, role="admin")
+        _, headers = H.session(self.runtime.auth, role="user", member_id="mem-a")
+        self.runtime.now_data.record_successful_control("mem-a", "light.bedroom")
+        # Learned: A's own layer, and the household's bedroom habit is A's.
+        block = await self.room_activity(member_id="mem-b")
+        self.assertIn(("room-bedroom", "habit_now"), self.reasons(block))
+        self.assertIn(
+            "regular:member:mem-a", dict(self.storage.table("now_room_habits").items())
+        )
+        status, _ = H.read_response(
+            await CasaSmartUnpairSelfView(self.hass).post(
+                H.FakeRequest(headers=headers)
+            )
+        )
+        self.assertEqual(status, 200)
+        # Gone: their log rows, their layer, their share of the household's
+        # and their recent devices. The household's own habits stay.
+        self.assertEqual(self.storage.room_activity().events(member_id="mem-a"), [])
+        self.assertEqual(self.runtime.now_data.recents_for("mem-a"), [])
+        block = await self.room_activity(member_id="mem-b")
+        self.assertEqual(
+            [r for r, reason in self.reasons(block) if reason == "habit_now"],
+            ["room-majlis"],
+        )
+        docs = dict(self.storage.table("now_room_habits").items())
+        self.assertEqual(sorted(docs), ["regular:household"])
+        self.assertNotIn("mem-a", json.dumps(docs))
+        self.assertNotIn("room-bedroom", docs["regular:household"]["layer"])
 
 
 if __name__ == "__main__":

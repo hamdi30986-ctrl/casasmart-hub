@@ -44,12 +44,14 @@ try:  # Home Assistant + cryptography only exist in the container / CI.
     from casasmart import auth_tokens
     from casasmart.audio import AudioEngine
     from casasmart.auth_engine import AuthEngine
+    from casasmart.now_data import NowDataEngine
     from casasmart.registry import RegistryEngine
     from casasmart.storage import HubStorage
 
     IMPORT_ERROR: Exception | None = None
 except Exception as err:
     auth_tokens = AuthEngine = RegistryEngine = AudioEngine = HubStorage = None
+    NowDataEngine = None
     IMPORT_ERROR = err
 
 
@@ -303,6 +305,15 @@ def make_hub(tmpdir) -> tuple[Any, Any]:
     )
     audio.warm_up()
     runtime = _Runtime(storage, auth, registry, audio, hub_config)
+    # Real, like the hub's: the unpair paths prune a departing member's
+    # recent devices through it.
+    runtime.now_data = NowDataEngine(
+        storage.table("now_recents"),
+        storage.table("now_room_policies"),
+        storage.table("now_config"),
+        storage.table("now_restore_sets"),
+        storage.table("now_idempotency"),
+    )
     return FakeHass(runtime), runtime
 
 

@@ -52,6 +52,8 @@ Capability `now_room_habits_v1`. All three need `users.manage` (admin only).
 - `PUT /api/casasmart/now/habits` with any of: `learning` (bool; off shows no habits and keeps no learned model, and the days while off are never learned), `paused` (bool; keeps ranking on what was learned, and the paused days are never learned), `weekend_days` (weekdays, Monday = 0 … Sunday = 6; applies at once), `self_scheduled_entity_ids` (at most 256 devices the hub manages that run on their own schedule: their wall-switch events stop counting). Answers like GET. An unknown field or a bad value is a 400 and changes nothing.
 - `POST /api/casasmart/now/habits/reset` forgets every learned habit: nothing before the reset counts and learning starts over the next day, warm-up included. The activity log itself is kept. Answers like GET.
 
+A member's own layer, and their share of the household's, is deleted with their last device (both leave paths), with their activity log rows and their recent devices.
+
 ## Fields
 
 Each room gains, after its existing fields:
