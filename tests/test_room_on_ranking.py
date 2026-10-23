@@ -411,6 +411,39 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_a_room_without_a_stored_policy_takes_part_with_its_lights(self):
+        # Once one stored policy takes part, a room without one is listed
+        # too, counting its lights, fans and the wall relays typed as one;
+        # never its plug or untyped relay.
+        self.room("a", "Majlis")
+        self.room("b", "Bedroom")
+        self.device("a", light("light.a"))
+        self.device(
+            "b",
+            light("light.b"),
+            relay("switch.b_plug", gang="outlet"),
+            relay("switch.b_relay", gang="switch"),
+            relay("switch.b_wall", gang="light"),
+        )
+        default = {"participates": True, "eligible_entity_ids": [], "default": True}
+        self.policies = {
+            "a": {"participates": True, "eligible_entity_ids": ["light.a"]},
+            "b": default,
+        }
+        self.assertEqual(
+            {
+                r["room_id"]: (r["active_count"], r["eligible_entity_ids"])
+                for r in await self.ranked()
+            },
+            {"a": (1, ["light.a"]), "b": (2, ["light.b", "switch.b_wall"])},
+        )
+        # Rooms that all take part by default rank as with no policy at all.
+        self.policies = {"a": default, "b": default}
+        self.assertEqual(
+            {r["room_id"]: r["active_count"] for r in await self.ranked()},
+            {"a": 1, "b": 4},
+        )
+
     # -- ties -------------------------------------------------------------------
 
     async def test_count_ties_go_to_sort_order_then_name_then_room_id(self):

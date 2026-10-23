@@ -111,6 +111,7 @@ class WholeRepliesUnchanged(golden.NowRoomActivityGoldenTest):
     test_without_policies = None
     test_with_policies_and_a_capture = None
     test_scoped_member = None
+    test_a_room_taken_out_of_room_commands = None
     test_more_than_four_rooms_feature_the_first = None
 
 

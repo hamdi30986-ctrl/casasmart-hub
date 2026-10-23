@@ -212,7 +212,9 @@ class OneTapFromAnyOff(OneTapCase):
 
 
 class OneTapNeverTouches(OneTapCase):
-    async def test_acs_plugs_relays_covers_heaters_and_tvs(self):
+    async def test_acs_plugs_covers_heaters_and_tvs(self):
+        # The Majlis relay is a wall relay its installer typed as a light: it
+        # comes back like one. The outlet doesn't.
         on = {
             "light.majlis_main": "on",
             "switch.majlis_relay": "on",
@@ -235,12 +237,22 @@ class OneTapNeverTouches(OneTapCase):
             self.press(eid, state)
         status, body = await self.turn_on("majlis")
         self.assertEqual(status, 200)
-        self.assertEqual(self.calls, [("light", "turn_on", ("light.majlis_main",))])
-        self.assertEqual(self.states(*off), {**off, "light.majlis_main": "on"})
+        self.assertEqual(
+            self.calls,
+            [
+                ("light", "turn_on", ("light.majlis_main",)),
+                ("switch", "turn_on", ("switch.majlis_relay",)),
+            ],
+        )
+        self.assertEqual(
+            self.states(*off),
+            {**off, "light.majlis_main": "on", "switch.majlis_relay": "on"},
+        )
 
     async def test_not_even_from_the_hubs_own_capture(self):
         # The room's policy approves the relay and the outlet; a room off
-        # switches them off and captures them; on brings back only the light.
+        # switches them off and captures them; on brings back the light and
+        # the relay typed as a light, never the outlet.
         for eid in ("light.majlis_main", "switch.majlis_relay", "switch.majlis_outlet"):
             self.press(eid, "on")
         status, off = await self.command("majlis", "turn_off")
@@ -251,14 +263,20 @@ class OneTapNeverTouches(OneTapCase):
         )
         self.assertEqual(
             (await self.now_rooms())["majlis"],
-            (1, {**last_on(1), "source": "capture"}),
+            (2, {**last_on(2), "source": "capture"}),
         )
         status, body = await self.turn_on("majlis")
         self.assertEqual((status, body["source"], body["ok"]), (200, "capture", True))
-        self.assertEqual(self.calls, [("light", "turn_on", ("light.majlis_main",))])
+        self.assertEqual(
+            self.calls,
+            [
+                ("light", "turn_on", ("light.majlis_main",)),
+                ("switch", "turn_on", ("switch.majlis_relay",)),
+            ],
+        )
         self.assertEqual(
             self.states("switch.majlis_relay", "switch.majlis_outlet"),
-            {"switch.majlis_relay": "off", "switch.majlis_outlet": "off"},
+            {"switch.majlis_relay": "on", "switch.majlis_outlet": "off"},
         )
         # The capture is done; the switches don't linger in it.
         self.assertEqual(self.now_data.restore_set("majlis"), [])

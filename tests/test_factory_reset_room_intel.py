@@ -273,6 +273,19 @@ class FactoryResetRoomIntelTest(unittest.IsolatedAsyncioTestCase):
             ["regular:household"],
         )
 
+    async def test_nothing_from_before_the_reload_is_written_after_the_wipe(self):
+        # A change between the wipe and the reload (an
+        # automation, a wall switch) is the old owner's; the unload's flush
+        # used to write it after the wipe.
+        await self.fill_with_the_old_owners_data()
+        await self.factory_reset()
+        await self.press(LIGHT, "on")
+        await self.press(LIGHT, "off")
+        await self.recorder.async_stop()  # what the reload's unload does
+        self.assertEqual(self.storage.room_activity().count(), 0)
+        self.assertEqual(len(self.storage.table("now_room_last_on")), 0)
+        self.assertEqual(self.recorder._buffer, [])
+
     async def test_a_scrub_that_fails_still_resets_and_says_run_it_again(self):
         await self.fill_with_the_old_owners_data()
         with mock.patch.object(

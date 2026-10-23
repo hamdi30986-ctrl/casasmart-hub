@@ -205,10 +205,11 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
                         "watts_quality": "complete",
                         "reason": "active",
                         "params": {},
-                        # No room policies: room commands are off.
+                        # No stored policy, so the room takes part with
+                        # its lights and fans; an AC never comes on.
                         "one_tap": {
                             "action": "open_room",
-                            "reason": "room_activity_disabled",
+                            "reason": "nothing_saved",
                         },
                     },
                 }

@@ -47,15 +47,90 @@ class NowDataEngineTest(unittest.TestCase):
         for record in (["light.kitchen"], "participates", 1):
             with self.subTest(record=record):
                 engine._policies["room-kitchen"] = record
+                # As if there were none: the room's default.
                 self.assertEqual(
                     engine.room_policy("room-kitchen"),
-                    {"participates": False, "eligible_entity_ids": []},
+                    {"participates": True, "eligible_entity_ids": [], "default": True},
                 )
-                self.assertFalse(engine.room_participates("room-kitchen"))
+                self.assertTrue(engine.room_participates("room-kitchen"))
 
-    def test_room_policy_and_config_are_explicit_not_auto_discovered(self) -> None:
+    def test_a_room_takes_part_by_default_and_a_stored_policy_wins(self) -> None:
         engine = make_engine()
+        self.assertEqual(
+            engine.room_policy("room-kitchen"),
+            {"participates": True, "eligible_entity_ids": [], "default": True},
+        )
+        self.assertTrue(engine.room_participates("room-kitchen"))
+        engine.set_room_policy("room-kitchen", False, ["light.kitchen"])
+        self.assertEqual(
+            engine.room_policy("room-kitchen"),
+            {
+                "participates": False,
+                "eligible_entity_ids": ["light.kitchen"],
+                "default": False,
+            },
+        )
         self.assertFalse(engine.room_participates("room-kitchen"))
+        engine.forget_room("room-kitchen")
+        self.assertTrue(engine.room_policy("room-kitchen")["default"])
+
+    def test_a_room_without_a_policy_switches_its_lights_and_fans(self) -> None:
+        # (entity id, attributes, registry gang type, lighting_kind)
+        for entity_id, attributes, gang, kind in (
+            ("light.kitchen", {}, None, "light"),
+            ("fan.kitchen", {}, None, "fan"),
+            ("light.lamp", {"casasmart_room_activity_exclude": True}, None, None),
+            # Wall relays the installer typed as a light or fan.
+            ("switch.relay", {}, "light", "light"),
+            ("switch.relay", {"device_class": "switch"}, "light", "light"),
+            ("switch.fan_relay", {}, "fan", "fan"),
+            # Home Assistant says outlet: never, whatever the gang type.
+            ("switch.relay", {"device_class": "outlet"}, "light", None),
+            (
+                "switch.relay",
+                {"casasmart_room_activity_exclude": True},
+                "light",
+                None,
+            ),
+            ("switch.kettle", {"device_class": "outlet"}, "outlet", None),
+            ("switch.plug", {}, "outlet", None),
+            ("switch.heater", {"device_class": "switch"}, "heater", None),
+            ("switch.relay", {"device_class": "switch"}, "switch", None),
+            ("switch.untyped", {}, None, None),
+            ("climate.ac", {"hvac_modes": ["off", "cool"]}, "light", None),
+            ("cover.curtain", {}, None, None),
+            ("media_player.tv", {}, None, None),
+            ("water_heater.tank", {}, None, None),
+        ):
+            with self.subTest(entity_id=entity_id, gang=gang, attributes=attributes):
+                state = {"entity_id": entity_id, "attributes": attributes}
+                self.assertEqual(_NOW.lighting_kind(state, gang), kind)
+                self.assertIs(
+                    _NOW.is_default_room_device(state, gang), kind is not None
+                )
+
+    def test_a_wall_relay_typed_as_a_light_is_a_room_activity_candidate(
+        self,
+    ) -> None:
+        for attributes, gang, expected in (
+            ({}, "light", True),
+            ({}, "fan", True),
+            ({"device_class": "switch"}, None, True),
+            ({}, None, False),
+            ({}, "outlet", False),
+            ({}, "heater", False),
+            ({"device_class": "outlet"}, "light", False),
+        ):
+            with self.subTest(attributes=attributes, gang=gang):
+                self.assertIs(
+                    _NOW.is_room_activity_candidate(
+                        {"entity_id": "switch.relay", "attributes": attributes}, gang
+                    ),
+                    expected,
+                )
+
+    def test_room_policy_and_config_are_stored_as_given(self) -> None:
+        engine = make_engine()
         self.assertEqual(
             engine.set_room_policy(
                 "room-kitchen", True, ["light.kitchen", "fan.kitchen"]
@@ -124,6 +199,33 @@ class NowDataEngineTest(unittest.TestCase):
             engine.consume_restore_set("room-kitchen"), ["light.kitchen", "fan.kitchen"]
         )
         self.assertEqual(engine.restore_set("room-kitchen"), [])
+
+    def test_a_later_room_off_never_makes_an_old_capture_new(self) -> None:
+        # Every room off used to restamp the capture, so
+        # a tap that switched nothing kept yesterday's capture "fresh".
+        from datetime import timedelta
+
+        engine = make_engine()
+        t = datetime(2026, 10, 23, 17, tzinfo=UTC)
+        engine.extend_restore_set("room-kitchen", ["light.main", "light.spot"], t)
+        stamp = t.isoformat()
+        # A second tap a minute later adds to it and keeps the time.
+        engine.extend_restore_set(
+            "room-kitchen", ["fan.hood"], t + timedelta(seconds=60)
+        )
+        self.assertEqual(
+            engine.restore_capture("room-kitchen"),
+            (["light.main", "light.spot", "fan.hood"], stamp),
+        )
+        # A tap that switches nothing, a day later: the capture is untouched.
+        engine.extend_restore_set("room-kitchen", [], t + timedelta(hours=25))
+        self.assertEqual(engine.restore_capture("room-kitchen")[1], stamp)
+        # A later off is what was on last time: a new capture.
+        later = t + timedelta(hours=25)
+        engine.extend_restore_set("room-kitchen", ["light.lamp"], later)
+        self.assertEqual(
+            engine.restore_capture("room-kitchen"), (["light.lamp"], later.isoformat())
+        )
 
     def test_extending_a_restore_set_keeps_what_is_outstanding(self) -> None:
         engine = make_engine()

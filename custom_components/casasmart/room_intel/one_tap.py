@@ -1,7 +1,9 @@
 """One tap "on" for a room that is off: what it turns on, and from what.
 
 One tap turns on the lights and fans that were
-on last time, never plugs, heaters, ACs or covers. The room command and the
+on last time, never plugs, heaters, ACs or covers. A wall relay (a switch)
+counts as a light or fan when the installer typed it so
+(now_data.lighting_kind). The room command and the
 Now page ask the same question (plan_room_on), so the card says what the tap
 does. The sources, first one with a device that can come on wins:
 
@@ -14,7 +16,8 @@ does. The sources, first one with a device that can come on wins:
 3. start_profile: the lights and fans an installer chose for the room;
 4. none: there is nothing to turn on, and the app opens the room instead.
 
-Only lights and fans (ON_DOMAINS) ever come on, whatever a source holds.
+Only lights and fans ever come on, whatever a source holds (ON_DOMAINS,
+and a switch only when the caller names it a typed wall relay: kinds).
 
 LastOnSets follows the state changes of the lights and fans the hub manages,
 in the order Home Assistant fires them, once the recorder is ready (10 minutes
@@ -37,8 +40,12 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any, NamedTuple
 
-# The only domains one tap turns on.
+# The only domains one tap turns on by themselves.
 ON_DOMAINS = frozenset({"light", "fan"})
+# A switch comes on only as a wall relay the installer typed as a light or
+# fan (now_data.lighting_kind), and only when the caller names it so in
+# kinds; a plug, outlet, heater or untyped switch never does.
+RELAY_DOMAIN = "switch"
 SOURCE_CAPTURE = "capture"
 SOURCE_LAST_ON = "last_on"
 SOURCE_START_PROFILE = "start_profile"
@@ -60,6 +67,13 @@ _MAX_SET = 256
 def is_on_domain(entity_id: str) -> bool:
     """True for a device one tap may turn on: a light or a fan."""
     return entity_id.split(".", 1)[0] in ON_DOMAINS
+
+
+def may_come_on(entity_id: str, kinds: Mapping[str, str]) -> bool:
+    """True for a light or fan, or a switch kinds names (a wall relay the
+    installer typed as a light or fan: now_data.lighting_kind)."""
+    domain = entity_id.split(".", 1)[0]
+    return domain in ON_DOMAINS or (domain == RELAY_DOMAIN and entity_id in kinds)
 
 
 # -- the plan -------------------------------------------------------------------
@@ -121,6 +135,7 @@ def plan_room(
     start_profile: Iterable[str],
     devices: Mapping[str, str],
     now_t: float,
+    kinds: Mapping[str, str] | None = None,
 ) -> RoomOnPlan:
     """plan_room_on over a room's three sources.
 
@@ -139,29 +154,41 @@ def plan_room(
             (SOURCE_START_PROFILE, start_profile),
         ],
         devices,
+        kinds,
     )
 
 
-def present_ids(ids: Iterable[str], devices: Mapping[str, str]) -> list[str]:
+def present_ids(
+    ids: Iterable[str],
+    devices: Mapping[str, str],
+    kinds: Mapping[str, str] | None = None,
+) -> list[str]:
     """The ids that are still devices one tap may switch in the room."""
-    return [eid for eid in dict.fromkeys(ids) if eid in devices and is_on_domain(eid)]
+    kinds = kinds or {}
+    return [
+        eid for eid in dict.fromkeys(ids) if eid in devices and may_come_on(eid, kinds)
+    ]
 
 
 def plan_room_on(
-    sources: Iterable[tuple[str, Iterable[str]]], devices: Mapping[str, str]
+    sources: Iterable[tuple[str, Iterable[str]]],
+    devices: Mapping[str, str],
+    kinds: Mapping[str, str] | None = None,
 ) -> RoomOnPlan:
     """Pick what one tap "on" turns on.
 
     sources are (source, entity ids) in priority order (a stale capture is
     passed empty). devices are the room's devices one tap may switch, by
-    entity id, with their state: policy-approved, served, in the room and in
-    ON_DOMAINS (anything else in a source is left out: deleted, moved,
-    unapproved, not a light or fan). The first source with an available
-    device wins.
+    entity id, with their state: policy-approved, served, in the room, and a
+    light or fan (now_data.lighting_kind). kinds maps each of them to
+    "light" or "fan"; a switch comes on only when it names it (a typed wall
+    relay), so a plug passed by mistake never does. Anything else in a
+    source is left out: deleted, moved, unapproved, not a light or fan. The
+    first source with an available device wins.
     """
     any_unavailable = False
     for source, ids in sources:
-        present = present_ids(ids, devices)
+        present = present_ids(ids, devices, kinds)
         targets = [eid for eid in present if devices[eid] not in _UNAVAILABLE]
         unavailable = [eid for eid in present if devices[eid] in _UNAVAILABLE]
         if targets:
@@ -175,15 +202,27 @@ def plan_room_on(
     )
 
 
-def one_tap_summary(plan: RoomOnPlan) -> dict[str, Any]:
-    """The Now page's rank.one_tap for a room that takes part in room commands."""
+def one_tap_summary(
+    plan: RoomOnPlan, kinds: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """The Now page's rank.one_tap for a room that takes part in room commands.
+
+    kinds maps a target to "light" or "fan" (now_data.lighting_kind), so a
+    wall relay typed as a light counts as a light; a target without one
+    counts by its domain.
+    """
     if plan.source is None:
         return {"action": "open_room", "reason": plan.reason}
+    kinds = kinds or {}
+
+    def kind(entity_id: str) -> str:
+        return kinds.get(entity_id) or entity_id.split(".", 1)[0]
+
     return {
         "action": "turn_on",
         "source": plan.source,
-        "light_count": sum(eid.startswith("light.") for eid in plan.targets),
-        "fan_count": sum(eid.startswith("fan.") for eid in plan.targets),
+        "light_count": sum(kind(eid) == "light" for eid in plan.targets),
+        "fan_count": sum(kind(eid) == "fan" for eid in plan.targets),
         "unavailable_count": len(plan.unavailable),
     }
 
@@ -284,14 +323,22 @@ class LastOnSets:
     def seed(self, lit: Iterable[tuple[str, str]]) -> None:
         """Start following from the devices that are on now: (entity id, room id).
 
-        Writes no set: whatever happened before is unknown.
+        Writes no set: whatever happened before is unknown. A room that is
+        still lit keeps its fading devices that are still off, so a registry
+        edit while a wall plate is switched off gang by gang (the recorder
+        reseeds on each) doesn't drop the gangs already off.
         """
+        fading = self._fading
         self._lit.clear()
         self._room_of.clear()
-        self._fading.clear()
+        self._fading = {}
         for entity_id, room_id in lit:
             self._lit.setdefault(room_id, set()).add(entity_id)
             self._room_of[entity_id] = room_id
+        for room_id, offs in fading.items():
+            kept = {e: off for e, off in offs.items() if e not in self._room_of}
+            if room_id in self._lit and kept:
+                self._fading[room_id] = kept
 
     def update(
         self,

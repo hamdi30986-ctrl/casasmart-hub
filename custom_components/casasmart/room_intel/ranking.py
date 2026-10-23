@@ -3,10 +3,12 @@
 A room's on devices are its safe devices that are on (lights, fans, and
 switches whose gang is a light, fan, switch or outlet; that number is
 active_count) plus every AC that is on. Only devices imported into the
-registry count. When any of the caller's rooms takes part in room commands,
-only those rooms and the safe devices their policies approve count (an AC
-counts in every listed room: a policy can't approve one); otherwise every
-visible room does.
+registry count. When an admin's stored policy makes any of the caller's rooms
+take part in room commands, only the rooms that take part count, with the
+devices their policies approve: a stored policy's list, or a room without
+one's lights and fans (wall relays typed as one included; an AC counts in
+every listed room: a policy can't approve one); otherwise every visible room
+does.
 
 Rooms with something on come first. When every one of them is fully metered
 (each on device's own power meters read valid), they rank by watts;
@@ -29,7 +31,7 @@ from collections.abc import Callable, Container, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from ..filtering import area_id_of, in_scope, is_served
-from ..now_data import is_room_activity_candidate
+from ..now_data import is_default_room_device, is_room_activity_candidate
 from .meters import is_power_meter, watt_step, watts_of
 from .off_rooms import (
     JUST_OFF_WINDOW_SECONDS,
@@ -185,6 +187,21 @@ def counts_as_activity(entity_id: str, gang_type: str | None) -> bool:
     return domain in {"light", "fan"} or (
         domain == "switch" and gang_type in _ACTIVE_SWITCH_GANG_TYPES
     )
+
+
+def approved_by(
+    policy: Mapping[str, Any], state: Any, gang_type: str | None = None
+) -> bool:
+    """True when the room's policy lets room commands switch the device: on
+    its stored policy's list (and a candidate), or, in a room without a
+    stored policy, one of its default devices (now_data.room_policy).
+    gang_type is the device's registry gang type (a wall relay typed as a
+    light or fan is a light or fan)."""
+    if policy.get("default"):
+        return is_default_room_device(state, gang_type)
+    return state.entity_id in policy.get(
+        "eligible_entity_ids", []
+    ) and is_room_activity_candidate(state, gang_type)
 
 
 def is_ac(state: Any) -> bool:
@@ -384,7 +401,12 @@ def rank_rooms(
     that were counted and a rank block: active, filler, on_count,
     ac_on_count, watts, watts_quality, reason and params.
     """
-    configured = any(policies.get(r["room_id"], {}).get("participates") for r in rooms)
+    # A room without a stored policy takes part too (its policy is the
+    # default), but only an admin's stored one switches the list over.
+    configured = any(
+        policy.get("participates") and not policy.get("default")
+        for policy in (policies.get(r["room_id"], {}) for r in rooms)
+    )
     events = events_by_room(activity.events) if activity is not None else {}
     on_rooms = []
     off_rooms = []
@@ -410,11 +432,7 @@ def rank_rooms(
             if is_ac(state):
                 kind = acs
             elif counts_as_activity(eid, gang_types.get(eid)) and not (
-                configured
-                and (
-                    eid not in policy.get("eligible_entity_ids", [])
-                    or not is_room_activity_candidate(state)
-                )
+                configured and not approved_by(policy, state, gang_types.get(eid))
             ):
                 kind = eligible
             else:

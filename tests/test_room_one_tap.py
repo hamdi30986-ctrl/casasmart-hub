@@ -82,6 +82,38 @@ class PlanTests(unittest.TestCase):
         for domain in ("switch", "climate", "water_heater", "cover", "media_player"):
             self.assertFalse(one_tap.is_on_domain(f"{domain}.x"))
 
+    def test_a_switch_comes_on_only_as_a_named_wall_relay(self):
+        # A wall relay the installer typed as a light or fan is one, when
+        # the caller names it in kinds; a plug passed without a kind never.
+        devices = {
+            "light.a": "off",
+            "switch.relay": "off",
+            "switch.fan_relay": "off",
+            "switch.plug": "off",
+        }
+        kinds = {"light.a": "light", "switch.relay": "light", "switch.fan_relay": "fan"}
+        plan = one_tap.plan_room_on(
+            [(LAST_ON, ["switch.plug", "switch.fan_relay", "switch.relay", "light.a"])],
+            devices,
+            kinds,
+        )
+        self.assertEqual(plan.targets, ["switch.fan_relay", "switch.relay", "light.a"])
+        self.assertEqual(
+            one_tap.one_tap_summary(plan, kinds),
+            {
+                "action": "turn_on",
+                "source": LAST_ON,
+                "light_count": 2,
+                "fan_count": 1,
+                "unavailable_count": 0,
+            },
+        )
+        only_plug = one_tap.plan_room_on([(LAST_ON, ["switch.plug"])], devices, kinds)
+        self.assertIsNone(only_plug.source)
+        self.assertTrue(one_tap.may_come_on("switch.relay", kinds))
+        self.assertFalse(one_tap.may_come_on("switch.plug", kinds))
+        self.assertFalse(one_tap.may_come_on("climate.ac", {"climate.ac": "light"}))
+
     def test_devices_gone_from_the_room_are_left_out(self):
         # Deleted, moved or unapproved: not among the room's devices.
         plan = self.plan(last_on=["light.deleted", "light.a", "light.moved"])
@@ -297,6 +329,34 @@ class LastOnTests(unittest.TestCase):
         self.assertEqual(self.sets.entity_ids("kitchen"), ["light.old"])
         self.assertTrue(self.off("light.b", t=NOW + 2))
         self.assertEqual(self.sets.entity_ids("kitchen"), ["light.b"])
+
+    def test_a_reseed_while_a_plate_is_switched_off_keeps_the_gangs_already_off(
+        self,
+    ):
+        # The recorder reseeds on every registry edit.
+        for eid in ("light.a", "light.b", "light.c", "light.d"):
+            self.on(eid)
+        self.off("light.a", t=NOW + 1)
+        self.off("light.b", t=NOW + 2)
+        # A setting saved in the app: c and d still on, b back on meanwhile.
+        self.sets.seed(
+            [("light.c", "kitchen"), ("light.d", "kitchen"), ("light.b", "kitchen")]
+        )
+        self.off("light.d", t=NOW + 3)
+        self.off("light.b", t=NOW + 4)
+        self.assertTrue(self.off("light.c", t=NOW + 5))
+        self.assertEqual(
+            self.sets.entity_ids("kitchen"),
+            ["light.c", "light.b", "light.d", "light.a"],
+        )
+        # A room dark at the reseed keeps nothing of its fading devices.
+        self.on("light.m", room="majlis")
+        self.on("light.n", room="majlis")
+        self.off("light.m", room="majlis", t=NOW + 6)
+        self.sets.seed([])
+        self.on("light.n", room="majlis", t=NOW + 7)
+        self.off("light.n", room="majlis", t=NOW + 8)
+        self.assertEqual(self.sets.entity_ids("majlis"), ["light.n"])
 
     def test_drain_saves_each_changed_room_once(self):
         self.on("light.a")
