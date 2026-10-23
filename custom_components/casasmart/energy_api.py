@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 
 from .auth_api import authenticate_request, read_json_object
 from .auth_tokens import ROLE_ADMIN
@@ -36,6 +35,7 @@ from .energy import (
 )
 from .energy_adapter import EnergyInventoryBuilder
 from .energy_validation import validate_config_against_discovery
+from .room_intel.power import power_sensor_of
 from .runtime_lookup import loaded_runtime_data
 
 if TYPE_CHECKING:
@@ -73,42 +73,6 @@ def _candidate(entity: Any, *, dimmable: bool | None = None) -> dict[str, Any]:
     if dimmable is not None:
         value["dimmable"] = dimmable
     return value
-
-
-def _power_sibling(hass: HomeAssistant, entity_id: str) -> dict[str, Any] | None:
-    """The power sensor on the plug's HA device, if there is one.
-
-    That is the first sibling sensor, by entity id, with device class power
-    or "power" in its entity id.
-    """
-    registry = er.async_get(hass)
-    entry = registry.async_get(entity_id)
-    if entry is None or entry.device_id is None:
-        return None
-    siblings = er.async_entries_for_device(
-        registry, entry.device_id, include_disabled_entities=True
-    )
-    for sibling in sorted(siblings, key=lambda item: item.entity_id):
-        if not sibling.entity_id.startswith("sensor."):
-            continue
-        state = hass.states.get(sibling.entity_id)
-        device_class = (
-            state.attributes.get("device_class") if state is not None else None
-        ) or sibling.original_device_class
-        device_class = getattr(device_class, "value", device_class)
-        if (
-            str(device_class or "").lower() != "power"
-            and "power" not in sibling.entity_id
-        ):
-            continue
-        return {
-            "entity_id": sibling.entity_id,
-            "state": state.state if state is not None else "unavailable",
-            "unit": state.attributes.get("unit_of_measurement")
-            if state is not None
-            else None,
-        }
-    return None
 
 
 async def async_energy_discovery(
@@ -250,7 +214,7 @@ async def async_energy_discovery(
             device_class = str(entity.attributes.get("device_class", "")).lower()
             if gang_type in {"outlet", "heater"} or device_class in {"outlet", "plug"}:
                 item = _candidate(entity)
-                item["power_sensor"] = _power_sibling(hass, entity.entity_id)
+                item["power_sensor"] = power_sensor_of(hass, entity.entity_id)
                 plugs.append(item)
             if gang_type in {"heater", "outlet"}:
                 heaters.append(_candidate(entity))
