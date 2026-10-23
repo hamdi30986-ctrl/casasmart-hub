@@ -47,7 +47,7 @@ from .now_data import (
 )
 from .registry import RegistryEngine
 from .room_intel.activity import SOURCE_APP
-from .room_intel.ranking import async_rank_rooms
+from .room_intel.ranking import async_rank_rooms, ranking_summary
 from .runtime_lookup import command_context, loaded_runtime_data
 from .storage import StorageError
 
@@ -287,6 +287,7 @@ class CasaSmartNowView(_NowView):
                         for room_id in room_ids
                         if policies.get(room_id, {}).get("participates", False)
                     ),
+                    "ranking": ranking_summary(active_rooms),
                 },
                 "outdoor_weather": weather,
                 "air_quality": air_quality,

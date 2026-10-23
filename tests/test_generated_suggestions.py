@@ -246,8 +246,9 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         self.states.values["light.unimported"] = light("light.unimported")
         self.hass.rooms["light.unimported"] = "b"
         ranked, _, _ = await self.runtime.generated.room_context(None)
+        # The tie goes to the room order: Kitchen (b) before Living (a).
         self.assertEqual(
-            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 1), ("b", 1)]
+            [(r["room_id"], r["active_count"]) for r in ranked], [("b", 1), ("a", 1)]
         )
         actions = [a for p in await self.plans() for a in p["actions"]]
         self.assertFalse(

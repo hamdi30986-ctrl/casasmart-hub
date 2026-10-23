@@ -1,11 +1,16 @@
 """Golden pins for the room ranking the Now page and generated suggestions share.
 
 The expected values are written out by hand, field by field and in key order,
-so a refactor of the ranking has to reproduce today's answers exactly: the
-order, the tie-break by room id (not name, not sort_order), every field of
-every room, the order of eligible_entity_ids, and the states the generated
-plans are built from. Runs without Home Assistant, on the suggestion-runtime
-fixture test_generated_suggestions uses.
+so a refactor of the ranking has to reproduce these answers exactly: the
+order, the tie-break, every field of every room, the order of
+eligible_entity_ids, and the states the generated plans are built from. Runs
+without Home Assistant, on the suggestion-runtime fixture
+test_generated_suggestions uses.
+
+The ranking changed three answers on purpose: ties go to the room order (sort_order,
+name, room id) instead of the room id; a running AC makes its room active
+(room-c); and off rooms fill the Now page's five card slots (room-d). Every
+room also gained its rank block.
 """
 
 import json
@@ -159,15 +164,27 @@ SERVED_CONTROLS = [
 ]
 
 
-def room(room_id, active_count, eligible_entity_ids):
-    """An expected ranked room: the registry record, then the ranking's fields."""
+def room(room_id, active_count, eligible_entity_ids, *, ac_on=0, filler=False):
+    """An expected ranked room: the registry record, then the ranking's fields.
+
+    This fixture has no power meters.
+    """
     record = next(r for r in ROOMS if r["room_id"] == room_id)
+    on_count = active_count + ac_on
     return {
         **record,
         "active_count": active_count,
         "eligible_entity_ids": eligible_entity_ids,
         "restore_pending_count": 0,
         "most_recent_activity_at": None,
+        "rank": {
+            "active": on_count > 0,
+            "filler": filler,
+            "on_count": on_count,
+            "ac_on_count": ac_on,
+            "watts": None,
+            "watts_quality": "absent",
+        },
     }
 
 
@@ -211,7 +228,9 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             list(states),
         )
 
-    async def test_without_policies_every_visible_room_ranks_by_count_then_id(self):
+    async def test_without_policies_every_visible_room_ranks_by_count_then_order(
+        self,
+    ):
         ranked, grouped, states = await self.rank()
         self.assertEqual(
             ranked,
@@ -227,10 +246,15 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
                             "light.a_excluded",
                         ],
                     ),
-                    # room-b beats room-e on id although "Anteroom" sorts first
-                    # by name; sort_order plays no part.
-                    room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    # A tie goes to the room order: both have sort_order 0,
+                    # and "Anteroom" sorts before "Kitchen" by name.
                     room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    # Only its AC is on (its lamp is unavailable, the other
+                    # light a hidden gang).
+                    room("room-c", 0, [], ac_on=1),
+                    # Four rooms are on, so one off room fills the fifth slot.
+                    room("room-d", 0, ["light.d_lamp"], filler=True),
                 ]
             ),
         )
@@ -262,8 +286,9 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             ranked,
             json.dumps(
                 [
-                    room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
                     room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    room("room-c", 0, [], ac_on=1),
                 ]
             ),
         )
@@ -305,8 +330,10 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             json.dumps(
                 [
                     room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    # The AC counts although no policy can approve one; the
+                    # tie with room-a goes to sort_order (1 before 2).
+                    room("room-c", 0, [], ac_on=1),
                     room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
-                    room("room-c", 0, []),
                 ]
             ),
         )
@@ -319,16 +346,56 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
         self.policies = POLICIES
         ranked, _, _ = await self.rank(["room-d", "room-e"])
         self.assertEqual(
-            ranked, json.dumps([room("room-e", 2, ["light.e_desk", "fan.e_fan"])])
+            ranked,
+            json.dumps(
+                [
+                    room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    room("room-d", 0, ["light.d_lamp"], filler=True),
+                ]
+            ),
         )
 
-    async def test_no_room_scope_and_nothing_on_rank_nothing(self):
+    async def test_no_room_scope_ranks_nothing_and_an_all_off_home_fills_the_slots(
+        self,
+    ):
         ranked, grouped, states = await self.rank([])
         self.assertEqual((ranked, grouped, states), ("[]", {}, []))
         for state in self.states.values.values():
             state.state = "off"
         ranked, _, _ = await self.rank()
-        self.assertEqual(ranked, "[]")
+        # Nothing is on: five off rooms with a device, in the room order.
+        self.assertEqual(
+            ranked,
+            json.dumps(
+                [
+                    room(
+                        "room-e",
+                        0,
+                        ["light.e_desk", "light.e_strip", "fan.e_fan"],
+                        filler=True,
+                    ),
+                    room("room-d", 0, ["light.d_lamp"], filler=True),
+                    room(
+                        "room-b",
+                        0,
+                        ["light.b_spot", "switch.b_relay_left"],
+                        filler=True,
+                    ),
+                    room("room-c", 0, ["light.c_lamp"], filler=True),
+                    room(
+                        "room-a",
+                        0,
+                        [
+                            "light.a_ceiling",
+                            "switch.a_outlet",
+                            "fan.a_fan",
+                            "light.a_excluded",
+                        ],
+                        filler=True,
+                    ),
+                ]
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,10 @@ NowDataEngine, suggestion runtime and filtering over a temp HubStorage; only
 hass, the request and Home Assistant's entity registry are fakes. The block is
 compared as JSON text, so the room order, every field and the key order are
 all pinned. Real-HA environment only, like the other view-layer suites.
+
+The ranking changed the answers on purpose: ties go to the room order (sort_order,
+name, room id), off rooms fill the five card slots, and every room carries a
+rank block, the block a ranking summary.
 """
 
 from __future__ import annotations
@@ -74,8 +78,10 @@ USER_DEVICES = {
 }
 
 
-def room(room_id, active_count, eligible_entity_ids, restore_pending_count=0):
-    """A room as the Now page sends it."""
+def room(
+    room_id, active_count, eligible_entity_ids, restore_pending_count=0, *, filler=False
+):
+    """A room as the Now page sends it (this fixture has no AC and no meter)."""
     return {
         "room_id": room_id,
         **ROOMS[room_id],
@@ -83,7 +89,18 @@ def room(room_id, active_count, eligible_entity_ids, restore_pending_count=0):
         "eligible_entity_ids": eligible_entity_ids,
         "restore_pending_count": restore_pending_count,
         "most_recent_activity_at": None,
+        "rank": {
+            "active": active_count > 0,
+            "filler": filler,
+            "on_count": active_count,
+            "ac_on_count": 0,
+            "watts": None,
+            "watts_quality": "absent",
+        },
     }
+
+
+RANKING = {"version": 1, "basis": "count", "slots": 5}
 
 
 @unittest.skipIf(
@@ -142,21 +159,26 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             await self.room_activity(),
             json.dumps(
                 {
+                    # A three-way tie in the room order (Anteroom and
+                    # Kitchen have sort_order 0, Majlis 2), then Bedroom
+                    # fills a slot.
                     "rooms": [
+                        room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                        room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
                         room(
                             "room-a",
                             2,
                             ["light.a_ceiling", "switch.a_outlet", "fan.a_fan"],
                         ),
-                        room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
-                        room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                        room("room-c", 0, ["light.c_lamp"], filler=True),
                     ],
                     "layout": {
                         "featured_room_id": None,
-                        "cards": ["room-a", "room-b", "room-e"],
+                        "cards": ["room-e", "room-b", "room-a", "room-c"],
                         "view_all_count": 0,
                     },
                     "configured_room_count": 0,
+                    "ranking": RANKING,
                 }
             ),
         )
@@ -180,7 +202,7 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
                     "rooms": [
                         room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
                         room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
-                        room("room-c", 0, ["light.c_lamp"], 1),
+                        room("room-c", 0, ["light.c_lamp"], 1, filler=True),
                     ],
                     "layout": {
                         "featured_room_id": None,
@@ -188,6 +210,7 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
                         "view_all_count": 0,
                     },
                     "configured_room_count": 3,
+                    "ranking": RANKING,
                 }
             ),
         )
@@ -199,13 +222,14 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             await self.room_activity(rooms=["room-c", "room-e"], role="user"),
             json.dumps(
                 {
-                    "rooms": [room("room-c", 0, ["light.c_lamp"], 1)],
+                    "rooms": [room("room-c", 0, ["light.c_lamp"], 1, filler=True)],
                     "layout": {
                         "featured_room_id": None,
                         "cards": ["room-c"],
                         "view_all_count": 0,
                     },
                     "configured_room_count": 1,
+                    "ranking": RANKING,
                 }
             ),
         )
@@ -231,15 +255,16 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             self.hass.states.add(eid, state="on")
         self.runtime.registry.warm_up()
         body = json.loads(await self.room_activity())
+        # Seven rooms are on, so no off room fills a slot.
         self.assertEqual(
             [r["room_id"] for r in body["rooms"]],
-            ["room-a", "room-b", "room-e", "room-z0", "room-z1", "room-z2", "room-z3"],
+            ["room-e", "room-b", "room-a", "room-z0", "room-z1", "room-z2", "room-z3"],
         )
         self.assertEqual(
             body["layout"],
             {
-                "featured_room_id": "room-a",
-                "cards": ["room-b", "room-e", "room-z0", "room-z1"],
+                "featured_room_id": "room-e",
+                "cards": ["room-b", "room-a", "room-z0", "room-z1"],
                 "view_all_count": 2,
             },
         )

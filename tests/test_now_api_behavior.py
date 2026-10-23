@@ -109,16 +109,17 @@ def _load_now_api():
     now_spec.loader.exec_module(now_data)
 
     # The real room ranking, over the stub filtering above, and the real
-    # room activity rules (Home Assistant-free).
+    # room activity and meter rules (Home Assistant-free).
     _module("casasmart.room_intel", package=True)
-    activity_spec = importlib.util.spec_from_file_location(
-        "casasmart.room_intel.activity",
-        ROOT / "custom_components" / "casasmart" / "room_intel" / "activity.py",
-    )
-    assert activity_spec and activity_spec.loader
-    activity = importlib.util.module_from_spec(activity_spec)
-    sys.modules[activity_spec.name] = activity
-    activity_spec.loader.exec_module(activity)
+    for name in ("activity", "meters"):
+        rules_spec = importlib.util.spec_from_file_location(
+            f"casasmart.room_intel.{name}",
+            ROOT / "custom_components" / "casasmart" / "room_intel" / f"{name}.py",
+        )
+        assert rules_spec and rules_spec.loader
+        rules = importlib.util.module_from_spec(rules_spec)
+        sys.modules[rules_spec.name] = rules
+        rules_spec.loader.exec_module(rules)
     ranking_spec = importlib.util.spec_from_file_location(
         "casasmart.room_intel.ranking",
         ROOT / "custom_components" / "casasmart" / "room_intel" / "ranking.py",
