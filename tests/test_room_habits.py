@@ -124,7 +124,7 @@ class DecayTests(unittest.TestCase):
         self.assertFalse(usable(TODAY))
         self.assertFalse(usable(TODAY - 57))
         model = build([row(TODAY, [H]), row(TODAY - 57, [H]), row(TODAY - 1, [H])])
-        self.assertEqual(set(model.household["majlis"].half), {TODAY - 1})
+        self.assertEqual(set(model.household["majlis"].full), {TODAY - 1})
 
 
 class GateTests(unittest.TestCase):
@@ -137,7 +137,9 @@ class GateTests(unittest.TestCase):
 
     def test_strength_threshold(self):
         # 20 observed workdays, the room switched on at 20:00 on the newest n.
-        for source, first in (("app", 7), ("wall_switch", 19)):
+        # A wall press weighs as much as an app tap (at
+        # half weight it took 19 of the 20 evenings).
+        for source, first in (("app", 7), ("wall_switch", 7)):
             previous = 0.0
             for evenings in range(1, 21):
                 with self.subTest(source=source, evenings=evenings):
@@ -210,23 +212,32 @@ class VoteTests(unittest.TestCase):
         self.assertEqual(evidence.near(TODAY - 5, 23, half_weight=True), 0.5)
         self.assertEqual(evidence.near(TODAY - 3, 0, half_weight=True), 0.0)
 
-    def test_wall_switch_votes_count_half_and_only_for_the_household(self):
+    def test_wall_switch_votes_count_fully_and_only_for_the_household(self):
         days = workdays(20)
         rows = presence(days) + [row(day, [H]) for day in days]
         model = build(rows)
         majlis = model.household["majlis"]
-        self.assertEqual(majlis.full, {})
-        self.assertEqual(set(majlis.half), set(days))
+        self.assertEqual(habits.SOURCE_WEIGHTS["wall_switch"], 1.0)
+        self.assertEqual(majlis.half, {})
+        self.assertEqual(set(majlis.full), set(days))
         habit, dates = scorer(model).score("majlis")
         self.assertEqual(dates, 20)
-        self.assertAlmostEqual(
-            habit, 0.5 * habits.strength(
-                habits.RoomEvidence(full=dict(majlis.half)), days, hour=H, today=TODAY
-            )[0],
-        )  # fmt: skip
+        app = build(
+            presence(days)
+            + [row(day, [H], source="app", member="mem-a") for day in days]
+        )
+        # The same evenings tapped in the app score the same for the house.
+        self.assertEqual(scorer(app).score("majlis"), (habit, dates))
         self.assertEqual(model.members, {})
-        # A full vote the same hour wins over a half one.
-        model = build(rows + [row(days[0], [H], source="ha_user")])
+
+    def test_a_weight_under_one_is_kept_as_a_half_vote(self):
+        # No source weighs 1/2 today; the model still keeps such votes apart.
+        days = workdays(3)
+        with mock.patch.dict(habits.SOURCE_WEIGHTS, {"wall_switch": 0.5}):
+            model = build([row(days[0], [H])])
+            self.assertEqual(model.household["majlis"].half, {days[0]: 1 << H})
+            # A full vote the same hour wins over a half one.
+            model = build([row(days[0], [H]), row(days[0], [H], source="ha_user")])
         self.assertEqual(
             model.household["majlis"].vote(days[0], H, half_weight=True), 1.0
         )
@@ -259,6 +270,99 @@ class VoteTests(unittest.TestCase):
         # Seen (someone was there), but no vote.
         self.assertEqual(majlis.seen, set(days[:2]))
         self.assertEqual((majlis.full, majlis.half), ({}, {}))
+
+
+class WallSwitchWeightTests(unittest.TestCase):
+    """Wall presses count at full weight for the household.
+
+    In this market the wall switch is how most people switch a room on, so
+    at half weight a wall-only room barely showed on workdays and never on
+    the weekend.
+    """
+
+    def history(self, today, weekend_evenings=4):
+        """Eight weeks before today. Someone is home every day (a kitchen
+        press at 07:00) except one weekend away; the majlis is switched on
+        at the wall at 20:00 on four workdays out of five (never on a
+        Wednesday) and on weekend_evenings of every four weekend days."""
+        rows, weekend = [], 0
+        for day in range(today - 56, today):
+            if habits.weekday(day) in (4, 5):
+                weekend += 1
+                if weekend in (5, 6):  # the third weekend away
+                    continue
+                if weekend % 4 < weekend_evenings:
+                    rows.append(row(day, [H]))
+            elif habits.weekday(day) != 2:
+                rows.append(row(day, [H]))
+            rows.append(row(day, [7], room="kitchen", entity="light.kitchen"))
+        return rows
+
+    def ask(self, today, **history):
+        model = habits.build_model(
+            self.history(today, **history),
+            counted=COUNTED,
+            self_scheduled=frozenset(),
+            usable=habits.HabitSettings().usable_days(today, RIYADH),
+        )
+        s = scorer(model, today=today)
+        habit, dates = s.score("majlis")
+        return s, round(habit, 4), dates
+
+    def test_a_wall_only_room_passes_on_workdays_and_weekends(self):
+        thursday, friday, saturday = TODAY, TODAY + 1, TODAY + 2
+        self.assertEqual(
+            [habits.weekday(d) for d in (thursday, friday, saturday)], [3, 4, 5]
+        )
+        cases = (
+            # (today, weekend evenings in 4, strength at 1, at 1/2, dates)
+            (thursday, 4, 0.5995, 0.2997, 32),
+            (friday, 4, 0.5230, 0.2615, 14),
+            (saturday, 4, 0.5564, 0.2782, 14),
+            # Fewer weekend evenings (3 in 4) still pass.
+            (friday, 3, 0.3649, 0.1824, 10),
+        )
+        for today, evenings, full, half, dates in cases:
+            with self.subTest(weekday=habits.weekday(today), evenings=evenings):
+                s, habit, seen = self.ask(today, weekend_evenings=evenings)
+                self.assertTrue(s.ready)
+                self.assertEqual(s.observed_days, 54)
+                self.assertEqual((habit, seen), (full, dates))
+                self.assertGreaterEqual(habit, habits.MIN_STRENGTH)
+                self.assertEqual(
+                    s.learned({"room_id": "majlis"}), ("habit_now", {}, (0, -full))
+                )
+                # The same history at the old half weight never showed.
+                with mock.patch.dict(habits.SOURCE_WEIGHTS, {"wall_switch": 0.5}):
+                    s, habit, _ = self.ask(today, weekend_evenings=evenings)
+                self.assertEqual(habit, half)
+                self.assertIsNone(s.learned({"room_id": "majlis"}))
+
+    def test_wall_presses_never_reach_a_persons_layer(self):
+        days = workdays(25)
+        rows = presence(days) + [row(day, [H]) for day in days]
+        # Member A taps the kitchen on from the app; a wall row that somehow
+        # carried a member id still isn't theirs.
+        rows += [
+            row(day, [H], room="kitchen", entity="light.kitchen", source="app",
+                member="mem-a")
+            for day in days[:20]
+        ]  # fmt: skip
+        rows.append(row(days[0], [9], member="mem-a"))
+        model = build(rows)
+        self.assertEqual(set(model.members), {"mem-a"})
+        own = model.members["mem-a"]
+        self.assertEqual(set(own), {"kitchen"})
+        self.assertEqual(own["kitchen"].vote_dates(), set(days[:20]))
+        # The household has every wall press; A's own layer none, so for A
+        # the majlis' wall habit is narrowed by their own taps (lambda 2/3).
+        self.assertEqual(set(model.household["majlis"].full), set(days))
+        household = scorer(model).score("majlis")[0]
+        mine = scorer(model, member="mem-a")
+        self.assertAlmostEqual(mine.personal_weight, 20 / 30)
+        self.assertAlmostEqual(mine.score("majlis")[0], household / 3)
+        # A member with no app taps gets the household's answer unchanged.
+        self.assertEqual(scorer(model, member="mem-b").score("majlis")[0], household)
 
 
 class ScheduleOptOutTests(unittest.TestCase):
@@ -538,7 +642,7 @@ class SettingsTests(unittest.TestCase):
             [row(day, [H]) for day in range(TODAY - 10, TODAY)], usable=usable
         )
         self.assertEqual(
-            sorted(model.household["majlis"].half), list(range(TODAY - 4, TODAY))
+            sorted(model.household["majlis"].full), list(range(TODAY - 4, TODAY))
         )
 
     def test_the_model_key_ignores_the_weekend(self):

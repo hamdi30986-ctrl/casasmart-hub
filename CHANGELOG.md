@@ -22,11 +22,12 @@ What changed in each version of CasaSmart Hub.
   (newest first; not by an automation or scene), then your room order.
 - The hub now learns when each room is usually switched on, from its own
   activity log, and puts those rooms after the ones just switched off, with
-  "Usually on around now". Wall switches count at half weight, automations
-  not at all. It waits for two weeks of history first. The wall tablet uses
-  the whole household's habits; each phone blends in its own person's app
-  taps. Rooms you switched off yourself in the last 30 minutes come right
-  after those, marked as yours.
+  "Usually on around now". Wall switches count as much as an app tap, but
+  only for the whole household; automations not at all. It waits for two
+  weeks of history first. The wall tablet uses the whole household's
+  habits; each phone blends in its own person's app taps. Rooms you
+  switched off yourself in the last 30 minutes come right after those,
+  marked as yours.
 - Admins can turn room habit learning off, pause it, reset it, set the
   weekend days (Friday and Saturday by default), and mark devices that run on
   their own schedule so their timers don't look like habits.

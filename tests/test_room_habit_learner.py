@@ -226,7 +226,7 @@ class BuildAndCacheTests(LearnerCase):
             ["regular:household", "regular:member:mem-a", "regular:member:mem-b"],
         )
         for doc in docs.values():
-            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 1, "day": TODAY})
+            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 2, "day": TODAY})
         self.assertEqual(set(docs["regular:household"]["layer"]), {"majlis", "kitchen"})
         # A saved doc that doesn't parse is rebuilt from the log.
         self.storage.table("now_room_habits")["regular:household"] = {
@@ -402,6 +402,18 @@ class LayerAndMemberTests(LearnerCase):
         # Someone with no app history gets the household's.
         _, reasons = await self.ask("mem-b")
         self.assertEqual(reasons, {"majlis": "habit_now", "bedroom": "habit_now"})
+
+    async def test_wall_presses_are_saved_in_the_household_layer_only(self):
+        await self.ask("mem-a")
+        docs = self.docs()
+        self.assertEqual(sorted(docs), ["regular:household", "regular:member:mem-a"])
+        # Full-weight wall votes in the household; A's layer is only A's taps.
+        self.assertEqual(
+            {day for day, full, half in docs["regular:household"]["layer"]["majlis"]["on"]
+             if full >> 20 & 1 and not half},
+            set(workdays(25)),
+        )  # fmt: skip
+        self.assertEqual(set(docs["regular:member:mem-a"]["layer"]), {"bedroom"})
 
     async def test_a_departing_member_is_forgotten(self):
         await self.ask("mem-a")

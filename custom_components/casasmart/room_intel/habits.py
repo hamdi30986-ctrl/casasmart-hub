@@ -9,11 +9,13 @@ imports Home Assistant.
 Votes. A confirmed "on" of a device that makes its room on (the ranking's
 rule: a light, a fan, a switch whose gang is a light, fan, switch or outlet,
 or an AC) votes for its room, local date and local hour, once however often
-it was tapped. A member's app tap, a scene a member ran and a Home Assistant
-user weigh 1; a wall switch (a press, a remote: no person behind it) weighs
-1/2 and only in the household layer; automations and unnamed service callers
-weigh 0. A device an admin marked "runs on its own schedule" has its wall
-switch events ignored: a schedule kept on the device logs as a wall switch.
+it was tapped. A member's app tap, a scene a member ran, a Home Assistant
+user and a wall switch (a press, a remote) weigh 1; a wall switch has no
+person behind it, so it votes only in the household layer, never in a
+member's (wall presses at full weight, was 1/2).
+Automations and unnamed service callers weigh 0. A device an admin marked
+"runs on its own schedule" has its wall switch events ignored: a schedule
+kept on the device logs as a wall switch.
 
 Layers. The household layer learns from every vote. A member's own layer
 learns from their app taps only. The shared tablet asks for the household; a
@@ -25,7 +27,7 @@ the app in their rooms.
 Strength of a room at local hour h, over the observed dates d of today's day
 class (workday or weekend) in the last WINDOW_DAYS, today excluded:
 
-    x_d   = max(v(d, h), 1/2 v(d, h-1), 1/2 v(d, h+1))   v = 1, 1/2 or 0
+    x_d   = max(v(d, h), 1/2 v(d, h-1), 1/2 v(d, h+1))   v = the vote's weight
     w_d   = 2 ** -(age_d / HALF_LIFE_DAYS)
     habit = sum(w_d x_d) / (sum(w_d) + PRIOR_DAYS)
 
@@ -70,15 +72,17 @@ PERSONAL_WEIGHT_MAX = 0.8
 PERSONAL_WEIGHT_HALF = 10
 
 # The sources that vote, and their weight in the household layer. Any other
-# source (automation, unknown) weighs 0.
+# source (automation, unknown) weighs 0. A weight under 1 would be kept as a
+# half vote (RoomEvidence.half); none is today: wall switches weighed 1/2
+# until they were set to 1, in the household layer only.
 SOURCE_WEIGHTS: Mapping[str, float] = {
     SOURCE_APP: 1.0,
     SOURCE_SCENE: 1.0,
     SOURCE_HA_USER: 1.0,
-    SOURCE_WALL_SWITCH: 0.5,
+    SOURCE_WALL_SWITCH: 1.0,
 }
 HUMAN_SOURCES = tuple(SOURCE_WEIGHTS)
-# The source of a member's own layer.
+# The source of a member's own layer: their app taps (never a wall switch).
 PERSONAL_SOURCE = SOURCE_APP
 
 # Saudi weekend (Friday, Saturday); Monday = 0.
@@ -101,7 +105,8 @@ STATUS_UNAVAILABLE = "unavailable"
 # leave the regular profile's usable days); the model docs carry it in their
 # key so the two never mix.
 PROFILE_REGULAR = "regular"
-MODEL_VERSION = 1
+# 2: wall switches vote at full weight (a saved v1 model has them at half).
+MODEL_VERSION = 2
 
 _SETTINGS_FIELDS = frozenset(
     {"learning", "paused", "weekend_days", "self_scheduled_entity_ids"}
