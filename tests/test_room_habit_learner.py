@@ -74,6 +74,8 @@ class FakeHass:
         self.config = NS(time_zone=time_zone)
 
     async def async_add_executor_job(self, target, *args):
+        # Yields like a real executor hop, so concurrent requests interleave.
+        await asyncio.sleep(0)
         return target(*args)
 
 
@@ -258,7 +260,8 @@ class BuildAndCacheTests(LearnerCase):
         self.household_routine()
         results = await asyncio.gather(*(self.ask() for _ in range(5)))
         self.assertEqual({json.dumps(r) for r in results}, {json.dumps(results[0])})
-        self.assertEqual(self.learner.builds, 1)
+        # One build, and no one re-reads the saved model while it is built.
+        self.assertEqual((self.learner.builds, self.learner.loads), (1, 0))
 
 
 class StatusTests(LearnerCase):
@@ -336,7 +339,10 @@ class StatusTests(LearnerCase):
     async def test_reset_forgets_and_learning_starts_again(self):
         self.household_routine()
         await self.ask()
+        self.assertTrue(self.docs())
         await self.learner.async_reset(now_t=at(TODAY - 1, 9))
+        # The saved model goes at once, not at the next request.
+        self.assertEqual(self.docs(), {})
         self.assertEqual(self.learner.settings.reset_at, at(TODAY - 1, 9))
         summary, reasons = await self.ask()
         self.assertEqual((summary["status"], reasons), ("warming_up", {}))
