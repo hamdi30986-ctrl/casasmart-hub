@@ -54,11 +54,11 @@ from .now_data import (
     MAX_START_PROFILE,
     NowDataEngine,
     NowDataError,
-    is_default_room_device,
     is_room_activity_candidate,
-    is_room_activity_eligible,
     lighting_kind,
     room_activity_layout,
+    room_command_approves,
+    room_light_kind,
     summarize_openings,
 )
 from .registry import RegistryEngine
@@ -136,28 +136,6 @@ def _room_command_locks(hass: HomeAssistant) -> dict[str, asyncio.Lock]:
     return hass.data.setdefault(DOMAIN, {}).setdefault("room_command_locks", {})
 
 
-def _approved(
-    state: Any, policy: dict[str, Any], gang_types: Mapping[str, str | None]
-) -> bool:
-    """True when the room's policy lets room commands switch this device.
-
-    A stored policy approves the candidates on its list. A room without one
-    takes part with its default devices: its lights and fans imported into
-    the registry, wall relays the installer typed as one included
-    (now_data.is_default_room_device). gang_types are the registry's
-    imported controls with their gang types (ranking.imported_controls). The
-    caller checks the device is in the room and served.
-    """
-    entity_id = state.entity_id
-    if policy["default"]:
-        return entity_id in gang_types and is_default_room_device(
-            state, gang_types[entity_id]
-        )
-    return is_room_activity_eligible(
-        state, policy["eligible_entity_ids"], gang_types.get(entity_id)
-    )
-
-
 def _one_tap_devices(
     hass: HomeAssistant,
     policies: dict[str, dict[str, Any]],
@@ -167,24 +145,20 @@ def _one_tap_devices(
     state, and each one's kind ("light" or "fan").
 
     policies are the rooms that take part in room commands, with their
-    policy. A device counts in its room when the policy approves it
-    (_approved), it is served, and it is a light or fan to the hub
-    (now_data.lighting_kind: a wall relay the installer typed as one too).
-    One scan.
+    policy. A device counts in its room when it is served and one of the
+    room's lights and fans (now_data.room_light_kind: what its policy
+    approves, a wall relay the installer typed as one too; the same devices
+    make the room on). One scan.
     """
     devices: dict[str, dict[str, str]] = {room_id: {} for room_id in policies}
     kinds: dict[str, str] = {}
     for state in hass.states.async_all():
         entity_id = state.entity_id
-        kind = lighting_kind(state, gang_types.get(entity_id))
-        if kind is None:
-            continue
         room_id = area_id_of(hass, entity_id)
         if room_id not in policies:
             continue
-        if _approved(state, policies[room_id], gang_types) and is_served(
-            hass, entity_id
-        ):
+        kind = room_light_kind(state, policies[room_id], gang_types)
+        if kind is not None and is_served(hass, entity_id):
             devices[room_id][entity_id] = state.state
             kinds[entity_id] = kind
     return devices, kinds
@@ -1104,7 +1078,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             for state in self._hass.states.async_all()
             if area_id_of(self._hass, state.entity_id) == room_id
             and is_served(self._hass, state.entity_id)
-            and _approved(state, policy, gang_types)
+            and room_command_approves(state, policy, gang_types)
         }
         plan: RoomOnPlan | None = None
         if action == "turn_off":
@@ -1119,7 +1093,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             kinds = {
                 entity_id: kind
                 for entity_id, state in eligible.items()
-                if (kind := lighting_kind(state, gang_types.get(entity_id))) is not None
+                if (kind := room_light_kind(state, policy, gang_types)) is not None
             }
             devices = {entity_id: eligible[entity_id].state for entity_id in kinds}
 
