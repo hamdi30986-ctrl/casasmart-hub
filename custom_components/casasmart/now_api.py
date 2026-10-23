@@ -237,9 +237,12 @@ class CasaSmartNowView(_NowView):
         # rooms that just went dark (the caller's own offs after the habits),
         # and the habits the ones usually on around now: the household's for
         # the shared tablet, the caller's own blended over them for a phone.
+        # The household's view has no "you": on a shared screen everyone's
+        # offs are just offs.
+        household = layer == LAYER_HOUSEHOLD
         learner = getattr(loaded_runtime_data(self._hass), "room_habits", None)
         habits = (
-            learner.query(None if layer == LAYER_HOUSEHOLD else member_id)
+            learner.query(None if household else member_id)
             if learner is not None
             else None
         )
@@ -249,7 +252,7 @@ class CasaSmartNowView(_NowView):
             now_data,
             scope,
             activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),
-            member_id=member_id,
+            member_id=None if household else member_id,
             habits=habits,
         )
 

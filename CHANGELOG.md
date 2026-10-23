@@ -24,10 +24,11 @@ What changed in each version of CasaSmart Hub.
   activity log, and puts those rooms after the ones just switched off, with
   "Usually on around now". Wall switches count as much as an app tap, but
   only for the whole household; automations not at all. It waits for two
-  weeks of history first. The wall tablet uses the whole household's
-  habits; each phone blends in its own person's app taps. Rooms you
-  switched off yourself in the last 30 minutes come right after those,
-  marked as yours.
+  weeks of history first. Each phone blends in its own person's app taps;
+  the wall tablet can ask for the whole household's habits instead (once
+  the tablet app does). Rooms you switched off yourself in the last 30
+  minutes come right after those, marked as yours (not on the household's
+  view).
 - Ramadan has habits of its own. The hub knows when Ramadan is from the
   Umm al-Qura calendar, offline, and learns those days apart: during
   Ramadan the rooms are ranked on Ramadan habits, and the day after it the

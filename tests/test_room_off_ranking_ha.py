@@ -340,12 +340,12 @@ class NowPageOffRooms(unittest.IsolatedAsyncioTestCase):
             "member_id": member_id,
         }
 
-    async def room_activity(self, *, member_id, rooms=None, role="admin"):
+    async def room_activity(self, *, member_id, rooms=None, role="admin", query=None):
         _, headers = H.session(
             self.runtime.auth, role=role, rooms=rooms, member_id=member_id
         )
         status, body = H.read_response(
-            await self.view.get(H.FakeRequest(headers=headers))
+            await self.view.get(H.FakeRequest(headers=headers, query=query))
         )
         self.assertEqual(status, 200)
         return body["room_activity"]
@@ -389,6 +389,24 @@ class NowPageOffRooms(unittest.IsolatedAsyncioTestCase):
                 ("room-kitchen", "just_off", {"went_dark_at": iso(self.kitchen_dark)}),
                 ("room-bedroom", "just_off",
                  {"went_dark_at": iso(self.bedroom_dark), "by_you": True}),
+                ("room-office", "room_order", {}),
+            ],
+        )  # fmt: skip
+
+    async def test_the_shared_tablet_has_no_own_offs(self):
+        # ?habits=household (the wall tablet, its own member): an off made
+        # from it is an off like anyone's, never "You turned this off".
+        rooms = (
+            await self.room_activity(
+                member_id="mem-owner", query={"habits": "household"}
+            )
+        )["rooms"]
+        self.assertEqual(
+            [(r["room_id"], r["rank"]["reason"], r["rank"]["params"]) for r in rooms],
+            [
+                ("room-majlis", "running_load", {"loads": ["media"]}),
+                ("room-bedroom", "just_off", {"went_dark_at": iso(self.bedroom_dark)}),
+                ("room-kitchen", "just_off", {"went_dark_at": iso(self.kitchen_dark)}),
                 ("room-office", "room_order", {}),
             ],
         )  # fmt: skip

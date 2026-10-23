@@ -76,7 +76,7 @@ class NowEndpointContractTest(unittest.TestCase):
             "            now_data,\n"
             "            scope,\n"
             '            activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),\n'
-            "            member_id=member_id,\n"
+            "            member_id=None if household else member_id,\n"
             "            habits=habits,\n",
             source,
         )
