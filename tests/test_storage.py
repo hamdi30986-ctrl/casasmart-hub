@@ -122,6 +122,9 @@ class TestScrub(StorageTestCase):
         self.assertIn(self.MARKER, self.disk())
         storage.compact()
         self.assertNotIn(self.MARKER, self.disk())
+        # The WAL is emptied, not just checkpointed.
+        wal = self.db_path.with_name(self.db_path.name + "-wal")
+        self.assertEqual(wal.stat().st_size if wal.exists() else 0, 0)
         # Still a working database.
         table["member-1"] = {"ok": True}
         self.assertEqual(table["member-1"], {"ok": True})
