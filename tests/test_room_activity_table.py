@@ -309,6 +309,48 @@ class RoomActivityTableTests(unittest.TestCase):
         self.table.clear()
         self.assertEqual(self.table.count(), 0)
 
+    def test_recent_in_rooms_reads_the_rooms_window_newest_first(self):
+        # The all-off ranking's read: these rooms, these actions, since t.
+        self.table.append_many(
+            [
+                event(FRI_00_UTC - 1, action="off"),  # before the window
+                event(FRI_00_UTC, action="on"),
+                event(FRI_00_UTC + 5, entity="cover.majlis", action="open"),
+                event(FRI_00_UTC + 5, action="off", source="app", member_id="m"),
+                event(FRI_00_UTC + 9, room="kitchen", action="set"),
+                event(FRI_00_UTC + 9, room="hall", action="off"),  # not asked for
+            ]
+        )
+        rows = self.table.recent_in_rooms(
+            ["majlis", "kitchen"], since_t=FRI_00_UTC, actions=["on", "off", "set"]
+        )
+        self.assertEqual(
+            [(r["t"], r["room_id"], r["action"], r["member_id"]) for r in rows],
+            [
+                (FRI_00_UTC + 9, "kitchen", "set", None),
+                (FRI_00_UTC + 5, "majlis", "off", "m"),
+                (FRI_00_UTC, "majlis", "on", None),
+            ],
+        )
+        # No room asked for matches nothing; actions are optional.
+        self.assertEqual(self.table.recent_in_rooms([], since_t=0), [])
+        self.assertEqual(
+            len(self.table.recent_in_rooms(["majlis"], since_t=FRI_00_UTC)), 3
+        )
+        self.assertEqual(
+            len(self.table.recent_in_rooms(["majlis"], since_t=0, limit=2)), 2
+        )
+        for bad in (
+            {"since_t": -1},
+            {"since_t": 0, "limit": 0},
+            {"since_t": 0, "limit": 5001},
+            {"since_t": 0, "limit": True},
+        ):
+            with self.assertRaises(ValueError):
+                self.table.recent_in_rooms(["majlis"], **bad)
+        with self.assertRaises(ValueError):
+            self.table.recent_in_rooms("majlis", since_t=0)
+
     # -- query plans -----------------------------------------------------------
 
     def test_room_and_member_queries_use_their_indexes(self):
@@ -337,6 +379,15 @@ class RoomActivityTableTests(unittest.TestCase):
         self.assertIn(
             "idx_room_activity_t",
             plan("SELECT id FROM room_activity_events WHERE t < ? ORDER BY t", (5,)),
+        )
+        # recent_in_rooms' query searches an index, never scans the table.
+        recent = plan(
+            "SELECT * FROM room_activity_events WHERE t >= ? AND room_id IN (?, ?) "
+            "AND action IN (?, ?, ?) ORDER BY t DESC, id DESC LIMIT ?",
+            (0, "majlis", "kitchen", "on", "off", "set", 5000),
+        )
+        self.assertIn(
+            "SEARCH room_activity_events USING INDEX idx_room_activity_room_t", recent
         )
 
 

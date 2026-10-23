@@ -687,6 +687,36 @@ class RoomActivityTable:
         )
         return [self._row(row) for row in rows]
 
+    def recent_in_rooms(
+        self,
+        room_ids: Iterable[str],
+        *,
+        since_t: int,
+        actions: Iterable[str] | None = None,
+        limit: int = _MAX_QUERY_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """The rooms' events since since_t (these actions only), newest first.
+
+        The all-off room ranking's read: one query over the (room_id, t) or
+        (t) index, however many rooms.
+        """
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= self._MAX_QUERY_LIMIT
+        ):
+            raise ValueError(f"limit must be between 1 and {self._MAX_QUERY_LIMIT}")
+        where, params = self._filters(
+            since_t=since_t, until_t=None, room_ids=room_ids, actions=actions
+        )
+        params.append(limit)
+        rows = self._storage._fetchall(
+            f"SELECT {self._COLUMNS} FROM room_activity_events {where} "
+            "ORDER BY t DESC, id DESC LIMIT ?",
+            tuple(params),
+        )
+        return [self._row(row) for row in rows]
+
     def last_off_by_room(
         self, room_ids: Iterable[str], *, since_t: int | None = None
     ) -> dict[str, dict[str, Any]]:
