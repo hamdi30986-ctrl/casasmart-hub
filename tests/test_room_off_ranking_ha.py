@@ -393,6 +393,24 @@ class NowPageOffRooms(unittest.IsolatedAsyncioTestCase):
             ],
         )  # fmt: skip
 
+    async def test_the_now_page_reads_the_rooms_and_policies_once(self):
+        registry, now_data = self.runtime.registry, self.runtime.now_data
+        with (
+            mock.patch.object(
+                registry, "list_rooms", wraps=registry.list_rooms
+            ) as rooms,
+            mock.patch.object(
+                registry, "list_user_devices", wraps=registry.list_user_devices
+            ) as devices,
+            mock.patch.object(
+                now_data, "room_policy", wraps=now_data.room_policy
+            ) as policy,
+        ):
+            await self.room_activity(member_id="mem-other")
+        self.assertEqual((rooms.call_count, devices.call_count), (1, 1))
+        # One policy read per room (four rooms here).
+        self.assertEqual(policy.call_count, 4)
+
     async def test_the_shared_tablet_has_no_own_offs(self):
         # ?habits=household (the wall tablet, its own member): an off made
         # from it is an off like anyone's, never "You turned this off".

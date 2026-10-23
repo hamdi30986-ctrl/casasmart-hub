@@ -482,6 +482,7 @@ async def async_rank_rooms(
     member_id: str | None = None,
     now_t: float | None = None,
     habits: HabitSource | None = None,
+    stores: tuple[list[dict[str, Any]], dict[str, Any], list[Any]] | None = None,
 ) -> RoomRanking:
     """Rank the caller's rooms; scope is their room ids, None for every room.
 
@@ -490,7 +491,10 @@ async def async_rank_rooms(
     habits answers the habit tier for the caller's rooms (a
     learner.HabitQuery; None: no habits). The stores are read in one
     executor job, the states in one scan and the log in one query; the
-    habits are served from memory (read from the log once a day).
+    habits are served from memory (read from the log once a day). stores,
+    when the caller already read them in its own executor job, are
+    (registry.list_rooms(), each room's now_data.room_policy,
+    registry.list_user_devices()), unscoped.
     """
 
     def read_stores():
@@ -498,7 +502,9 @@ async def async_rank_rooms(
         policies = {r["room_id"]: now_data.room_policy(r["room_id"]) for r in rooms}
         return rooms, policies, registry.list_user_devices()
 
-    rooms, policies, devices = await hass.async_add_executor_job(read_stores)
+    rooms, policies, devices = (
+        stores if stores is not None else await hass.async_add_executor_job(read_stores)
+    )
     rooms = [r for r in rooms if scope is None or r["room_id"] in scope]
     gang_types = imported_controls(devices)
     device_of, sensor_device = device_keys(devices)

@@ -204,18 +204,22 @@ class CasaSmartNowView(_NowView):
                 scenes,
                 favorites,
                 policies,
+                registry.list_user_devices(),
             )
 
         (
             recents,
             config,
             contacts_picked,
-            rooms,
+            all_rooms,
             scenes,
             favorites,
             policies,
+            devices,
         ) = await self._hass.async_add_executor_job(read_stores)
-        rooms = [room for room in rooms if scope is None or room["room_id"] in scope]
+        rooms = [
+            room for room in all_rooms if scope is None or room["room_id"] in scope
+        ]
         room_ids = {room["room_id"] for room in rooms}
 
         recent_items = [
@@ -254,6 +258,8 @@ class CasaSmartNowView(_NowView):
             activity=getattr(loaded_runtime_data(self._hass), "room_activity", None),
             member_id=None if household else member_id,
             habits=habits,
+            # Read above, in the same executor job.
+            stores=(all_rooms, policies, devices),
         )
 
         def read_restore_counts() -> dict[str, int]:
