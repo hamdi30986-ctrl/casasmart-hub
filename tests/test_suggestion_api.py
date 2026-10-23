@@ -258,7 +258,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 10, 5, 23, 30, tzinfo=fixtures.UTC)
         self.calls = []
         self.gate = None
-        self.fail = set()
+        self.failing = set()
         self.tracked = {}
         self.states = NS(
             values={
@@ -274,7 +274,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append((domain, service, data))
             if self.gate:
                 await self.gate.wait()
-            if data["entity_id"] in self.fail:
+            if data["entity_id"] in self.failing:
                 raise RuntimeError("offline")
             if service in {"turn_off", "turn_on"}:
                 self.states.get(data["entity_id"]).state = (
@@ -537,7 +537,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("entity_id", str(result.data))
 
     async def test_partial_is_visible_and_no_silent_retry(self):
-        self.fail.add("light.one")
+        self.failing.add("light.one")
         oid = (await self.selected())["occurrence_id"]
         result = await self.action("run", oid)
         self.assertFalse(result.data["ok"])

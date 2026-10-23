@@ -48,10 +48,20 @@ def _load_filtering():
     registry_module.UNSET = object()
     lookup = _module("casasmart.runtime_lookup")
     lookup.loaded_runtime_data = lambda hass: None
+    # The real token rules (camera access), which import nothing of the hub's.
+    tokens_spec = importlib.util.spec_from_file_location(
+        "casasmart.auth_tokens",
+        ROOT / "custom_components" / "casasmart" / "auth_tokens.py",
+    )
+    assert tokens_spec and tokens_spec.loader
+    tokens = importlib.util.module_from_spec(tokens_spec)
+    sys.modules[tokens_spec.name] = tokens
+    tokens_spec.loader.exec_module(tokens)
     casa.const = const
     casa.entity_bridge = bridge
     casa.registry = registry_module
     casa.runtime_lookup = lookup
+    casa.auth_tokens = tokens
 
     spec = importlib.util.spec_from_file_location(
         "casasmart.filtering",
