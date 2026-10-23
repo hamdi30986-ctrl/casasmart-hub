@@ -103,6 +103,22 @@ async def async_member_id(hass: HomeAssistant, claims: dict[str, Any]) -> str:
     return await hass.async_add_executor_job(engine.member_id_for, claims["sub"])
 
 
+async def _async_forget_room_activity(
+    hass: HomeAssistant, engine: AuthEngine, member_id: str
+) -> None:
+    """Delete the member's room activity once their last device is gone.
+
+    Written and still-buffered events alike; a member with another paired
+    device keeps them.
+    """
+    recorder = getattr(loaded_runtime_data(hass), "room_activity", None)
+    if recorder is None:
+        return
+    if await hass.async_add_executor_job(engine.member_device_count, member_id):
+        return
+    await recorder.async_forget_member(member_id)
+
+
 def get_pairing(hass: HomeAssistant) -> PairingManager | None:
     """The loaded entry's pairing manager, or None when not set up."""
     runtime_data = loaded_runtime_data(hass)
@@ -881,6 +897,7 @@ class CasaSmartUnpairSelfView(HomeAssistantView):
                 return True
 
             unclaimed = await self._hass.async_add_executor_job(_finish_leave)
+            await _async_forget_room_activity(self._hass, engine, member_id)
 
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
         return self.json({"unpaired": device_id, "hub_unclaimed": unclaimed})
@@ -1118,8 +1135,8 @@ class CasaSmartUserView(HomeAssistantView):
         if push is not None:
             await self._hass.async_add_executor_job(push.unregister, device_id)
 
-        # A member's favorites and settings go with their last device; a
-        # member with another paired device keeps them.
+        # A member's favorites, settings and room activity go with their last
+        # device; a member with another paired device keeps them.
         runtime = loaded_runtime_data(self._hass)
         if runtime is not None:
 
@@ -1130,6 +1147,7 @@ class CasaSmartUserView(HomeAssistantView):
                 runtime.user_settings.delete(member_id)
 
             await self._hass.async_add_executor_job(_prune_orphaned_member)
+            await _async_forget_room_activity(self._hass, engine, member_id)
 
         # Remove the device's sensor.
         self._hass.bus.async_fire(EVENT_AUTH_CHANGED, {})
