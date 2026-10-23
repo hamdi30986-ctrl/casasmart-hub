@@ -3,9 +3,14 @@
 What changed in each version of CasaSmart Hub.
 
 ## [Unreleased]
-- Turning a room back on now says so when there is nothing to restore,
-  instead of reporting success. If a device fails to come back on, the room
-  remembers it, so the next tap tries that device again.
+- One tap on a room that is off now turns on the lights and fans that were
+  on last time, however the room was switched off: at the wall, from Home
+  Assistant, by an automation or from the app. Never plugs, relays,
+  heaters, ACs, covers or TVs. An installer can give a room a start profile
+  for when the hub doesn't know yet. With nothing to turn on, the app opens
+  the room instead of saying it couldn't turn it on, and the Now page tells
+  the apps beforehand. Offline lights are skipped and reported. If a device
+  fails to come back on, the next tap tries it again.
 - The hub keeps a log of which room devices were switched, when, and how
   (the app, a wall switch, an automation), for the room suggestions coming
   next. It stays on the hub. It starts 10 minutes after Home Assistant

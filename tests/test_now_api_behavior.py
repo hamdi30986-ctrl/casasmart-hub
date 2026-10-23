@@ -466,15 +466,19 @@ class _EntityFailingServices(_Services):
 
 
 class RoomOnRestoreResultTest(unittest.TestCase):
-    """Room on answers what it did: a 409 when there is nothing to restore, and
+    """Room on answers what it did: a 409 when there is nothing to turn on, and
     a device that failed stays captured for the next on."""
 
     ROOM = "room-kitchen"
     ENTITIES = ("light.a", "light.b", "fan.c")
+    # The room has no capture, no last-on set (no recorder here) and no
+    # start profile, so there is nothing to turn on and the app opens it.
     NOTHING = {
-        "error": "nothing_to_restore",
-        "message": "Nothing to restore: no device in this room was captured "
-        "by a room off",
+        "error": "nothing_to_turn_on",
+        "reason": "nothing_saved",
+        "message": "Nothing to turn on: the hub doesn't know which lights and "
+        "fans this room had on, and it has no start profile",
+        "open_room": True,
     }
 
     def setUp(self) -> None:

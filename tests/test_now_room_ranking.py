@@ -205,6 +205,11 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
                         "watts_quality": "complete",
                         "reason": "active",
                         "params": {},
+                        # No room policies: room commands are off.
+                        "one_tap": {
+                            "action": "open_room",
+                            "reason": "room_activity_disabled",
+                        },
                     },
                 }
             ),

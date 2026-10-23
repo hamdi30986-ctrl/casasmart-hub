@@ -149,6 +149,62 @@ class CaptureAgeTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(one_tap.capture_is_fresh(value, NOW))
 
+    def test_a_capture_the_room_went_dark_again_after_no_longer_counts(self):
+        captured = iso(NOW - 3600)
+        last_on = one_tap.LastOn
+
+        def counts(at):
+            return one_tap.capture_counts(captured, last_on(("light.a",), at), NOW)
+
+        self.assertTrue(one_tap.capture_counts(captured, None, NOW))
+        # The hub's own off: the room went dark just before the capture, or a
+        # slow device reported its off a little after it.
+        self.assertTrue(counts(NOW - 3600 - 2))
+        self.assertTrue(counts(NOW - 3600 + 120))
+        # Lit again later and switched off at the wall: that is "last time".
+        self.assertFalse(counts(NOW - 3600 + 121))
+        self.assertFalse(
+            one_tap.capture_counts(iso(NOW - 90000), last_on(("light.a",), 0), NOW)
+        )
+
+
+class PlanRoomTests(unittest.TestCase):
+    DEVICES = {"light.a": "off", "light.b": "off", "fan.c": "off"}
+
+    def plan(self, capture, last_on=None, profile=()):
+        return one_tap.plan_room(
+            capture=capture,
+            last_on=last_on,
+            start_profile=profile,
+            devices=self.DEVICES,
+            now_t=NOW,
+        )
+
+    def test_a_current_capture_beats_the_last_on_set(self):
+        plan = self.plan(
+            (["light.a"], iso(NOW - 60)), one_tap.LastOn(("light.b",), NOW - 61)
+        )
+        self.assertEqual((plan.source, plan.targets), (CAPTURE, ["light.a"]))
+
+    def test_an_old_or_outdated_capture_gives_way_to_the_last_on_set(self):
+        for captured, last_at in (
+            (iso(NOW - 86401), NOW - 86402),  # older than 24 h
+            (iso(NOW - 3600), NOW - 60),  # the room went dark again since
+        ):
+            with self.subTest(captured=captured):
+                plan = self.plan(
+                    (["light.a"], captured), one_tap.LastOn(("light.b",), last_at)
+                )
+                self.assertEqual((plan.source, plan.targets), (LAST_ON, ["light.b"]))
+
+    def test_the_start_profile_when_nothing_is_known(self):
+        plan = self.plan(([], None), None, ["fan.c"])
+        self.assertEqual((plan.source, plan.targets), (PROFILE, ["fan.c"]))
+        # An old capture alone is not known either.
+        plan = self.plan((["light.a"], iso(NOW - 90000)), None, ["fan.c"])
+        self.assertEqual(plan.source, PROFILE)
+        self.assertIsNone(self.plan((["light.a"], iso(NOW - 90000))).source)
+
 
 class LastOnTests(unittest.TestCase):
     def setUp(self):

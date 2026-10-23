@@ -17,6 +17,12 @@ in the room order.
 The summary then gained habits: which layer ranked and how far learning is.
 This hub has no habit learner, so it says "unavailable" for the default
 (personal) layer.
+
+rank.one_tap came next, what one tap "on" does (room_intel.one_tap), and made
+restore_pending_count the number of devices it would turn on. Here: rooms
+without a policy say room_activity_disabled; a room with a fresh capture
+restores it; a policy room with nothing saved opens the room. This hub has
+no recorder, so no last-on sets.
 """
 
 from __future__ import annotations
@@ -86,8 +92,30 @@ USER_DEVICES = {
 }
 
 
+# rank.one_tap of a room that doesn't take part in room commands, and of one
+# that does but has nothing saved.
+DISABLED = {"action": "open_room", "reason": "room_activity_disabled"}
+NOTHING_SAVED = {"action": "open_room", "reason": "nothing_saved"}
+
+
+def restores(lights, fans=0, source="capture"):
+    return {
+        "action": "turn_on",
+        "source": source,
+        "light_count": lights,
+        "fan_count": fans,
+        "unavailable_count": 0,
+    }
+
+
 def room(
-    room_id, active_count, eligible_entity_ids, restore_pending_count=0, *, filler=False
+    room_id,
+    active_count,
+    eligible_entity_ids,
+    restore_pending_count=0,
+    *,
+    filler=False,
+    one_tap=DISABLED,
 ):
     """A room as the Now page sends it (this fixture has no AC and no meter)."""
     return {
@@ -106,6 +134,7 @@ def room(
             "watts_quality": "absent",
             "reason": "active" if active_count > 0 else "room_order",
             "params": {},
+            "one_tap": one_tap,
         },
     }
 
@@ -218,9 +247,26 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             json.dumps(
                 {
                     "rooms": [
-                        room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
-                        room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
-                        room("room-c", 0, ["light.c_lamp"], 1, filler=True),
+                        room(
+                            "room-b",
+                            2,
+                            ["light.b_spot", "switch.b_relay_left"],
+                            one_tap=NOTHING_SAVED,
+                        ),
+                        room(
+                            "room-a",
+                            1,
+                            ["light.a_ceiling", "fan.a_fan"],
+                            one_tap=NOTHING_SAVED,
+                        ),
+                        room(
+                            "room-c",
+                            0,
+                            ["light.c_lamp"],
+                            1,
+                            filler=True,
+                            one_tap=restores(1),
+                        ),
                     ],
                     "layout": {
                         "featured_room_id": None,
@@ -240,7 +286,16 @@ class NowRoomActivityGoldenTest(unittest.IsolatedAsyncioTestCase):
             await self.room_activity(rooms=["room-c", "room-e"], role="user"),
             json.dumps(
                 {
-                    "rooms": [room("room-c", 0, ["light.c_lamp"], 1, filler=True)],
+                    "rooms": [
+                        room(
+                            "room-c",
+                            0,
+                            ["light.c_lamp"],
+                            1,
+                            filler=True,
+                            one_tap=restores(1),
+                        )
+                    ],
                     "layout": {
                         "featured_room_id": None,
                         "cards": ["room-c"],

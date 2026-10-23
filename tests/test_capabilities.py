@@ -32,6 +32,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "push_relay_optional_v1",
                 "member_camera_access_v1",
                 "now_room_habits_v1",
+                "now_room_one_tap_v1",
             },
         )
         self.assertEqual(
@@ -49,6 +50,7 @@ class CapabilityContractTest(unittest.TestCase):
                 "push_relay_optional_v1": False,
                 "member_camera_access_v1": True,
                 "now_room_habits_v1": True,
+                "now_room_one_tap_v1": True,
             },
         )
         self.assertTrue(

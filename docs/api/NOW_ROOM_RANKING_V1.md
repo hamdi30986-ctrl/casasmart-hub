@@ -58,6 +58,35 @@ Capability `now_room_habits_v1`. All three need `users.manage` (admin only).
 
 A member's own layer, and their share of the household's (the kept Ramadans included), is deleted with their last device (both leave paths), with their activity log rows, their recent devices and the room-command answers kept for their retries (`now_idempotency`).
 
+## One tap "on"
+
+Capability `now_room_one_tap_v1`. What one tap does on a room that is off: the lights and fans that were on last time. Never a switch of any kind (relay, outlet, plug, heater), an AC, a cover, a TV or a water heater. The room command and the Now page ask the same question, so the card says what the tap does.
+
+Only rooms that take part in room commands (their policy), and only the devices that policy approves, as for every room command. The first source with a light or fan of the room that is available wins:
+
+1. `capture`: what the hub's own room off switched off, at most 24 hours ago, if the room hasn't been lit and switched off another way since (more than 2 minutes after the capture).
+2. `last_on`: the lights and fans that were on just before the room last went dark, whoever switched it off (wall switch, Home Assistant, an automation, the hub): the light or fan whose off left nothing on, plus the room's others that went off in the 2 minutes before it. The hub follows this from Home Assistant's state changes; it starts 10 minutes after Home Assistant starts (at once on a reload), so a restart never replaces it. A room that went dark because its last light went unavailable, was removed or moved keeps the set it had. It holds no member id.
+3. `start_profile`: the lights and fans an installer set for the room (below).
+4. Nothing: the app opens the room.
+
+Within the source, devices no longer in the room (deleted, moved, unapproved) are left out, and unavailable ones are skipped and reported. A source whose devices are all unavailable gives way to the next.
+
+`POST /api/casasmart/now/rooms/{room_id}/activity` `{"action": "turn_on", "idempotency_key": "..."}` (same gates as before: `devices.control`, the room in scope, Energy Saving lockout, the room's policy):
+
+- 200 `{"ok": true, "room_id": "...", "action": "turn_on", "outcomes": [{"entity_id": "light.majlis_main", "outcome": "changed"}, {"entity_id": "light.majlis_spot", "outcome": "unavailable"}], "restore_pending_count": 1, "restored_from_capture_count": 0, "source": "last_on", "restored_count": 1, "idempotency_key": "..."}`. Outcomes are `changed`, `failed` or `unavailable` (not sent a command). `ok` is true only when every planned device is on. `restored_count`: the plan's devices that are on now (switched on, or already on); `restored_from_capture_count` the same for a capture, else 0; `restore_pending_count`: the plan's devices still not on. With a capture, those stay captured for the next tap; a capture that is too old, outdated or has nothing of the room's left is dropped.
+- 409 `{"error": "nothing_to_turn_on", "reason": "nothing_saved" | "unavailable", "message": "...", "open_room": true}`: nothing switched, nothing kept for a retry. Open the room; don't say "Couldn't turn on". (Replaces the unreleased `nothing_to_restore`.)
+- `turn_off` is unchanged (it still switches every approved device that is on, and captures them).
+
+### Start profile (installer)
+
+`registry.manage` (admin and sub-admin), the room in the caller's scope (else 404):
+
+- `GET /api/casasmart/now/rooms/{room_id}/start-profile` → `{"room_id": "...", "entity_ids": [...]}` (`[]` without one).
+- `PUT` same path, `{"entity_ids": ["light.majlis_main", "fan.majlis"]}`: 1 to 64 of the room's lights and fans (served, in the room, not `casasmart_room_activity_exclude`). Anything else (a switch, outlet, AC, cover, TV, water heater, another room's light, a duplicate, an unknown field) is a 400 and nothing changes. Answers like GET.
+- `DELETE` same path clears it; answers like GET.
+
+Only devices the room's policy approves come on. A deleted room takes its profile and its last-on set with it. Last-on sets and start profiles are the room's, not a member's: a member leaving keeps them; a factory reset deletes them.
+
 ## Fields
 
 Each room gains, after its existing fields:
@@ -71,7 +100,8 @@ Each room gains, after its existing fields:
   "watts": 1840.5,
   "watts_quality": "complete",
   "reason": "active",
-  "params": {}
+  "params": {},
+  "one_tap": {"action": "turn_on", "source": "last_on", "light_count": 2, "fan_count": 1, "unavailable_count": 0}
 }
 ```
 
@@ -81,5 +111,8 @@ Each room gains, after its existing fields:
 - `watts`: the room's valid meter readings summed, in W, one decimal; `null` when none.
 - `reason`: `active`, `running_load`, `just_off`, `habit_now` or `room_order` (above). Later versions may add reasons between `just_off` and `room_order`; show an unknown reason like `room_order`.
 - `params`: `{}` for `active`, `habit_now` and `room_order`; `{"loads": [...]}` for `running_load`; `{"went_dark_at": "..."}` for `just_off`, plus `"by_you": true` when the caller switched it off.
+- `one_tap` (`now_room_one_tap_v1`): what one tap "on" does, as above. `{"action": "turn_on", "source": "capture" | "last_on" | "start_profile", "light_count": 2, "fan_count": 0, "unavailable_count": 0}` (label e.g. "Restore 2 lights"; the counts are the available devices it covers), or `{"action": "open_room", "reason": "nothing_saved" | "unavailable" | "room_activity_disabled"}` (no ON button: the tap opens the room). A `running_load` card's tap should open the room too (no blind "on"), whatever `one_tap` says. Never an entity or member id.
+
+`restore_pending_count` (an older field) is now the number of devices one tap "on" would turn on (`light_count + fan_count`, 0 for `open_room`), so apps that only read it enable an off room's switch exactly when the tap does something. It used to count the raw capture.
 
 `room_activity` gains `"ranking": {"version": 1, "basis": "watts" | "count", "slots": 5, "mode": "on" | "all_off", "habits": {"layer": "household" | "personal", "status": "off" | "paused" | "warming_up" | "learning" | "unavailable", "profile": "regular" | "ramadan"}}`. Apps detect the ranking by this object. `habits.profile` (added with the Ramadan profile; absent from older hubs, read it as `regular`) says which profile answered. `habits.status`: `off` (an admin turned learning off), `paused` (ranking on what was learned before the pause), `warming_up` (fewer than 14 dates yet), `learning`, `unavailable` (the hub couldn't read its log). Label the section "Rooms", not "Suggested", unless the status is `learning` or `paused`.

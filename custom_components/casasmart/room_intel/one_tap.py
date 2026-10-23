@@ -6,7 +6,8 @@ Now page ask the same question (plan_room_on), so the card says what the tap
 does. The sources, first one with a device that can come on wins:
 
 1. capture: what the hub's own room off switched off, if that was at most
-   CAPTURE_MAX_AGE_SECONDS ago (now_data's restore set);
+   CAPTURE_MAX_AGE_SECONDS ago and the room hasn't been lit and gone dark
+   again since (now_data's restore set);
 2. last_on: the lights and fans that were on just before the room last went
    dark, whoever switched it off: a wall switch, Home Assistant, an
    automation or the hub (LastOnSets, kept by room_intel.recorder);
@@ -96,6 +97,51 @@ def capture_is_fresh(captured_at: Any, now_t: float) -> bool:
     return now_t - at.timestamp() <= CAPTURE_MAX_AGE_SECONDS
 
 
+def capture_counts(captured_at: Any, last_on: LastOn | None, now_t: float) -> bool:
+    """True when the hub's capture is still what the room was last time.
+
+    It must be fresh (capture_is_fresh), and the room must not have gone
+    dark again since: a last-on set newer than the capture by more than
+    OFF_SEQUENCE_SECONDS means someone lit the room after the hub's off and
+    switched it off another way. (The hub's own off makes both: the set at
+    the moment the room went dark, the capture just after.)
+    """
+    if not capture_is_fresh(captured_at, now_t):
+        return False
+    if last_on is None:
+        return True
+    captured_t = datetime.fromisoformat(captured_at).timestamp()
+    return last_on.at <= captured_t + OFF_SEQUENCE_SECONDS
+
+
+def plan_room(
+    *,
+    capture: tuple[list[str], str | None],
+    last_on: LastOn | None,
+    start_profile: Iterable[str],
+    devices: Mapping[str, str],
+    now_t: float,
+) -> RoomOnPlan:
+    """plan_room_on over a room's three sources.
+
+    capture is the room's restore set and when it was made
+    (NowDataEngine.restore_capture); one that doesn't count
+    (capture_counts) is passed empty.
+    """
+    capture_ids, captured_at = capture
+    return plan_room_on(
+        [
+            (
+                SOURCE_CAPTURE,
+                capture_ids if capture_counts(captured_at, last_on, now_t) else [],
+            ),
+            (SOURCE_LAST_ON, last_on.entity_ids if last_on is not None else []),
+            (SOURCE_START_PROFILE, start_profile),
+        ],
+        devices,
+    )
+
+
 def present_ids(ids: Iterable[str], devices: Mapping[str, str]) -> list[str]:
     """The ids that are still devices one tap may switch in the room."""
     return [eid for eid in dict.fromkeys(ids) if eid in devices and is_on_domain(eid)]
@@ -166,8 +212,10 @@ class LastOnSets:
         # room -> its lit devices; lit device -> its room.
         self._lit: dict[str, set[str]] = {}
         self._room_of: dict[str, str] = {}
-        # room -> {device: when it went off} while the room stayed lit.
-        self._fading: dict[str, dict[str, int]] = {}
+        # room -> {device: (when it went off, order)} while the room stayed
+        # lit; the order sorts offs within one second.
+        self._fading: dict[str, dict[str, tuple[int, int]]] = {}
+        self._offs = 0
         # Rooms whose set changed (or went) since the last drain.
         self._dirty: set[str] = set()
 
@@ -280,10 +328,11 @@ class LastOnSets:
                     self._dirty.add(old_room)
                     changed = True
             elif went_off:
+                self._offs += 1
                 fading = self._fading.setdefault(old_room, {})
-                fading[entity_id] = t
+                fading[entity_id] = (t, self._offs)
                 for other in [
-                    e for e, at in fading.items() if t - at > OFF_SEQUENCE_SECONDS
+                    e for e, (at, _) in fading.items() if t - at > OFF_SEQUENCE_SECONDS
                 ]:
                     del fading[other]
         if new_room is not None:
@@ -299,14 +348,17 @@ class LastOnSets:
         return changed
 
 
-def _newest_first(fading: Mapping[str, int], t: int, exclude: str) -> list[str]:
-    """The devices that went off in the OFF_SEQUENCE_SECONDS before t."""
+def _newest_first(
+    fading: Mapping[str, tuple[int, int]], t: int, exclude: str
+) -> list[str]:
+    """The devices that went off in the OFF_SEQUENCE_SECONDS before t, the
+    last one first."""
     recent = [
-        (at, entity_id)
-        for entity_id, at in fading.items()
-        if entity_id != exclude and t - at <= OFF_SEQUENCE_SECONDS
+        (off, entity_id)
+        for entity_id, off in fading.items()
+        if entity_id != exclude and t - off[0] <= OFF_SEQUENCE_SECONDS
     ]
-    return [entity_id for _, entity_id in sorted(recent, key=lambda i: (-i[0], i[1]))]
+    return [entity_id for _, entity_id in sorted(recent, reverse=True)]
 
 
 def _to_doc(last: LastOn) -> dict[str, Any]:
