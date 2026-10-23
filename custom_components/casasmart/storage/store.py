@@ -2,8 +2,8 @@
 
 HubStorage owns the hub's one SQLite connection (WAL mode), shared by every
 executor thread under a re-entrant lock. Engines get dict-like KeyValueTable
-views, one namespace each in a single kv table, plus two append-only tables
-for tank readings and Energy Saving events.
+views, one namespace each in a single kv table, plus three append-only tables
+for tank readings, Energy Saving events and room activity events.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ import logging
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,10 @@ class HubStorage:
     def energy_events(self) -> EnergyEventsTable:
         """Append-only audit store for Energy Saving events."""
         return EnergyEventsTable(self)
+
+    def room_activity(self) -> RoomActivityTable:
+        """Append-only store for room activity events (who switched what)."""
+        return RoomActivityTable(self)
 
     @property
     def _connection(self) -> sqlite3.Connection:
@@ -525,3 +530,307 @@ class EnergyEventsTable:
         if value is None:
             return None
         return cls._required_text(value, field, max_length=max_length)
+
+
+class RoomActivityTable:
+    """Room activity events, one row per confirmed device transition (v5).
+
+    room_intel.recorder writes them in batches; the read methods are what the
+    room ranking queries. Each row keeps the hub time zone's UTC offset at t,
+    so local day and hour are t plus that offset.
+    """
+
+    _MAX_QUERY_LIMIT = 5000
+    # Rows per DELETE, so a big prune releases the lock between batches.
+    _DELETE_BATCH = 5000
+    _COLUMNS = "id, t, utc_offset_min, room_id, entity_id, action, source, member_id"
+    # (t + offset) as local epoch seconds; day 0 (1970-01-01) was a Thursday.
+    _LOCAL = "(t + utc_offset_min * 60)"
+    _EPOCH = date(1970, 1, 1)
+
+    def __init__(self, storage: HubStorage) -> None:
+        self._storage = storage
+
+    # -- writes ----------------------------------------------------------------
+
+    def append_many(self, events: Iterable[Mapping[str, Any]]) -> int:
+        """Write events in one transaction and return how many.
+
+        Each event has t, utc_offset_min, room_id, entity_id, action, source
+        and an optional member_id. Every event is checked before any is
+        written, so a bad one writes none.
+        """
+        rows = [self._clean(event) for event in events]
+        if not rows:
+            return 0
+        with self._storage.transaction():
+            for row in rows:
+                self._storage._execute_write(
+                    """
+                    INSERT INTO room_activity_events
+                        (t, utc_offset_min, room_id, entity_id, action, source,
+                         member_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row,
+                )
+        return len(rows)
+
+    def prune(self, *, before_t: int, sources: Iterable[str] | None = None) -> int:
+        """Delete events older than before_t (only these sources, if given)."""
+        if not _is_non_negative_int(before_t):
+            raise ValueError("before_t must be a non-negative integer")
+        where = "t < ?"
+        params: list[Any] = [before_t]
+        if sources is not None:
+            clean = self._texts(sources, "source", max_length=32)
+            where += f" AND source IN ({','.join('?' for _ in clean)})"
+            params.extend(clean)
+        return self._delete_oldest(where, params)
+
+    def trim_to(self, max_rows: int) -> int:
+        """Delete the oldest events beyond max_rows and return how many went."""
+        if not _is_non_negative_int(max_rows):
+            raise ValueError("max_rows must be a non-negative integer")
+        excess = self.count() - max_rows
+        if excess <= 0:
+            return 0
+        return self._delete_oldest("1", [], limit=excess)
+
+    def delete_member(self, member_id: str) -> int:
+        """Delete every event attributed to the member."""
+        member_id = EnergyEventsTable._required_text(
+            member_id, "member_id", max_length=255
+        )
+        return self._delete_oldest("member_id = ?", [member_id])
+
+    def clear(self) -> None:
+        """Delete every event."""
+        self._storage._execute_write("DELETE FROM room_activity_events")
+
+    # -- reads -----------------------------------------------------------------
+
+    def count(self) -> int:
+        """How many events are stored."""
+        row = self._storage._fetchone("SELECT COUNT(*) FROM room_activity_events")
+        return int(row[0])
+
+    def room_hour_counts(
+        self,
+        *,
+        since_t: int,
+        until_t: int | None = None,
+        room_ids: Iterable[str] | None = None,
+        member_id: str | None = None,
+        actions: Iterable[str] | None = None,
+        sources: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Event counts per room, local day and local hour, oldest first.
+
+        Each row is {room_id, local_date, local_dow (Monday=0), local_hour,
+        events} for since_t <= t < until_t. member_id narrows to one member's
+        events.
+        """
+        where, params = self._filters(
+            since_t=since_t,
+            until_t=until_t,
+            room_ids=room_ids,
+            member_id=member_id,
+            actions=actions,
+            sources=sources,
+        )
+        rows = self._storage._fetchall(
+            f"SELECT room_id, {self._LOCAL} / 86400 AS day, "
+            f"({self._LOCAL} / 3600) % 24 AS hour, COUNT(*) "
+            f"FROM room_activity_events {where} "
+            "GROUP BY room_id, day, hour ORDER BY room_id, day, hour",
+            tuple(params),
+        )
+        return [
+            {
+                "room_id": room_id,
+                "local_date": (self._EPOCH + timedelta(days=int(day))).isoformat(),
+                "local_dow": (int(day) + 3) % 7,
+                "local_hour": int(hour),
+                "events": int(count),
+            }
+            for room_id, day, hour, count in rows
+        ]
+
+    def events(
+        self,
+        *,
+        since_t: int | None = None,
+        until_t: int | None = None,
+        room_id: str | None = None,
+        member_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Events newest first, optionally for one room or one member."""
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= self._MAX_QUERY_LIMIT
+        ):
+            raise ValueError(f"limit must be between 1 and {self._MAX_QUERY_LIMIT}")
+        where, params = self._filters(
+            since_t=since_t,
+            until_t=until_t,
+            room_ids=None if room_id is None else [room_id],
+            member_id=member_id,
+        )
+        params.append(limit)
+        rows = self._storage._fetchall(
+            f"SELECT {self._COLUMNS} FROM room_activity_events {where} "
+            "ORDER BY t DESC, id DESC LIMIT ?",
+            tuple(params),
+        )
+        return [self._row(row) for row in rows]
+
+    def last_off_by_room(
+        self, room_ids: Iterable[str], *, since_t: int | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Each room's newest "off" event, as {t, entity_id, source, member_id}.
+
+        Rooms with no off (since since_t) are left out.
+        """
+        clean = self._texts(room_ids, "room_id", max_length=255, allow_empty=True)
+        if since_t is not None and not _is_non_negative_int(since_t):
+            raise ValueError("since_t must be a non-negative integer")
+        latest: dict[str, dict[str, Any]] = {}
+        for room_id in dict.fromkeys(clean):
+            row = self._storage._fetchone(
+                "SELECT t, entity_id, source, member_id FROM room_activity_events "
+                "WHERE room_id = ? AND action = 'off' AND t >= ? "
+                "ORDER BY t DESC, id DESC LIMIT 1",
+                (room_id, since_t or 0),
+            )
+            if row is not None:
+                latest[room_id] = {
+                    "t": int(row[0]),
+                    "entity_id": row[1],
+                    "source": row[2],
+                    "member_id": row[3],
+                }
+        return latest
+
+    # -- helpers ---------------------------------------------------------------
+
+    def _delete_oldest(
+        self, where: str, params: list[Any], *, limit: int | None = None
+    ) -> int:
+        """Delete matching rows oldest first, in batches; at most limit rows."""
+        total = 0
+        while limit is None or total < limit:
+            batch = self._DELETE_BATCH
+            if limit is not None:
+                batch = min(batch, limit - total)
+            cursor = self._storage._execute_write(
+                "DELETE FROM room_activity_events WHERE id IN ("
+                f"SELECT id FROM room_activity_events WHERE {where} "
+                "ORDER BY t, id LIMIT ?)",
+                (*params, batch),
+            )
+            total += cursor.rowcount
+            if cursor.rowcount < batch:
+                break
+        return total
+
+    def _filters(
+        self,
+        *,
+        since_t: int | None,
+        until_t: int | None,
+        room_ids: Iterable[str] | None = None,
+        member_id: str | None = None,
+        actions: Iterable[str] | None = None,
+        sources: Iterable[str] | None = None,
+    ) -> tuple[str, list[Any]]:
+        """A WHERE clause and its parameters for the read methods."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        for value, clause, field in (
+            (since_t, "t >= ?", "since_t"),
+            (until_t, "t < ?", "until_t"),
+        ):
+            if value is None:
+                continue
+            if not _is_non_negative_int(value):
+                raise ValueError(f"{field} must be a non-negative integer")
+            clauses.append(clause)
+            params.append(value)
+        if member_id is not None:
+            clauses.append("member_id = ?")
+            params.append(
+                EnergyEventsTable._required_text(member_id, "member_id", max_length=255)
+            )
+        for values, column in (
+            (room_ids, "room_id"),
+            (actions, "action"),
+            (sources, "source"),
+        ):
+            if values is None:
+                continue
+            clean = self._texts(values, column, max_length=255, allow_empty=True)
+            if not clean:
+                # An empty filter matches nothing.
+                clauses.append("0")
+                continue
+            clauses.append(f"{column} IN ({','.join('?' for _ in clean)})")
+            params.extend(clean)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
+
+    @staticmethod
+    def _texts(
+        values: Iterable[str], field: str, *, max_length: int, allow_empty=False
+    ) -> list[str]:
+        """Checked text values; a bare string is refused, not split."""
+        if isinstance(values, str):
+            raise ValueError(f"{field} values must be a list, not a string")
+        clean = [
+            EnergyEventsTable._required_text(value, field, max_length=max_length)
+            for value in values
+        ]
+        if not clean and not allow_empty:
+            raise ValueError(f"{field} values must not be empty")
+        return clean
+
+    @staticmethod
+    def _clean(event: Mapping[str, Any]) -> tuple[Any, ...]:
+        """One event as an INSERT row, or ValueError."""
+        t = event.get("t")
+        if not _is_non_negative_int(t):
+            raise ValueError("t must be a non-negative integer timestamp")
+        offset = event.get("utc_offset_min")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not -1440 < offset < 1440
+        ):
+            raise ValueError("utc_offset_min must be a whole number of minutes")
+        text = EnergyEventsTable._required_text
+        return (
+            t,
+            offset,
+            text(event.get("room_id"), "room_id", max_length=255),
+            text(event.get("entity_id"), "entity_id", max_length=255),
+            text(event.get("action"), "action", max_length=32),
+            text(event.get("source"), "source", max_length=32),
+            EnergyEventsTable._optional_text(
+                event.get("member_id"), "member_id", max_length=255
+            ),
+        )
+
+    @staticmethod
+    def _row(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": int(row[0]),
+            "t": int(row[1]),
+            "utc_offset_min": int(row[2]),
+            "room_id": row[3],
+            "entity_id": row[4],
+            "action": row[5],
+            "source": row[6],
+            "member_id": row[7],
+        }
