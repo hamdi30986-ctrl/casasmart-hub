@@ -74,44 +74,69 @@ class NowDataEngineTest(unittest.TestCase):
         engine.forget_room("room-kitchen")
         self.assertTrue(engine.room_policy("room-kitchen")["default"])
 
-    def test_a_room_without_a_policy_switches_its_lights_and_fans(self) -> None:
-        # (entity id, attributes, registry gang type, lighting_kind)
-        for entity_id, attributes, gang, kind in (
-            ("light.kitchen", {}, None, "light"),
-            ("fan.kitchen", {}, None, "fan"),
-            ("light.lamp", {"casasmart_room_activity_exclude": True}, None, None),
+    def test_a_room_without_a_policy_switches_its_lights_fans_and_relays(
+        self,
+    ) -> None:
+        # (entity id, attributes, registry gang type, lighting_kind: what one
+        # tap may turn on, room_off_kind: what room off switches)
+        for entity_id, attributes, gang, kind, off_kind in (
+            ("light.kitchen", {}, None, "light", "light"),
+            ("fan.kitchen", {}, None, "fan", "fan"),
+            ("light.lamp", {"casasmart_room_activity_exclude": True}, None, None, None),
             # Wall relays the installer typed as a light or fan.
-            ("switch.relay", {}, "light", "light"),
-            ("switch.relay", {"device_class": "switch"}, "light", "light"),
-            ("switch.fan_relay", {}, "fan", "fan"),
+            ("switch.relay", {}, "light", "light", "light"),
+            ("switch.relay", {"device_class": "switch"}, "light", "light", "light"),
+            ("switch.fan_relay", {}, "fan", "fan", "fan"),
+            # Untyped wall relays: room off switches them, one tap
+            # doesn't turn them back on.
+            ("switch.relay", {"device_class": "switch"}, "switch", None, "switch"),
+            ("switch.relay", {}, "switch", None, "switch"),
+            ("switch.untyped", {}, None, None, "switch"),
+            ("switch.untyped", {"device_class": "switch"}, None, None, "switch"),
             # Home Assistant says outlet: never, whatever the gang type.
-            ("switch.relay", {"device_class": "outlet"}, "light", None),
+            ("switch.relay", {"device_class": "outlet"}, "light", None, None),
+            ("switch.socket", {"device_class": "outlet"}, "switch", None, None),
+            ("switch.socket", {"device_class": "outlet"}, None, None, None),
             (
                 "switch.relay",
                 {"casasmart_room_activity_exclude": True},
                 "light",
                 None,
+                None,
             ),
-            ("switch.kettle", {"device_class": "outlet"}, "outlet", None),
-            ("switch.plug", {}, "outlet", None),
-            ("switch.heater", {"device_class": "switch"}, "heater", None),
-            ("switch.relay", {"device_class": "switch"}, "switch", None),
-            ("switch.untyped", {}, None, None),
-            ("climate.ac", {"hvac_modes": ["off", "cool"]}, "light", None),
-            ("cover.curtain", {}, None, None),
-            ("media_player.tv", {}, None, None),
-            ("water_heater.tank", {}, None, None),
+            (
+                "switch.relay",
+                {"casasmart_room_activity_exclude": True},
+                None,
+                None,
+                None,
+            ),
+            ("switch.kettle", {"device_class": "outlet"}, "outlet", None, None),
+            ("switch.plug", {}, "outlet", None, None),
+            ("switch.plug", {}, "plug", None, None),
+            ("switch.heater", {"device_class": "switch"}, "heater", None, None),
+            ("switch.heater", {}, "heater", None, None),
+            ("climate.ac", {"hvac_modes": ["off", "cool"]}, "light", None, None),
+            ("cover.curtain", {}, None, None, None),
+            ("media_player.tv", {}, None, None, None),
+            ("water_heater.tank", {}, None, None, None),
         ):
             with self.subTest(entity_id=entity_id, gang=gang, attributes=attributes):
                 state = {"entity_id": entity_id, "attributes": attributes}
                 self.assertEqual(_NOW.lighting_kind(state, gang), kind)
+                self.assertEqual(_NOW.room_off_kind(state, gang), off_kind)
                 self.assertIs(
-                    _NOW.is_default_room_device(state, gang), kind is not None
+                    _NOW.is_default_room_device(state, gang), off_kind is not None
+                )
+                self.assertIs(
+                    _NOW.is_room_activity_candidate(state, gang), off_kind is not None
                 )
 
-    def test_a_room_is_on_only_by_what_room_off_switches(self) -> None:
-        # room_light_kind is what makes a room on;
-        # it is always something room_command_approves (room off switches).
+    def test_a_room_is_on_by_what_room_off_switches_and_a_running_ac(self) -> None:
+        # room_on_kind is what makes a room on: what
+        # room_command_approves (room off switches), and an AC in any room,
+        # which room off never switches. room_light_kind (one tap) is always
+        # one of the devices room off switches, never an untyped relay.
         gang_types = {
             "light.main": None,
             "fan.hood": None,
@@ -120,13 +145,16 @@ class NowDataEngineTest(unittest.TestCase):
             "switch.relay": "switch",
             "switch.boiler": "heater",
             "switch.socket": "light",
+            "switch.untyped": None,
             "climate.ac": None,
+            "climate.heat_only": None,
         }
         attributes = {
             "switch.relay": {"device_class": "switch"},
             "switch.boiler": {"device_class": "switch"},
             "switch.socket": {"device_class": "outlet"},
             "climate.ac": {"hvac_modes": ["off", "cool"]},
+            "climate.heat_only": {"hvac_modes": ["off", "heat"]},
         }
 
         def state(entity_id):
@@ -136,38 +164,57 @@ class NowDataEngineTest(unittest.TestCase):
         self.assertEqual(default, _NOW.NowDataEngine(*[Table()] * 5).room_policy("r"))
         stored = {
             "participates": True,
-            "eligible_entity_ids": ["light.main", "switch.relay", "switch.boiler"],
+            "eligible_entity_ids": [
+                "light.main",
+                "switch.relay",
+                "switch.boiler",
+                "switch.fridge",
+            ],
             "default": False,
         }
-        # entity id -> (kind with no stored policy, kind under the stored list,
-        # room off switches it under the stored list)
+        # entity id -> ((room_on_kind, room_light_kind, room off switches it)
+        # with no stored policy, the same under the stored list)
         expected = {
-            "light.main": ("light", "light", True),
-            "fan.hood": ("fan", None, False),
-            "switch.wall": ("light", None, False),
-            "switch.fridge": (None, None, False),
-            # Approved for room off by the admin, yet never makes it on.
-            "switch.relay": (None, None, True),
-            "switch.boiler": (None, None, True),
-            "switch.socket": (None, None, False),
-            "climate.ac": (None, None, False),
+            "light.main": (("light", "light", True), ("light", "light", True)),
+            "fan.hood": (("fan", "fan", True), (None, None, False)),
+            "switch.wall": (("light", "light", True), (None, None, False)),
+            # An untyped relay: switched and counted, never turned back on.
+            "switch.relay": (("switch", None, True), ("switch", None, True)),
+            "switch.untyped": (("switch", None, True), (None, None, False)),
+            # A plug or a heater: never, even on an admin's list (stored
+            # earlier, when a heater relay could be approved).
+            "switch.fridge": ((None, None, False), (None, None, False)),
+            "switch.boiler": ((None, None, False), (None, None, False)),
+            "switch.socket": ((None, None, False), (None, None, False)),
+            # An AC: on while it runs, in any room; room off never switches it.
+            "climate.ac": (("ac", None, False), ("ac", None, False)),
+            "climate.heat_only": ((None, None, False), (None, None, False)),
             # Not imported into the registry.
-            "light.unimported": (None, None, False),
+            "light.unimported": ((None, None, False), (None, None, False)),
         }
-        for entity_id, (kind, listed_kind, listed_off) in expected.items():
-            with self.subTest(entity_id=entity_id):
-                item = state(entity_id)
-                self.assertEqual(_NOW.room_light_kind(item, default, gang_types), kind)
-                self.assertIs(
-                    _NOW.room_command_approves(item, default, gang_types),
-                    kind is not None,
-                )
-                self.assertEqual(
-                    _NOW.room_light_kind(item, stored, gang_types), listed_kind
-                )
-                self.assertIs(
-                    _NOW.room_command_approves(item, stored, gang_types), listed_off
-                )
+        for entity_id, by_policy in expected.items():
+            item = state(entity_id)
+            for policy, (on_kind, light_kind, switched) in zip(
+                (default, stored), by_policy, strict=True
+            ):
+                with self.subTest(entity_id=entity_id, default=policy["default"]):
+                    self.assertEqual(
+                        _NOW.room_on_kind(item, policy, gang_types), on_kind
+                    )
+                    self.assertEqual(
+                        _NOW.room_light_kind(item, policy, gang_types), light_kind
+                    )
+                    self.assertIs(
+                        _NOW.room_command_approves(item, policy, gang_types), switched
+                    )
+                    # Everything room off switches counts; one tap only ever
+                    # turns on some of it.
+                    self.assertIs(
+                        switched,
+                        on_kind is not None and on_kind != _NOW.KIND_AC,
+                    )
+                    if light_kind is not None:
+                        self.assertTrue(switched)
 
     def test_a_wall_relay_typed_as_a_light_is_a_room_activity_candidate(
         self,
@@ -176,10 +223,17 @@ class NowDataEngineTest(unittest.TestCase):
             ({}, "light", True),
             ({}, "fan", True),
             ({"device_class": "switch"}, None, True),
-            ({}, None, False),
+            # An untyped wall relay.
+            ({}, None, True),
+            ({}, "switch", True),
             ({}, "outlet", False),
             ({}, "heater", False),
+            # A heater or outlet relay Home Assistant calls a switch: no
+            # longer (never switched by a room command).
+            ({"device_class": "switch"}, "heater", False),
+            ({"device_class": "switch"}, "outlet", False),
             ({"device_class": "outlet"}, "light", False),
+            ({"device_class": "outlet"}, None, False),
         ):
             with self.subTest(attributes=attributes, gang=gang):
                 self.assertIs(
@@ -402,7 +456,7 @@ class RoomActivityContractTest(unittest.TestCase):
                     {"status": "unknown", "open_count": 0, "unknown_count": 1},
                 )
 
-    def test_allowlist_requires_hub_policy_and_excludes_generic_switches(self) -> None:
+    def test_allowlist_requires_hub_policy_and_excludes_plugs_and_heaters(self) -> None:
         allowed = ["light.kitchen", "fan.kitchen", "switch.wall"]
         self.assertTrue(
             _NOW.is_room_activity_eligible(
@@ -425,9 +479,16 @@ class RoomActivityContractTest(unittest.TestCase):
                 {"entity_id": "light.unlisted", "state": "on"}, allowed
             )
         )
-        self.assertFalse(
+        # A switch without a device class is an untyped wall relay:
+        # on the list, room off switches it; typed as a heater, never.
+        self.assertTrue(
             _NOW.is_room_activity_eligible(
                 {"entity_id": "switch.generic"}, ["switch.generic"]
+            )
+        )
+        self.assertFalse(
+            _NOW.is_room_activity_eligible(
+                {"entity_id": "switch.generic"}, ["switch.generic"], "heater"
             )
         )
         self.assertFalse(

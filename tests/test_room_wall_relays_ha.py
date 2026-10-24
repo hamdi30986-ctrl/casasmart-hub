@@ -8,7 +8,9 @@ each gang in the app (the registry's gang type); a switch typed "light" or
 off switches it off in a room without a stored policy, one tap brings it
 back, and an admin may approve it or put it in a start profile. Plugs,
 outlets, heaters and untyped switches never come on, and Home Assistant's
-own "outlet" device class always wins. Same fixture as test_room_one_tap_ha,
+own "outlet" device class always wins. Room off also switches an
+untyped relay off (most lights are on one), but one tap never turns it back
+on. Same fixture as test_room_one_tap_ha,
 with no stored policy and a Corridor wired only with relays. Real-HA
 environment only.
 """
@@ -160,20 +162,35 @@ class WallRelayOnlyRoom(WallRelayCase):
         )
         self.assertEqual(set(self.states(*OTHERS).values()), {"off"})
 
-    async def test_room_off_and_on_switch_the_typed_relays_only(self):
+    async def test_room_off_switches_the_wall_relays_and_on_only_the_typed_ones(
+        self,
+    ):
         for eid in (*RELAYS, *OTHERS):
             self.press(eid, "on")
         status, off = await self.command("corridor", "turn_off")
+        # The typed relays and the untyped one.
         self.assertEqual(
             (status, sorted(o["entity_id"] for o in off["outcomes"])),
-            (200, sorted(RELAYS)),
+            (200, sorted([*RELAYS, "switch.corridor_untyped"])),
         )
-        # The plug, the heater, the socket and the untyped switch keep running.
-        self.assertEqual(set(self.states(*OTHERS).values()), {"on"})
+        # The plug, the heater and the socket keep running.
+        self.assertEqual(
+            self.states(*OTHERS),
+            {
+                "switch.corridor_plug": "on",
+                "switch.corridor_heater": "on",
+                "switch.corridor_socket": "on",
+                "switch.corridor_untyped": "off",
+            },
+        )
         status, on = await self.turn_on("corridor")
         self.assertEqual((status, on["source"], on["ok"]), (200, "capture", True))
         self.assertEqual(set(self.states(*RELAYS).values()), {"on"})
-        self.assertEqual(self.switched(), [("switch", "turn_on")])
+        self.assertEqual(self.calls, [("switch", "turn_on", RELAYS)])
+        # The untyped relay stays off: one tap never turns one on.
+        self.assertEqual(
+            self.states("switch.corridor_untyped"), {"switch.corridor_untyped": "off"}
+        )
 
     async def test_a_relay_retyped_as_an_outlet_stops_coming_on(self):
         for eid in RELAYS:

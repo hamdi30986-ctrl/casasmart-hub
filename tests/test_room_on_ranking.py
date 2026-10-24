@@ -1,8 +1,9 @@
 """The "something is on" room ranking: watts or count, ACs, fillers, ties.
 
-A room is on only by the lights and fans room off switches (wall relays
-typed as one included); a plug, an untyped relay or an AC never makes it on.
-An AC's own meter still adds to its room's watts.
+A room is on only by what room off switches, and
+that includes untyped wall relays (most lights are on one), and a running AC
+makes its room on too, although room off leaves it alone; a plug, an outlet
+or a heater never does.
 
 Runs without Home Assistant, on the suggestion-runtime fixture the golden
 ranking pins use, so the real room_intel.ranking and room_intel.meters run
@@ -147,7 +148,7 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_fully_metered_home_ranks_by_watts(self):
         self.metered_home()
         # By count, Kitchen (3 on) would lead. The Majlis is on by its light
-        # (its AC doesn't count) and its AC's meter adds to its watts.
+        # and its running AC, whose meter adds to its watts.
         self.assertEqual(await self.order(), ["majlis", "bedroom", "kitchen"])
         self.assertEqual(await self.basis(), "watts")
         ranks = await self.ranks()
@@ -156,8 +157,8 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
             {
                 "active": True,
                 "filler": False,
-                "on_count": 1,
-                "ac_on_count": 0,
+                "on_count": 2,
+                "ac_on_count": 1,
                 "watts": 1855.0,
                 "watts_quality": "complete",
                 # Why it's where it is.
@@ -179,8 +180,8 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
         # One more Kitchen light, a bulb with no meter.
         self.device("kitchen", light("light.kitchen_bulb"))
         self.assertEqual(await self.basis(), "count")
-        # Kitchen 4 on; Majlis and Bedroom tie on 1 and go by name.
-        self.assertEqual(await self.order(), ["kitchen", "bedroom", "majlis"])
+        # Kitchen 4 on, Majlis 2 (its light and AC), Bedroom 1.
+        self.assertEqual(await self.order(), ["kitchen", "majlis", "bedroom"])
         ranks = await self.ranks()
         self.assertEqual(
             (ranks["kitchen"]["watts"], ranks["kitchen"]["watts_quality"]),
@@ -281,16 +282,19 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
 
     # -- ACs --------------------------------------------------------------------
 
-    async def test_a_room_with_only_its_ac_on_is_off(self):
-        # Room off never switches an AC, so a running AC doesn't make its
-        # room on (it would stay "on" after room off).
+    async def test_a_room_with_only_its_ac_on_is_on(self):
+        # A running AC counts as on, so an AC-only
+        # room is never hidden behind "Everything is off".
         self.room("a", "Majlis")
         self.room("b", "Bedroom")
         self.device("a", light("light.a"))
         self.device("b", ac("climate.b"), light("light.b", "off"))
         ranked = await self.ranked()
-        self.assertEqual([r["room_id"] for r in ranked], ["a", "b"])
-        bedroom = ranked[1]
+        # One on each; the tie goes by name.
+        self.assertEqual([r["room_id"] for r in ranked], ["b", "a"])
+        bedroom = ranked[0]
+        # active_count and eligible_entity_ids keep their meaning: what room
+        # commands switch, never an AC.
         self.assertEqual(bedroom["active_count"], 0)
         self.assertEqual(bedroom["eligible_entity_ids"], ["light.b"])
         self.assertEqual(
@@ -299,30 +303,34 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
                 bedroom["rank"]["filler"],
                 bedroom["rank"]["on_count"],
                 bedroom["rank"]["ac_on_count"],
+                bedroom["rank"]["reason"],
             ),
-            (False, True, 0, 0),
+            (True, False, 1, 1, "active"),
         )
+        self.assertEqual(ranking_summary(ranked)["mode"], "on")
 
-    async def test_no_ac_makes_a_room_on_but_an_available_one_fills_a_slot(self):
+    async def test_which_acs_count_as_on(self):
         self.room("a", "Room")
-        # (state, attributes, fills): an available AC gives the off room
-        # something to control, so it fills a slot.
+        # (state, attributes, on, fills): a running AC makes the room on; an
+        # available one that is off gives the off room something to control,
+        # so it fills a slot.
         cases = [
-            ("cool", {}, True),
-            ("heat", {}, True),
-            ("dry", {}, True),
-            ("fan_only", {}, True),
-            ("auto", {}, True),
-            ("heat_cool", {}, True),
-            ("off", {}, True),
-            ("unavailable", {}, False),
-            ("unknown", {}, False),
+            ("cool", {}, True, True),
+            ("heat", {}, True, True),
+            ("dry", {}, True, True),
+            ("fan_only", {}, True, True),
+            ("auto", {}, True, True),
+            ("heat_cool", {}, True, True),
+            ("off", {}, False, True),
+            ("unavailable", {}, False, False),
+            ("unknown", {}, False, False),
             # A heating-only thermostat is not an AC.
-            ("heat", {"hvac_modes": ["off", "heat"]}, False),
-            ("cool", {"hvac_modes": None}, False),
-            ("cool", {"casasmart_room_activity_exclude": True}, False),
+            ("heat", {"hvac_modes": ["off", "heat"]}, False, False),
+            ("cool", {"hvac_modes": None}, False, False),
+            # An admin left it out of room activity.
+            ("cool", {"casasmart_room_activity_exclude": True}, False, False),
         ]
-        for state, attributes, fills in cases:
+        for state, attributes, on, fills in cases:
             with self.subTest(state=state, attributes=attributes):
                 self.devices = []
                 self.values = {}
@@ -331,26 +339,33 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("a" in ranks, fills)
                 if fills:
                     self.assertEqual(
-                        (ranks["a"]["active"], ranks["a"]["on_count"]), (False, 0)
+                        (
+                            ranks["a"]["active"],
+                            ranks["a"]["on_count"],
+                            ranks["a"]["ac_on_count"],
+                        ),
+                        (on, int(on), int(on)),
                     )
 
-    async def test_running_acs_never_count(self):
+    async def test_every_running_ac_is_one_device(self):
         self.room("a", "Majlis")
         self.room("b", "Kitchen")
         self.device("a", ac("climate.a1"), ac("climate.a2", "dry"))
         self.device("b", light("light.b1"))
         ranked = await self.ranked()
-        self.assertEqual([r["room_id"] for r in ranked], ["b", "a"])
+        self.assertEqual([r["room_id"] for r in ranked], ["a", "b"])
         self.assertEqual(
             (
-                ranked[1]["rank"]["active"],
-                ranked[1]["rank"]["on_count"],
-                ranked[1]["rank"]["ac_on_count"],
+                ranked[0]["active_count"],
+                ranked[0]["rank"]["on_count"],
+                ranked[0]["rank"]["ac_on_count"],
             ),
-            (False, 0, 0),
+            (0, 2, 2),
         )
 
-    async def test_an_ac_doesnt_count_in_a_room_with_a_policy_either(self):
+    async def test_an_ac_counts_in_a_room_with_a_policy(self):
+        # A policy can't approve an AC (room off never switches one), yet a
+        # running one counts in every room that takes part.
         self.room("a", "Majlis")
         self.room("b", "Bedroom")
         self.device("a", light("light.a"))
@@ -360,12 +375,29 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
             "b": {"participates": True, "eligible_entity_ids": []},
         }
         ranked = await self.ranked()
-        self.assertEqual([r["room_id"] for r in ranked], ["a", "b"])
+        self.assertEqual([r["room_id"] for r in ranked], ["b", "a"])
         self.assertEqual(
-            (ranked[1]["rank"]["active"], ranked[1]["rank"]["ac_on_count"]), (False, 0)
+            (ranked[0]["rank"]["active"], ranked[0]["rank"]["ac_on_count"]), (True, 1)
         )
 
-    # -- what makes a room on (only what room off switches) --------------------
+    async def test_an_ac_and_a_plug_count_one(self):
+        self.room("server", "Server")
+        self.device("server", ac("climate.server"))
+        self.device("server", relay("switch.server_plug", gang="outlet"))
+        self.device("server", ("switch.server_ups", "on", {"device_class": "outlet"}))
+        (server,) = await self.ranked()
+        self.assertEqual(
+            (
+                server["active_count"],
+                server["eligible_entity_ids"],
+                server["rank"]["active"],
+                server["rank"]["on_count"],
+                server["rank"]["ac_on_count"],
+            ),
+            (0, [], True, 1, 1),
+        )
+
+    # -- what makes a room on (what room off switches, wall relays too) ---
 
     async def test_a_fridge_plug_alone_leaves_its_room_off(self):
         self.room("kitchen", "Kitchen")
@@ -429,11 +461,50 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
             ["switch.hall_light", "switch.hall_fan", "switch.hall_left"],
         )
 
-    async def test_an_unmarked_switch_does_not_count(self):
+    async def test_an_untyped_wall_relay_counts(self):
+        # Most lights are on a wall relay no one
+        # typed, so an untyped one (gang "switch" or none) counts, as room
+        # off switches it.
         self.room("store", "Store")
         self.device("store", relay("switch.store_relay", gang="switch"))
         self.device("store", ("switch.store_untyped", "on", {}))
+        self.device("store", light("light.store", "off"))
+        (store,) = await self.ranked()
+        self.assertEqual(
+            (
+                store["active_count"],
+                store["eligible_entity_ids"],
+                store["rank"]["active"],
+                store["rank"]["on_count"],
+                store["rank"]["ac_on_count"],
+            ),
+            (
+                2,
+                ["switch.store_relay", "switch.store_untyped", "light.store"],
+                True,
+                2,
+                0,
+            ),
+        )
+
+    async def test_a_heater_an_outlet_or_an_excluded_device_does_not_count(self):
+        self.room("store", "Store")
         self.device("store", relay("switch.store_heater", gang="heater"))
+        self.device("store", relay("switch.store_socket", gang="outlet"))
+        # Home Assistant says outlet: never, whatever the gang type.
+        self.device("store", ("switch.store_plug", "on", {"device_class": "outlet"}))
+        self.device(
+            "store",
+            ("switch.store_lamp_plug", "on", {"device_class": "outlet"}, "light"),
+        )
+        self.device(
+            "store",
+            ("switch.store_fan", "on", {"casasmart_room_activity_exclude": True}),
+        )
+        self.device(
+            "store",
+            ("light.store_strip", "on", {"casasmart_room_activity_exclude": True}),
+        )
         self.device("store", light("light.store", "off"))
         (store,) = await self.ranked()
         self.assertEqual(
@@ -445,17 +516,10 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
             ),
             (0, ["light.store"], False, 0),
         )
-        # A light left out of room activity doesn't count either.
-        self.device(
-            "store",
-            ("light.store_strip", "on", {"casasmart_room_activity_exclude": True}),
-        )
-        (store,) = await self.ranked()
-        self.assertFalse(store["rank"]["active"])
 
-    async def test_a_policy_counts_only_the_lights_and_fans_it_approves(self):
-        # An admin may approve a plain relay (device class switch) for room
-        # off; it is switched off with the room but never makes it on.
+    async def test_a_policy_counts_exactly_what_it_switches(self):
+        # An admin's list: room off switches its light and its plain relay,
+        # so both count; the lamp off the list doesn't.
         self.room("a", "Majlis")
         self.device("a", light("light.a"), light("light.a_lamp"))
         self.device("a", relay("switch.a_relay", gang="switch"))
@@ -467,11 +531,40 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
         }
         (majlis,) = await self.ranked()
         self.assertEqual(
-            (majlis["active_count"], majlis["eligible_entity_ids"]), (1, ["light.a"])
+            (majlis["active_count"], majlis["eligible_entity_ids"]),
+            (2, ["light.a", "switch.a_relay"]),
         )
         self.set("light.a", "off")
+        self.set("switch.a_relay", "off")
         (majlis,) = await self.ranked()
         self.assertFalse(majlis["rank"]["active"])
+
+    async def test_a_policy_listing_a_heater_or_an_outlet_never_counts_them(self):
+        # Stored earlier (a heater with device class switch was a
+        # candidate then): room off no longer switches them, nor do they count.
+        self.room("a", "Majlis")
+        self.device("a", light("light.a", "off"))
+        self.device("a", relay("switch.a_heater", gang="heater"))
+        self.device("a", relay("switch.a_outlet", gang="outlet"))
+        self.policies = {
+            "a": {
+                "participates": True,
+                "eligible_entity_ids": [
+                    "light.a",
+                    "switch.a_heater",
+                    "switch.a_outlet",
+                ],
+            }
+        }
+        (majlis,) = await self.ranked()
+        self.assertEqual(
+            (
+                majlis["active_count"],
+                majlis["eligible_entity_ids"],
+                majlis["rank"]["active"],
+            ),
+            (0, ["light.a"], False),
+        )
 
     # -- fillers ----------------------------------------------------------------
 
@@ -552,8 +645,8 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_room_without_a_stored_policy_takes_part_with_its_lights(self):
         # Once one stored policy takes part, a room without one is listed
-        # too, counting its lights, fans and the wall relays typed as one;
-        # never its plug or untyped relay.
+        # too, counting its lights, fans and wall relays (untyped ones
+        # too); never its plug.
         self.room("a", "Majlis")
         self.room("b", "Bedroom")
         self.device("a", light("light.a"))
@@ -574,19 +667,22 @@ class OnRankingTest(unittest.IsolatedAsyncioTestCase):
                 r["room_id"]: (r["active_count"], r["eligible_entity_ids"])
                 for r in await self.ranked()
             },
-            {"a": (1, ["light.a"]), "b": (2, ["light.b", "switch.b_wall"])},
+            {
+                "a": (1, ["light.a"]),
+                "b": (3, ["light.b", "switch.b_relay", "switch.b_wall"]),
+            },
         )
-        # Rooms that all take part by default count the same devices (
-        # only what room off switches, as with no policy at all).
+        # Rooms that all take part by default count the same devices (only
+        # what room off switches, as with no policy at all).
         self.policies = {"a": default, "b": default}
         self.assertEqual(
             {r["room_id"]: r["active_count"] for r in await self.ranked()},
-            {"a": 1, "b": 2},
+            {"a": 1, "b": 3},
         )
         self.policies = {}
         self.assertEqual(
             {r["room_id"]: r["active_count"] for r in await self.ranked()},
-            {"a": 1, "b": 2},
+            {"a": 1, "b": 3},
         )
 
     # -- ties -------------------------------------------------------------------
@@ -731,16 +827,16 @@ class GeneratedFollowsTheRankingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_watts_order_picks_the_first_room_and_skips_ac_only_rooms(self):
         ranked, _, _ = await self.runtime.room_context(None)
-        # The AC-only Bedroom isn't on; its 1.5 kW meter makes it the
-        # first off room, still running.
+        # The AC-only Bedroom is on and leads by its 1.5 kW.
         self.assertEqual(
             [(r["room_id"], r["rank"]["reason"]) for r in ranked],
-            [("living", "active"), ("kitchen", "active"), ("bedroom", "running_load")],
+            [("bedroom", "active"), ("living", "active"), ("kitchen", "active")],
         )
         self.assertEqual(ranking_summary(ranked)["basis"], "watts")
         data, *_ = await self.runtime.context(None)
-        # Only rooms with a light or fan on are chosen (active_count > 0):
-        # Living (300 W) first, although Kitchen has more devices on.
+        # Bedroom leads the Now page, but only rooms with something room off
+        # switches on are chosen (active_count > 0): Living (300 W) first,
+        # although Kitchen has more devices on.
         self.assertEqual(
             [(p["room_id"], p["kind"]) for p in data["_generated_plans"]],
             [("living", "room_off"), ("kitchen", "room_off")],

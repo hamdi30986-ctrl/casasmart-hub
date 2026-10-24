@@ -1,7 +1,7 @@
 """The Now page's room ranking through the real view.
 
-An AC no longer makes a room on (room off never switches it), so the
-AC-only Majlis is an off room, still running on its meter.
+A running AC counts as on although room off never switches one, so the
+AC-only Majlis leads by its 2.1 kW.
 
 GET /api/casasmart/now with the real registry, NowDataEngine, suggestion
 runtime, filtering and ranking over a temp HubStorage; only hass, the request
@@ -177,22 +177,20 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         rooms = activity["rooms"]
-        # The Kitchen's two lights (45 W) are the only thing on: the AC-only
-        # Majlis isn't on (room off never switches an AC), but its 2.1 kW
-        # meter makes it the first off room, still running; three more off
-        # rooms fill the slots in the room order.
+        # The AC-only Majlis (2.1 kW) beats the Kitchen's two lights (45 W);
+        # three off rooms fill the slots in the room order.
         self.assertEqual(
             [(r["room_id"], r["rank"]["filler"]) for r in rooms],
             [
+                ("room-majlis", False),
                 ("room-kitchen", False),
-                ("room-majlis", True),
                 ("room-bedroom", True),
                 ("room-office", True),
                 ("room-guest", True),
             ],
         )
         self.assertEqual(
-            json.dumps(rooms[1]),
+            json.dumps(rooms[0]),
             json.dumps(
                 {
                     "room_id": "room-majlis",
@@ -202,14 +200,14 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
                     "restore_pending_count": 0,
                     "most_recent_activity_at": None,
                     "rank": {
-                        "active": False,
-                        "filler": True,
-                        "on_count": 0,
-                        "ac_on_count": 0,
+                        "active": True,
+                        "filler": False,
+                        "on_count": 1,
+                        "ac_on_count": 1,
                         "watts": 2100.0,
                         "watts_quality": "complete",
-                        "reason": "running_load",
-                        "params": {"loads": ["power"]},
+                        "reason": "active",
+                        "params": {},
                         # No stored policy, so the room takes part with
                         # its lights and fans; an AC never comes on.
                         "one_tap": {
@@ -227,8 +225,8 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             activity["layout"],
             {
-                "featured_room_id": "room-kitchen",
-                "cards": ["room-majlis", "room-bedroom", "room-office", "room-guest"],
+                "featured_room_id": "room-majlis",
+                "cards": ["room-kitchen", "room-bedroom", "room-office", "room-guest"],
                 "view_all_count": 0,
             },
         )
@@ -254,12 +252,13 @@ class NowRoomRankingTest(unittest.IsolatedAsyncioTestCase):
         self.add_majlis_lamp()
         activity = await self.room_activity()
         self.assertEqual(activity["ranking"]["basis"], "count")
-        # The Kitchen has two on, the Majlis one (its AC doesn't count).
+        # Majlis (its lamp and AC) and Kitchen have two on each; Majlis has
+        # the lower sort_order.
         self.assertEqual(
             [(r["room_id"], r["rank"]["on_count"]) for r in activity["rooms"][:2]],
-            [("room-kitchen", 2), ("room-majlis", 1)],
+            [("room-majlis", 2), ("room-kitchen", 2)],
         )
-        self.assertEqual(activity["rooms"][1]["rank"]["watts_quality"], "partial")
+        self.assertEqual(activity["rooms"][0]["rank"]["watts_quality"], "partial")
 
     async def test_a_scoped_member_is_ranked_on_their_rooms_only(self):
         self.add_majlis_lamp()

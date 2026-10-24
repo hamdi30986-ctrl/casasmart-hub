@@ -19,6 +19,13 @@ stays in the room order ("room_order"), as before.
 Counting only the lights and fans room off switches:
 room-a's outlet and its light left out of room activity no longer count, and
 room-c's running AC no longer makes it on (it fills a slot instead).
+
+Now a room is on by what room off switches, untyped wall
+relays included, and by a running AC. room-e's plain relay counts (room-e
+leads with three), room-c's AC makes it on again (it ties room-a on one and
+comes first by sort_order); room-a's outlet, its excluded light and room-b's
+heater still don't count, and an admin's list can no longer approve the
+heater.
 """
 
 import json
@@ -172,14 +179,13 @@ SERVED_CONTROLS = [
 ]
 
 
-def room(room_id, active_count, eligible_entity_ids, *, filler=False):
+def room(room_id, active_count, eligible_entity_ids, *, ac_on=0, filler=False):
     """An expected ranked room: the registry record, then the ranking's fields.
 
-    This fixture has no power meters. An AC never counts, so
-    ac_on_count is 0.
+    This fixture has no power meters.
     """
     record = next(r for r in ROOMS if r["room_id"] == room_id)
-    on_count = active_count
+    on_count = active_count + ac_on
     return {
         **record,
         "active_count": active_count,
@@ -190,7 +196,7 @@ def room(room_id, active_count, eligible_entity_ids, *, filler=False):
             "active": on_count > 0,
             "filler": filler,
             "on_count": on_count,
-            "ac_on_count": 0,
+            "ac_on_count": ac_on,
             "watts": None,
             "watts_quality": "absent",
             "reason": "active" if on_count > 0 else "room_order",
@@ -247,18 +253,18 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             ranked,
             json.dumps(
                 [
-                    # A tie goes to the room order: both have sort_order 0,
-                    # and "Anteroom" sorts before "Kitchen" by name.
-                    room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    # Its desk, fan and plain (untyped) relay are on.
+                    room("room-e", 3, ["light.e_desk", "switch.e_plain", "fan.e_fan"]),
                     room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    # Only its AC is on (its lamp is unavailable, the other
+                    # light a hidden gang). It ties room-a on one and goes
+                    # first by sort_order (1 before 2).
+                    room("room-c", 0, [], ac_on=1),
                     # Its ceiling light only: the outlet and the light left
                     # out of room activity aren't what room off switches.
                     room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
-                    # Three rooms are on, so two off rooms fill the slots, in
-                    # the room order. room-c has only its AC on (its lamp is
-                    # unavailable, the other light a hidden gang): off.
+                    # Four rooms are on, so one off room fills the fifth slot.
                     room("room-d", 0, ["light.d_lamp"], filler=True),
-                    room("room-c", 0, [], filler=True),
                 ]
             ),
         )
@@ -290,9 +296,9 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             ranked,
             json.dumps(
                 [
-                    room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    room("room-e", 3, ["light.e_desk", "switch.e_plain", "fan.e_fan"]),
                     room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
-                    room("room-c", 0, [], filler=True),
+                    room("room-c", 0, [], ac_on=1),
                 ]
             ),
         )
@@ -333,11 +339,12 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             ranked,
             json.dumps(
                 [
+                    # The heater on its list is no longer approved.
                     room("room-b", 2, ["light.b_spot", "switch.b_relay_left"]),
+                    # The AC counts although no policy can approve one; the
+                    # tie with room-a goes to sort_order (1 before 2).
+                    room("room-c", 0, [], ac_on=1),
                     room("room-a", 1, ["light.a_ceiling", "fan.a_fan"]),
-                    # Its running AC doesn't count (no policy can approve
-                    # one): an off room filling a slot.
-                    room("room-c", 0, [], filler=True),
                 ]
             ),
         )
@@ -353,7 +360,7 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
             ranked,
             json.dumps(
                 [
-                    room("room-e", 2, ["light.e_desk", "fan.e_fan"]),
+                    room("room-e", 3, ["light.e_desk", "switch.e_plain", "fan.e_fan"]),
                     room("room-d", 0, ["light.d_lamp"], filler=True),
                 ]
             ),
@@ -375,7 +382,12 @@ class RoomRankingGoldenTest(unittest.IsolatedAsyncioTestCase):
                     room(
                         "room-e",
                         0,
-                        ["light.e_desk", "light.e_strip", "fan.e_fan"],
+                        [
+                            "light.e_desk",
+                            "switch.e_plain",
+                            "light.e_strip",
+                            "fan.e_fan",
+                        ],
                         filler=True,
                     ),
                     room("room-d", 0, ["light.d_lamp"], filler=True),
