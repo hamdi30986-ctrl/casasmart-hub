@@ -1,15 +1,15 @@
 """Room ranking: the caller's rooms, the ones with something on first.
 
-A room's on devices are its lights and fans that room off switches
-(now_data.room_light_kind: wall relays the installer typed as a light or fan
-included; that number is active_count), so a room that room off switched off
-reads off. A plug, an outlet, a heater, an untyped switch, an AC, a cover or
-a TV never makes a room on. Only devices imported into
-the registry count. A room counts the devices its stored policy approves, or
-(without one, or when it doesn't take part) its lights and fans. When an
-admin's stored policy makes any of the caller's rooms take part in room
-commands, only the rooms that take part are ranked; otherwise every visible
-room is.
+A room's on devices (now_data.room_on_kind) are what room
+off switches that is on: its lights, fans and wall relays, typed as a light
+or fan or untyped (that number is active_count), plus every AC that runs,
+which room off leaves alone (ac_on_count). A plug, an outlet, a heater, a
+cover or a TV never makes a room on. Only devices imported into the registry
+count. A room counts the devices its stored policy approves, or (without
+one, or when it doesn't take part) its lights, fans and wall relays; an AC
+counts in every room. When an admin's stored policy makes any of the
+caller's rooms take part in room commands, only the rooms that take part are
+ranked; otherwise every visible room is.
 
 Rooms with something on come first. When every one of them is fully metered
 (each on device's own power meters read valid), they rank by watts;
@@ -32,7 +32,12 @@ from collections.abc import Callable, Container, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from ..filtering import area_id_of, in_scope, is_served
-from ..now_data import default_room_policy, room_light_kind
+from ..now_data import (
+    AC_ON_MODES,
+    KIND_AC,
+    default_room_policy,
+    room_on_kind,
+)
 from .meters import is_power_meter, watt_step, watts_of
 from .off_rooms import (
     JUST_OFF_WINDOW_SECONDS,
@@ -176,32 +181,22 @@ def device_keys(
     return controls, sensors
 
 
-def is_ac(state: Any) -> bool:
-    """True for a cooling-capable climate entity not excluded from room
-    activity (generated_suggestions.room_actions' test for an AC)."""
-    attributes = state.attributes
-    return (
-        state.entity_id.startswith("climate.")
-        and "cool" in (attributes.get("hvac_modes") or [])
-        and attributes.get("casasmart_room_activity_exclude") is not True
-    )
-
-
 def counted_controls(
     gang_types: Mapping[str, str | None], state_of: Callable[[str], Any]
 ) -> frozenset[str]:
     """The imported controls that make their room on when they are on.
 
-    The lights and fans a room without a stored policy switches
-    (now_data.room_light_kind; a typed wall relay too), wherever they are and
-    whatever room policies say. The habits learn from these devices' "on"s.
-    A control without a state is judged by its entity id and gang type.
+    What makes a room without a stored policy on (now_data.room_on_kind: its
+    lights, fans and wall relays, and ACs), wherever they are and whatever
+    room policies say. The habits learn from these devices' "on"s. A control
+    without a state is judged by its entity id and gang type (an AC needs
+    its state: an unavailable one keeps its hvac_modes).
     """
     policy = default_room_policy()
     return frozenset(
         entity_id
         for entity_id in gang_types
-        if room_light_kind(
+        if room_on_kind(
             state_of(entity_id) or {"entity_id": entity_id}, policy, gang_types
         )
         is not None
@@ -315,8 +310,7 @@ def _room_watts(
     """A room's watts, how complete they are, and its valid readings.
 
     room_meters holds each device's meters in the room; devices are the keys
-    of the room's counted devices and ACs, on_devices of the counted devices
-    that are on. An on
+    of the room's counted devices, on_devices of those that are on. An on
     device is covered when its device has a meter in the room and every one
     of them reads valid. Quality is "absent" with no valid reading,
     "complete" when every on device is covered, else "partial". The valid
@@ -371,10 +365,11 @@ def rank_rooms(
     habit tier (None: no room is habit_now). held_meters are the meters
     holding a running load (off_rooms.LoadLatch; none: a meter runs from
     RUNNING_LOAD_MIN_W only). Each ranked
-    room is its registry record plus active_count, the eligible_entity_ids
-    that were counted and a rank block: active, filler, on_count,
-    ac_on_count (always 0: an AC doesn't make a room on), watts,
-    watts_quality, reason and params.
+    room is its registry record plus active_count (what room off switches
+    that is on), the eligible_entity_ids (the available devices room off
+    switches) and a rank block: active, filler, on_count (active_count plus
+    ac_on_count), ac_on_count (running ACs), watts, watts_quality, reason
+    and params.
     """
     # A room without a stored policy takes part too (its policy is the
     # default), but only an admin's stored one switches the list over.
@@ -393,13 +388,12 @@ def rank_rooms(
         policy = policies.get(rid, {})
         if configured and not policy.get("participates"):
             continue
-        # The room's lights and fans as room off sees them: its stored
-        # policy's, else (no stored policy, or one that doesn't take part)
-        # the default ones.
+        # The room's devices as room off sees them: its stored policy's,
+        # else (no stored policy, or one that doesn't take part) the default
+        # ones; ACs in any case.
         counting = policy if policy.get("participates") else default
+        # The available devices room off switches, and the available ACs.
         eligible = []
-        # The room's available ACs: never on, but their meters are the
-        # room's and they give an off room's card something to control.
         acs = []
         # Every device that counts the room as on, available or not, and
         # when each unavailable one got so (for just_off).
@@ -411,22 +405,22 @@ def rank_rooms(
             if is_playing(state):
                 media_playing += 1
                 continue
-            if room_light_kind(state, counting, gang_types) is None:
-                if is_ac(state) and state.state not in _UNAVAILABLE:
-                    acs.append(state)
+            kind = room_on_kind(state, counting, gang_types)
+            if kind is None:
                 continue
             counted_ids.add(eid)
             if state.state in _UNAVAILABLE:
                 unavailable_since.append(changed_at(state))
                 continue
-            eligible.append(state)
+            (acs if kind == KIND_AC else eligible).append(state)
         on = [state for state in eligible if state.state == "on"]
+        acs_on = [state for state in acs if state.state in AC_ON_MODES]
         watts, quality, readings = _room_watts(
             meters_by_room.get(rid, {}),
             [device_of.get(state.entity_id) for state in [*eligible, *acs]],
-            [device_of.get(state.entity_id) for state in on],
+            [device_of.get(state.entity_id) for state in [*on, *acs_on]],
         )
-        active = bool(on)
+        active = bool(on or acs_on)
         ranked = {
             **room,
             "active_count": len(on),
@@ -436,8 +430,8 @@ def rank_rooms(
             "rank": {
                 "active": active,
                 "filler": False,
-                "on_count": len(on),
-                "ac_on_count": 0,
+                "on_count": len(on) + len(acs_on),
+                "ac_on_count": len(acs_on),
                 "watts": watts,
                 "watts_quality": quality,
                 "reason": REASON_ACTIVE,

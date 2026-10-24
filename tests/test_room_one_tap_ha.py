@@ -250,16 +250,17 @@ class OneTapNeverTouches(OneTapCase):
         )
 
     async def test_not_even_from_the_hubs_own_capture(self):
-        # The room's policy approves the relay and the outlet; a room off
-        # switches them off and captures them; on brings back the light and
-        # the relay typed as a light, never the outlet.
+        # The room's policy lists the relay and the outlet. A room
+        # command never switches an outlet, even one on a stored list: room
+        # off switches the light and the relay off and captures them; on
+        # brings back the light and the relay typed as a light.
         for eid in ("light.majlis_main", "switch.majlis_relay", "switch.majlis_outlet"):
             self.press(eid, "on")
         status, off = await self.command("majlis", "turn_off")
-        self.assertEqual((status, off["restore_pending_count"]), (200, 3))
+        self.assertEqual((status, off["restore_pending_count"]), (200, 2))
         self.assertEqual(
             self.now_data.restore_set("majlis"),
-            ["light.majlis_main", "switch.majlis_relay", "switch.majlis_outlet"],
+            ["light.majlis_main", "switch.majlis_relay"],
         )
         self.assertEqual(
             (await self.now_rooms())["majlis"],
@@ -276,7 +277,7 @@ class OneTapNeverTouches(OneTapCase):
         )
         self.assertEqual(
             self.states("switch.majlis_relay", "switch.majlis_outlet"),
-            {"switch.majlis_relay": "on", "switch.majlis_outlet": "off"},
+            {"switch.majlis_relay": "on", "switch.majlis_outlet": "on"},
         )
         # The capture is done; the switches don't linger in it.
         self.assertEqual(self.now_data.restore_set("majlis"), [])

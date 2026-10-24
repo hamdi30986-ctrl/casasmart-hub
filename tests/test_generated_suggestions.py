@@ -226,9 +226,9 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         await self.setup_generated()
         self.states.values["light.two"].state = "off"
         ranked, _, _ = await self.runtime.generated.room_context(None)
-        # One light on in each (the running AC doesn't make Living on: room
-        # off never switches it), so the tie goes to the room order.
-        self.assertEqual([r["room_id"] for r in ranked], ["b", "a"])
+        # Living has more on: its light, its untyped switch (no outlet class
+        # or type: a wall relay) and its running AC.
+        self.assertEqual([r["room_id"] for r in ranked], ["a", "b"])
         self.runtime.generated.now_data.room_policy = lambda rid: {
             "participates": rid == "b",
             "eligible_entity_ids": ["light.other"],
@@ -248,9 +248,14 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
         self.states.values["light.unimported"] = light("light.unimported")
         self.hass.rooms["light.unimported"] = "b"
         ranked, _, _ = await self.runtime.generated.room_context(None)
-        # The tie goes to the room order: Kitchen (b) before Living (a).
+        # Living: its light and its untyped switch; never the hidden
+        # light, the AC kept as a config entity or the unimported light.
         self.assertEqual(
-            [(r["room_id"], r["active_count"]) for r in ranked], [("b", 1), ("a", 1)]
+            [
+                (r["room_id"], r["active_count"], r["rank"]["ac_on_count"])
+                for r in ranked
+            ],
+            [("a", 2, 0), ("b", 1, 0)],
         )
         actions = [a for p in await self.plans() for a in p["actions"]]
         self.assertFalse(
@@ -271,19 +276,17 @@ class GeneratedApiTest(unittest.IsolatedAsyncioTestCase):
                 },
             ]
 
-        # A relay typed as a light under its legacy channel name counts (a
-        # tie with Living's two lights: Kitchen first by room order)...
-        legacy("light")
-        ranked, _, _ = await self.runtime.generated.room_context(None)
-        self.assertEqual(
-            [(r["room_id"], r["active_count"]) for r in ranked], [("b", 2), ("a", 2)]
-        )
-        # ...an untyped one doesn't (room off doesn't switch it).
-        legacy("switch")
-        ranked, _, _ = await self.runtime.generated.room_context(None)
-        self.assertEqual(
-            [(r["room_id"], r["active_count"]) for r in ranked], [("a", 2), ("b", 1)]
-        )
+        # A relay typed as a light under its legacy channel name counts, an
+        # untyped one too (room off switches it), an outlet doesn't.
+        # Living leads with its two lights and untyped switch (and its AC).
+        for gang_type, kitchen in (("light", 2), ("switch", 2), ("outlet", 1)):
+            with self.subTest(gang_type=gang_type):
+                legacy(gang_type)
+                ranked, _, _ = await self.runtime.generated.room_context(None)
+                self.assertEqual(
+                    [(r["room_id"], r["active_count"]) for r in ranked],
+                    [("a", 3), ("b", kitchen)],
+                )
         legacy("light")
         self.assertFalse(
             any(

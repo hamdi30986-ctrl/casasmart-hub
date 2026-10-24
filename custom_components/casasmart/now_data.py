@@ -7,10 +7,11 @@ configuration, recent room-command answers for idempotent retries, each
 room's restore set (what its last off switched off) and each room's start
 profile (the lights and fans an installer chose for one tap "on" when
 nothing else is known). The functions decide which devices may join
-a room command (room_command_approves: what room off switches) and which of
-those make a room on (room_light_kind: its lights and fans, which one tap
-may turn back on). Storage methods are synchronous; now_api runs them in the
-executor.
+a room command (room_command_approves: what room off switches), what makes a
+room on (room_on_kind: what room off switches, and a running AC, which room
+off leaves alone) and what one tap may turn back on (room_light_kind: the
+room's lights and fans). Storage methods are synchronous; now_api runs them
+in the executor.
 """
 
 from __future__ import annotations
@@ -34,17 +35,23 @@ MAX_START_PROFILE = 64
 _CAPTURE_EXTEND_SECONDS = 120
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
-# Domains a room command may switch.
-_ROOM_ACTIVITY_DOMAINS = frozenset({"light", "fan", "switch"})
-# A switch without a device class could be anything, so only switches with
-# device class "switch" may join a room command, or a wall relay the
-# installer typed as a light or fan (lighting_kind).
-_SAFE_SWITCH_DEVICE_CLASSES = frozenset({"switch"})
 # The registry gang types that make a wall relay (a switch) a light or a fan.
 # The installer sets them in the app's gang-type picker; Home Assistant has
 # no device class for a switch that drives a light. Outlets, heaters and
 # untyped switches ("switch", or none) never are.
 LIGHT_RELAY_GANG_TYPES = frozenset({"light", "fan"})
+# The registry gang types of an untyped wall relay: "switch", or none. Room
+# off switches one, as most lights are on a wall relay no one typed, but
+# one tap never turns one back on (not a light to it).
+UNTYPED_RELAY_GANG_TYPES = frozenset({"switch", None})
+# Home Assistant's device class for a switch that is a plug or socket: never
+# switched by a room command, whatever its gang type.
+_OUTLET_DEVICE_CLASS = "outlet"
+# What room_on_kind calls an AC.
+KIND_AC = "ac"
+# The HVAC modes an AC runs in: every mode but off (generated_suggestions
+# room_actions' set).
+AC_ON_MODES = frozenset({"cool", "heat", "auto", "heat_cool", "dry", "fan_only"})
 
 
 class NowDataError(Exception):
@@ -97,8 +104,7 @@ def lighting_kind(state: Any, gang_type: str | None = None) -> str | None:
     type the installer set to light or fan (gang_type), unless Home
     Assistant calls it an outlet. Never a plug, outlet, heater, untyped
     switch, AC, cover or TV, nor a device left out of room activity. What
-    one tap "on" may turn on, and what a room without a stored policy
-    switches.
+    one tap "on" may turn on (room_light_kind).
     """
     entity_id = _state_value(state, "entity_id", "")
     attributes = _state_attributes(state)
@@ -110,31 +116,55 @@ def lighting_kind(state: Any, gang_type: str | None = None) -> str | None:
     if (
         domain == "switch"
         and gang_type in LIGHT_RELAY_GANG_TYPES
-        and attributes.get("device_class") != "outlet"
+        and attributes.get("device_class") != _OUTLET_DEVICE_CLASS
     ):
         return gang_type
     return None
 
 
-def is_room_activity_candidate(state: Any, gang_type: str | None = None) -> bool:
-    """True when an admin may approve this device for room commands.
+def room_off_kind(state: Any, gang_type: str | None = None) -> str | None:
+    """ "light", "fan" or "switch" for a device room off may switch, else None.
 
-    gang_type is the device's registry gang type (None: unknown), which
-    makes a wall relay typed as a light or fan a candidate (lighting_kind).
+    A light, a fan or a wall relay typed as one (lighting_kind), or an
+    untyped wall relay: a switch whose registry gang type (gang_type) is
+    "switch" or none (most lights are on a wall relay no one typed). Never
+    a switch Home Assistant calls an outlet, one typed as
+    an outlet, plug or heater, an AC, a cover, a TV, nor a device left out of
+    room activity. While on, each of these makes its room on (room_on_kind).
     """
+    kind = lighting_kind(state, gang_type)
+    if kind is not None:
+        return kind
     entity_id = _state_value(state, "entity_id", "")
-    domain = entity_id.split(".", 1)[0]
-    if domain not in _ROOM_ACTIVITY_DOMAINS:
-        return False
     attributes = _state_attributes(state)
-    if attributes.get("casasmart_room_activity_exclude") is True:
-        return False
-    if domain == "switch":
-        return (
-            attributes.get("device_class") in _SAFE_SWITCH_DEVICE_CLASSES
-            or lighting_kind(state, gang_type) is not None
-        )
-    return True
+    if (
+        entity_id.split(".", 1)[0] == "switch"
+        and gang_type in UNTYPED_RELAY_GANG_TYPES
+        and attributes.get("device_class") != _OUTLET_DEVICE_CLASS
+        and attributes.get("casasmart_room_activity_exclude") is not True
+    ):
+        return "switch"
+    return None
+
+
+def is_room_ac(state: Any) -> bool:
+    """True for an AC: a cooling-capable climate entity not left out of room
+    activity (generated_suggestions.room_actions' test for an AC)."""
+    attributes = _state_attributes(state)
+    return (
+        _state_value(state, "entity_id", "").startswith("climate.")
+        and "cool" in (attributes.get("hvac_modes") or [])
+        and attributes.get("casasmart_room_activity_exclude") is not True
+    )
+
+
+def is_room_activity_candidate(state: Any, gang_type: str | None = None) -> bool:
+    """True when an admin may approve this device for room commands: one
+    room off may switch (room_off_kind).
+
+    gang_type is the device's registry gang type (None: unknown or untyped).
+    """
+    return room_off_kind(state, gang_type) is not None
 
 
 def is_room_activity_eligible(
@@ -149,14 +179,14 @@ def is_room_activity_eligible(
 
 def is_default_room_device(state: Any, gang_type: str | None = None) -> bool:
     """True for a device a room without a stored policy switches: a light, a
-    fan, or a wall relay the installer typed as one (lighting_kind; gang_type
+    fan, or a wall relay typed as one or untyped (room_off_kind; gang_type
     is its registry gang type).
 
     As in Apple Home and Google Home, a room's lights act together with no
     setup. Never a plug, outlet, heater, AC, cover or TV. The caller also
     checks the device is imported into the registry, served and in the room.
     """
-    return lighting_kind(state, gang_type) is not None
+    return room_off_kind(state, gang_type) is not None
 
 
 def default_room_policy() -> dict[str, Any]:
@@ -172,12 +202,13 @@ def room_command_approves(
 
     The one rule for what room off switches off. A stored policy approves
     the candidates on its list. A room without one (policy default) takes
-    part with its default devices: its lights and fans imported into the
-    registry, wall relays the installer typed as one included
-    (is_default_room_device). gang_types are the registry's imported
-    controls with their gang types (ranking.imported_controls). The caller
-    checks the device is in the room and served, and that the room takes
-    part.
+    part with its default devices: its lights, fans and wall relays (typed
+    as a light or fan, or untyped) imported into the registry
+    (is_default_room_device). Either way only devices room_off_kind allows,
+    so never a plug, outlet, heater or AC. gang_types are the registry's
+    imported controls with their gang types (ranking.imported_controls). The
+    caller checks the device is in the room and served, and that the room
+    takes part.
     """
     entity_id = _state_value(state, "entity_id", "")
     if policy.get("default"):
@@ -195,16 +226,35 @@ def room_light_kind(
     """ "light" or "fan" for a light or fan (lighting_kind) that room commands
     switch in a room with this policy (room_command_approves), else None.
 
-    These are the devices that make a room on (room_intel.ranking: the Now
-    page's room cards, active rooms, the all-off tiers, the habits) and that
-    one tap "on" may turn back on, so a room card never counts a device room
-    off leaves on. Never a plug, outlet, heater, untyped switch, AC, cover
-    or TV: an admin's stored list may approve another switch for room off,
-    but it doesn't make the room on.
+    What one tap "on" may turn back on. Never an untyped wall relay (room off
+    switches one, one tap doesn't turn it back on), a plug, an outlet, a
+    heater, an AC, a cover or a TV.
     """
     if not room_command_approves(state, policy, gang_types):
         return None
     return lighting_kind(state, gang_types.get(_state_value(state, "entity_id", "")))
+
+
+def room_on_kind(
+    state: Any, policy: Mapping[str, Any], gang_types: Mapping[str, str | None]
+) -> str | None:
+    """What a device is to its room's on state, in a room with this policy;
+    None for a device that never makes it on.
+
+    "light", "fan" or "switch" for a device room commands switch there
+    (room_command_approves, room_off_kind), so room off leaves none of them
+    on. KIND_AC for an AC (is_room_ac) in any room, whatever its policy:
+    room off never switches one, but a running AC keeps its room on. Never
+    a plug, outlet, heater, cover or TV. The one rule for
+    the Now page's room cards (room_intel.ranking: active rooms, the
+    all-off tiers, the habits). An AC is on in AC_ON_MODES, anything else
+    when "on".
+    """
+    if is_room_ac(state):
+        return KIND_AC
+    if not room_command_approves(state, policy, gang_types):
+        return None
+    return room_off_kind(state, gang_types.get(_state_value(state, "entity_id", "")))
 
 
 def summarize_openings(

@@ -230,8 +230,8 @@ class WholeHouseTest(OffRankingCase):
     async def test_on_rooms_come_first_and_the_off_rooms_fill_by_tier(self):
         self.home()
         self.values["light.guest"].state = "on"
-        # An AC running alone, unmetered: not on (room off never
-        # switches an AC), so the Hall is an off room in the room order.
+        # An AC running alone, unmetered: on, although
+        # room off never switches it.
         self.device("hall", ac("climate.hall"))
         self.device("majlis", media("media_player.majlis_tv"))
         self.log.add("bedroom", "light.bedroom", "off", 3 * MIN)
@@ -241,10 +241,10 @@ class WholeHouseTest(OffRankingCase):
             [(r["room_id"], r["rank"]["reason"], r["rank"]["filler"]) for r in ranked],
             [
                 ("guest", "active", False),
+                ("hall", "active", False),
                 ("majlis", "running_load", True),
                 ("bedroom", "just_off", True),
                 ("kitchen", "just_off", True),
-                ("office", "room_order", True),
             ],
         )
         self.assertEqual(ranking_summary(ranked)["mode"], "on")
@@ -405,6 +405,43 @@ class StillRunningTest(OffRankingCase):
         self.device("study", media("media_player.study_tv", "paused"))
         self.assertEqual(await self.order(), [("majlis", "running_load")])
 
+    async def test_a_running_ac_is_on_and_an_off_one_still_drawing_power_runs(self):
+        # A running AC makes its room on (metered or not, its meter in
+        # the room's watts); an AC that is off but whose meter still draws 20
+        # W or more is a room still running, as any of the room's meters.
+        for room_id, mode, watts in (
+            ("majlis", "cool", "1800"),
+            ("guest", "dry", None),
+            ("bedroom", "off", "300"),
+            ("study", "off", "2"),
+        ):
+            self.room(room_id)
+            entities = [ac(f"climate.{room_id}", mode)]
+            if watts is not None:
+                entities.append(power(f"sensor.{room_id}_ac", watts))
+            self.device(room_id, light(f"light.{room_id}", "off"))
+            self.device(room_id, *entities)
+        ranked = await self.ranked()
+        self.assertEqual(
+            [
+                (
+                    r["room_id"],
+                    r["rank"]["reason"],
+                    r["rank"]["on_count"],
+                    r["rank"]["ac_on_count"],
+                    r["rank"]["watts"],
+                    r["rank"]["params"],
+                )
+                for r in ranked
+            ],
+            [
+                ("majlis", "active", 1, 1, 1800.0, {}),
+                ("guest", "active", 1, 1, None, {}),
+                ("bedroom", "running_load", 0, 0, 300.0, {"loads": ["power"]}),
+                ("study", "room_order", 0, 0, 2.0, {}),
+            ],
+        )
+
     async def test_running_beats_just_off(self):
         self.home()
         self.device("hall", media("media_player.hall_tv"))
@@ -549,8 +586,8 @@ class JustOffTest(OffRankingCase):
         # (logged nothing).
         self.log.add("kitchen", "light.kitchen", "off", 10 * MIN)
         self.log.add("kitchen", "light.kitchen", "on", 5 * MIN)
-        # Bedroom: its AC changed mode after the light's off; an AC doesn't
-        # make a room on, so the light's off is when it went dark.
+        # Bedroom: its AC changed mode after the light's off (a running
+        # AC counts), then went off unlogged.
         self.device("bedroom", ac("climate.bedroom", "off"))
         self.log.add("bedroom", "climate.bedroom", "on", 20 * MIN)
         self.log.add("bedroom", "light.bedroom", "off", 10 * MIN)
@@ -563,7 +600,7 @@ class JustOffTest(OffRankingCase):
         self.device("hall", relay("switch.hall_boiler", "on", "heater"))
         self.log.add("hall", "light.hall", "off", 8 * MIN)
         self.log.add("hall", "switch.hall_boiler", "on", 1 * MIN)
-        # Guest: only its AC went off, and an AC doesn't count.
+        # Guest: its AC is what went off.
         self.device("guest", ac("climate.guest", "off"))
         self.log.add("guest", "climate.guest", "off", 15 * MIN)
         self.participate_all()
@@ -572,11 +609,11 @@ class JustOffTest(OffRankingCase):
             [(r["room_id"], r["rank"]["reason"], r["rank"]["params"]) for r in ranked],
             [
                 ("hall", "just_off", {"went_dark_at": iso(NOW - 8 * MIN)}),
-                ("bedroom", "just_off", {"went_dark_at": iso(NOW - 10 * MIN)}),
                 ("office", "just_off", {"went_dark_at": iso(NOW - 10 * MIN)}),
+                ("guest", "just_off", {"went_dark_at": iso(NOW - 15 * MIN)}),
                 ("majlis", "room_order", {}),
                 ("kitchen", "room_order", {}),
-                ("guest", "room_order", {}),
+                ("bedroom", "room_order", {}),
             ],
         )
 
@@ -623,19 +660,50 @@ class UnavailableTest(OffRankingCase):
 
     async def test_only_a_device_that_counts_blocks_when_it_goes_unavailable(self):
         self.home()
-        # An AC doesn't make a room on, so one dropping off after the
-        # light's off says nothing about when the room went dark...
+        # An AC counts, so one dropping off after the light's off may be
+        # what made the room look dark...
         self.device("kitchen", ac("climate.kitchen", "cool"))
         self.log.add("kitchen", "light.kitchen", "off", 10 * MIN)
         self.unavailable("climate.kitchen", since_ago=1 * MIN)
-        # ...a wall relay typed as a light does.
+        # ...as may a wall relay, typed as a light or untyped...
         self.device("bedroom", relay("switch.bedroom_wall", "off"))
         self.log.add("bedroom", "light.bedroom", "off", 10 * MIN)
         self.unavailable("switch.bedroom_wall", since_ago=1 * MIN)
+        self.device("office", relay("switch.office_wall", "off", "switch"))
+        self.log.add("office", "light.office", "off", 10 * MIN)
+        self.unavailable("switch.office_wall", since_ago=1 * MIN)
+        # ...but not a plug.
+        self.device("guest", relay("switch.guest_plug", "off", "outlet"))
+        self.log.add("guest", "light.guest", "off", 10 * MIN)
+        self.unavailable("switch.guest_plug", since_ago=1 * MIN)
         reasons = await self.reasons()
         self.assertEqual(
-            (reasons["kitchen"], reasons["bedroom"]), ("just_off", "room_order")
+            (
+                reasons["kitchen"],
+                reasons["bedroom"],
+                reasons["office"],
+                reasons["guest"],
+            ),
+            ("room_order", "room_order", "room_order", "just_off"),
         )
+
+    async def test_an_untyped_wall_relay_switched_off_is_the_room_going_dark(self):
+        # An untyped wall relay counts, so its off darkens the room; a
+        # plug's off doesn't.
+        self.home()
+        self.device("bedroom", relay("switch.bedroom_wall", "off", "switch"))
+        self.log.add("bedroom", "switch.bedroom_wall", "on", 20 * MIN)
+        self.log.add("bedroom", "switch.bedroom_wall", "off", 4 * MIN)
+        self.device("guest", relay("switch.guest_plug", "off", "outlet"))
+        self.log.add("guest", "switch.guest_plug", "off", 2 * MIN)
+        ranked = await self.ranked()
+        reasons = {
+            r["room_id"]: (r["rank"]["reason"], r["rank"]["params"]) for r in ranked
+        }
+        self.assertEqual(
+            reasons["bedroom"], ("just_off", {"went_dark_at": iso(NOW - 4 * MIN)})
+        )
+        self.assertEqual(reasons["guest"], ("room_order", {}))
 
 
 class RestartTest(OffRankingCase):

@@ -147,8 +147,8 @@ def _one_tap_devices(
     policies are the rooms that take part in room commands, with their
     policy. A device counts in its room when it is served and one of the
     room's lights and fans (now_data.room_light_kind: what its policy
-    approves, a wall relay the installer typed as one too; the same devices
-    make the room on). One scan.
+    approves, a wall relay the installer typed as one too; never an untyped
+    wall relay, which room off switches but one tap leaves off). One scan.
     """
     devices: dict[str, dict[str, str]] = {room_id: {} for room_id in policies}
     kinds: dict[str, str] = {}
@@ -793,8 +793,9 @@ class CasaSmartRoomActivityPolicyView(_NowView):
     ) -> str | None:
         """Why the list cannot be the room's policy, or None if it can.
 
-        Every entity must be served, in this room, and a safe candidate (a
-        wall relay typed as a light or fan is one).
+        Every entity must be served, in this room, and a device room off may
+        switch (now_data.room_off_kind: a light, a fan, or a wall relay typed
+        as one or untyped; never a plug, outlet or heater).
         """
         if len(entity_ids) > 64 or any(
             not isinstance(entity_id, str) for entity_id in entity_ids
@@ -1070,8 +1071,9 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
         room activity log).
         """
         policy = await self._hass.async_add_executor_job(now_data.room_policy, room_id)
-        # Which wall relays the installer typed as a light or fan, and (in a
-        # room without a stored policy) which devices are imported.
+        # How the installer typed each wall relay (light, fan, untyped,
+        # outlet, heater), and (in a room without a stored policy) which
+        # devices are imported.
         gang_types = await self._gang_types()
         eligible = {
             state.entity_id: state
