@@ -118,8 +118,9 @@ class TestScrub(StorageTestCase):
             table[f"member-{i}"] = {"who": self.MARKER.decode() * 4}
         table.clear()
         self.assertEqual(len(table), 0)
-        # SQLite's secure_delete is off: the bytes are still there.
-        self.assertIn(self.MARKER, self.disk())
+        # Whether deleted bytes linger before compact() depends on the
+        # SQLite build (secure_delete, WAL checkpoints), so only the
+        # after-state is checked.
         storage.compact()
         self.assertNotIn(self.MARKER, self.disk())
         # The WAL is emptied, not just checkpointed.
