@@ -2,73 +2,15 @@
 
 What changed in each version of CasaSmart Hub.
 
-## [Unreleased]
-- Every room's lights and fans now work together from the start, as in
-  Apple Home and Google Home: room off switches them off (and the room's
-  wall switches, typed or not) and one tap turns the lights and fans back
-  on, with no setup. Before, a room did nothing until an admin set it up,
-  which no app could do. Plugs, heaters, ACs, covers and TVs are never
-  switched this way, not even when an admin's room list names a plug or a
-  heater. An admin can still take a room out or pick its devices.
-- Wall relays wired to lights or fans now count as lights and fans, when
-  the installer set the gang's type to Light or Fan in the app: one tap
-  brings them back with the room's other lights. Plugs, outlets, heaters
-  and relays without a type still never come on by themselves.
-- One tap on a room that is off now turns on the lights and fans that were
-  on last time, however the room was switched off: at the wall, from Home
-  Assistant, by an automation or from the app. Never plugs, outlets,
-  heaters, ACs, covers or TVs. An installer can give a room a start profile
-  for when the hub doesn't know yet. With nothing to turn on, the app opens
-  the room instead of saying it couldn't turn it on, and the Now page tells
-  the apps beforehand. Offline lights are skipped and reported. If a device
-  fails to come back on, the next tap tries it again.
-- The hub keeps a log of which room devices were switched, when, and how
-  (the app, a wall switch, an automation), for the room suggestions coming
-  next. It stays on the hub. It starts 10 minutes after Home Assistant
-  starts, while devices catch up. A member's entries are deleted with their
-  last phone, and a factory reset clears it. The database moves to schema
-  v5: to go back to 2.3.2, restore the copy the update saves in
-  `casasmart/backups`.
-- A room on the Now page is on while something room off switches is on
-  (a light, a fan or a wall switch, with or without a type) or while its
-  AC runs, so a room where only the AC runs is no longer hidden behind
-  "Everything is off". Room off leaves ACs running, as before. Plugs,
-  outlets and heaters never make a room on, so a fridge plug no longer
-  keeps the kitchen on. When every room that is on has its own power
-  meters, rooms are ordered by how much power they draw; otherwise by how
-  many devices are on. Rooms that tie follow your room order. When fewer
-  than five rooms are on, rooms that are off fill the empty cards.
-- Rooms that are off are now ordered too, each with its reason: first rooms
-  where something still runs (a TV or speaker playing, or a device drawing
-  real power), then rooms someone switched off in the last 30 minutes
-  (newest first; not by an automation or scene), then your room order.
-- The hub now learns when each room is usually switched on, from its own
-  activity log, and puts those rooms after the ones just switched off, with
-  "Usually on around now". Wall switches count as much as an app tap, but
-  only for the whole household; automations not at all. It waits for two
-  weeks of history first. Each phone blends in its own person's app taps;
-  the wall tablet can ask for the whole household's habits instead (once
-  the tablet app does). Rooms you switched off yourself in the last 30
-  minutes come right after those, marked as yours (not on the household's
-  view).
-- Ramadan has habits of its own. The hub knows when Ramadan is from the
-  Umm al-Qura calendar, offline, and learns those days apart: during
-  Ramadan the rooms are ranked on Ramadan habits, and the day after it the
-  rest of the year's habits are back exactly as they were before it. Each
-  Ramadan is kept for the next one, so next year's starts from day one.
-- Admins can turn room habit learning off, pause it, reset it, set the
-  weekend days (Friday and Saturday by default), and mark devices that run on
-  their own schedule so their timers don't look like habits.
-- When a member's last phone leaves the hub, what was learned from them,
-  their recently used devices and the room-command answers kept for their
-  retries are deleted too.
-- A factory reset is for a new owner, so it now leaves nothing of the old
-  one to read back: everything the hub learned about rooms goes (the
-  activity log, habits, Ramadan habits, last-on lights, start profiles),
-  the database is compacted so deleted data doesn't linger on the disk,
-  and the database copies earlier updates saved in `casasmart/backups` are
-  deleted (after a reset there is no going back to an older version with
-  them).
+## [2.3.3] - 2026-10-24
+- Smarter room order on the Now page: rooms in use first, then rooms just
+  switched off, then the rooms you usually use at this time.
+- A room with its AC running now shows as on.
+- Turning a room off switches off its lights, fans and wall switches, and
+  leaves plugs alone.
+- One tap turns a room back on with the lights and fans that were on last
+  time.
+- The hub learns your usual rooms over time, with Ramadan kept apart.
 
 ## [2.3.2] - 2026-10-22
 - Admins can now choose which cameras each member sees: none, only the
