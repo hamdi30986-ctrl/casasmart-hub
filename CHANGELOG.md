@@ -4,11 +4,12 @@ What changed in each version of CasaSmart Hub.
 
 ## [Unreleased]
 - Every room's lights and fans now work together from the start, as in
-  Apple Home and Google Home: room off switches them off and one tap turns
-  them back on, with no setup. Before, a room did nothing until an admin
-  set it up, which no app could do. Plugs, heaters, ACs, covers and TVs are
-  never switched this way. An admin can still take a room out or pick its
-  devices.
+  Apple Home and Google Home: room off switches them off (and the room's
+  wall switches, typed or not) and one tap turns the lights and fans back
+  on, with no setup. Before, a room did nothing until an admin set it up,
+  which no app could do. Plugs, heaters, ACs, covers and TVs are never
+  switched this way, not even when an admin's room list names a plug or a
+  heater. An admin can still take a room out or pick its devices.
 - Wall relays wired to lights or fans now count as lights and fans, when
   the installer set the gang's type to Light or Fan in the app: one tap
   brings them back with the room's other lights. Plugs, outlets, heaters
@@ -28,15 +29,15 @@ What changed in each version of CasaSmart Hub.
   last phone, and a factory reset clears it. The database moves to schema
   v5: to go back to 2.3.2, restore the copy the update saves in
   `casasmart/backups`.
-- A room on the Now page is on only while a light or fan that room off
-  switches is on (wall relays typed Light or Fan included), so room off
-  always leaves the room off and a fridge plug no longer keeps the kitchen
-  on. Plugs, other switches, heaters and ACs never make a room on; a
-  running AC with its own power meter shows its room as still running.
-  When every room that is on has its own power meters, rooms are ordered
-  by how much power they draw; otherwise by how many lights and fans are
-  on. Rooms that tie follow your room order. When fewer than five rooms are
-  on, rooms that are off fill the empty cards.
+- A room on the Now page is on while something room off switches is on
+  (a light, a fan or a wall switch, with or without a type) or while its
+  AC runs, so a room where only the AC runs is no longer hidden behind
+  "Everything is off". Room off leaves ACs running, as before. Plugs,
+  outlets and heaters never make a room on, so a fridge plug no longer
+  keeps the kitchen on. When every room that is on has its own power
+  meters, rooms are ordered by how much power they draw; otherwise by how
+  many devices are on. Rooms that tie follow your room order. When fewer
+  than five rooms are on, rooms that are off fill the empty cards.
 - Rooms that are off are now ordered too, each with its reason: first rooms
   where something still runs (a TV or speaker playing, or a device drawing
   real power), then rooms someone switched off in the last 30 minutes
