@@ -122,14 +122,20 @@ async def async_execute_registry_scene(
 
         if generated:
             # Each call yields to the event loop, so check again that the step
-            # still applies: the device may have moved or been switched off.
-            from .generated_suggestions import room_actions
+            # still applies: the device may have moved or been switched.
+            from .generated_suggestions import (
+                KIND_USUALLY_ON_NOW,
+                room_actions,
+                usual_step_applies,
+            )
 
             state = hass.states.get(entity_id)
             valid = (
                 state is not None and area_id_of(hass, entity_id) == scene["room_id"]
             )
-            if valid and entity_id.startswith("light."):
+            if valid and scene["kind"] == KIND_USUALLY_ON_NOW:
+                valid = usual_step_applies(state, item)
+            elif valid and entity_id.startswith("light."):
                 valid = (
                     state.state == "on"
                     and state.attributes.get("casasmart_room_activity_exclude")

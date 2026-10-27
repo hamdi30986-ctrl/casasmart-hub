@@ -1,8 +1,9 @@
 """Room habits through the real views, over the real log and learner.
 
-GET /api/casasmart/now through the real CasaSmartNowView, with the real
-registry, NowDataEngine, room activity table, recorder (only read through)
-and HabitLearner over a temp HubStorage; Home Assistant's entity registry,
+GET /api/casasmart/now through the real CasaSmartNowView (and the generated
+suggestions' usually_on_now through the real suggestion views, runtime and
+scene executor), with the real registry, NowDataEngine, room activity
+table, recorder (only read through) and HabitLearner over a temp HubStorage; Home Assistant's entity registry,
 hass and the requests are the view harness' fakes. History is written into
 the room activity table as the recorder would have logged it over the past
 eight weeks (the recorder's own attribution is pinned in
@@ -34,6 +35,12 @@ try:
     from casasmart.room_intel.hijri import next_ramadan, ramadan_of, ramadans_before
     from casasmart.room_intel.learner import HabitLearner
     from casasmart.room_intel.recorder import ActivityRecorder
+    from casasmart.suggestion_api import (
+        CasaSmartGeneratedSuggestionActionView,
+        CasaSmartGeneratedSuggestionsView,
+    )
+    from casasmart.suggestion_runtime import SuggestionRuntime
+    from casasmart.suggestion_store import SuggestionStore
     from homeassistant.helpers import entity_registry as er
 
     IMPORT_ERROR = H.IMPORT_ERROR
@@ -454,6 +461,112 @@ class MemberLeaves(HabitHubCase):
         # And from the kept Ramadans.
         self.assertTrue(dict(kept.items()))
         self.assertNotIn("mem-a", json.dumps(dict(kept.items())))
+
+
+@unittest.skipIf(
+    IMPORT_ERROR is not None, f"Home Assistant unavailable: {IMPORT_ERROR}"
+)
+class GeneratedHabitSuggestions(HabitHubCase):
+    """usually_on_now through the real views: what the tablet and each phone
+    are offered, and an old app that never asks."""
+
+    KINDS = {"kinds": "room_off,room_eco,usually_on_now"}
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.runtime.suggestions = SuggestionRuntime(
+            self.hass,
+            SuggestionStore(self.storage),
+            self.runtime.registry,
+            now_data=self.runtime.now_data,
+        )
+
+    async def generated(self, *, member_id, query=None, rooms=None, role="admin"):
+        _, headers = H.session(
+            self.runtime.auth, role=role, rooms=rooms, member_id=member_id
+        )
+        status, body = H.read_response(
+            await CasaSmartGeneratedSuggestionsView(self.hass).get(
+                H.FakeRequest(headers=headers, query=query)
+            )
+        )
+        self.assertEqual(status, 200, body)
+        return body
+
+    @staticmethod
+    def plans(body):
+        return [
+            (p["kind"], p["room_id"], [a["entity_id"] for a in p["actions"]])
+            for p in body["suggestions"]
+        ]
+
+    async def test_the_tablet_gets_the_households_turn_ons(self):
+        body = await self.generated(
+            member_id="mem-a", query={**self.KINDS, "habits": "household"}
+        )
+        self.assertEqual(
+            self.plans(body),
+            [
+                ("usually_on_now", "room-majlis", ["light.majlis"]),
+                ("usually_on_now", "room-bedroom", ["light.bedroom"]),
+            ],
+        )
+        self.assertEqual(body["suggestion"], body["suggestions"][0])
+        self.assertEqual(body["suggestions"][0]["reason"]["layer"], "household")
+        self.assertEqual(
+            body["suggestions"][0]["actions"][0],
+            {"entity_id": "light.majlis", "action": "turn_on", "data": {},
+             "name": "light.majlis"},
+        )  # fmt: skip
+
+    async def test_a_phone_gets_its_members_turn_ons(self):
+        body = await self.generated(member_id="mem-a", query=self.KINDS)
+        self.assertEqual(
+            self.plans(body),
+            [("usually_on_now", "room-bedroom", ["light.bedroom"])],
+        )
+        self.assertEqual(body["suggestions"][0]["reason"]["layer"], "personal")
+        body = await self.generated(member_id="mem-b", query=self.KINDS)
+        self.assertEqual(
+            [room for _, room, _ in self.plans(body)], ["room-majlis", "room-bedroom"]
+        )
+        body = await self.generated(
+            member_id="mem-c", query=self.KINDS, rooms=["room-kitchen"], role="user"
+        )
+        self.assertEqual(body["suggestions"], [])
+
+    async def test_an_old_app_never_sees_one(self):
+        body = await self.generated(member_id="mem-a")
+        self.assertEqual(
+            (body["status"], body["suggestions"], body["suggestion"]),
+            ("no_match", [], None),
+        )
+        self.assertEqual(self.runtime.room_habits.builds, 0)
+
+    async def test_the_tablet_runs_one(self):
+        query = {**self.KINDS, "habits": "household"}
+        plan = (await self.generated(member_id="mem-a", query=query))["suggestion"]
+        generated = self.runtime.suggestions.generated
+
+        async def refresh():
+            """No change events in this harness (no event loop on its hass)."""
+
+        generated.refresh = refresh
+        _, headers = H.session(self.runtime.auth, role="admin", member_id="mem-a")
+        status, receipt = H.read_response(
+            await CasaSmartGeneratedSuggestionActionView(self.hass).post(
+                H.FakeRequest(
+                    headers=headers,
+                    query=query,
+                    body={"action": "run", "occurrence_id": plan["occurrence_id"]},
+                )
+            )
+        )
+        self.assertEqual((status, receipt["status"]), (200, "succeeded"))
+        self.assertEqual(
+            self.hass.services.calls,
+            [("light", "turn_on", {"entity_id": "light.majlis"}, True)],
+        )
 
 
 if __name__ == "__main__":
