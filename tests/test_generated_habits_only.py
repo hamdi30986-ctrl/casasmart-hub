@@ -1,5 +1,5 @@
 """?habits_only=1: the habit kinds once the habits are ready, the room plans
-before.
+before; and a usually_off_now dismissal hiding its room's room_off.
 
 The fixtures of test_generated_habit_suggestions (P1) and
 test_generated_habit_off_suggestions (P3): the real suggestion handlers,
@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import importlib
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
+import test_generated_habit_off_suggestions as p3
 import test_generated_habit_suggestions as p1
 
 TODAY, H, NOW = p1.TODAY, p1.H, p1.NOW
@@ -276,6 +277,89 @@ class SwitchableTest(Case):
         self.assertEqual(
             await self.answer(TABLET), (True, [("usually_on_now", "majlis")])
         )
+
+
+class OffDismissalTest(p3.OffCase):
+    """Dismissing or snoozing a room's usually_off_now hides its room_off for
+    as long, for that member."""
+
+    async def plans(self, query=MIXED, **claims):
+        return {
+            p["kind"] + ":" + p["room_id"]: p
+            for p in (await self.get(query, **claims))["suggestions"]
+        }
+
+    async def test_a_dismissal_hides_the_rooms_room_off(self):
+        self.history()
+        plans = await self.plans()
+        self.assertEqual(
+            list(plans),
+            ["room_off:majlis", "room_eco:majlis", "room_off:living",
+             "usually_off_now:majlis"],
+        )  # fmt: skip
+        response = await self.act(plans["usually_off_now:majlis"], "dismiss", MIXED)
+        self.assertEqual(response.data["status"], "dismissed")
+        self.assertEqual(
+            list(await self.plans()), ["room_eco:majlis", "room_off:living"]
+        )
+        # And for an app that never asked for habits, for the same member.
+        self.assertEqual(
+            offered(await self.get()), [("room_eco", "majlis"), ("room_off", "living")]
+        )
+        # So it can't be run or dismissed either.
+        response = await self.act(plans["room_off:majlis"], "run", MIXED)
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.calls, [])
+        # Bob's dismissals are his own.
+        self.assertEqual(
+            list(await self.plans(sub="bob:phone")),
+            ["room_off:majlis", "room_eco:majlis", "room_off:living",
+             "usually_off_now:majlis"],
+        )  # fmt: skip
+
+    async def test_a_snooze_hides_it_until_the_snooze_ends(self):
+        self.history()
+        plans = await self.plans()
+        response = await self.act(plans["usually_off_now:majlis"], "snooze", MIXED)
+        self.assertEqual(response.data["status"], "snoozed")
+        self.assertEqual(
+            list(await self.plans()), ["room_eco:majlis", "room_off:living"]
+        )
+        self.now = datetime.fromisoformat(response.data["until"]) + timedelta(seconds=1)
+        self.assertEqual(
+            list(await self.plans()),
+            ["room_off:majlis", "room_eco:majlis", "room_off:living",
+             "usually_off_now:majlis"],
+        )  # fmt: skip
+
+    async def test_a_room_off_dismissal_leaves_the_usually_off_now(self):
+        self.history()
+        plans = await self.plans()
+        await self.act(plans["room_off:majlis"], "dismiss", MIXED)
+        self.assertEqual(
+            list(await self.plans()),
+            ["room_eco:majlis", "room_off:living", "usually_off_now:majlis"],
+        )
+
+    async def test_it_holds_when_the_habits_stop_being_ready(self):
+        self.history()
+        payload = await self.get(TABLET)
+        self.assertEqual(
+            (payload["habits_ready"], offered(payload)),
+            (True, [("usually_off_now", "majlis")]),
+        )
+        await self.act(payload["suggestions"][0], "dismiss", TABLET)
+        # Learning turned off within the window: the fallback comes back,
+        # without the majlis' room_off.
+        await self.learner.async_update({"learning": False}, managed_ids=())
+        self.assertEqual(
+            await self.answer(TABLET),
+            (False, [("room_eco", "majlis"), ("room_off", "living")]),
+        )
+
+    async def answer(self, query, **claims):
+        payload = await self.get(query, **claims)
+        return payload.get("habits_ready"), offered(payload)
 
 
 class AnyHabitTest(Case):

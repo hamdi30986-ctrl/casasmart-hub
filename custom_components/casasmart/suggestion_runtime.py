@@ -41,6 +41,7 @@ from .generated_suggestions import (
     make_suggestion,
     make_usual_off_suggestion,
     make_usual_suggestion,
+    slot_id,
     window,
 )
 from .now_data import AC_ON_MODES, KIND_AC, is_room_ac, room_light_kind, room_on_kind
@@ -625,8 +626,9 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
     def payload_from(self, context, member, scope):
         """Every plan this member has not suppressed and nobody tried to run.
 
-        Asked habits_only, the answer says whether the habits were ready
-        (habits_ready).
+        A room_off is suppressed too while this member's dismissal or snooze
+        of the same room's usually_off_now lasts. Asked habits_only, the
+        answer says whether the habits were ready (habits_ready).
         """
         data, _, _, now, zone = context
 
@@ -641,7 +643,10 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         plans = []
         for _, plan, _ in self.candidates(context, scope):
             slot = plan["suppression_id"]
-            if suppressed(slot):
+            if suppressed(slot) or (
+                plan["kind"] == KIND_ROOM_OFF
+                and suppressed(slot_id(plan["room_id"], KIND_USUALLY_OFF_NOW, now))
+            ):
                 continue
             # Any attempted execution blocks a changed version of this slot too.
             receipts = [
