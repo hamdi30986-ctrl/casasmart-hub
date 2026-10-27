@@ -8,8 +8,9 @@
   the occurrence the caller was shown.
 - GET /generated and POST /generated/actions: the same for the generated
   room scenes. ?kinds= picks the kinds the client shows (usually_on_now
-  only when asked for) and ?habits=household|personal whose habits they
-  follow; an action sends the same query as the read that showed it.
+  and usually_off_now only when asked for) and ?habits=household|personal
+  whose habits they follow; an action sends the same query as the read
+  that showed it.
 
 Reading never runs a scene. Errors carry an "error" code and a readable
 "message"; the contracts are in docs/api/CONTEXTUAL_SUGGESTIONS_V1.md and

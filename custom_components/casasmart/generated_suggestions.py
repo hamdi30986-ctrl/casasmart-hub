@@ -2,9 +2,9 @@
 
 Pure functions behind GeneratedSuggestionRuntime. From a room's current
 device states they build the actions for "turn the room off", "save energy
-in the room" or "turn on the room you usually use now" (at the levels last
-used at this hour) and wrap them as a suggestion for the current two-hour
-window. A client gets the kinds it asks for (?kinds=, ask_from_query);
+in the room", "turn on the room you usually use now" (at the levels last
+used at this hour) or "turn off what you usually have off by now" and wrap
+them as a suggestion for the current two-hour window. A client gets the kinds it asks for (?kinds=, ask_from_query);
 without asking, the first two only. A run goes through
 async_execute_registry_scene, which re-checks each action against live
 state. The contract is in docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
@@ -29,11 +29,17 @@ KIND_ROOM_ECO = "room_eco"
 # A room that is off but usually on at this hour (room_intel.habits), with
 # the devices that usually come on there.
 KIND_USUALLY_ON_NOW = "usually_on_now"
-KINDS = frozenset({KIND_ROOM_OFF, KIND_ROOM_ECO, KIND_USUALLY_ON_NOW})
+# A room's devices that are on but usually switched off by now
+# (room_intel.habits).
+KIND_USUALLY_OFF_NOW = "usually_off_now"
+KINDS = frozenset(
+    {KIND_ROOM_OFF, KIND_ROOM_ECO, KIND_USUALLY_ON_NOW, KIND_USUALLY_OFF_NOW}
+)
 # What a client that sends no ?kinds= gets: the kinds every app shows.
 DEFAULT_KINDS = frozenset({KIND_ROOM_OFF, KIND_ROOM_ECO})
 _MAX_KINDS_LENGTH = 256
-# The most usually_on_now plans offered at once (one per room).
+# The most usually_on_now plans offered at once (one per room), and the
+# most usually_off_now plans.
 USUAL_ROOMS = 2
 
 _WINDOW_SECONDS = 2 * 60 * 60
@@ -242,6 +248,50 @@ def usual_step_applies(state, step, steps=()):
     return mode is not None and state.state in {"off", mode}
 
 
+def usual_off_step_applies(state, step):
+    """True while a usually_off_now step still applies to the device.
+
+    A plain turn_off (no data) of a light, fan or wall relay that is on, or
+    of an AC running in a mode (is_room_ac) that has off among its modes,
+    as room_off's ACs. Never a device left out of room activity.
+    """
+    attributes = state.attributes
+    if (
+        attributes.get("casasmart_room_activity_exclude") is True
+        or step["action"] != "turn_off"
+        or step.get("data")
+    ):
+        return False
+    if state.entity_id.split(".", 1)[0] in _USUAL_ON_DATA:
+        return state.state == "on"
+    return (
+        is_room_ac(state)
+        and state.state in AC_ON_MODES
+        and "off" in (attributes.get("hvac_modes") or [])
+    )
+
+
+def usual_off_actions(states):
+    """The actions of a usually_off_now plan, device by device in this order:
+    a turn_off of each that is still on (usual_off_step_applies).
+
+    states are the room's devices that are on and usually switched off by
+    now (the caller picks them: now_data.room_on_kind, so never a plug, an
+    outlet, a heater, a lock, a cover or a TV; HabitQuery.usual_off_devices).
+    """
+    actions = []
+    for state in states:
+        step = {
+            "entity_id": state.entity_id,
+            "action": "turn_off",
+            "data": {},
+            "name": state.attributes.get("friendly_name") or state.entity_id,
+        }
+        if usual_off_step_applies(state, step):
+            actions.append(step)
+    return actions
+
+
 def _turn_on_data(state, level):
     """A light's or fan's turn_on data for its recorded level, keeping only
     what it supports now: a dimmable light's brightness, a colour temperature
@@ -403,4 +453,26 @@ def make_usual_suggestion(room, states, now, *, layer, hour, levels=None):
         name="Turn on · " + room["name"],
         icon="lightbulb",
         reason={"code": "usually_on_now", "layer": layer, "hour": hour},
+    )
+
+
+def make_usual_off_suggestion(room, states, now, *, layer, hour):
+    """A usually_off_now suggestion for the room, or None when none of its
+    devices can be turned off.
+
+    states are its devices usually off by now (usual_off_actions); layer is
+    the habit layer that answered (household or personal) and hour the local
+    hour it is now.
+    """
+    actions = usual_off_actions(states)
+    if not actions:
+        return None
+    return _plan(
+        room,
+        KIND_USUALLY_OFF_NOW,
+        actions,
+        now,
+        name="Turn off · " + room["name"],
+        icon="power",
+        reason={"code": "usually_off_now", "layer": layer, "hour": hour},
     )

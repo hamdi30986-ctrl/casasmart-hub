@@ -39,6 +39,9 @@ ORBIT_CAPABILITIES: Final = (
     # hour, with its usual lights and fans) on ?kinds=usually_on_now, on the
     # household's habits with ?habits=household.
     "generated_room_habit_suggestions_v1",
+    # Generated usually_off_now plans (a room's devices that are on but
+    # usually switched off by now) on ?kinds=usually_off_now, same habits.
+    "generated_room_habit_off_suggestions_v1",
 )
 
 # Features whose server-side enforcement is complete. admin_password_v1 and
@@ -54,6 +57,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
         "now_room_habits_v1",
         "now_room_one_tap_v1",
         "generated_room_habit_suggestions_v1",
+        "generated_room_habit_off_suggestions_v1",
     }
 )
 

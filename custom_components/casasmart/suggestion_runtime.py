@@ -31,17 +31,23 @@ from .filtering import in_scope, is_served
 from .generated_suggestions import (
     KIND_ROOM_ECO,
     KIND_ROOM_OFF,
+    KIND_USUALLY_OFF_NOW,
     KIND_USUALLY_ON_NOW,
     KINDS,
     USUAL_ROOMS,
     Ask,
     digest,
     make_suggestion,
+    make_usual_off_suggestion,
     make_usual_suggestion,
     window,
 )
-from .now_data import is_room_ac, room_light_kind
-from .room_intel.off_rooms import REASON_HABIT_NOW
+from .now_data import AC_ON_MODES, KIND_AC, is_room_ac, room_light_kind, room_on_kind
+from .room_intel.off_rooms import (
+    JUST_OFF_WINDOW_SECONDS,
+    REASON_HABIT_NOW,
+    changed_at,
+)
 from .room_intel.ranking import async_rank_rooms, imported_controls
 from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
@@ -296,8 +302,9 @@ class SuggestionRuntime:
 class GeneratedSuggestionRuntime(SuggestionRuntime):
     """Generated room scenes, served on their own endpoint.
 
-    Clients opt in with the generated_room_suggestions_v1 capability, and
-    to usually_on_now with ?kinds= (generated_room_habit_suggestions_v1).
+    Clients opt in with the generated_room_suggestions_v1 capability, to
+    usually_on_now with ?kinds= (generated_room_habit_suggestions_v1) and
+    to usually_off_now the same way (generated_room_habit_off_suggestions_v1).
     """
 
     def __init__(self, hass, store, registry, now_data, *, clock=None):
@@ -326,18 +333,25 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         the second an off plan. Asked for usually_on_now (ask: the kinds,
         and the household's habits or member_id's), up to USUAL_ROOMS rooms
         that are off but usually on around now get an on plan each, unless
-        an Energy Saving level is active. Returns the same tuple shape as
-        the rule runtime, with the plans standing in for rules and scenes.
+        an Energy Saving level is active. Asked for usually_off_now, up to
+        USUAL_ROOMS rooms that are on get an off plan each for their devices
+        usually switched off by now, Energy Saving or not. Returns the same
+        tuple shape as the rule runtime, with the plans standing in for
+        rules and scenes.
         """
         ask = ask or Ask()
         now = self.clock()
         runtime = learner = None
-        if KIND_USUALLY_ON_NOW in ask.kinds:
+        habit_kinds = ask.kinds & {KIND_USUALLY_ON_NOW, KIND_USUALLY_OFF_NOW}
+        if habit_kinds:
             runtime = loaded_runtime_data(self.hass)
             learner = getattr(runtime, "room_habits", None)
             energy = getattr(runtime, "energy", None)
             if energy is not None and energy.active_level is not None:
-                learner = None
+                # Nothing is turned on while Energy Saving is on; off may be.
+                habit_kinds -= {KIND_USUALLY_ON_NOW}
+                if not habit_kinds:
+                    learner = None
         habits = stores = None
         if learner is not None:
             # Ranked as the Now page ranks for this caller, every off room
@@ -393,16 +407,23 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                     if plan:
                         plans.append(plan)
         zone = ZoneInfo(self.hass.config.time_zone)
-        if habits is not None:
+        wake_t = None
+        if habits is not None and KIND_USUALLY_ON_NOW in habit_kinds:
             plans.extend(
                 await self._usual_plans(ranked, grouped, stores, habits, now, zone)
             )
+        if habits is not None and KIND_USUALLY_OFF_NOW in habit_kinds:
+            off_plans, wake_t = self._usual_off_plans(
+                ranked, grouped, stores, habits, now, zone
+            )
+            plans.extend(off_plans)
         data = await self.hass.async_add_executor_job(self.store.snapshot)
         data = {
             **data,
             "rules": [],
             "_generated_plans": plans,
             "_generated_habits": habits is not None,
+            "_generated_wake_t": wake_t,
         }
         scenes = {
             p["scene_id"]: {
@@ -468,6 +489,62 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                     break
         return plans
 
+    def _usual_off_plans(self, ranked, grouped, stores, habits, now, zone):
+        """The usually_off_now plans, in the ranking's order (busiest first),
+        and when a device held back as just switched on stops being so (epoch
+        seconds; None: none is).
+
+        Only a room that is on and takes part in room commands, with its
+        devices that are on and usually switched off by now
+        (HabitQuery.usual_off_devices): what makes the room on
+        (now_data.room_on_kind: the lights, fans and wall relays room off
+        switches, and its ACs), so never a plug, an outlet, a heater, a
+        lock, a cover or a TV, nor a device left out of room activity. A
+        device switched on (or into another mode) less than
+        JUST_OFF_WINDOW_SECONDS ago is in use: left out until then.
+        """
+        _, policies, devices = stores
+        gang_types = imported_controls(devices)
+        hour = now.astimezone(zone).hour
+        now_t = now.timestamp()
+        plans = []
+        wake_t = None
+        for room in ranked:
+            policy = policies.get(room["room_id"], {})
+            if not room["rank"]["active"] or not policy.get("participates"):
+                continue
+            usual = habits.usual_off_devices(room["room_id"])
+            if not usual:
+                continue
+            on = {}
+            for state in grouped[room["room_id"]]:
+                kind = room_on_kind(state, policy, gang_types)
+                if kind is not None and (
+                    state.state in AC_ON_MODES
+                    if kind == KIND_AC
+                    else state.state == "on"
+                ):
+                    on[state.entity_id] = state
+            states = []
+            for entity_id in usual:
+                state = on.get(entity_id)
+                if state is None:
+                    continue
+                changed = changed_at(state)
+                if changed is not None and now_t < changed + JUST_OFF_WINDOW_SECONDS:
+                    until = changed + JUST_OFF_WINDOW_SECONDS
+                    wake_t = until if wake_t is None else min(wake_t, until)
+                    continue
+                states.append(state)
+            plan = make_usual_off_suggestion(
+                room, states, now, layer=habits.summary["layer"], hour=hour
+            )
+            if plan:
+                plans.append(plan)
+                if len(plans) == USUAL_ROOMS:
+                    break
+        return plans, wake_t
+
     async def refresh_context(self):
         """Every kind, on the household's habits: a change to what the shared
         tablet would be offered tells clients to refetch."""
@@ -484,12 +561,17 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
     def _refresh_at(data, now, zone):
         """When the plans may change by themselves: the end of the two-hour
         window or, when habits made them, the next local hour if sooner (a
-        habit is an hour's)."""
+        habit is an hour's), or when a device held back from usually_off_now
+        as just switched on stops being so, if sooner still."""
         end = window(now)[1]
         if not data["_generated_habits"]:
             return end
         hour = now.astimezone(zone).replace(minute=0, second=0, microsecond=0)
-        return min(end, (hour + timedelta(hours=1)).astimezone(UTC))
+        end = min(end, (hour + timedelta(hours=1)).astimezone(UTC))
+        wake_t = data.get("_generated_wake_t")
+        if wake_t is not None:
+            end = min(end, datetime.fromtimestamp(wake_t, UTC))
+        return end
 
     def _seconds_to_boundary(self, data, now, zone):
         """The rule boundary or _refresh_at, if sooner."""

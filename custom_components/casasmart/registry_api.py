@@ -124,8 +124,10 @@ async def async_execute_registry_scene(
             # Each call yields to the event loop, so check again that the step
             # still applies: the device may have moved or been switched.
             from .generated_suggestions import (
+                KIND_USUALLY_OFF_NOW,
                 KIND_USUALLY_ON_NOW,
                 room_actions,
+                usual_off_step_applies,
                 usual_step_applies,
             )
 
@@ -135,6 +137,8 @@ async def async_execute_registry_scene(
             )
             if valid and scene["kind"] == KIND_USUALLY_ON_NOW:
                 valid = usual_step_applies(state, item, scene["entities"])
+            elif valid and scene["kind"] == KIND_USUALLY_OFF_NOW:
+                valid = usual_off_step_applies(state, item)
             elif valid and entity_id.startswith("light."):
                 valid = (
                     state.state == "on"
