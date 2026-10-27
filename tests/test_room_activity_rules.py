@@ -1,6 +1,7 @@
 """room_intel.activity: the event, attribution and retention rules (no HA)."""
 
 import importlib.util
+import math
 import sys
 import tempfile
 import unittest
@@ -205,6 +206,123 @@ class HistogramTests(unittest.TestCase):
         self.assertEqual(sum(histogram["a"]), 7)
         self.assertEqual(histogram["b"], [0] * 23 + [1])
         self.assertEqual(activity.hour_histogram([]), {})
+
+
+class LevelRulesTests(unittest.TestCase):
+    def test_a_lights_level_is_its_brightness_and_colour_temperature(self):
+        self.assertEqual(
+            activity.level_of(
+                "light.majlis",
+                "on",
+                {
+                    "brightness": 204,
+                    "color_temp_kelvin": 2700,
+                    "color_mode": "color_temp",
+                },
+            ),
+            {"brightness": 204, "color_temp_kelvin": 2700},
+        )
+        # In a colour mode Home Assistant reports no colour temperature.
+        self.assertEqual(
+            activity.level_of(
+                "light.majlis",
+                "on",
+                {"brightness": 51, "color_temp_kelvin": None, "hs_color": [30, 80]},
+            ),
+            {"brightness": 51},
+        )
+        # A float brightness is rounded; nonsense is left out.
+        self.assertEqual(
+            activity.level_of("light.a", "on", {"brightness": 127.6}),
+            {"brightness": 128},
+        )
+        for attributes in (
+            {},
+            {"brightness": None},
+            {"brightness": 0},
+            {"brightness": 256},
+            {"brightness": True},
+            {"brightness": "200"},
+            {"brightness": math.nan},
+            {"color_temp_kelvin": -1},
+        ):
+            with self.subTest(attributes=attributes):
+                self.assertIsNone(activity.level_of("light.a", "on", attributes))
+        self.assertIsNone(activity.level_of("light.a", "off", {"brightness": 200}))
+
+    def test_a_fans_level_is_its_speed_and_an_acs_its_mode_target_and_fan(self):
+        self.assertEqual(
+            activity.level_of("fan.majlis", "on", {"percentage": 66}),
+            {"percentage": 66},
+        )
+        self.assertIsNone(activity.level_of("fan.majlis", "on", {"percentage": 0}))
+        self.assertIsNone(activity.level_of("fan.majlis", "on", {"percentage": 101}))
+        self.assertEqual(
+            activity.level_of(
+                "climate.majlis",
+                "cool",
+                {"temperature": 23, "fan_mode": "low", "current_temperature": 29},
+            ),
+            {"hvac_mode": "cool", "temperature": 23.0, "fan_mode": "low"},
+        )
+        # A mode without a target (fan only) still has its mode.
+        self.assertEqual(
+            activity.level_of("climate.majlis", "fan_only", {"temperature": None}),
+            {"hvac_mode": "fan_only"},
+        )
+        self.assertIsNone(
+            activity.level_of("climate.majlis", "off", {"temperature": 23})
+        )
+        self.assertEqual(
+            activity.level_of("climate.a", "heat", {"temperature": math.inf}),
+            {"hvac_mode": "heat"},
+        )
+        # A wall relay, a cover, a TV have no level.
+        for entity_id, state in (
+            ("switch.majlis", "on"),
+            ("cover.majlis", "open"),
+            ("media_player.tv", "on"),
+        ):
+            self.assertIsNone(activity.level_of(entity_id, state, {"brightness": 9}))
+
+    def test_a_level_change_is_a_new_level_on_a_device_that_stays_on(self):
+        change = activity.level_change
+        self.assertEqual(
+            change("light.a", "on", {"brightness": 200}, "on", {"brightness": 90}),
+            {"brightness": 90},
+        )
+        self.assertEqual(
+            change(
+                "climate.a",
+                "cool",
+                {"temperature": 24, "current_temperature": 28},
+                "cool",
+                {"temperature": 22, "current_temperature": 28},
+            ),
+            {"hvac_mode": "cool", "temperature": 22.0},
+        )
+        # Not one: the room's temperature moving, the same level reported
+        # again, a switch on or off, an AC's mode change (a "set").
+        for args in (
+            ("climate.a", "cool", {"temperature": 24, "current_temperature": 28},
+             "cool", {"temperature": 24, "current_temperature": 27}),
+            ("light.a", "on", {"brightness": 90}, "on", {"brightness": 90}),
+            ("light.a", "off", {}, "on", {"brightness": 90}),
+            ("light.a", "on", {"brightness": 90}, "off", {}),
+            ("climate.a", "cool", {"temperature": 24}, "heat", {"temperature": 24}),
+            ("light.a", "on", {"brightness": 90}, "on", {"brightness": None}),
+            ("switch.a", "on", {}, "on", {"x": 1}),
+        ):  # fmt: skip
+            with self.subTest(args=args):
+                self.assertIsNone(change(*args))
+
+    def test_level_rows_come_from_the_sources_the_habits_learn_from(self):
+        from room_intel.habits import HUMAN_SOURCES
+
+        self.assertEqual(activity.LEVEL_SOURCES, frozenset(HUMAN_SOURCES))
+        self.assertEqual(
+            activity.LEVEL_ACTIONS, {activity.ACTION_ON, activity.ACTION_SET, "level"}
+        )
 
 
 if __name__ == "__main__":

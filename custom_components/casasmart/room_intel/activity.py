@@ -21,10 +21,20 @@ change (attribute):
   kept on the device.
 
 A member id is kept only for app and scene events.
+
+Levels. An "on" or "set" carries the level the device is at (level_of): a
+light's brightness and colour temperature, a fan's speed, an AC's mode,
+target and fan mode. A person changing the level of a device that stays on (a
+light dimmed, an AC's setpoint) is a "level" row (level_change), which is no
+habit vote. A device's own report soon after it was switched on is that
+switch-on's (LEVEL_FOLLOW_SECONDS: a light ramping up, an AC settling), and a
+level that changes again before it is written replaces the one queued
+(room_intel.recorder).
 """
 
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
@@ -55,11 +65,25 @@ ACTION_OFF = "off"
 ACTION_SET = "set"
 ACTION_OPEN = "open"
 ACTION_CLOSE = "close"
+# A level changed while the device stayed on: no transition, no habit vote.
+ACTION_LEVEL = "level"
+# The actions whose rows carry a level.
+LEVEL_ACTIONS = frozenset({ACTION_ON, ACTION_SET, ACTION_LEVEL})
+# The sources whose level changes are logged: the ones the habits learn from
+# (room_intel.habits.SOURCE_WEIGHTS). An automation's or an unknown caller's
+# level change is never a level anyone used.
+LEVEL_SOURCES = frozenset(
+    {SOURCE_APP, SOURCE_SCENE, SOURCE_HA_USER, SOURCE_WALL_SWITCH}
+)
+# How long after a switch-on a device's own level report (attribute(): a
+# wall switch) is still that switch-on's.
+LEVEL_FOLLOW_SECONDS = 30.0
 
 # Retention. Human rows cover last year's Ramadan: a lunar year is about 354
 # days, so when Ramadan starts again its previous one began ~354 days ago, and
 # when it ends that one began ~384 days ago. Automation rows never feed a
-# habit, only the latest off. The cap bounds the file (~134 bytes a row).
+# habit, only the latest off. The cap bounds the file (~134 bytes a row, up
+# to ~30 more with a level).
 HUMAN_RETENTION_DAYS = 400
 AUTOMATION_RETENTION_DAYS = 31
 MAX_ROWS = 500_000
@@ -111,6 +135,72 @@ def transition(entity_id: str, old: str, new: str) -> str | None:
         if old in _MEDIA_ON and new in _MEDIA_OFF:
             return ACTION_OFF
     return None
+
+
+def level_of(entity_id: str, state: str, attributes: Mapping[str, Any]) -> dict | None:
+    """The level a device that is on is at, as the service data that sets it
+    back; None when it is off or has none.
+
+    A light: brightness (1-255) and, in colour temperature mode, its
+    color_temp_kelvin. A fan: its percentage (1-100). An AC in a mode: that
+    hvac_mode, its target temperature and fan_mode. A wall relay, a cover or
+    a TV has none. A value out of range or of the wrong type is left out.
+    """
+    domain = entity_id.split(".", 1)[0]
+    level: dict[str, Any] = {}
+    if domain == "light" and state == "on":
+        _put_whole(level, "brightness", attributes.get("brightness"), 255)
+        _put_whole(level, "color_temp_kelvin", attributes.get("color_temp_kelvin"))
+    elif domain == "fan" and state == "on":
+        _put_whole(level, "percentage", attributes.get("percentage"), 100)
+    elif domain == "climate" and state in _CLIMATE_MODES:
+        level["hvac_mode"] = state
+        target = attributes.get("temperature")
+        if (
+            isinstance(target, (int, float))
+            and not isinstance(target, bool)
+            and math.isfinite(target)
+            and -1000 <= target <= 1000
+        ):
+            level["temperature"] = float(target)
+        fan_mode = attributes.get("fan_mode")
+        if isinstance(fan_mode, str) and fan_mode.strip() and len(fan_mode) <= 64:
+            level["fan_mode"] = fan_mode.strip()
+    return level or None
+
+
+def level_change(
+    entity_id: str,
+    old: str,
+    old_attributes: Mapping[str, Any],
+    new: str,
+    new_attributes: Mapping[str, Any],
+) -> dict | None:
+    """The new level when a device changed its level and stayed on, else None.
+
+    On on both sides (an AC in the same mode), with a new level that differs
+    from the old one. A switch-on, a switch-off and an AC's mode change are
+    transitions, not level changes.
+    """
+    if old != new:
+        return None
+    level = level_of(entity_id, new, new_attributes)
+    if level is None or level == level_of(entity_id, old, old_attributes):
+        return None
+    return level
+
+
+def _put_whole(
+    level: dict[str, Any], name: str, value: Any, maximum: int = 100_000
+) -> None:
+    """Put value in level as a whole number from 1 to maximum, if it is one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    if not math.isfinite(value):
+        return
+    whole = round(value)
+    if 1 <= whole <= maximum:
+        level[name] = whole
 
 
 def attribute(
