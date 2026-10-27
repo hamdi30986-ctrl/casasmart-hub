@@ -568,17 +568,37 @@ class EnergyEventsTable:
 
 
 class RoomActivityTable:
-    """Room activity events, one row per confirmed device transition (v5).
+    """Room activity events, one row per confirmed device transition (v5),
+    with the level the device was switched on or set to (v6).
 
     room_intel.recorder writes them in batches; the read methods are what the
-    room ranking queries. Each row keeps the hub time zone's UTC offset at t,
-    so local day and hour are t plus that offset.
+    room ranking, the habits and the generated suggestions query. Each row
+    keeps the hub time zone's UTC offset at t, so local day and hour are t
+    plus that offset. A row's level is None or a dict of the level columns it
+    has, named as the Home Assistant service data that sets the device back
+    to it: brightness (1-255), color_temp_kelvin, percentage (1-100),
+    hvac_mode, temperature (an AC's target) and fan_mode.
     """
 
     _MAX_QUERY_LIMIT = 5000
     # Rows per DELETE, so a big prune releases the lock between batches.
     _DELETE_BATCH = 5000
-    _COLUMNS = "id, t, utc_offset_min, room_id, entity_id, action, source, member_id"
+    _LEVELS = (
+        "brightness",
+        "color_temp_kelvin",
+        "percentage",
+        "hvac_mode",
+        "temperature",
+        "fan_mode",
+    )
+    _COLUMNS = (
+        "id, t, utc_offset_min, room_id, entity_id, action, source, member_id, "
+        + ", ".join(_LEVELS)
+    )
+    # A row with a level; and the action of a row that is only a level change
+    # (room_intel.activity.ACTION_LEVEL), which is no habit vote.
+    _HAS_LEVEL = "(" + " OR ".join(f"{name} IS NOT NULL" for name in _LEVELS) + ")"
+    _LEVEL_ONLY = "'level'"
     # (t + offset) as local epoch seconds; day 0 (1970-01-01) was a Thursday.
     _LOCAL = "(t + utc_offset_min * 60)"
     _EPOCH = date(1970, 1, 1)
@@ -591,22 +611,24 @@ class RoomActivityTable:
     def append_many(self, events: Iterable[Mapping[str, Any]]) -> int:
         """Write events in one transaction and return how many.
 
-        Each event has t, utc_offset_min, room_id, entity_id, action, source
-        and an optional member_id. Every event is checked before any is
-        written, so a bad one writes none.
+        Each event has t, utc_offset_min, room_id, entity_id, action, source,
+        an optional member_id and an optional level (a dict of level columns).
+        Every event is checked before any is written, so a bad one writes
+        none.
         """
         rows = [self._clean(event) for event in events]
         if not rows:
             return 0
+        columns = (
+            "t, utc_offset_min, room_id, entity_id, action, source, member_id, "
+            + ", ".join(self._LEVELS)
+        )
+        placeholders = ", ".join("?" for _ in range(7 + len(self._LEVELS)))
         with self._storage.transaction():
             for row in rows:
                 self._storage._execute_write(
-                    """
-                    INSERT INTO room_activity_events
-                        (t, utc_offset_min, room_id, entity_id, action, source,
-                         member_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                    f"INSERT INTO room_activity_events ({columns}) "
+                    f"VALUES ({placeholders})",
                     row,
                 )
         return len(rows)
@@ -761,7 +783,8 @@ class RoomActivityTable:
         first_day to last_day (local epoch days, inclusive), these sources
         only: {room_id, entity_id, source, member_id, local_day, on_hours}.
         on_hours is the mask of local hours (bit h) with at least one "on";
-        0 when the device only did something else that day. Local dates and
+        0 when the device only did something else that day. A level change
+        alone (a light dimmed while on) is no activity here. Local dates and
         hours come from each row's own offset, so an event stays in the local
         day it happened in. One query over the (t) index.
         """
@@ -780,6 +803,7 @@ class RoomActivityTable:
             "FROM (SELECT room_id, entity_id, source, member_id, action, "
             f"{self._LOCAL} / 86400 AS day, ({self._LOCAL} / 3600) % 24 AS hour "
             "FROM room_activity_events WHERE t >= ? AND t < ? "
+            f"AND action <> {self._LEVEL_ONLY} "
             f"AND source IN ({','.join('?' for _ in clean)})) "
             "WHERE day BETWEEN ? AND ? "
             "GROUP BY room_id, entity_id, source, member_id, day "
@@ -797,6 +821,61 @@ class RoomActivityTable:
             }
             for room_id, entity_id, source, member_id, day, on_hours in rows
         ]
+
+    def level_rows(
+        self,
+        room_ids: Iterable[str],
+        *,
+        since_t: int,
+        local_hours: Iterable[int],
+        sources: Iterable[str],
+        entity_ids: Iterable[str] | None = None,
+        limit: int = _MAX_QUERY_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """The rooms' events with a level since since_t, newest first.
+
+        Only rows at these local hours (0-23, from each row's own offset), of
+        these sources and, when given, these devices. What the level a device
+        was last used at is read from (room_intel.learner). One query over
+        the (room_id, t) index.
+        """
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= self._MAX_QUERY_LIMIT
+        ):
+            raise ValueError(f"limit must be between 1 and {self._MAX_QUERY_LIMIT}")
+        hours = sorted(set(local_hours))
+        if any(
+            isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23
+            for hour in hours
+        ):
+            raise ValueError("local_hours must be hours from 0 to 23")
+        where, params = self._filters(
+            since_t=since_t, until_t=None, room_ids=room_ids, sources=sources
+        )
+        clauses = [where, self._HAS_LEVEL]
+        if entity_ids is not None:
+            clean = self._texts(
+                entity_ids, "entity_id", max_length=255, allow_empty=True
+            )
+            clauses.append(
+                f"entity_id IN ({','.join('?' for _ in clean)})" if clean else "0"
+            )
+            params.extend(clean)
+        clauses.append(
+            f"({self._LOCAL} / 3600) % 24 IN ({','.join('?' for _ in hours)})"
+            if hours
+            else "0"
+        )
+        params.extend(hours)
+        params.append(limit)
+        rows = self._storage._fetchall(
+            f"SELECT {self._COLUMNS} FROM room_activity_events "
+            f"{' AND '.join(clauses)} ORDER BY t DESC, id DESC LIMIT ?",
+            tuple(params),
+        )
+        return [self._row(row) for row in rows]
 
     def last_off_by_room(
         self, room_ids: Iterable[str], *, since_t: int | None = None
@@ -931,10 +1010,54 @@ class RoomActivityTable:
             EnergyEventsTable._optional_text(
                 event.get("member_id"), "member_id", max_length=255
             ),
+            *RoomActivityTable._clean_level(event.get("level")),
         )
 
-    @staticmethod
-    def _row(row: tuple[Any, ...]) -> dict[str, Any]:
+    @classmethod
+    def _clean_level(cls, level: Any) -> tuple[Any, ...]:
+        """A level as its column values (None where it has none), or ValueError."""
+        if level is None:
+            return (None,) * len(cls._LEVELS)
+        if not isinstance(level, Mapping):
+            raise ValueError("level must be an object or null")
+        unknown = set(level) - set(cls._LEVELS)
+        if unknown:
+            raise ValueError(f"Unknown level field: {sorted(unknown)[0]!r}")
+        whole = {"brightness": 255, "color_temp_kelvin": 100_000, "percentage": 100}
+        values = []
+        for name in cls._LEVELS:
+            value = level.get(name)
+            if value is None:
+                values.append(None)
+            elif name in whole:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 1 <= value <= whole[name]
+                ):
+                    raise ValueError(f"{name} must be a whole number in range")
+                values.append(value)
+            elif name == "temperature":
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not -1000 <= value <= 1000  # also rejects NaN
+                ):
+                    raise ValueError("temperature must be a finite number")
+                values.append(float(value))
+            else:
+                values.append(
+                    EnergyEventsTable._required_text(value, name, max_length=64)
+                )
+        return tuple(values)
+
+    @classmethod
+    def _row(cls, row: tuple[Any, ...]) -> dict[str, Any]:
+        level = {
+            name: value
+            for name, value in zip(cls._LEVELS, row[8:], strict=True)
+            if value is not None
+        }
         return {
             "id": int(row[0]),
             "t": int(row[1]),
@@ -944,4 +1067,5 @@ class RoomActivityTable:
             "action": row[5],
             "source": row[6],
             "member_id": row[7],
+            "level": level or None,
         }

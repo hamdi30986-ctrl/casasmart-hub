@@ -62,6 +62,7 @@ class RoomActivityTableTests(unittest.TestCase):
                     "action": "off",
                     "source": "wall_switch",
                     "member_id": None,
+                    "level": None,
                 },
                 {
                     "id": 1,
@@ -72,6 +73,7 @@ class RoomActivityTableTests(unittest.TestCase):
                     "action": "on",
                     "source": "app",
                     "member_id": "mem-a",
+                    "level": None,
                 },
             ],
         )
