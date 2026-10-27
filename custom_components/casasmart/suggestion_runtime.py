@@ -29,6 +29,7 @@ from .const import (
 )
 from .filtering import in_scope, is_served
 from .generated_suggestions import (
+    HABIT_KINDS,
     KIND_ROOM_ECO,
     KIND_ROOM_OFF,
     KIND_USUALLY_OFF_NOW,
@@ -303,8 +304,10 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
     """Generated room scenes, served on their own endpoint.
 
     Clients opt in with the generated_room_suggestions_v1 capability, to
-    usually_on_now with ?kinds= (generated_room_habit_suggestions_v1) and
-    to usually_off_now the same way (generated_room_habit_off_suggestions_v1).
+    usually_on_now with ?kinds= (generated_room_habit_suggestions_v1), to
+    usually_off_now the same way (generated_room_habit_off_suggestions_v1)
+    and to the habit kinds replacing the others once the habits are ready
+    with ?habits_only=1 (generated_room_habits_only_v1).
     """
 
     def __init__(self, hass, store, registry, now_data, *, clock=None):
@@ -335,22 +338,24 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         that are off but usually on around now get an on plan each, unless
         an Energy Saving level is active. Asked for usually_off_now, up to
         USUAL_ROOMS rooms that are on get an off plan each for their devices
-        usually switched off by now, Energy Saving or not. Returns the same
+        usually switched off by now, Energy Saving or not. Asked habits_only,
+        only the habit kinds once the caller's habits are ready
+        (_habits_ready), and only the others before then. Returns the same
         tuple shape as the rule runtime, with the plans standing in for
         rules and scenes.
         """
         ask = ask or Ask()
         now = self.clock()
         runtime = learner = None
-        habit_kinds = ask.kinds & {KIND_USUALLY_ON_NOW, KIND_USUALLY_OFF_NOW}
-        if habit_kinds:
+        habit_kinds = ask.kinds & HABIT_KINDS
+        if habit_kinds or ask.habits_only:
             runtime = loaded_runtime_data(self.hass)
             learner = getattr(runtime, "room_habits", None)
             energy = getattr(runtime, "energy", None)
             if energy is not None and energy.active_level is not None:
                 # Nothing is turned on while Energy Saving is on; off may be.
                 habit_kinds -= {KIND_USUALLY_ON_NOW}
-                if not habit_kinds:
+                if not habit_kinds and not ask.habits_only:
                     learner = None
         habits = stores = None
         if learner is not None:
@@ -417,6 +422,12 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                 ranked, grouped, stores, habits, now, zone
             )
             plans.extend(off_plans)
+        ready = None
+        if ask.habits_only:
+            ready = habits is not None and await self._habits_ready(
+                grouped, stores, habits
+            )
+            plans = [p for p in plans if (p["kind"] in HABIT_KINDS) == ready]
         data = await self.hass.async_add_executor_job(self.store.snapshot)
         data = {
             **data,
@@ -424,6 +435,7 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             "_generated_plans": plans,
             "_generated_habits": habits is not None,
             "_generated_wake_t": wake_t,
+            "_generated_habits_ready": ready,
         }
         scenes = {
             p["scene_id"]: {
@@ -438,6 +450,33 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             for p in plans
         }
         return data, scenes, states, now, zone
+
+    async def _habits_ready(self, grouped, stores, habits):
+        """True once the caller's habits are ready for habit plans: past the
+        warm-up, a device of a room that takes part in room commands passes
+        the habit bar at some hour of today's day class, for coming on
+        (what _usual_plans may turn on) or for being off by then (what
+        _usual_off_plans may turn off) (HabitQuery.habits_ready). Every
+        hour of every device the first time a day: in the executor."""
+        _, policies, devices = stores
+        gang_types = imported_controls(devices)
+        on, off = {}, {}
+        for room_id, states in grouped.items():
+            policy = policies.get(room_id, {})
+            if not policy.get("participates"):
+                continue
+            on[room_id] = [
+                state.entity_id
+                for state in states
+                if room_light_kind(state, policy, gang_types) is not None
+                or is_room_ac(state)
+            ]
+            off[room_id] = [
+                state.entity_id
+                for state in states
+                if room_on_kind(state, policy, gang_types) is not None
+            ]
+        return await self.hass.async_add_executor_job(habits.habits_ready, on, off)
 
     async def _usual_plans(self, ranked, grouped, stores, habits, now, zone):
         """The usually_on_now plans, strongest habit first.
@@ -584,15 +623,25 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         )
 
     def payload_from(self, context, member, scope):
-        """Every plan this member has not suppressed and nobody tried to run."""
+        """Every plan this member has not suppressed and nobody tried to run.
+
+        Asked habits_only, the answer says whether the habits were ready
+        (habits_ready).
+        """
         data, _, _, now, zone = context
-        plans = []
-        for _, plan, _ in self.candidates(context, scope):
-            slot = plan["suppression_id"]
+
+        def suppressed(slot):
             suppression = data["suppressions"].get(
                 self.store.suppression_key(member, slot)
             )
-            if suppression and datetime.fromisoformat(suppression["until"]) > now:
+            return bool(
+                suppression and datetime.fromisoformat(suppression["until"]) > now
+            )
+
+        plans = []
+        for _, plan, _ in self.candidates(context, scope):
+            slot = plan["suppression_id"]
+            if suppressed(slot):
                 continue
             # Any attempted execution blocks a changed version of this slot too.
             receipts = [
@@ -603,7 +652,7 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             if receipts:
                 continue
             plans.append(plan)
-        return {
+        payload = {
             "version": 1,
             "source": "generated_room_v1",
             "status": "available" if plans else "no_match",
@@ -611,6 +660,9 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             "suggestions": plans,
             "refresh_at": self._refresh_at(data, now, zone).isoformat(),
         }
+        if data["_generated_habits_ready"] is not None:
+            payload["habits_ready"] = data["_generated_habits_ready"]
+        return payload
 
     async def payload(self, member, scope, ask=None):
         """payload_from for the caller's scope and ask; "unavailable" on

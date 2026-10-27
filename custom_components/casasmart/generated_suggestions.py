@@ -5,7 +5,8 @@ device states they build the actions for "turn the room off", "save energy
 in the room", "turn on the room you usually use now" (at the levels last
 used at this hour) or "turn off what you usually have off by now" and wrap
 them as a suggestion for the current two-hour window. A client gets the kinds it asks for (?kinds=, ask_from_query);
-without asking, the first two only. A run goes through
+without asking, the first two only. With ?habits_only=1 it gets the habit
+kinds once its habits are ready and the others only before then. A run goes through
 async_execute_registry_scene, which re-checks each action against live
 state. The contract is in docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
 """
@@ -37,6 +38,9 @@ KINDS = frozenset(
 )
 # What a client that sends no ?kinds= gets: the kinds every app shows.
 DEFAULT_KINDS = frozenset({KIND_ROOM_OFF, KIND_ROOM_ECO})
+# The kinds made from the room habits. With ?habits_only=1 a client gets only
+# these once the habits are ready, and only the others before.
+HABIT_KINDS = frozenset({KIND_USUALLY_ON_NOW, KIND_USUALLY_OFF_NOW})
 _MAX_KINDS_LENGTH = 256
 # The most usually_on_now plans offered at once (one per room), and the
 # most usually_off_now plans.
@@ -67,20 +71,22 @@ _USUAL_AC_STEPS = {
 @dataclass(frozen=True)
 class Ask:
     """What a generated suggestions request asks for: the kinds the client
-    shows, and whether the habits are the household's (the shared tablet)
-    or the caller's own blended over them."""
+    shows, whether the habits are the household's (the shared tablet) or
+    the caller's own blended over them, and whether the habit kinds replace
+    the others once the habits are ready (habits_only)."""
 
     kinds: frozenset[str] = DEFAULT_KINDS
     household: bool = False
+    habits_only: bool = False
 
 
 def ask_from_query(query: Mapping[str, str]) -> Ask:
-    """The Ask in a request's query: ?kinds= and ?habits=.
+    """The Ask in a request's query: ?kinds=, ?habits= and ?habits_only=.
 
     kinds is a comma-separated list; names this hub doesn't know are
     skipped, so a newer app still gets the kinds it shares with an older
-    hub. habits is household or personal (the default). A bad value is a
-    SuggestionError (400).
+    hub. habits is household or personal (the default). habits_only is 1
+    or 0 (the default). A bad value is a SuggestionError (400).
     """
     kinds = DEFAULT_KINDS
     raw = query.get("kinds")
@@ -94,7 +100,10 @@ def ask_from_query(query: Mapping[str, str]) -> Ask:
     layer = query.get("habits", LAYER_PERSONAL)
     if layer not in LAYERS:
         raise SuggestionError("invalid_habits")
-    return Ask(kinds, layer == LAYER_HOUSEHOLD)
+    habits_only = query.get("habits_only", "0")
+    if habits_only not in ("0", "1"):
+        raise SuggestionError("invalid_habits_only")
+    return Ask(kinds, layer == LAYER_HOUSEHOLD, habits_only == "1")
 
 
 def digest(value):
@@ -106,6 +115,11 @@ def window(now):
     """The two-hour UTC window holding now: (start epoch, end datetime)."""
     start = int(now.timestamp()) // _WINDOW_SECONDS * _WINDOW_SECONDS
     return start, datetime.fromtimestamp(start + _WINDOW_SECONDS, UTC)
+
+
+def slot_id(room_id, kind, now):
+    """A plan's suppression_id: its room, kind and now's window."""
+    return digest(["generated_room_v1", window(now)[0], room_id, kind])
 
 
 def number(value):
@@ -396,8 +410,8 @@ def _plan(room, kind, actions, now, *, name, icon, reason):
     the plan changing; occurrence_id also covers the actions, so running a
     plan that changed since it was shown is refused.
     """
-    start, expires = window(now)
-    slot = digest(["generated_room_v1", start, room["room_id"], kind])
+    expires = window(now)[1]
+    slot = slot_id(room["room_id"], kind, now)
     occurrence = digest([slot, actions])
     return {
         "source": "generated_room_v1",
