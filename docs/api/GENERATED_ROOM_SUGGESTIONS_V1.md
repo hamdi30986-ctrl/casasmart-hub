@@ -1,6 +1,6 @@
 # Generated room suggestions
 
-The hub generates up to three temporary scenes without saved routines: turn off the most-active room, save energy in that room, and turn off the second-most-active room. A client that asks for it also gets up to two "turn on" scenes for rooms that are off but usually on at this hour (`usually_on_now`, below). Generation never executes commands or creates registry scenes.
+The hub generates up to three temporary scenes without saved routines: turn off the most-active room, save energy in that room, and turn off the second-most-active room. A client that asks for it also gets up to two "turn on" scenes for rooms that are off but usually on at this hour (`usually_on_now`, below), and up to two "turn off" scenes for what is on but usually switched off by now (`usually_off_now`, below). Generation never executes commands or creates registry scenes.
 
 ## Contract
 
@@ -35,7 +35,7 @@ The additive `generated_room_habit_suggestions_v1` capability adds a third kind:
 
 Both endpoints take two query parameters:
 
-- `kinds`: a comma-separated list of the kinds the client shows, from `room_off`, `room_eco` and `usually_on_now`. Without it the client gets `room_off` and `room_eco` only, exactly as before this capability existed; that is how an older app keeps working. Names the hub doesn't know are skipped, so a newer app can ask for a later kind; an empty list, or one longer than 256 characters, is `400 invalid_kinds`.
+- `kinds`: a comma-separated list of the kinds the client shows, from `room_off`, `room_eco`, `usually_on_now` and `usually_off_now`. Without it the client gets `room_off` and `room_eco` only, exactly as before this capability existed; that is how an older app keeps working. Names the hub doesn't know are skipped, so a newer app can ask for a later kind; an empty list, or one longer than 256 characters, is `400 invalid_kinds`.
 - `habits`: `household` (the shared tablet: the whole household's habits, with no "you") or `personal` (the default: the caller's own app taps blended over the household's, as on the Now page). Anything else is `400 invalid_habits`.
 
 `POST .../generated/actions` must carry the same `kinds` and `habits` as the `GET` that showed the occurrence: the hub regenerates the plan from them, and a different query (or none) answers `409 occurrence_expired_or_ineligible`.
@@ -88,8 +88,50 @@ When `usually_on_now` was evaluated, `refresh_at` is the end of the two-hour win
 
 ### Running, dismissing
 
-Running, dismissing and snoozing work as for the other kinds: the same slot (room, kind, window) rules, member-scoped dismissals, and one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and off, so one switched on meanwhile is skipped ("Device changed since preview"). An AC's mode step needs it still off; its target and fan steps need it off (a cloud AC may report its new mode late) or in the plan's mode, so an AC someone set to something else meanwhile keeps their setting. Only these steps, with only these data keys, can run in a `usually_on_now` scene; each also passes the single-device command whitelist (no `climate.turn_on`). A `usually_on_now` scene never runs while Energy Saving is active (`409`), and is not offered then.
+Running, dismissing and snoozing work as for the other kinds: the same slot (room, kind, window) rules, member-scoped dismissals, and one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and off, so one switched on meanwhile is skipped ("Device changed since preview"). An AC's mode step needs it still off; its target and fan steps need it off (a cloud AC may report its new mode late) or in the plan's mode, so an AC someone set to something else meanwhile keeps their setting. Like a saved scene, the run sends an AC's mode and target but skips its fan step (an IR AC takes each call as a full-state burst and garbles a third one right after the mode); the item still shows the fan mode last used, and the receipt counts only the steps sent. Only these steps, with only these data keys, can run in a `usually_on_now` scene; each also passes the single-device command whitelist (no `climate.turn_on`). A `usually_on_now` scene never runs while Energy Saving is active (`409`), and is not offered then.
+
+## Usually off by now (`usually_off_now`)
+
+The additive `generated_room_habit_off_suggestions_v1` capability adds a fourth kind: a room that is on, with its devices that are on but are usually switched off by now. It is asked for exactly like `usually_on_now`: `kinds` must list `usually_off_now`, `habits` picks the layer (`household` on the shared tablet), and `POST .../generated/actions` must carry the same query as the `GET` that showed it.
+
+### Which rooms and devices
+
+The habits learn each device's offs from the room activity log as they learn its ons: the same sources and weights (an app tap, a scene a member ran, a Home Assistant user and a wall switch weigh 1, a wall switch only in the household layer; automations, Energy Saving and unnamed callers weigh nothing; a self-scheduled device's wall-switch offs are ignored), the same layers, window, decay, day class and Ramadan profile. An off never votes for its room, so the Now page's ranking and `usually_on_now` don't change. For each date, a device counts as off by now at local hour h when it was switched off at h or at h−1 and not switched on at h (on and off within the same hour is a device in use, such as a bathroom light). A device is usually off by now at the same bar as a room is usually on: strength at least 0.35 on at least 3 dates, after two weeks of history. So the suggestion starts at the usual hour and lasts until the end of the next one, and never comes before the usual time.
+
+A room is offered when it is on and takes part in room commands. Its plan holds its devices that are on now and usually off by now, strongest first, then by entity ID, and only what makes the room on on the Now page (`NOW_ROOM_RANKING_V1.md`): the lights, fans and wall relays (typed as a light or fan, or untyped) that room off switches under the room's policy, and its ACs (a `climate` entity with `cool` in its `hvac_modes`) that run in a mode and have `off` in their `hvac_modes`. Never a plug, an outlet, a fridge or anything typed as an outlet, plug or heater, a lock, an alarm, a cover, a TV, a heating-only thermostat or a device left out of room activity, whatever the habits say. A device switched on (or into another mode) less than 30 minutes ago is in use and left out until then; `refresh_at` is that moment when it comes before the next local hour. At most two rooms are offered, in the ranking's order (busiest first). A room can have both a `room_off` and a `usually_off_now` item: `room_off` turns off its lights and ACs, `usually_off_now` only what is usually off by now.
+
+The thresholds are those of `usually_on_now` on purpose, and follow how assistants that do this decide: Alexa's Hunches flagged a device "not in its usual state" (a light left on at bedtime) only after a few weeks of learning, and only asked; Google Home's suggested automations are offered for the user to accept or dismiss. Here nothing runs without a tap, the hub learns for two weeks first, a habit needs most of the recent days, and a dismissal holds for the window.
+
+### The item
+
+```json
+{
+  "source": "generated_room_v1",
+  "kind": "usually_off_now",
+  "room_id": "room-majlis",
+  "room_name": "Majlis",
+  "rule_id": "<64 hex: room + kind + window>",
+  "suppression_id": "<same as rule_id>",
+  "occurrence_id": "<64 hex: also covers the actions>",
+  "scene_id": "<same as occurrence_id>",
+  "scene": {"scene_id": "<occurrence_id>", "name": "Turn off · Majlis", "icon": "power"},
+  "actions": [
+    {"entity_id": "climate.majlis_ac", "action": "turn_off", "data": {}, "name": "Majlis AC"},
+    {"entity_id": "light.majlis", "action": "turn_off", "data": {}, "name": "Majlis light"},
+    {"entity_id": "switch.majlis_lamp", "action": "turn_off", "data": {}, "name": "Majlis lamp"}
+  ],
+  "generated_at": "2026-10-22T20:10:00+00:00",
+  "expires_at": "2026-10-22T22:00:00+00:00",
+  "reason": {"code": "usually_off_now", "layer": "household", "hour": 23}
+}
+```
+
+Every action is a plain `turn_off` with empty `data`. `reason.layer` is the habit layer that answered; `reason.hour` is the local hour it is now. Items come after the `usually_on_now` ones. When `usually_off_now` was evaluated, `refresh_at` is the window's end, the next local hour or the moment a device stops being "just switched on", whichever is soonest.
+
+### Running, dismissing
+
+As for the other kinds: the same slot rules, member-scoped dismissals and snoozes, one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and on (an AC in a mode with `off`), the step a plain `turn_off`, and the device not left out of room activity; one switched off or moved meanwhile is skipped ("Device changed since preview"). Turning off saves energy, so a `usually_off_now` item is offered and runs while Energy Saving is active (an energy lockout still refuses it).
 
 ## Compatibility
 
-This contract requires both the hub capability and an app that supports it. Without the capability, the app shows only rule-based suggestions. `usually_on_now` items appear only for a client that lists them in `kinds`; without that parameter the response is the same as before, byte for byte.
+This contract requires both the hub capability and an app that supports it. Without the capability, the app shows only rule-based suggestions. `usually_on_now` and `usually_off_now` items appear only for a client that lists them in `kinds`; without that parameter the response is the same as before, byte for byte, and an app that lists only `usually_on_now` gets what it got before `usually_off_now` existed.

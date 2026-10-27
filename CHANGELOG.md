@@ -11,6 +11,13 @@ What changed in each version of CasaSmart Hub.
   temperature and fan speed you last used then. The hub starts recording
   these levels with this update (database version 6), so a light comes on
   plainly until it has been used once at that time.
+- Suggestions can now offer to turn off what you usually have off by this
+  time, such as the majlis lights and AC left on late. Plugs, fridges,
+  heaters and locks are never included, and something switched on in the
+  last half hour is left alone. The apps show it once they are updated.
+- When that turn-on suggestion brings an AC back, it now sets the mode and
+  temperature but not the fan speed, as saved scenes do, so IR-controlled
+  ACs don't miss the command.
 
 ## [2.3.3] - 2026-10-24
 - Smarter room order on the Now page: rooms in use first, then rooms just
