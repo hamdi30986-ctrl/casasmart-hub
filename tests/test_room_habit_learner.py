@@ -190,6 +190,36 @@ class BuildAndCacheTests(LearnerCase):
         # The buffered seconds were written before each read.
         self.assertEqual(self.recorder.flushes, 2)
 
+    async def test_the_query_says_which_devices_usually_come_on(self):
+        self.household_routine()
+        query = self.learner.query(None)
+        self.assertEqual(query.usual_devices("majlis"), [])
+        await query.async_learned(ROOMS, COUNTED, self.now)
+        self.assertEqual(query.usual_devices("majlis"), ["light.majlis"])
+        self.assertEqual(query.usual_devices("kitchen"), [])
+        # A restart the same day loads the saved per-device votes.
+        restarted = await self.make_learner()
+        query = restarted.query(None)
+        await query.async_learned(ROOMS, COUNTED, self.now)
+        self.assertEqual(restarted.loads, 1)
+        self.assertEqual(query.usual_devices("majlis"), ["light.majlis"])
+        # Learning off: no habits, so no usual devices either.
+        await self.learner.async_update({"learning": False}, managed_ids=())
+        query = self.learner.query(None)
+        await query.async_learned(ROOMS, COUNTED, self.now)
+        self.assertEqual(query.usual_devices("majlis"), [])
+
+    async def test_a_saved_version_2_model_is_rebuilt(self):
+        self.household_routine()
+        await self.ask()
+        table = self.storage.table("now_room_habits")
+        for key, doc in table.items():
+            table[key] = {**doc, "v": 2}
+        restarted = await self.make_learner()
+        _, reasons = await self.ask(learner=restarted)
+        self.assertEqual(reasons, {"majlis": "habit_now"})
+        self.assertEqual((restarted.builds, restarted.loads), (1, 0))
+
     async def test_a_restart_the_same_day_reuses_the_saved_model(self):
         self.household_routine()
         await self.ask()
@@ -237,7 +267,7 @@ class BuildAndCacheTests(LearnerCase):
             ["regular:household", "regular:member:mem-a", "regular:member:mem-b"],
         )
         for doc in docs.values():
-            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 2, "day": TODAY})
+            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 3, "day": TODAY})
         self.assertEqual(set(docs["regular:household"]["layer"]), {"majlis", "kitchen"})
         # A saved doc that doesn't parse is rebuilt from the log.
         self.storage.table("now_room_habits")["regular:household"] = {
@@ -447,7 +477,8 @@ class LayerAndMemberTests(LearnerCase):
         self.assertEqual(sorted(docs), ["regular:household", "regular:member:mem-a"])
         # Full-weight wall votes in the household; A's layer is only A's taps.
         self.assertEqual(
-            {day for day, full, half in docs["regular:household"]["layer"]["majlis"]["on"]
+            {day for day, full, half
+             in docs["regular:household"]["layer"]["majlis"]["devices"]["light.majlis"]
              if full >> 20 & 1 and not half},
             set(workdays(25)),
         )  # fmt: skip

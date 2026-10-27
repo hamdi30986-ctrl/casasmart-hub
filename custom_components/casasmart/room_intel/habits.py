@@ -3,8 +3,9 @@
 The room activity log (room_intel.activity, storage.RoomActivityTable) is the
 only source, never Home Assistant's recorder. room_intel.learner builds the
 model on the hub once a local day and keeps it in kv now_room_habits; the
-all-off ranking asks it which rooms are usually on around now. Nothing here
-imports Home Assistant.
+all-off ranking asks it which rooms are usually on around now, and the
+generated room suggestions which of a room's devices usually come on then.
+Nothing here imports Home Assistant.
 
 Votes. A confirmed "on" of a device that makes its room on (the ranking's
 rule: a light, a fan, a switch whose gang is a light, fan, switch or outlet,
@@ -39,7 +40,9 @@ PRIOR_DAYS empty days keep one evening from looking like a habit: 0.35 is
 about "on at this hour on more than half of the recent days". A room is
 usually on around now with habit >= MIN_STRENGTH on at least
 MIN_EVIDENCE_DAYS dates, and only once the asker's rooms have WARM_UP_DAYS
-observed dates.
+observed dates. A device usually comes on around now by the same rule over
+its own votes (and its room's observed dates); a room's votes are its
+devices' together.
 
 Ramadan (no switch, detected by itself). The dates of
 Ramadan by the Umm al-Qura calendar (room_intel.hijri) are a profile of their
@@ -123,8 +126,9 @@ PROFILE_REGULAR = "regular"
 PROFILE_RAMADAN = "ramadan"
 PROFILES = (PROFILE_REGULAR, PROFILE_RAMADAN)
 # 2: wall switches vote at full weight (a saved v1 model has them at half);
-# ages counted in the profile's own dates.
-MODEL_VERSION = 2
+# ages counted in the profile's own dates. 3: votes kept per device (a room's
+# are its devices' together).
+MODEL_VERSION = 3
 # Off and paused periods are kept while a date in them may still be read:
 # the log's human rows live HUMAN_RETENTION_DAYS (a finished Ramadan is
 # copied out of the log when it ends, learner.HabitLearner).
@@ -193,16 +197,16 @@ def profile_window(today: int, profile: str) -> list[int]:
 
 
 @dataclass
-class RoomEvidence:
-    """One room's votes in one layer.
+class Votes:
+    """Votes by date: full and half each date's mask of hours (bit h) with a
+    full or a half vote."""
 
-    seen holds the observed dates; full and half each date's mask of hours
-    (bit h) with a full or a half vote.
-    """
-
-    seen: set[int] = field(default_factory=set)
     full: dict[int, int] = field(default_factory=dict)
     half: dict[int, int] = field(default_factory=dict)
+
+    def add(self, day: int, on_hours: int, *, full: bool) -> None:
+        votes = self.full if full else self.half
+        votes[day] = votes.get(day, 0) | on_hours
 
     def vote(self, day: int, hour: int, *, half_weight: bool) -> float:
         if self.full.get(day, 0) >> hour & 1:
@@ -222,8 +226,26 @@ class RoomEvidence:
         )
 
     def vote_dates(self) -> set[int]:
-        """The dates the room got a full vote."""
+        """The dates with a full vote."""
         return {day for day, mask in self.full.items() if mask}
+
+
+@dataclass
+class RoomEvidence(Votes):
+    """One room's votes in one layer: its devices' together.
+
+    seen holds the observed dates; devices each device's own votes.
+    """
+
+    seen: set[int] = field(default_factory=set)
+    devices: dict[str, Votes] = field(default_factory=dict)
+
+    def add_device(
+        self, entity_id: str, day: int, on_hours: int, *, full: bool
+    ) -> None:
+        """A device's vote, which is its room's too."""
+        self.add(day, on_hours, full=full)
+        self.devices.setdefault(entity_id, Votes()).add(day, on_hours, full=full)
 
 
 # room_id -> evidence
@@ -273,8 +295,7 @@ def build_model(
         household = model.household.setdefault(room_id, RoomEvidence())
         household.seen.add(day)
         if on_hours:
-            votes = household.full if weight >= 1.0 else household.half
-            votes[day] = votes.get(day, 0) | on_hours
+            household.add_device(entity_id, day, on_hours, full=weight >= 1.0)
         member_id = row["member_id"]
         if source == PERSONAL_SOURCE and member_id:
             own = model.members.setdefault(member_id, {}).setdefault(
@@ -282,12 +303,12 @@ def build_model(
             )
             own.seen.add(day)
             if on_hours:
-                own.full[day] = own.full.get(day, 0) | on_hours
+                own.add_device(entity_id, day, on_hours, full=True)
     return model
 
 
 def strength(
-    evidence: RoomEvidence | None,
+    evidence: Votes | None,
     observed: Iterable[int],
     *,
     hour: int,
@@ -366,8 +387,16 @@ class HabitScorer:
 
     def score(self, room_id: str) -> tuple[float, int]:
         """(strength, household dates with evidence) of a room at this hour."""
-        habit, dates = strength(
+        return self._blend(
             self._model.household.get(room_id),
+            self._member.get(room_id) if self.personal_weight else None,
+        )
+
+    def _blend(self, household: Votes | None, mine: Votes | None) -> tuple[float, int]:
+        """(strength, household dates with evidence) of these votes: the
+        household's, with the member's own blended over them."""
+        habit, dates = strength(
+            household,
             self._observed,
             hour=self._hour,
             today=self._today,
@@ -375,15 +404,15 @@ class HabitScorer:
         )
         weight = self.personal_weight
         if weight:
-            mine, _ = strength(
-                self._member.get(room_id),
+            own, _ = strength(
+                mine,
                 self._own_observed,
                 hour=self._hour,
                 today=self._today,
                 half_weight=False,
                 ages=self._model.ages,
             )
-            habit = weight * mine + (1 - weight) * habit
+            habit = weight * own + (1 - weight) * habit
         return habit, dates
 
     def learned(self, room: Mapping[str, Any]) -> tuple[str, dict, tuple] | None:
@@ -395,19 +424,48 @@ class HabitScorer:
             return None
         return REASON_HABIT_NOW, {}, (LEARNED_HABIT, -round(habit, 4))
 
+    def usual_devices(self, room_id: str) -> list[str]:
+        """The room's devices that usually come on around now, strongest
+        first (ties by entity id).
+
+        A device does when its own votes, blended like its room's (score),
+        reach MIN_STRENGTH on at least MIN_EVIDENCE_DAYS dates. None until
+        the asker's rooms are ready.
+        """
+        if not self.ready:
+            return []
+        household = self._model.household.get(room_id)
+        own = self._member.get(room_id) if self.personal_weight else None
+        ids = set(household.devices if household else ()) | set(
+            own.devices if own else ()
+        )
+        passing = []
+        for entity_id in ids:
+            habit, dates = self._blend(
+                household.devices.get(entity_id) if household else None,
+                own.devices.get(entity_id) if own else None,
+            )
+            if habit >= MIN_STRENGTH and dates >= MIN_EVIDENCE_DAYS:
+                passing.append((-round(habit, 4), entity_id))
+        return [entity_id for _, entity_id in sorted(passing)]
+
 
 # -- storage shape --------------------------------------------------------------
 
 
 def layer_to_doc(layer: Layer) -> dict[str, Any]:
-    """A layer as JSON: per room, observed dates and [date, full, half] votes."""
+    """A layer as JSON: per room, observed dates and each device's
+    [date, full, half] votes (the room's are theirs together)."""
     return {
         room_id: {
             "seen": sorted(evidence.seen),
-            "on": [
-                [day, evidence.full.get(day, 0), evidence.half.get(day, 0)]
-                for day in sorted(evidence.full.keys() | evidence.half.keys())
-            ],
+            "devices": {
+                entity_id: [
+                    [day, votes.full.get(day, 0), votes.half.get(day, 0)]
+                    for day in sorted(votes.full.keys() | votes.half.keys())
+                ]
+                for entity_id, votes in sorted(evidence.devices.items())
+            },
         }
         for room_id, evidence in sorted(layer.items())
     }
@@ -422,18 +480,21 @@ def layer_from_doc(doc: Any) -> Layer:
         if not isinstance(record, dict):
             raise ValueError("room evidence must be an object")
         seen = record.get("seen")
-        votes = record.get("on")
-        if not isinstance(seen, list) or not isinstance(votes, list):
-            raise ValueError("room evidence needs seen and on lists")
+        devices = record.get("devices")
+        if not isinstance(seen, list) or not isinstance(devices, dict):
+            raise ValueError("room evidence needs a seen list and devices")
         evidence = RoomEvidence(seen={_int(day) for day in seen})
-        for item in votes:
-            if not isinstance(item, list) or len(item) != 3:
-                raise ValueError("a vote is [date, full, half]")
-            day, full, half = (_int(value) for value in item)
-            if full:
-                evidence.full[day] = full
-            if half:
-                evidence.half[day] = half
+        for entity_id, votes in devices.items():
+            if not isinstance(votes, list):
+                raise ValueError("a device's votes must be a list")
+            for item in votes:
+                if not isinstance(item, list) or len(item) != 3:
+                    raise ValueError("a vote is [date, full, half]")
+                day, full, half = (_int(value) for value in item)
+                if full:
+                    evidence.add_device(str(entity_id), day, full, full=True)
+                if half:
+                    evidence.add_device(str(entity_id), day, half, full=False)
         layer[str(room_id)] = evidence
     return layer
 

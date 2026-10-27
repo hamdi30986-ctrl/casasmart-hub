@@ -8,7 +8,8 @@ same day reuses them instead of reading the log again. The model is rebuilt
 when the date changes, when an admin changes what it learns from, when the
 devices that count change, and after a member's data is deleted. Each Now
 page request gets a HabitQuery for its layer; the all-off ranking asks it
-which of the caller's rooms are usually on around now.
+which of the caller's rooms are usually on around now, and the generated
+room suggestions which of their devices usually come on then.
 
 Each finished Ramadan is kept for the next one in kv now_ramadan_habits
 (key: its Hijri year): the log's rows of its dates, grouped per room, device,
@@ -93,12 +94,13 @@ LearnedTier = Callable[[Mapping[str, Any]], tuple[str, dict, tuple] | None]
 
 
 class HabitQuery:
-    """One Now page request's view of the habits.
+    """One Now page (or generated suggestions) request's view of the habits.
 
     member_id None is the household layer (the shared tablet). After
     async_learned, summary says which layer answered and how far learning
     is: {"layer": ..., "status": "off" | "paused" | "warming_up" |
-    "learning" | "unavailable"}.
+    "learning" | "unavailable"}, and usual_devices which devices usually
+    come on around now.
     """
 
     def __init__(
@@ -111,6 +113,8 @@ class HabitQuery:
             "status": STATUS_UNAVAILABLE,
             "profile": profile,
         }
+        # The scorer that answered async_learned (None: no habits).
+        self._scorer: HabitScorer | None = None
 
     async def async_learned(
         self,
@@ -124,6 +128,12 @@ class HabitQuery:
         they are.
         """
         return await self._learner.async_learned(self, room_ids, counted, now_t)
+
+    def usual_devices(self, room_id: str) -> list[str]:
+        """After async_learned: the room's devices that usually come on
+        around now, strongest first (HabitScorer.usual_devices); none when
+        no habits answered."""
+        return [] if self._scorer is None else self._scorer.usual_devices(room_id)
 
 
 class HabitLearner:
@@ -192,6 +202,7 @@ class HabitLearner:
         settings = self._settings
         now_t = self._wall_clock() if now_t is None else now_t
         query.summary["profile"] = self.profile_at(now_t)
+        query._scorer = None
         if not settings.learning:
             query.summary["status"] = STATUS_OFF
             return None
@@ -206,7 +217,10 @@ class HabitLearner:
             query.summary["status"] = STATUS_WARMING_UP
         else:
             query.summary["status"] = STATUS_LEARNING
-        return scorer.learned if scorer.ready else None
+        if not scorer.ready:
+            return None
+        query._scorer = scorer
+        return scorer.learned
 
     # -- admin -----------------------------------------------------------------
 
