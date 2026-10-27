@@ -18,6 +18,12 @@ What changed in each version of CasaSmart Hub.
 - When that turn-on suggestion brings an AC back, it now sets the mode and
   temperature but not the fan speed, as saved scenes do, so IR-controlled
   ACs don't miss the command.
+- Updated apps can ask for habit suggestions only: once the hub has learned
+  a habit for the home, Suggested scenes show only the "usually on" and
+  "usually off" ones. Before that, a new home keeps getting the room
+  turn-off and save-energy suggestions.
+- Dismissing or snoozing a "usually off" suggestion for a room also hides
+  that room's turn-off suggestion for as long.
 
 ## [2.3.3] - 2026-10-24
 - Smarter room order on the Now page: rooms in use first, then rooms just

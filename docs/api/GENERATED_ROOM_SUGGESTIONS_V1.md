@@ -1,6 +1,6 @@
 # Generated room suggestions
 
-The hub generates up to three temporary scenes without saved routines: turn off the most-active room, save energy in that room, and turn off the second-most-active room. A client that asks for it also gets up to two "turn on" scenes for rooms that are off but usually on at this hour (`usually_on_now`, below), and up to two "turn off" scenes for what is on but usually switched off by now (`usually_off_now`, below). Generation never executes commands or creates registry scenes.
+The hub generates up to three temporary scenes without saved routines: turn off the most-active room, save energy in that room, and turn off the second-most-active room. A client that asks for it also gets up to two "turn on" scenes for rooms that are off but usually on at this hour (`usually_on_now`, below), and up to two "turn off" scenes for what is on but usually switched off by now (`usually_off_now`, below), and can ask for those alone once the habits are ready (`habits_only`, below). Generation never executes commands or creates registry scenes.
 
 ## Contract
 
@@ -25,7 +25,7 @@ The selected two rooms persist for fixed two-hour UTC windows, including hub res
 
 The app previews exact devices and actions, then requires a separate Run scene confirmation. The occurrence hash binds the previewed plan and window. The hub regenerates and rechecks it after acquiring a durable SQLite execution claim. Changed plans, revoked permissions, moved devices or expired windows fail closed. Each generated command also checks live state and room membership after preceding commands yield.
 
-Dismissal and snooze are member-scoped and survive plan changes within the same room/kind/window. Execution claims are global for that slot: concurrent clients, changed action hashes, partial failures, lost responses and restarts cannot run it again. Successful, partial and unknown attempts suppress the slot for the rest of its window. Snooze lasts at most 30 minutes. Registry and state changes trigger change events that carry no details; reads and timers never run scenes.
+Dismissal and snooze are member-scoped and survive plan changes within the same room/kind/window. A member's dismissal or snooze of a room's `usually_off_now` also suppresses that room's `room_off` for them, for as long (same window, same `until`), whatever the client asked for; a `room_off` dismissal leaves the `usually_off_now`. Execution claims are global for that slot: concurrent clients, changed action hashes, partial failures, lost responses and restarts cannot run it again. Successful, partial and unknown attempts suppress the slot for the rest of its window. Snooze lasts at most 30 minutes. Registry and state changes trigger change events that carry no details; reads and timers never run scenes.
 
 ## Usually on around now (`usually_on_now`)
 
@@ -132,6 +132,24 @@ Every action is a plain `turn_off` with empty `data`. `reason.layer` is the habi
 
 As for the other kinds: the same slot rules, member-scoped dismissals and snoozes, one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and on (an AC in a mode with `off`), the step a plain `turn_off`, and the device not left out of room activity; one switched off or moved meanwhile is skipped ("Device changed since preview"). Turning off saves energy, so a `usually_off_now` item is offered and runs while Energy Saving is active (an energy lockout still refuses it).
 
+## Habits only, once learned (`habits_only`)
+
+The additive `generated_room_habits_only_v1` capability adds a third query parameter to both endpoints:
+
+- `habits_only`: `1` or `0` (the default). With `1`, once the caller's habits are ready the hub answers only the habit kinds asked for (`usually_on_now`, `usually_off_now`), and before then only the other kinds asked for (`room_off`, `room_eco`), as the cold-start fallback of a new home. The two never mix in one answer. Anything else is `400 invalid_habits_only`.
+
+The answer then carries `"habits_ready": true|false`, which side it took. An answer without `habits_only=1` has no such field and is unchanged. `POST .../generated/actions` must carry the same query as the `GET`: a `room_off` a ready caller no longer gets answers `409 occurrence_expired_or_ineligible`.
+
+### When the habits are ready
+
+The rule is the habits' own bar, applied to every hour of the day instead of only now: the caller's habit layer is past the warm-up (14 observed dates), and at some local hour of today's day class (workday or weekend; Ramadan's profile during Ramadan) at least one device passes it, strength at least 0.35 on at least 3 dates, either for coming on (as `usually_on_now` reads) or for being off by then (as `usually_off_now` reads). Only devices a habit plan may switch count, in rooms that take part in room commands: for coming on, the lights and fans one tap "on" may turn on and the ACs; for being off, what makes the room on (lights, fans, typed or untyped wall relays, ACs). So a habit only an untyped wall relay's switch-on has, or one in a room an admin took out, doesn't make a home ready.
+
+- **All day, not hour by hour.** A ready home stays ready at hours with nothing usual: the answer is then empty (`no_match`), not the room plans. The habits are rebuilt once a day, so the answer can change only at local midnight, when the day class changes, or when an admin turns learning off, resets it or changes the devices.
+- **Per caller.** It is computed in the layer that builds the caller's plans: the household's for `habits=household` (the shared tablet), the member's own taps blended over the household's for a phone. A phone whose blend can't build a habit plan keeps the fallback rather than an empty row, even when the tablet's household habits are ready. Within the caller's room scope.
+- **Not ready** while learning is off, the habits are warming up or can't be read, or on a hub without the habit learner: the fallback.
+
+Energy Saving doesn't change readiness: a ready caller then gets only its `usually_off_now` plans.
+
 ## Compatibility
 
-This contract requires both the hub capability and an app that supports it. Without the capability, the app shows only rule-based suggestions. `usually_on_now` and `usually_off_now` items appear only for a client that lists them in `kinds`; without that parameter the response is the same as before, byte for byte, and an app that lists only `usually_on_now` gets what it got before `usually_off_now` existed.
+This contract requires both the hub capability and an app that supports it. Without the capability, the app shows only rule-based suggestions. `usually_on_now` and `usually_off_now` items appear only for a client that lists them in `kinds`; without that parameter the response is the same as before, byte for byte, and an app that lists only `usually_on_now` gets what it got before `usually_off_now` existed. Without `habits_only=1` the kinds asked for are all offered together, as before.
