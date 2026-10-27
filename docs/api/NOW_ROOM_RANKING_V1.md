@@ -39,7 +39,7 @@ Off rooms go in tiers; a room takes the first it qualifies for, and its `rank.re
 4. `just_off` with `params.by_you: true`: the member asking switched it off from the app in the last 30 minutes (label "You turned this off"); newest first. Same rules as 2. Such a room is never `habit_now`. Never with `?habits=household` (a shared screen has no "you"): there the member's own offs are plain `just_off` (tier 2).
 5. `room_order`: `sort_order`, then `name`, then `room_id`.
 
-Rooms that are on have `reason: "active"`. Within a tier, ties go to the room order. `params` never holds a member id, an entity id or a score. The just_off tiers and the habits depend on who asks, so two members can see the off rooms in a different order; everything else is the same for every member with the same scope. The generated room suggestions rank without the activity log and without habits (they only use rooms that are on).
+Rooms that are on have `reason: "active"`. Within a tier, ties go to the room order. `params` never holds a member id, an entity id or a score. The just_off tiers and the habits depend on who asks, so two members can see the off rooms in a different order; everything else is the same for every member with the same scope. The generated room suggestions rank without the activity log and without habits (they only use rooms that are on), except when a client asks for `usually_on_now`: then they rank as this page does for that caller, and offer a room only when its `reason` here would be `habit_now` (`GENERATED_ROOM_SUGGESTIONS_V1.md`).
 
 ## Habits
 

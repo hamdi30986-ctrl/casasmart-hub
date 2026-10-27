@@ -2,6 +2,11 @@
 
 What changed in each version of CasaSmart Hub.
 
+## [Unreleased]
+- Suggestions can now offer to turn on a room you usually use at this time,
+  with the lights and fans that usually come on there. The apps show it once
+  they are updated; until then nothing changes.
+
 ## [2.3.3] - 2026-10-24
 - Smarter room order on the Now page: rooms in use first, then rooms just
   switched off, then the rooms you usually use at this time.
