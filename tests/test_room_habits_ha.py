@@ -31,7 +31,12 @@ try:
         CasaSmartNowView,
     )
     from casasmart.now_data import NowDataEngine
-    from casasmart.room_intel.habits import local_day, profile_of, profile_window
+    from casasmart.room_intel.habits import (
+        local_day,
+        profile_of,
+        profile_window,
+        weekday,
+    )
     from casasmart.room_intel.hijri import next_ramadan, ramadan_of, ramadans_before
     from casasmart.room_intel.learner import HabitLearner
     from casasmart.room_intel.recorder import ActivityRecorder
@@ -567,6 +572,119 @@ class GeneratedHabitSuggestions(HabitHubCase):
             self.hass.services.calls,
             [("light", "turn_on", {"entity_id": "light.majlis"}, True)],
         )
+
+
+@unittest.skipIf(
+    IMPORT_ERROR is not None, f"Home Assistant unavailable: {IMPORT_ERROR}"
+)
+class GeneratedHabitLevels(HabitHubCase):
+    """The tablet's usually_on_now at the levels last used at this hour, the
+    majlis AC included, through the real views, executor and whitelist."""
+
+    KINDS = GeneratedHabitSuggestions.KINDS
+    generated = GeneratedHabitSuggestions.generated
+
+    AC = {
+        "hvac_modes": ["off", "cool", "heat"],
+        "fan_modes": ["low", "auto"],
+        "supported_features": 1 | 8,
+        "min_temp": 16,
+        "max_temp": 30,
+    }
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        storage = self.storage
+        self.runtime.suggestions = SuggestionRuntime(
+            self.hass,
+            SuggestionStore(storage),
+            self.runtime.registry,
+            now_data=self.runtime.now_data,
+        )
+        storage.table("registry_devices")["climate.majlis_ac"] = {
+            "room_id": "room-majlis",
+            "display_name": None,
+            "sort_order": 0,
+        }
+        storage.table("registry_user_devices")["dev-majlis-ac"] = {
+            "entity_ids": ["climate.majlis_ac"]
+        }
+        self.runtime.registry.warm_up()
+        self.hass.states.add("climate.majlis_ac", state="off", attributes=self.AC)
+        self.hass.states.get("light.majlis").attributes = {
+            "supported_color_modes": ["brightness"]
+        }
+        now = time.time()
+        today = local_day(now, RIYADH)
+        hour = int((now + RIYADH * 60) // 3600) % 24
+        weekend = weekday(today) in (4, 5)
+        days = profile_window(today, profile_of(today))
+        # The newest date like today (workday or weekend), and an older one.
+        newest, older = [d for d in days if (weekday(d) in (4, 5)) == weekend][:2]
+        events = []
+        for day in days:
+            t = day * 86400 + hour * 3600 + 600 - RIYADH * 60
+            events.append(self.event("room-majlis", "climate.majlis_ac", t, "ha_user"))
+        for day, brightness, target in ((older, 90, 26), (newest, 200, 23)):
+            t = day * 86400 + hour * 3600 + 900 - RIYADH * 60
+            light = self.event("room-majlis", "light.majlis", t, "ha_user")
+            ac = self.event("room-majlis", "climate.majlis_ac", t, "ha_user")
+            events += [
+                {**light, "level": {"brightness": brightness}},
+                {**ac, "level": {"hvac_mode": "cool", "temperature": target,
+                                 "fan_mode": "low"}},
+            ]  # fmt: skip
+        storage.room_activity().append_many(events)
+
+    async def test_the_tablet_gets_the_last_used_levels(self):
+        body = await self.generated(
+            member_id="mem-a", query={**self.KINDS, "habits": "household"}
+        )
+        majlis = body["suggestions"][0]
+        self.assertEqual(majlis["room_id"], "room-majlis")
+        self.assertEqual(
+            [(a["entity_id"], a["action"], a["data"]) for a in majlis["actions"]],
+            [
+                ("climate.majlis_ac", "set_hvac_mode", {"hvac_mode": "cool"}),
+                ("climate.majlis_ac", "set_temperature", {"temperature": 23.0}),
+                ("climate.majlis_ac", "set_fan_mode", {"fan_mode": "low"}),
+                ("light.majlis", "turn_on", {"brightness": 200}),
+            ],
+        )
+
+    async def test_the_tablet_runs_one(self):
+        query = {**self.KINDS, "habits": "household"}
+        plan = (await self.generated(member_id="mem-a", query=query))["suggestion"]
+
+        async def refresh():
+            """No change events in this harness (no event loop on its hass)."""
+
+        self.runtime.suggestions.generated.refresh = refresh
+        _, headers = H.session(self.runtime.auth, role="admin", member_id="mem-a")
+        status, receipt = H.read_response(
+            await CasaSmartGeneratedSuggestionActionView(self.hass).post(
+                H.FakeRequest(
+                    headers=headers,
+                    query=query,
+                    body={"action": "run", "occurrence_id": plan["occurrence_id"]},
+                )
+            )
+        )
+        self.assertEqual((status, receipt["status"]), (200, "succeeded"))
+        ac = "climate.majlis_ac"
+        self.assertEqual(
+            self.hass.services.calls,
+            [
+                ("climate", "set_hvac_mode", {"entity_id": ac, "hvac_mode": "cool"},
+                 True),
+                ("climate", "set_temperature", {"entity_id": ac, "temperature": 23.0},
+                 True),
+                ("climate", "set_fan_mode", {"entity_id": ac, "fan_mode": "low"},
+                 True),
+                ("light", "turn_on", {"entity_id": "light.majlis", "brightness": 200},
+                 True),
+            ],
+        )  # fmt: skip
 
 
 if __name__ == "__main__":

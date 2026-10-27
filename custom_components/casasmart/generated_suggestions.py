@@ -2,11 +2,12 @@
 
 Pure functions behind GeneratedSuggestionRuntime. From a room's current
 device states they build the actions for "turn the room off", "save energy
-in the room" or "turn on the room you usually use now" and wrap them as a
-suggestion for the current two-hour window. A client gets the kinds it asks
-for (?kinds=, ask_from_query); without asking, the first two only. A run
-goes through async_execute_registry_scene, which re-checks each action
-against live state. The contract is in docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
+in the room" or "turn on the room you usually use now" (at the levels last
+used at this hour) and wrap them as a suggestion for the current two-hour
+window. A client gets the kinds it asks for (?kinds=, ask_from_query);
+without asking, the first two only. A run goes through
+async_execute_registry_scene, which re-checks each action against live
+state. The contract is in docs/api/GENERATED_ROOM_SUGGESTIONS_V1.md.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from .now_data import AC_ON_MODES, is_room_ac
 from .room_intel.habits import LAYER_HOUSEHOLD, LAYER_PERSONAL, LAYERS
 from .suggestions import SuggestionError
 
@@ -38,9 +40,22 @@ _WINDOW_SECONDS = 2 * 60 * 60
 # The eco plan's light cap (of 255) and its AC target in each unit.
 _ECO_BRIGHTNESS = 128
 _ECO_TARGETS = {"°C": 24, "C": 24, "°F": 75.2, "F": 75.2}
-# Home Assistant's ClimateEntityFeature bits.
+# Home Assistant's ClimateEntityFeature and FanEntityFeature bits.
 _SUPPORT_TARGET_TEMPERATURE = 1
 _SUPPORT_FAN_MODE = 8
+_SUPPORT_SET_SPEED = 1
+# What a usually_on_now step may send: a turn_on with these level keys, or
+# one of an AC's three steps with its one key.
+_USUAL_ON_DATA = {
+    "light": frozenset({"brightness", "color_temp_kelvin"}),
+    "fan": frozenset({"percentage"}),
+    "switch": frozenset(),
+}
+_USUAL_AC_STEPS = {
+    "set_hvac_mode": "hvac_mode",
+    "set_temperature": "temperature",
+    "set_fan_mode": "fan_mode",
+}
 
 
 @dataclass(frozen=True)
@@ -189,38 +204,138 @@ def room_actions(states, kind, *, temperature_unit="°C"):
     return actions
 
 
-def usual_step_applies(state, step):
-    """True while a usually_on_now step still applies: it turns on a light,
-    fan or wall relay that is off and not left out of room activity."""
-    return (
-        step["action"] == "turn_on"
-        and state.entity_id.split(".", 1)[0] in {"light", "fan", "switch"}
-        and state.state == "off"
-        and state.attributes.get("casasmart_room_activity_exclude") is not True
+def usual_step_applies(state, step, steps=()):
+    """True while a usually_on_now step still applies to the device.
+
+    A turn_on of a light, fan or wall relay that is off, with only the level
+    data that device takes; or one of an AC's steps (mode, target, fan) with
+    its one value: the mode while the AC is off, the target and fan while it
+    is off or in the mode the plan's own mode step sets (steps are the plan's
+    actions). Never a device left out of room activity.
+    """
+    if state.attributes.get("casasmart_room_activity_exclude") is True:
+        return False
+    domain = state.entity_id.split(".", 1)[0]
+    data = step.get("data") or {}
+    if domain in _USUAL_ON_DATA:
+        return (
+            step["action"] == "turn_on"
+            and state.state == "off"
+            and set(data) <= _USUAL_ON_DATA[domain]
+        )
+    key = _USUAL_AC_STEPS.get(step["action"])
+    if domain != "climate" or key is None or set(data) != {key}:
+        return False
+    if not is_room_ac(state):
+        return False
+    if step["action"] == "set_hvac_mode":
+        return state.state == "off"
+    mode = next(
+        (
+            other["data"]["hvac_mode"]
+            for other in steps
+            if other["entity_id"] == state.entity_id
+            and other["action"] == "set_hvac_mode"
+        ),
+        None,
     )
+    return mode is not None and state.state in {"off", mode}
+
+
+def _turn_on_data(state, level):
+    """A light's or fan's turn_on data for its recorded level, keeping only
+    what it supports now: a dimmable light's brightness, a colour temperature
+    within its range, a fan's speed. Empty: it comes on as it keeps."""
+    attrs = state.attributes
+    domain = state.entity_id.split(".", 1)[0]
+    data = {}
+    if domain == "light":
+        modes = set(attrs.get("supported_color_modes") or [])
+        brightness = level.get("brightness")
+        if (
+            modes - {"onoff", "unknown"}
+            and number(brightness)
+            and 1 <= brightness <= 255
+        ):
+            data["brightness"] = brightness
+        kelvin = level.get("color_temp_kelvin")
+        low = attrs.get("min_color_temp_kelvin")
+        high = attrs.get("max_color_temp_kelvin")
+        if (
+            "color_temp" in modes
+            and number(kelvin)
+            and kelvin > 0
+            and (not number(low) or low <= kelvin)
+            and (not number(high) or kelvin <= high)
+        ):
+            data["color_temp_kelvin"] = kelvin
+    elif domain == "fan":
+        percentage = level.get("percentage")
+        if (
+            int(attrs.get("supported_features", 0)) & _SUPPORT_SET_SPEED
+            and number(percentage)
+            and 1 <= percentage <= 100
+        ):
+            data["percentage"] = percentage
+    return data
+
+
+def _ac_steps(state, level):
+    """An AC's (action, data) steps back to its recorded mode and target, and
+    fan mode when it had one it still has; none without a mode and a target
+    it still takes (an AC never comes on at a guess)."""
+    attrs = state.attributes
+    features = int(attrs.get("supported_features", 0))
+    mode = level.get("hvac_mode")
+    target = level.get("temperature")
+    minimum, maximum = attrs.get("min_temp"), attrs.get("max_temp")
+    if not (
+        mode in AC_ON_MODES
+        and mode in (attrs.get("hvac_modes") or [])
+        and features & _SUPPORT_TARGET_TEMPERATURE
+        and number(target)
+        and (not number(minimum) or minimum <= target)
+        and (not number(maximum) or target <= maximum)
+    ):
+        return []
+    steps = [
+        ("set_hvac_mode", {"hvac_mode": mode}),
+        ("set_temperature", {"temperature": target}),
+    ]
+    fan_mode = level.get("fan_mode")
+    if features & _SUPPORT_FAN_MODE and fan_mode in (attrs.get("fan_modes") or []):
+        steps.append(("set_fan_mode", {"fan_mode": fan_mode}))
+    return steps
 
 
 def usual_actions(states, levels: Mapping[str, Mapping[str, Any]] | None = None):
-    """The actions of a usually_on_now plan: turn each of these devices on
-    that is off, in this order.
+    """The actions of a usually_on_now plan, device by device in this order:
+    each one that is off comes back on at the level it was last used at
+    around now.
 
-    states are the room's lights and fans that usually come on around now
-    (the caller picks them: now_data.room_light_kind, HabitQuery.
-    usual_devices). levels, when given, maps a device to its turn_on data
-    (a brightness, a fan speed); nothing passes them yet, so every device
-    comes on plainly, at the level it keeps.
+    states are the room's lights, fans and ACs that usually come on around
+    now (the caller picks them: now_data.room_light_kind, is_room_ac,
+    HabitQuery.usual_devices). levels maps a device to its recorded level
+    (HabitQuery.async_levels). A light or fan turns on with what of its
+    level it still supports (no level: data empty, at the level it keeps); a
+    wall relay plainly. An AC comes on only with a recorded mode and target:
+    set_hvac_mode, set_temperature, then set_fan_mode when it had one.
     """
     levels = levels or {}
     actions = []
     for state in states:
-        step = {
-            "entity_id": state.entity_id,
-            "action": "turn_on",
-            "data": dict(levels.get(state.entity_id, {})),
-            "name": state.attributes.get("friendly_name") or state.entity_id,
-        }
-        if usual_step_applies(state, step):
-            actions.append(step)
+        level = levels.get(state.entity_id) or {}
+        if state.entity_id.startswith("climate."):
+            pairs = _ac_steps(state, level)
+        else:
+            pairs = [("turn_on", _turn_on_data(state, level))]
+        name = state.attributes.get("friendly_name") or state.entity_id
+        steps = [
+            {"entity_id": state.entity_id, "action": action, "data": data, "name": name}
+            for action, data in pairs
+        ]
+        if steps and all(usual_step_applies(state, step, steps) for step in steps):
+            actions.extend(steps)
     return actions
 
 
@@ -273,9 +388,9 @@ def make_usual_suggestion(room, states, now, *, layer, hour, levels=None):
     """A usually_on_now suggestion for the room, or None when none of its
     usual devices can be turned on.
 
-    states are its usual devices (usual_actions); layer is the habit layer
-    that answered (household or personal) and hour the local hour it is
-    usual at.
+    states are its usual devices and levels their recorded levels
+    (usual_actions); layer is the habit layer that answered (household or
+    personal) and hour the local hour it is usual at.
     """
     actions = usual_actions(states, levels)
     if not actions:

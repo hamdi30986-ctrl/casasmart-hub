@@ -40,7 +40,7 @@ from .generated_suggestions import (
     make_usual_suggestion,
     window,
 )
-from .now_data import room_light_kind
+from .now_data import is_room_ac, room_light_kind
 from .room_intel.off_rooms import REASON_HABIT_NOW
 from .room_intel.ranking import async_rank_rooms, imported_controls
 from .runtime_lookup import loaded_runtime_data
@@ -394,7 +394,9 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                         plans.append(plan)
         zone = ZoneInfo(self.hass.config.time_zone)
         if habits is not None:
-            plans.extend(self._usual_plans(ranked, grouped, stores, habits, now, zone))
+            plans.extend(
+                await self._usual_plans(ranked, grouped, stores, habits, now, zone)
+            )
         data = await self.hass.async_add_executor_job(self.store.snapshot)
         data = {
             **data,
@@ -416,13 +418,15 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         }
         return data, scenes, states, now, zone
 
-    def _usual_plans(self, ranked, grouped, stores, habits, now, zone):
+    async def _usual_plans(self, ranked, grouped, stores, habits, now, zone):
         """The usually_on_now plans, strongest habit first.
 
         Only a room the ranking calls usually on around now (habit_now: off,
         nothing still running, not just switched off) that takes part in
-        room commands, with its usual lights and fans that are off: what one
-        tap "on" may turn on (now_data.room_light_kind).
+        room commands, with its usual devices that are off: the lights and
+        fans one tap "on" may turn on (now_data.room_light_kind), and its
+        ACs (is_room_ac, as they count in every room), each at the level
+        last used around now (HabitQuery.async_levels; an AC only with one).
         """
         _, policies, devices = stores
         gang_types = imported_controls(devices)
@@ -434,21 +438,29 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
                 "participates"
             ):
                 continue
-            lights = {
+            usual = {
                 state.entity_id: state
                 for state in grouped[room["room_id"]]
                 if room_light_kind(state, policy, gang_types) is not None
+                or is_room_ac(state)
             }
+            states = [
+                usual[entity_id]
+                for entity_id in habits.usual_devices(room["room_id"])
+                if entity_id in usual and usual[entity_id].state == "off"
+            ]
+            if not states:
+                continue
+            levels = await habits.async_levels(
+                room["room_id"], [state.entity_id for state in states], now.timestamp()
+            )
             plan = make_usual_suggestion(
                 room,
-                [
-                    lights[entity_id]
-                    for entity_id in habits.usual_devices(room["room_id"])
-                    if entity_id in lights
-                ],
+                states,
                 now,
                 layer=habits.summary["layer"],
                 hour=hour,
+                levels=levels,
             )
             if plan:
                 plans.append(plan)
