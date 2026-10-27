@@ -4,8 +4,9 @@ The room activity log (room_intel.activity, storage.RoomActivityTable) is the
 only source, never Home Assistant's recorder. room_intel.learner builds the
 model on the hub once a local day and keeps it in kv now_room_habits; the
 all-off ranking asks it which rooms are usually on around now, and the
-generated room suggestions which of a room's devices usually come on then.
-Nothing here imports Home Assistant.
+generated room suggestions which of a room's devices usually come on then,
+and which are usually switched off by then. Nothing here imports Home
+Assistant.
 
 Votes. A confirmed "on" of a device that makes its room on (the ranking's
 rule: a light, a fan, a switch whose gang is a light, fan, switch or outlet,
@@ -43,6 +44,18 @@ MIN_EVIDENCE_DAYS dates, and only once the asker's rooms have WARM_UP_DAYS
 observed dates. A device usually comes on around now by the same rule over
 its own votes (and its room's observed dates); a room's votes are its
 devices' together.
+
+Offs. A confirmed "off" of a counted device votes the same way, for that
+device only (never for its room: a room's strength is its "on"s), in the
+same layers with the same weights. A device is usually off by now by the
+same rule over its off votes, read for "by now", not "around now":
+
+    x_d = 0 when it was switched on at h (it was in use then), else
+          max(v_off(d, h), v_off(d, h-1))
+
+so an off this hour or the hour before counts in full, and an off an hour
+later never does: the suggestion comes once the usual time has come, not
+before it.
 
 Ramadan (no switch, detected by itself). The dates of
 Ramadan by the Umm al-Qura calendar (room_intel.hijri) are a profile of their
@@ -127,8 +140,8 @@ PROFILE_RAMADAN = "ramadan"
 PROFILES = (PROFILE_REGULAR, PROFILE_RAMADAN)
 # 2: wall switches vote at full weight (a saved v1 model has them at half);
 # ages counted in the profile's own dates. 3: votes kept per device (a room's
-# are its devices' together).
-MODEL_VERSION = 3
+# are its devices' together). 4: each device's off votes too.
+MODEL_VERSION = 4
 # Off and paused periods are kept while a date in them may still be read:
 # the log's human rows live HUMAN_RETENTION_DAYS (a finished Ramadan is
 # copied out of the log when it ends, learner.HabitLearner).
@@ -230,15 +243,37 @@ class Votes:
         return {day for day, mask in self.full.items() if mask}
 
 
+@dataclass(frozen=True)
+class OffVotes:
+    """A device's off votes, read against its on votes for "usually off by
+    now" (strength's evidence, like Votes)."""
+
+    off: Votes
+    on: Votes | None = None
+
+    def near(self, day: int, hour: int, *, half_weight: bool) -> float:
+        """x_d: the off vote at the hour or the hour before, 0 on a date it
+        was switched on at the hour."""
+        if self.on is not None and self.on.vote(day, hour, half_weight=half_weight):
+            return 0.0
+        before = (day, hour - 1) if hour else (day - 1, 23)
+        return max(
+            self.off.vote(day, hour, half_weight=half_weight),
+            self.off.vote(*before, half_weight=half_weight),
+        )
+
+
 @dataclass
 class RoomEvidence(Votes):
-    """One room's votes in one layer: its devices' together.
+    """One room's votes in one layer: its devices' "on"s together.
 
-    seen holds the observed dates; devices each device's own votes.
+    seen holds the observed dates; devices each device's own on votes, offs
+    its off votes (which are no vote for the room).
     """
 
     seen: set[int] = field(default_factory=set)
     devices: dict[str, Votes] = field(default_factory=dict)
+    offs: dict[str, Votes] = field(default_factory=dict)
 
     def add_device(
         self, entity_id: str, day: int, on_hours: int, *, full: bool
@@ -246,6 +281,19 @@ class RoomEvidence(Votes):
         """A device's vote, which is its room's too."""
         self.add(day, on_hours, full=full)
         self.devices.setdefault(entity_id, Votes()).add(day, on_hours, full=full)
+
+    def add_device_off(
+        self, entity_id: str, day: int, off_hours: int, *, full: bool
+    ) -> None:
+        """A device's off vote (its own only)."""
+        self.offs.setdefault(entity_id, Votes()).add(day, off_hours, full=full)
+
+    def off_votes(self) -> dict[str, OffVotes]:
+        """Each device's off votes, read against its on votes."""
+        return {
+            entity_id: OffVotes(off, self.devices.get(entity_id))
+            for entity_id, off in self.offs.items()
+        }
 
 
 # room_id -> evidence
@@ -274,7 +322,8 @@ def build_model(
 ) -> HabitModel:
     """Build the layers from RoomActivityTable.habit_rows rows.
 
-    counted are the devices whose "on" makes a room on; self_scheduled the
+    counted are the devices whose "on" makes a room on (and whose "off"
+    votes for the device); self_scheduled the
     devices whose wall switch events don't count; usable says which local
     dates may be learned (the window, minus pauses and before a reset).
     """
@@ -292,10 +341,13 @@ def build_model(
             continue
         room_id = row["room_id"]
         on_hours = row["on_hours"] if entity_id in counted else 0
+        off_hours = row.get("off_hours", 0) if entity_id in counted else 0
         household = model.household.setdefault(room_id, RoomEvidence())
         household.seen.add(day)
         if on_hours:
             household.add_device(entity_id, day, on_hours, full=weight >= 1.0)
+        if off_hours:
+            household.add_device_off(entity_id, day, off_hours, full=weight >= 1.0)
         member_id = row["member_id"]
         if source == PERSONAL_SOURCE and member_id:
             own = model.members.setdefault(member_id, {}).setdefault(
@@ -304,11 +356,13 @@ def build_model(
             own.seen.add(day)
             if on_hours:
                 own.add_device(entity_id, day, on_hours, full=True)
+            if off_hours:
+                own.add_device_off(entity_id, day, off_hours, full=True)
     return model
 
 
 def strength(
-    evidence: Votes | None,
+    evidence: Votes | OffVotes | None,
     observed: Iterable[int],
     *,
     hour: int,
@@ -392,7 +446,11 @@ class HabitScorer:
             self._member.get(room_id) if self.personal_weight else None,
         )
 
-    def _blend(self, household: Votes | None, mine: Votes | None) -> tuple[float, int]:
+    def _blend(
+        self,
+        household: Votes | OffVotes | None,
+        mine: Votes | OffVotes | None,
+    ) -> tuple[float, int]:
         """(strength, household dates with evidence) of these votes: the
         household's, with the member's own blended over them."""
         habit, dates = strength(
@@ -432,19 +490,30 @@ class HabitScorer:
         reach MIN_STRENGTH on at least MIN_EVIDENCE_DAYS dates. None until
         the asker's rooms are ready.
         """
+        return self._usual(room_id, lambda evidence: evidence.devices)
+
+    def usual_off_devices(self, room_id: str) -> list[str]:
+        """The room's devices that are usually switched off by now, strongest
+        first (ties by entity id): usual_devices' rule over their off votes
+        (OffVotes)."""
+        return self._usual(room_id, RoomEvidence.off_votes)
+
+    def _usual(
+        self,
+        room_id: str,
+        votes_of: Callable[[RoomEvidence], Mapping[str, Votes | OffVotes]],
+    ) -> list[str]:
+        """The devices whose votes (votes_of a room's evidence, by entity id)
+        pass the bar, strongest first."""
         if not self.ready:
             return []
         household = self._model.household.get(room_id)
         own = self._member.get(room_id) if self.personal_weight else None
-        ids = set(household.devices if household else ()) | set(
-            own.devices if own else ()
-        )
+        theirs = votes_of(household) if household else {}
+        mine = votes_of(own) if own else {}
         passing = []
-        for entity_id in ids:
-            habit, dates = self._blend(
-                household.devices.get(entity_id) if household else None,
-                own.devices.get(entity_id) if own else None,
-            )
+        for entity_id in theirs.keys() | mine.keys():
+            habit, dates = self._blend(theirs.get(entity_id), mine.get(entity_id))
             if habit >= MIN_STRENGTH and dates >= MIN_EVIDENCE_DAYS:
                 passing.append((-round(habit, 4), entity_id))
         return [entity_id for _, entity_id in sorted(passing)]
@@ -455,17 +524,23 @@ class HabitScorer:
 
 def layer_to_doc(layer: Layer) -> dict[str, Any]:
     """A layer as JSON: per room, observed dates and each device's
-    [date, full, half] votes (the room's are theirs together)."""
+    [date, full, half] on votes (the room's are theirs together) and off
+    votes."""
+
+    def votes_doc(devices: Mapping[str, Votes]) -> dict[str, list[list[int]]]:
+        return {
+            entity_id: [
+                [day, votes.full.get(day, 0), votes.half.get(day, 0)]
+                for day in sorted(votes.full.keys() | votes.half.keys())
+            ]
+            for entity_id, votes in sorted(devices.items())
+        }
+
     return {
         room_id: {
             "seen": sorted(evidence.seen),
-            "devices": {
-                entity_id: [
-                    [day, votes.full.get(day, 0), votes.half.get(day, 0)]
-                    for day in sorted(votes.full.keys() | votes.half.keys())
-                ]
-                for entity_id, votes in sorted(evidence.devices.items())
-            },
+            "devices": votes_doc(evidence.devices),
+            "offs": votes_doc(evidence.offs),
         }
         for room_id, evidence in sorted(layer.items())
     }
@@ -481,20 +556,29 @@ def layer_from_doc(doc: Any) -> Layer:
             raise ValueError("room evidence must be an object")
         seen = record.get("seen")
         devices = record.get("devices")
-        if not isinstance(seen, list) or not isinstance(devices, dict):
-            raise ValueError("room evidence needs a seen list and devices")
+        offs = record.get("offs")
+        if (
+            not isinstance(seen, list)
+            or not isinstance(devices, dict)
+            or not isinstance(offs, dict)
+        ):
+            raise ValueError("room evidence needs a seen list, devices and offs")
         evidence = RoomEvidence(seen={_int(day) for day in seen})
-        for entity_id, votes in devices.items():
-            if not isinstance(votes, list):
-                raise ValueError("a device's votes must be a list")
-            for item in votes:
-                if not isinstance(item, list) or len(item) != 3:
-                    raise ValueError("a vote is [date, full, half]")
-                day, full, half = (_int(value) for value in item)
-                if full:
-                    evidence.add_device(str(entity_id), day, full, full=True)
-                if half:
-                    evidence.add_device(str(entity_id), day, half, full=False)
+        for votes_by_device, add in (
+            (devices, evidence.add_device),
+            (offs, evidence.add_device_off),
+        ):
+            for entity_id, votes in votes_by_device.items():
+                if not isinstance(votes, list):
+                    raise ValueError("a device's votes must be a list")
+                for item in votes:
+                    if not isinstance(item, list) or len(item) != 3:
+                        raise ValueError("a vote is [date, full, half]")
+                    day, full, half = (_int(value) for value in item)
+                    if full:
+                        add(str(entity_id), day, full, full=True)
+                    if half:
+                        add(str(entity_id), day, half, full=False)
         layer[str(room_id)] = evidence
     return layer
 

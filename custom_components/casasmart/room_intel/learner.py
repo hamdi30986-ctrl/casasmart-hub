@@ -10,7 +10,8 @@ devices that count change, and after a member's data is deleted. Each Now
 page request gets a HabitQuery for its layer; the all-off ranking asks it
 which of the caller's rooms are usually on around now, and the generated
 room suggestions which of their devices usually come on then, and at what
-level (async_levels: read from the log when asked, not kept in the model).
+level (async_levels: read from the log when asked, not kept in the model),
+and which are usually switched off by then.
 
 Each finished Ramadan is kept for the next one in kv now_ramadan_habits
 (key: its Hijri year): the log's rows of its dates, grouped per room, device,
@@ -78,10 +79,22 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _SETTINGS_KEY = "global"
-_RAMADAN_VERSION = 1
+# 2: rows carry off_hours too. A version 1 copy (no off_hours) is still read,
+# with no offs.
+_RAMADAN_VERSION = 2
 # A kept Ramadan's row: room_id, entity_id, source, member_id, local_day,
-# on_hours (habit_rows' fields, in that order).
-_ROW_FIELDS = ("room_id", "entity_id", "source", "member_id", "local_day", "on_hours")
+# on_hours, off_hours (habit_rows' fields, in that order).
+_ROW_FIELDS = (
+    "room_id",
+    "entity_id",
+    "source",
+    "member_id",
+    "local_day",
+    "on_hours",
+    "off_hours",
+)
+# A row's length in each copy version.
+_ROW_WIDTHS = {1: len(_ROW_FIELDS) - 1, _RAMADAN_VERSION: len(_ROW_FIELDS)}
 
 
 def _household_key(profile: str) -> str:
@@ -102,8 +115,8 @@ class HabitQuery:
     member_id None is the household layer (the shared tablet). After
     async_learned, summary says which layer answered and how far learning
     is: {"layer": ..., "status": "off" | "paused" | "warming_up" |
-    "learning" | "unavailable"}, and usual_devices which devices usually
-    come on around now.
+    "learning" | "unavailable"}, usual_devices which devices usually come
+    on around now and usual_off_devices which are usually off by now.
     """
 
     def __init__(
@@ -137,6 +150,14 @@ class HabitQuery:
         around now, strongest first (HabitScorer.usual_devices); none when
         no habits answered."""
         return [] if self._scorer is None else self._scorer.usual_devices(room_id)
+
+    def usual_off_devices(self, room_id: str) -> list[str]:
+        """After async_learned: the room's devices that are usually switched
+        off by now, strongest first (HabitScorer.usual_off_devices); none
+        when no habits answered."""
+        if self._scorer is None:
+            return []
+        return self._scorer.usual_off_devices(room_id)
 
     async def async_levels(
         self,
@@ -421,11 +442,12 @@ class HabitLearner:
                             # leave anything of theirs behind in it.
                             del self._ramadans[key]
                             continue
+                        width = _ROW_WIDTHS.get(doc.get("v"))
                         kept = [
                             row
                             for row in rows
                             if isinstance(row, list)
-                            and len(row) == len(_ROW_FIELDS)
+                            and len(row) == width
                             and row[member] != member_id
                         ]
                         if len(kept) != len(rows):
@@ -696,22 +718,21 @@ def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
     isn't a copy of that Hijri year.
 
     Rows outside the month's dates are dropped, so a later correction of a
-    year in the Umm al-Qura table keeps the copy (minus a day at most).
+    year in the Umm al-Qura table keeps the copy (minus a day at most). A
+    version 1 copy's rows have no off_hours: 0.
     """
-    if (
-        not isinstance(doc, dict)
-        or doc.get("v") != _RAMADAN_VERSION
-        or doc.get("year") != month.year
-    ):
+    if not isinstance(doc, dict) or doc.get("year") != month.year:
         return None
+    width = _ROW_WIDTHS.get(doc.get("v"))
     rows = doc.get("rows")
-    if not isinstance(rows, list):
+    if width is None or not isinstance(rows, list):
         return None
     kept = []
     for row in rows:
-        if not isinstance(row, list) or len(row) != len(_ROW_FIELDS):
+        if not isinstance(row, list) or len(row) != width:
             return None
-        room_id, entity_id, source, member_id, day, on_hours = row
+        room_id, entity_id, source, member_id, day, on_hours, *rest = row
+        off_hours = rest[0] if rest else 0
         if not (
             isinstance(room_id, str)
             and isinstance(entity_id, str)
@@ -719,10 +740,27 @@ def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
             and (member_id is None or isinstance(member_id, str))
             and _is_day(day)
             and _is_day(on_hours)
+            and _is_day(off_hours)
         ):
             return None
         if month.first <= day <= month.last:
-            kept.append(dict(zip(_ROW_FIELDS, row, strict=True)))
+            kept.append(
+                dict(
+                    zip(
+                        _ROW_FIELDS,
+                        (
+                            room_id,
+                            entity_id,
+                            source,
+                            member_id,
+                            day,
+                            on_hours,
+                            off_hours,
+                        ),
+                        strict=True,
+                    )
+                )
+            )
     return kept
 
 

@@ -267,7 +267,7 @@ class BuildAndCacheTests(LearnerCase):
             ["regular:household", "regular:member:mem-a", "regular:member:mem-b"],
         )
         for doc in docs.values():
-            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 3, "day": TODAY})
+            self.assertEqual({k: doc[k] for k in ("v", "day")}, {"v": 4, "day": TODAY})
         self.assertEqual(set(docs["regular:household"]["layer"]), {"majlis", "kitchen"})
         # A saved doc that doesn't parse is rebuilt from the log.
         self.storage.table("now_room_habits")["regular:household"] = {
@@ -613,7 +613,7 @@ class RamadanTests(LearnerCase):
         copy = kept["1447"]
         self.assertEqual(
             {k: copy[k] for k in ("v", "year", "first_day", "last_day")},
-            {"v": 1, "year": 1447, "first_day": 20502, "last_day": 20531},
+            {"v": 2, "year": 1447, "first_day": 20502, "last_day": 20531},
         )
         self.assertEqual(len(copy["rows"]), 60)  # two devices a day, 30 days
         self.assertEqual(
@@ -786,7 +786,7 @@ class RamadanTests(LearnerCase):
             **copy,
             "first_day": LAST_RAMADAN[0] + 1,
             "rows": copy["rows"] + [["majlis", "light.majlis", "app", "mem-a",
-                                     LAST_RAMADAN[0] - 1, 1 << 21]],
+                                     LAST_RAMADAN[0] - 1, 1 << 21, 0]],
         }  # fmt: skip
         summary, reasons = await self.ask_at(RAMADAN_1, 21)
         self.assertEqual(
@@ -808,3 +808,86 @@ class RamadanTests(LearnerCase):
         # A member leaving drops such a copy rather than keep it.
         await self.learner.async_forget_member("mem-a")
         self.assertEqual(self.kept()["1447"]["rows"], [])
+
+    async def off_by_now(self, day, hour, member=None):
+        """The majlis devices usually off by now at this local time."""
+        self.now = at(day, hour, 30)
+        query = self.learner.query(member)
+        await query.async_learned(ROOMS, COUNTED, self.now)
+        return query.usual_off_devices("majlis")
+
+    async def test_a_kept_ramadan_keeps_the_offs_too(self):
+        # Last Ramadan the majlis went dark at 23:05 from the app.
+        self.ramadan_routine(LAST_RAMADAN)
+        self.log(
+            [event(d, 23, action="off", source="app", member="mem-a")
+             for d in LAST_RAMADAN]
+        )  # fmt: skip
+        await self.ask()
+        rows = self.kept()["1447"]["rows"]
+        self.assertEqual(
+            {tuple(row[4:]) for row in rows if row[1] == "light.majlis"},
+            {(day, 1 << 21, 1 << 23) for day in LAST_RAMADAN},
+        )
+        self.table.prune(before_t=at(LAST_RAMADAN[-1] + 1, 0))
+        # From the copy alone, on 1 Ramadan next year.
+        self.assertEqual(await self.off_by_now(RAMADAN_1, 23), ["light.majlis"])
+        self.assertEqual(await self.off_by_now(RAMADAN_1, 21), [])
+
+    async def test_a_version_1_copy_is_still_read_without_offs(self):
+        self.ramadan_routine(LAST_RAMADAN)
+        self.ramadan_routine(LAST_RAMADAN, member="mem-b")
+        self.log(
+            [event(d, 23, action="off", source="app", member="mem-a")
+             for d in LAST_RAMADAN]
+        )  # fmt: skip
+        await self.ask()
+        table = self.storage.table("now_ramadan_habits")
+        copy = table["1447"]
+        # As a hub before usually_off_now wrote it: no off_hours.
+        table["1447"] = {**copy, "v": 1, "rows": [row[:6] for row in copy["rows"]]}
+        self.table.prune(before_t=at(LAST_RAMADAN[-1] + 1, 0))
+        summary, reasons = await self.ask_at(RAMADAN_1, 21)
+        self.assertEqual(
+            (summary["status"], reasons), ("learning", {"majlis": "habit_now"})
+        )
+        self.assertEqual(self.learner._model.household["majlis"].offs, {})
+        self.assertEqual(await self.off_by_now(RAMADAN_1, 23), [])
+        # A member leaving takes their rows out of it, and only theirs.
+        await self.learner.async_forget_member("mem-a")
+        kept = self.kept()["1447"]
+        self.assertEqual(kept["v"], 1)
+        self.assertEqual({row[3] for row in kept["rows"]}, {None, "mem-b"})
+        self.assertTrue(all(len(row) == 6 for row in kept["rows"]))
+        # A copy of an unknown version is unreadable.
+        table["1447"] = {**kept, "v": 3}
+        _, reasons = await self.ask_at(RAMADAN_1 + 1, 21)
+        self.assertEqual(reasons, {})
+
+
+class OffByNowTests(LearnerCase):
+    async def test_the_query_says_what_is_usually_off_by_now(self):
+        days = self.household_routine()
+        self.log([event(day, 23, action="off") for day in days])
+        query = self.learner.query(None)
+        # Nothing before the habits answered.
+        self.assertEqual(query.usual_off_devices("majlis"), [])
+        # Thursday 23:30 it is; at 20:30 not yet; on Friday (the weekend,
+        # learned apart) not at all.
+        for now, expected in (
+            (at(TODAY, 23, 30), ["light.majlis"]),
+            (at(TODAY, 20, 30), []),
+            (at(TODAY + 1, 23, 30), []),
+        ):
+            self.now = now
+            query = self.learner.query(None)
+            await query.async_learned(ROOMS, COUNTED, self.now)
+            self.assertEqual(query.usual_off_devices("majlis"), expected)
+        # Learning off: no habits, nothing usually off.
+        await self.learner.async_update(
+            {"learning": False}, managed_ids=(), now_t=self.now
+        )
+        self.now = at(TODAY, 23, 30)
+        query = self.learner.query(None)
+        await query.async_learned(ROOMS, COUNTED, self.now)
+        self.assertEqual(query.usual_off_devices("majlis"), [])

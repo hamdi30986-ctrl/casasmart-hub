@@ -602,7 +602,8 @@ class StorageShapeTests(unittest.TestCase):
         day = workdays(1)[0]
         doc = habits.layer_to_doc(build([row(day, [H])]).household)
         self.assertEqual(
-            doc, {"majlis": {"seen": [day], "devices": {"light.majlis": [[day, 1 << H, 0]]}}}
+            doc, {"majlis": {"seen": [day], "devices": {"light.majlis": [[day, 1 << H, 0]]},
+                             "offs": {}}}
         )  # fmt: skip
 
     def test_a_malformed_layer_is_refused(self):
@@ -612,11 +613,22 @@ class StorageShapeTests(unittest.TestCase):
             {"majlis": {"seen": [1]}},
             # The room-level votes of a version 2 model.
             {"majlis": {"seen": [1], "on": [[1, 2, 0]]}},
-            {"majlis": {"seen": [-1], "devices": {}}},
-            {"majlis": {"seen": [], "devices": []}},
-            {"majlis": {"seen": [], "devices": {"light.a": {}}}},
-            {"majlis": {"seen": [], "devices": {"light.a": [[1, 2]]}}},
-            {"majlis": {"seen": [], "devices": {"light.a": [[1, True, 0]]}}},
+            {"majlis": {"seen": [-1], "devices": {}, "offs": {}}},
+            {"majlis": {"seen": [], "devices": [], "offs": {}}},
+            {"majlis": {"seen": [], "devices": {"light.a": {}}, "offs": {}}},
+            {"majlis": {"seen": [], "devices": {"light.a": [[1, 2]]}, "offs": {}}},
+            {
+                "majlis": {
+                    "seen": [],
+                    "devices": {"light.a": [[1, True, 0]]},
+                    "offs": {},
+                }
+            },
+            # A version 3 model has no off votes.
+            {"majlis": {"seen": [], "devices": {}}},
+            {"majlis": {"seen": [], "devices": {}, "offs": []}},
+            {"majlis": {"seen": [], "devices": {}, "offs": {"light.a": [[1, 2]]}}},
+            {"majlis": {"seen": [], "devices": {}, "offs": {"light.a": [[1, -2, 0]]}}},
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 habits.layer_from_doc(bad)
