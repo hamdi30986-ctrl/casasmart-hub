@@ -122,6 +122,8 @@ DEFAULT_WEEKEND_DAYS = (4, 5)
 MAX_SELF_SCHEDULED = 256
 # Pause and off periods the settings keep (older ones fall out of the window).
 _MAX_EXCLUDED = 64
+# HabitScorer.any_habit answers a model keeps (askers and scopes in a day).
+_MAX_ANSWERS = 64
 
 LAYER_HOUSEHOLD = "household"
 LAYER_PERSONAL = "personal"
@@ -311,6 +313,8 @@ class HabitModel:
     household: Layer = field(default_factory=dict)
     members: dict[str, Layer] = field(default_factory=dict)
     ages: Mapping[int, int] | None = None
+    # HabitScorer.any_habit's answers: the model is a day's, and so are they.
+    answers: dict[tuple, bool] = field(default_factory=dict, compare=False, repr=False)
 
 
 def build_model(
@@ -408,9 +412,12 @@ class HabitScorer:
         member_id: str | None = None,
     ) -> None:
         rooms = list(dict.fromkeys(room_ids))
+        self._rooms = rooms
         self._model = model
         self._today = today
         self._hour = hour
+        self._weekend_days = tuple(sorted(weekend_days))
+        self._member_id = member_id
         self._member = (
             model.members.get(member_id, {}) if member_id is not None else None
         )
@@ -450,13 +457,16 @@ class HabitScorer:
         self,
         household: Votes | OffVotes | None,
         mine: Votes | OffVotes | None,
+        hour: int | None = None,
     ) -> tuple[float, int]:
-        """(strength, household dates with evidence) of these votes: the
-        household's, with the member's own blended over them."""
+        """(strength, household dates with evidence) of these votes at this
+        hour (None: the scorer's): the household's, with the member's own
+        blended over them."""
+        hour = self._hour if hour is None else hour
         habit, dates = strength(
             household,
             self._observed,
-            hour=self._hour,
+            hour=hour,
             today=self._today,
             ages=self._model.ages,
         )
@@ -465,7 +475,7 @@ class HabitScorer:
             own, _ = strength(
                 mine,
                 self._own_observed,
-                hour=self._hour,
+                hour=hour,
                 today=self._today,
                 half_weight=False,
                 ages=self._model.ages,
@@ -497,6 +507,67 @@ class HabitScorer:
         first (ties by entity id): usual_devices' rule over their off votes
         (OffVotes)."""
         return self._usual(room_id, RoomEvidence.off_votes)
+
+    def any_habit(
+        self,
+        on: Mapping[str, Collection[str]],
+        off: Mapping[str, Collection[str]],
+    ) -> bool:
+        """True once the asker's habits have learned something a habit plan
+        can switch: at some hour of today's day class, one of a room's
+        devices in on (room id -> entity ids) usually comes on then
+        (usual_devices' bar), or one in off is usually off by then
+        (usual_off_devices'). False until ready.
+
+        Every hour, so the answer holds all day; in the asker's layer (the
+        household's, or a member's blend), so a phone is "learned" only once
+        its own blend can build a plan. Kept on the model (a day's).
+        """
+        if not self.ready:
+            return False
+        key = (
+            self._today,
+            self._weekend_days,
+            self._member_id,
+            tuple(self._rooms),
+            frozenset((r, e) for r, ids in on.items() for e in ids),
+            frozenset((r, e) for r, ids in off.items() for e in ids),
+        )
+        answers = self._model.answers
+        if key not in answers:
+            if len(answers) >= _MAX_ANSWERS:
+                answers.clear()
+            answers[key] = self._any_habit(on, off)
+        return answers[key]
+
+    def _any_habit(
+        self,
+        on: Mapping[str, Collection[str]],
+        off: Mapping[str, Collection[str]],
+    ) -> bool:
+        for room_id in self._rooms:
+            household = self._model.household.get(room_id)
+            if household is None:
+                continue  # a device needs household dates with evidence
+            own = self._member.get(room_id) if self.personal_weight else None
+            for wanted, votes_of in (
+                (on.get(room_id, ()), lambda evidence: evidence.devices),
+                (off.get(room_id, ()), RoomEvidence.off_votes),
+            ):
+                if not wanted:
+                    continue
+                theirs = votes_of(household)
+                mine = votes_of(own) if own else {}
+                for entity_id in wanted:
+                    if entity_id not in theirs:
+                        continue
+                    for hour in range(24):
+                        habit, dates = self._blend(
+                            theirs[entity_id], mine.get(entity_id), hour
+                        )
+                        if habit >= MIN_STRENGTH and dates >= MIN_EVIDENCE_DAYS:
+                            return True
+        return False
 
     def _usual(
         self,

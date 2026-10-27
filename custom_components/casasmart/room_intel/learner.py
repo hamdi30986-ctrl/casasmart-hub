@@ -159,6 +159,17 @@ class HabitQuery:
             return []
         return self._scorer.usual_off_devices(room_id)
 
+    def habits_ready(
+        self,
+        on: Mapping[str, Collection[str]],
+        off: Mapping[str, Collection[str]],
+    ) -> bool:
+        """After async_learned: True once these habits have learned something
+        a habit plan can switch (HabitScorer.any_habit; on and off: room id
+        -> the devices a plan may turn on, or off); False when no habits
+        answered (learning off, warming up, unavailable)."""
+        return self._scorer is not None and self._scorer.any_habit(on, off)
+
     async def async_levels(
         self,
         room_id: str,
