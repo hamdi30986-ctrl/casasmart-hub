@@ -29,7 +29,7 @@ Dismissal and snooze are member-scoped and survive plan changes within the same 
 
 ## Usually on around now (`usually_on_now`)
 
-The additive `generated_room_habit_suggestions_v1` capability adds a third kind: a room that is off now but is usually switched on at this hour (`room_intel.habits`, the Now page's `habit_now`), with the devices that usually come on there.
+The additive `generated_room_habit_suggestions_v1` capability adds a third kind: a room that is off now but is usually switched on at this hour (`room_intel.habits`, the Now page's `habit_now`), with the devices that usually come on there, each at the level it was last used at this hour.
 
 ### Asking for it
 
@@ -44,7 +44,15 @@ Both endpoints take two query parameters:
 
 Rooms are ranked as the Now page ranks them for this caller (activity log and habits included). A room is offered only when its tier is `habit_now`: nothing in it is on (no light, fan, wall relay or running AC), nothing is still running there, nobody switched it off in the last 30 minutes, and the caller's habit layer has learned it is usually on now (strength at least 0.35 on at least 3 dates, after two weeks of history). It must take part in room commands; a room an admin took out never gets one. At most two rooms are offered, the strongest habit first, then room order. None are offered while learning is off, while the habits are warming up, or while an Energy Saving level is active.
 
-A device goes in the plan when its own votes pass the same bar at this hour (in the same habit layer), and it is one one-tap "on" may turn on: a light, a fan, or a wall relay the installer typed as a light or fan, approved by the room's policy, not left out of room activity, available and off. ACs, untyped wall relays, plugs, outlets and heaters are never turned on. A room with no such device gets no plan. Devices are listed strongest first, then by entity ID.
+A device goes in the plan when its own votes pass the same bar at this hour (in the same habit layer), it is available, off and not left out of room activity, and it is either one one-tap "on" may turn on (a light, a fan, or a wall relay the installer typed as a light or fan, approved by the room's policy) or an AC (a `climate` entity with `cool` in its `hvac_modes`, in any room that takes part, as an AC counts in every room). An AC goes in only with a recorded mode and target it still takes (below). Untyped wall relays, plugs, outlets, heaters and heating-only thermostats are never turned on. A room with no such device gets no plan. Devices are listed strongest first, then by entity ID; an AC's steps stay together.
+
+### Levels
+
+Each device comes back at the level it was last used at this hour, not an average. Since hub schema v6 the room activity log records, with each on (and an AC's mode change), the level the device was at: a light's `brightness` (1-255) and, in colour temperature mode, `color_temp_kelvin`; a fan's `percentage`; an AC's `hvac_mode`, target `temperature` and `fan_mode`. A person changing the level of a device that stays on (dimming a light, an AC's setpoint or fan) is logged too; the device's own report within 30 seconds of a switch-on (a light ramping up, an AC settling) belongs to that switch-on. Levels set by automations and unnamed callers never count as used.
+
+The level used is the device's newest one in this room at this local hour, on a day like today (workday or weekend, as the habits count them), within today's habit window (Ramadan's during Ramadan) or today; with none at this hour, the newest an hour either side. Dates learning was off or paused, dates before a reset and a self-scheduled device's wall-switch rows don't count. It is the household's last use whichever layer answered, so a phone and the tablet restore the same level. A device with no recorded level (all its uses were logged before v6) gets a plain on.
+
+Only what the device still supports goes in: brightness for a dimmable light (a `supported_color_modes` other than `onoff`), a colour temperature only with `color_temp` in its modes and inside `min_color_temp_kelvin`..`max_color_temp_kelvin`, a speed only for a fan that supports one. An AC needs its recorded mode in its `hvac_modes`, target-temperature support and the target inside `min_temp`..`max_temp` (the target is in Home Assistant's unit, as recorded); its fan mode is added only when it is still in `fan_modes`. An AC that fails any of these is left out of the plan rather than turned on at a guess.
 
 ### The item
 
@@ -62,7 +70,11 @@ Same envelope as the other kinds:
   "scene_id": "<same as occurrence_id>",
   "scene": {"scene_id": "<occurrence_id>", "name": "Turn on · Majlis", "icon": "lightbulb"},
   "actions": [
-    {"entity_id": "light.majlis", "action": "turn_on", "data": {}, "name": "Majlis light"}
+    {"entity_id": "climate.majlis_ac", "action": "set_hvac_mode", "data": {"hvac_mode": "cool"}, "name": "Majlis AC"},
+    {"entity_id": "climate.majlis_ac", "action": "set_temperature", "data": {"temperature": 23.0}, "name": "Majlis AC"},
+    {"entity_id": "climate.majlis_ac", "action": "set_fan_mode", "data": {"fan_mode": "low"}, "name": "Majlis AC"},
+    {"entity_id": "light.majlis", "action": "turn_on", "data": {"brightness": 204, "color_temp_kelvin": 2700}, "name": "Majlis light"},
+    {"entity_id": "switch.majlis_lamp", "action": "turn_on", "data": {}, "name": "Majlis lamp"}
   ],
   "generated_at": "2026-10-22T16:10:00+00:00",
   "expires_at": "2026-10-22T18:00:00+00:00",
@@ -70,13 +82,13 @@ Same envelope as the other kinds:
 }
 ```
 
-`reason.layer` is the habit layer that answered (`household` or `personal`); `reason.hour` is the local hour (0-23) the room is usually on at. Each action is a plain `turn_on`; `data` is empty for now and is where a level (a brightness, a fan speed) will go, so clients must send nothing themselves and should show `data` when it is not empty. Items come after the `room_off` and `room_eco` ones, so `suggestion` is a `usually_on_now` item only when nothing else is offered.
+`reason.layer` is the habit layer that answered (`household` or `personal`); `reason.hour` is the local hour (0-23) the room is usually on at. A light, fan or wall relay is one `turn_on`, with its level in `data` (`brightness`, `color_temp_kelvin`, `percentage`) or `data: {}` for a plain on. An AC is `set_hvac_mode`, `set_temperature` and, when it had one, `set_fan_mode`, in that order, each with its one value. Clients send nothing of this themselves; they should show the levels (and an AC's mode and target) in the preview. A level change makes a new `occurrence_id` (same `suppression_id`), so a plan shown before someone used the room again can't run as something else. Items come after the `room_off` and `room_eco` ones, so `suggestion` is a `usually_on_now` item only when nothing else is offered.
 
 When `usually_on_now` was evaluated, `refresh_at` is the end of the two-hour window or the next local hour, whichever is sooner (a habit is an hour's). Otherwise it is the window's end, as before.
 
 ### Running, dismissing
 
-Running, dismissing and snoozing work as for the other kinds: the same slot (room, kind, window) rules, member-scoped dismissals, and one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and off, so one switched on meanwhile is skipped ("Device changed since preview"). A `usually_on_now` scene never runs while Energy Saving is active (`409`), and is not offered then.
+Running, dismissing and snoozing work as for the other kinds: the same slot (room, kind, window) rules, member-scoped dismissals, and one global execution claim per slot. Each step is checked again as it runs: the device must still be in the room and off, so one switched on meanwhile is skipped ("Device changed since preview"). An AC's mode step needs it still off; its target and fan steps need it off (a cloud AC may report its new mode late) or in the plan's mode, so an AC someone set to something else meanwhile keeps their setting. Only these steps, with only these data keys, can run in a `usually_on_now` scene; each also passes the single-device command whitelist (no `climate.turn_on`). A `usually_on_now` scene never runs while Energy Saving is active (`409`), and is not offered then.
 
 ## Compatibility
 
