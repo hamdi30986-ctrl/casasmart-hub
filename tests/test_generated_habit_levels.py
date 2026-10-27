@@ -442,10 +442,17 @@ class AcRunTest(LevelCase):
         self.mode_after = "cool"
         self.hass.services.async_call = call
 
-    async def test_run_sends_the_mode_then_the_target_then_the_fan(self):
+    async def test_run_sends_the_mode_then_the_target_not_the_fan(self):
         plan = await self.plan()
+        # The plan shows the fan mode last used...
+        self.assertIn(
+            ("climate.majlis_ac", "set_fan_mode", {"fan_mode": "low"}),
+            steps(plan["actions"]),
+        )
         response = await self.act(plan, query=HOUSEHOLD)
         self.assertEqual(response.data["status"], "succeeded", response.data)
+        # ...but the run skips it after the mode, as a saved scene does: an
+        # IR AC takes each call as a full-state burst and garbles a third.
         self.assertEqual(
             self.calls,
             [
@@ -453,13 +460,14 @@ class AcRunTest(LevelCase):
                  {"entity_id": "climate.majlis_ac", "hvac_mode": "cool"}),
                 ("climate", "set_temperature",
                  {"entity_id": "climate.majlis_ac", "temperature": 23.0}),
-                ("climate", "set_fan_mode",
-                 {"entity_id": "climate.majlis_ac", "fan_mode": "low"}),
                 ("light", "turn_on",
                  {"entity_id": "light.majlis", **WARM}),
                 ("switch", "turn_on", {"entity_id": "switch.majlis_lamp"}),
             ],
         )  # fmt: skip
+        self.assertEqual(
+            (response.data["succeeded_count"], response.data["failed_count"]), (4, 0)
+        )
 
     async def test_an_ac_that_reports_its_mode_late_still_gets_its_target(self):
         # A cloud AC: still "off" in Home Assistant right after the mode step.
@@ -468,7 +476,7 @@ class AcRunTest(LevelCase):
         self.assertEqual(response.data["status"], "succeeded")
         self.assertEqual(
             [s for _, s, _ in self.calls[:3]],
-            ["set_hvac_mode", "set_temperature", "set_fan_mode"],
+            ["set_hvac_mode", "set_temperature", "turn_on"],
         )
 
     async def test_an_ac_someone_set_meanwhile_keeps_their_setting(self):
@@ -481,9 +489,9 @@ class AcRunTest(LevelCase):
             [(d, s) for d, s, _ in self.calls],
             [("climate", "set_hvac_mode"), ("light", "turn_on"), ("switch", "turn_on")],
         )
-        # Its target and fan steps were skipped, not sent.
+        # Its target step was skipped, not sent (and the fan step never is).
         self.assertEqual(
-            (response.data["succeeded_count"], response.data["failed_count"]), (3, 2)
+            (response.data["succeeded_count"], response.data["failed_count"]), (3, 1)
         )
 
     async def test_energy_saving_still_hides_and_refuses_it(self):
@@ -492,6 +500,56 @@ class AcRunTest(LevelCase):
         self.assertEqual((await self.act(plan, query=HOUSEHOLD)).status, 409)
         self.assertEqual(self.calls, [])
         self.assertEqual(await self.plans(), {})
+
+
+class IrAcRuleTest(LevelCase):
+    """One rule for an AC's fan step after its mode (registry_api's
+    async_execute_registry_scene): a saved scene and a usually_on_now plan
+    skip it, room_eco sends it."""
+
+    async def run_scene(self, entities, **scene):
+        # The executor the suggestion views run (the fixture's).
+        return await p1.API.async_execute_registry_scene(
+            self.hass, {"scene_id": "s", "entities": entities, **scene}
+        )
+
+    async def test_a_saved_scene_skips_the_fan_after_the_mode_or_target(self):
+        ac = "climate.majlis_ac"
+        mode = {"entity_id": ac, "action": "set_hvac_mode",
+                "data": {"hvac_mode": "cool"}}  # fmt: skip
+        target = {"entity_id": ac, "action": "set_temperature",
+                  "data": {"temperature": 23}}  # fmt: skip
+        fan = {"entity_id": ac, "action": "set_fan_mode", "data": {"fan_mode": "low"}}
+        for entities, sent in (
+            ([mode, target, fan], ["set_hvac_mode", "set_temperature"]),
+            ([target, fan], ["set_temperature"]),
+            ([fan], ["set_fan_mode"]),
+        ):
+            with self.subTest(sent=sent):
+                self.calls.clear()
+                result = await self.run_scene(entities)
+                self.assertEqual([s for _, s, _ in self.calls], sent)
+                self.assertEqual(len(result["results"]), len(sent))
+                self.assertTrue(result["ok"])
+
+    async def test_room_eco_still_sends_the_target_and_the_fan(self):
+        self.states.values["light.majlis"].state = "on"
+        self.states.values["light.majlis_spot"].state = "on"
+        ac = self.states.values["climate.majlis_ac"]
+        ac.state = "cool"
+        ac.attributes.update(temperature=22, fan_mode="auto")
+        query = {"kinds": "room_eco"}
+        [plan] = (await self.get(query))["suggestions"]
+        self.assertEqual(
+            [s for e, s, _ in steps(plan["actions"]) if e == "climate.majlis_ac"],
+            ["set_temperature", "set_fan_mode"],
+        )
+        response = await self.act(plan, query=query)
+        self.assertEqual(response.data["status"], "succeeded", response.data)
+        self.assertEqual(
+            [s for d, s, _ in self.calls if d == "climate"],
+            ["set_temperature", "set_fan_mode"],
+        )
 
 
 class WhitelistTest(unittest.TestCase):

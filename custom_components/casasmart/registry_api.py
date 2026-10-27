@@ -95,10 +95,17 @@ async def async_execute_registry_scene(
     """
     scene_id = scene["scene_id"]
     generated = scene.get("generated_room_v1", False)
+    skips_fan = not generated
+    if generated:
+        from .generated_suggestions import KIND_USUALLY_ON_NOW
+
+        skips_fan = scene.get("kind") == KIND_USUALLY_ON_NOW
 
     # An IR AC takes every climate call as a full-state burst, and a second one
-    # right after the mode is set collides with it, so saved scenes (not
-    # generated ones) skip the fan-mode step for an AC whose mode they set.
+    # right after the mode is set collides with it, so saved scenes skip the
+    # fan-mode step for an AC whose mode they set, and so does a usually_on_now
+    # plan (an AC back to its last mode and target, like a saved one). The
+    # other generated kinds send every step.
     climate_with_mode = {
         item["entity_id"]
         for item in scene["entities"]
@@ -108,7 +115,7 @@ async def async_execute_registry_scene(
     entities_to_run = [
         item
         for item in scene["entities"]
-        if generated
+        if not skips_fan
         or not (
             item["entity_id"].split(".", 1)[0] == "climate"
             and item.get("action") == "set_fan_mode"

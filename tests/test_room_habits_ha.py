@@ -671,6 +671,13 @@ class GeneratedHabitLevels(HabitHubCase):
             )
         )
         self.assertEqual((status, receipt["status"]), (200, "succeeded"))
+        # The plan shows the AC's fan mode, but as a saved scene the run skips
+        # it after the mode (an IR AC would garble a third burst).
+        self.assertIn(
+            {"entity_id": "climate.majlis_ac", "action": "set_fan_mode",
+             "data": {"fan_mode": "low"}, "name": "climate.majlis_ac"},
+            plan["actions"],
+        )  # fmt: skip
         ac = "climate.majlis_ac"
         self.assertEqual(
             self.hass.services.calls,
@@ -678,8 +685,6 @@ class GeneratedHabitLevels(HabitHubCase):
                 ("climate", "set_hvac_mode", {"entity_id": ac, "hvac_mode": "cool"},
                  True),
                 ("climate", "set_temperature", {"entity_id": ac, "temperature": 23.0},
-                 True),
-                ("climate", "set_fan_mode", {"entity_id": ac, "fan_mode": "low"},
                  True),
                 ("light", "turn_on", {"entity_id": "light.majlis", "brightness": 200},
                  True),
