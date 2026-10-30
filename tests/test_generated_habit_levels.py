@@ -36,7 +36,7 @@ AC = {
 }
 COOL = {"hvac_mode": "cool", "temperature": 23, "fan_mode": "low"}
 WARM = {"brightness": 204, "color_temp_kelvin": 2700}
-# entity: (room, state, attributes), next to the P1 devices.
+# entity: (room, state, attributes), next to the base fixture's devices.
 EXTRA = {
     "climate.majlis_ac": ("majlis", "off", AC),
     "fan.majlis": ("majlis", "off", {"supported_features": 1}),

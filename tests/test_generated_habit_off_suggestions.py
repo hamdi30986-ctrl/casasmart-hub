@@ -1,6 +1,6 @@
 """usually_off_now: generated "turn off" plans from the room habits.
 
-The fixture of test_generated_habit_levels (and P1's before it): the real
+The fixture of test_generated_habit_levels (and test_generated_habit_suggestions' before it): the real
 suggestion handlers, runtime, scene executor and command whitelist, the
 real ranking and HabitLearner over a real SQLite room activity log. History
 is written into the log as the recorder logs it; Home Assistant's states
@@ -28,7 +28,7 @@ OFF = {"kinds": "usually_off_now", "habits": "household"}
 EVERY = {"kinds": "room_off,room_eco,usually_on_now,usually_off_now"}
 HOUSEHOLD = {**EVERY, "habits": "household"}
 COOLING = {**p2.AC, "hvac_modes": ["off", "cool", "heat", "fan_only"]}
-# entity: (room, state, attributes), next to the P1 and P2 devices: what
+# entity: (room, state, attributes), next to the base and level fixtures' devices: what
 # room off never switches.
 PROTECTED = {
     "switch.majlis_heater": ("majlis", "on", {}),

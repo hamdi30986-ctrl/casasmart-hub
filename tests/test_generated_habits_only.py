@@ -1,8 +1,8 @@
 """?habits_only=1: the habit kinds once the habits are ready, the room plans
 before; and a usually_off_now dismissal hiding its room's room_off.
 
-The fixtures of test_generated_habit_suggestions (P1) and
-test_generated_habit_off_suggestions (P3): the real suggestion handlers,
+The fixtures of test_generated_habit_suggestions and
+test_generated_habit_off_suggestions: the real suggestion handlers,
 runtime, scene executor, ranking and HabitLearner over a real SQLite room
 activity log. Home Assistant's states are fakes.
 """
@@ -24,7 +24,7 @@ capabilities = importlib.import_module("phase4_fixture.capabilities")
 suggestions_module = importlib.import_module("phase4_fixture.suggestions")
 
 EVERY = "room_off,room_eco,usually_on_now,usually_off_now"
-# What the P4b tablet and phone ask for, and what a P3/P4 app asked for.
+# What current apps ask for, and what an app without habits_only asks for.
 TABLET = {"kinds": EVERY, "habits": "household", "habits_only": "1"}
 PHONE = {"kinds": EVERY, "habits_only": "1"}
 MIXED = {"kinds": EVERY, "habits": "household"}
@@ -94,7 +94,7 @@ class ContractTest(Case):
                 before = await self.get(query)
                 self.assertNotIn("habits_ready", before)
                 self.assertEqual(before, await self.get({**query, "habits_only": "0"}))
-        # A P3/P4 app still gets every kind together.
+        # An app without habits_only still gets every kind together.
         self.assertEqual(
             offered(await self.get(MIXED)),
             [("room_off", "living"), ("usually_on_now", "majlis"),
@@ -170,7 +170,7 @@ class LearnedTest(Case):
             (True, "no_match", []),
         )
         self.assertIsNone(payload["suggestion"])
-        # A P3/P4 app at the same moment still gets the room plan.
+        # An app without habits_only at the same moment still gets the room plan.
         self.assertEqual(offered(await self.get(MIXED)), [("room_off", "living")])
 
     async def test_a_habit_at_another_hour_is_enough(self):
