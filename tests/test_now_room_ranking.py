@@ -1,6 +1,6 @@
 """The Now page's room ranking through the real view.
 
-A running AC counts as on although room off never switches one, so the
+A running AC counts as on, though it isn't in active_count, so the
 AC-only Majlis leads by its 2.1 kW.
 
 GET /api/casasmart/now with the real registry, NowDataEngine, suggestion

@@ -203,13 +203,92 @@ class CaptureAgeTests(unittest.TestCase):
 class PlanRoomTests(unittest.TestCase):
     DEVICES = {"light.a": "off", "light.b": "off", "fan.c": "off"}
 
-    def plan(self, capture, last_on=None, profile=()):
+    def plan(self, capture, last_on=None, profile=(), acs=None):
         return one_tap.plan_room(
             capture=capture,
             last_on=last_on,
             start_profile=profile,
             devices=self.DEVICES,
             now_t=NOW,
+            capture_acs=acs,
+        )
+
+    def test_a_capture_brings_its_acs_back_with_its_lights(self):
+        plan = self.plan((["light.a"], iso(NOW - 60)), acs={"climate.ac": "off"})
+        self.assertEqual(
+            (plan.source, plan.targets, plan.acs),
+            (CAPTURE, ["light.a"], ("climate.ac",)),
+        )
+        self.assertEqual(
+            one_tap.one_tap_summary(plan),
+            {
+                "action": "turn_on",
+                "source": CAPTURE,
+                "light_count": 1,
+                "fan_count": 0,
+                "unavailable_count": 0,
+                "ac_count": 1,
+            },
+        )
+
+    def test_an_ac_only_capture_beats_the_last_on_set(self):
+        # An off that found only the AC running: the lights stay off.
+        plan = self.plan(
+            ([], iso(NOW - 60)),
+            one_tap.LastOn(("light.b",), NOW - 3600),
+            ["fan.c"],
+            {"climate.ac": "off"},
+        )
+        self.assertEqual(
+            (plan.source, plan.targets, plan.acs), (CAPTURE, [], ("climate.ac",))
+        )
+
+    def test_no_counted_capture_means_no_ac(self):
+        for captured, last_at in (
+            (iso(NOW - 86401), NOW - 86402),  # older than 24 h
+            (iso(NOW - 3600), NOW - 60),  # the room went dark again since
+        ):
+            with self.subTest(captured=captured):
+                plan = self.plan(
+                    ([], captured),
+                    one_tap.LastOn(("light.b",), last_at),
+                    acs={"climate.ac": "off"},
+                )
+                self.assertEqual(
+                    (plan.source, plan.targets, plan.acs), (LAST_ON, ["light.b"], ())
+                )
+        self.assertIsNone(
+            self.plan(([], iso(NOW - 90000)), acs={"climate.ac": "off"}).source
+        )
+
+    def test_an_offline_ac_is_reported_not_counted(self):
+        plan = self.plan(
+            (["light.a"], iso(NOW - 60)),
+            acs={"climate.ac": "unavailable", "climate.b": "off"},
+        )
+        self.assertEqual(
+            (plan.source, plan.targets, plan.unavailable, plan.acs),
+            (CAPTURE, ["light.a"], ["climate.ac"], ("climate.b",)),
+        )
+        # Lights only in the plan, the capture's AC offline.
+        plan = self.plan(
+            (["light.a"], iso(NOW - 60)), acs={"climate.ac": "unavailable"}
+        )
+        self.assertEqual(
+            (plan.source, plan.targets, plan.unavailable, plan.acs),
+            (CAPTURE, ["light.a"], ["climate.ac"], ()),
+        )
+        # Nothing else: there is nothing to turn on because it is offline.
+        plan = self.plan(([], iso(NOW - 60)), acs={"climate.ac": "unavailable"})
+        self.assertEqual((plan.source, plan.reason), (None, one_tap.REASON_UNAVAILABLE))
+        # The next source wins, without the AC.
+        plan = self.plan(
+            ([], iso(NOW - 60)),
+            one_tap.LastOn(("light.b",), NOW - 3600),
+            acs={"climate.ac": "unavailable"},
+        )
+        self.assertEqual(
+            (plan.source, plan.targets, plan.unavailable), (LAST_ON, ["light.b"], [])
         )
 
     def test_a_current_capture_beats_the_last_on_set(self):

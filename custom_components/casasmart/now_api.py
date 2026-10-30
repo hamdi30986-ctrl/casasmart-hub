@@ -14,11 +14,12 @@
   (registry.manage): the lights and fans one tap "on" turns on when nothing
   better is known.
 - POST /api/casasmart/now/rooms/{room_id}/activity (devices.control): switch
-  a room's approved devices off, or its lights and fans back on: what the
-  hub's last off captured, else what was on before the room last went dark,
-  else the room's start profile (room_intel.one_tap; 409 nothing_to_turn_on
-  when there is nothing, and the app opens the room). Idempotent per client
-  key, one command per room at a time.
+  a room's approved devices and running ACs off, or bring it back on: what
+  the hub's last off captured, ACs at their mode and target included, else
+  the lights and fans on before the room last went dark, else the room's start
+  profile (room_intel.one_tap; 409 nothing_to_turn_on when there is nothing,
+  and the app opens the room). Idempotent per client key, one command per room
+  at a time.
 - GET/PUT /api/casasmart/now/habits and POST /api/casasmart/now/habits/reset
   (users.manage, admin only): room habit learning, which the all-off
   ranking uses (room_intel.learner).
@@ -51,9 +52,13 @@ from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies, energy_lockout_refusal
 from .filtering import area_id_of, in_scope, is_served, serialize_device, visible_to
 from .now_data import (
+    AC_ON_MODES,
     MAX_START_PROFILE,
     NowDataEngine,
     NowDataError,
+    ac_capture_level,
+    ac_restore_steps,
+    is_room_ac,
     is_room_activity_candidate,
     lighting_kind,
     room_activity_layout,
@@ -62,6 +67,7 @@ from .now_data import (
     summarize_openings,
 )
 from .registry import RegistryEngine
+from .registry_api import async_execute_registry_scene
 from .room_intel.activity import SOURCE_APP
 from .room_intel.habits import (
     LAYER_HOUSEHOLD,
@@ -140,28 +146,46 @@ def _one_tap_devices(
     hass: HomeAssistant,
     policies: dict[str, dict[str, Any]],
     gang_types: Mapping[str, str | None],
-) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], dict[str, str], dict[str, dict[str, Any]]]:
     """Each room's devices one tap "on" may switch, by entity id, with their
-    state, and each one's kind ("light" or "fan").
+    state, each one's kind ("light" or "fan"), and each room's ACs by entity
+    id, with their full state.
 
     policies are the rooms that take part in room commands, with their
     policy. A device counts in its room when it is served and one of the
     room's lights and fans (now_data.room_light_kind: what its policy
     approves, a wall relay the installer typed as one too; never an untyped
-    wall relay, which room off switches but one tap leaves off). One scan.
+    wall relay, which room off switches but one tap leaves off). An AC counts
+    when it is imported, served and is_room_ac. One scan.
     """
     devices: dict[str, dict[str, str]] = {room_id: {} for room_id in policies}
     kinds: dict[str, str] = {}
+    acs: dict[str, dict[str, Any]] = {room_id: {} for room_id in policies}
     for state in hass.states.async_all():
         entity_id = state.entity_id
         room_id = area_id_of(hass, entity_id)
         if room_id not in policies:
             continue
+        if entity_id in gang_types and is_room_ac(state) and is_served(hass, entity_id):
+            acs[room_id][entity_id] = state
+            continue
         kind = room_light_kind(state, policies[room_id], gang_types)
         if kind is not None and is_served(hass, entity_id):
             devices[room_id][entity_id] = state.state
             kinds[entity_id] = kind
-    return devices, kinds
+    return devices, kinds, acs
+
+
+def _ac_restores(
+    acs: Mapping[str, Any], levels: Mapping[str, Mapping[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """The capture's ACs (levels) still in the room (acs) that can come back,
+    each with its steps (now_data.ac_restore_steps)."""
+    return {
+        entity_id: steps
+        for entity_id, level in levels.items()
+        if entity_id in acs and (steps := ac_restore_steps(acs[entity_id], level))
+    }
 
 
 def _last_on(hass: HomeAssistant, room_id: str) -> Any:
@@ -340,12 +364,13 @@ class CasaSmartNowView(_NowView):
                 room_id: (
                     now_data.restore_capture(room_id),
                     now_data.start_profile(room_id),
+                    now_data.restore_acs(room_id),
                 )
                 for room_id in approved
             }
 
         one_tap_sources = await self._hass.async_add_executor_job(read_one_tap_sources)
-        devices_by_room, kinds = _one_tap_devices(
+        devices_by_room, kinds, acs_by_room = _one_tap_devices(
             self._hass, approved, imported_controls(devices)
         )
         now_t = time.time()
@@ -353,7 +378,8 @@ class CasaSmartNowView(_NowView):
         for room in ranked:
             room_id = room["room_id"]
             if room_id in approved:
-                capture, start_profile = one_tap_sources[room_id]
+                capture, start_profile, levels = one_tap_sources[room_id]
+                room_acs = acs_by_room[room_id]
                 plan = plan_room(
                     capture=capture,
                     last_on=_last_on(self._hass, room_id),
@@ -361,9 +387,13 @@ class CasaSmartNowView(_NowView):
                     devices=devices_by_room[room_id],
                     now_t=now_t,
                     kinds=kinds,
+                    capture_acs={
+                        entity_id: room_acs[entity_id].state
+                        for entity_id in _ac_restores(room_acs, levels)
+                    },
                 )
                 one_tap = one_tap_summary(plan, kinds)
-                pending = len(plan.targets)
+                pending = len(plan.targets) + len(plan.acs)
             else:
                 one_tap = {"action": "open_room", "reason": "room_activity_disabled"}
                 pending = 0
@@ -952,9 +982,11 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
 
     The body is {action: turn_off|turn_on, idempotency_key}. Commands run one
     at a time per room, and a retry with the same key replays the answer. An
-    on turns on only lights and fans, from the room's plan
-    (room_intel.one_tap); with nothing to turn on it is refused with 409
-    nothing_to_turn_on and open_room: true, before anything is switched.
+    off also switches the room's running ACs, capturing each one's mode and
+    target. An on turns on lights and fans, and ACs only from that capture,
+    from the room's plan (room_intel.one_tap); with nothing to turn on it is
+    refused with 409 nothing_to_turn_on and open_room: true, before anything
+    is switched.
     """
 
     url = f"/api/{DOMAIN}/now/rooms/{{room_id}}/activity"
@@ -1060,11 +1092,15 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
     ) -> dict[str, Any] | RoomOnPlan:
         """Switch the room's eligible devices and report each one's outcome.
 
-        Off targets every eligible device that is on. On targets the room's
-        plan (room_intel.one_tap.plan_room: the hub's capture, the last-on
-        set or the start profile; lights and fans only, wall relays typed as
-        one included) that is still off;
-        the plan's unavailable devices are reported, not switched. A device
+        Off targets every eligible device that is on and every AC that runs
+        (is_room_ac, whatever the policy lists), keeping each AC's mode and
+        target in the capture. On targets the room's plan
+        (room_intel.one_tap.plan_room: the hub's capture, the last-on set or
+        the start profile; lights and fans, wall relays typed as one
+        included, and the capture's ACs at their mode and target) that is
+        still off; the plan's unavailable devices are reported, not switched.
+        ACs go through the saved-scene path, after the rest, one step at a
+        time and with no fan step, so an IR AC misses no command. A device
         counts as changed only when its state afterwards confirms it. An on
         with nothing to turn on returns that plan (no source), before
         anything is switched. The calls carry context (the member's, for the
@@ -1082,13 +1118,39 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             and is_served(self._hass, state.entity_id)
             and room_command_approves(state, policy, gang_types)
         }
+        # No policy lists an AC: each one the hub manages in the room counts.
+        acs = {
+            state.entity_id: state
+            for state in self._hass.states.async_all("climate")
+            if state.entity_id in gang_types
+            and area_id_of(self._hass, state.entity_id) == room_id
+            and is_served(self._hass, state.entity_id)
+            and is_room_ac(state)
+        }
         plan: RoomOnPlan | None = None
+        # The scene steps for the ACs this command switches, the state each
+        # must reach, and what an off keeps of them.
+        ac_steps: list[dict[str, Any]] = []
+        ac_expected: dict[str, str] = {}
+        ac_levels: dict[str, dict[str, Any]] = {}
         if action == "turn_off":
             target_ids = [
                 entity_id
                 for entity_id, state in eligible.items()
                 if state.state == "on"
             ]
+            for entity_id, state in acs.items():
+                if state.state not in AC_ON_MODES:
+                    continue
+                ac_levels[entity_id] = ac_capture_level(state)
+                ac_expected[entity_id] = "off"
+                ac_steps.append(
+                    {
+                        "entity_id": entity_id,
+                        "action": "set_hvac_mode",
+                        "data": {"hvac_mode": "off"},
+                    }
+                )
         else:
             # Lights and fans only: a switch only when it is a wall relay
             # the installer typed as a light or fan.
@@ -1100,13 +1162,16 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             devices = {entity_id: eligible[entity_id].state for entity_id in kinds}
 
             def read_sources() -> tuple:
-                return now_data.restore_capture(room_id), now_data.start_profile(
-                    room_id
+                return (
+                    now_data.restore_capture(room_id),
+                    now_data.start_profile(room_id),
+                    now_data.restore_acs(room_id),
                 )
 
-            capture, start_profile = await self._hass.async_add_executor_job(
+            capture, start_profile, levels = await self._hass.async_add_executor_job(
                 read_sources
             )
+            restores = _ac_restores(acs, levels)
             last_on = _last_on(self._hass, room_id)
             now_t = time.time()
             plan = plan_room(
@@ -1116,19 +1181,20 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 devices=devices,
                 now_t=now_t,
                 kinds=kinds,
+                capture_acs={entity_id: acs[entity_id].state for entity_id in restores},
             )
             capture_ids, captured_at = capture
             if (
-                capture_ids
+                (capture_ids or levels)
                 and plan.source != SOURCE_CAPTURE
                 and (
                     not capture_counts(captured_at, last_on, now_t)
-                    or not present_ids(capture_ids, devices, kinds)
+                    or not (present_ids(capture_ids, devices, kinds) or restores)
                 )
             ):
                 # Too old, outdated by a later dark room, or nothing in it
-                # is still one of the room's lights and fans: dropped, so it
-                # never comes back as the room's restore.
+                # is still one of the room's lights, fans and ACs: dropped, so
+                # it never comes back as the room's restore.
                 await self._hass.async_add_executor_job(
                     now_data.consume_restore_set, room_id
                 )
@@ -1137,8 +1203,14 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             target_ids = [
                 entity_id for entity_id in plan.targets if devices[entity_id] != "on"
             ]
+            # An AC someone already switched on stays as they set it.
+            for entity_id in plan.acs:
+                if acs[entity_id].state == "off":
+                    ac_expected[entity_id] = levels[entity_id]["hvac_mode"]
+                    ac_steps.extend(restores[entity_id])
         outcomes = [
-            {"entity_id": entity_id, "outcome": "pending"} for entity_id in target_ids
+            {"entity_id": entity_id, "outcome": "pending"}
+            for entity_id in (*target_ids, *ac_expected)
         ]
         by_domain: dict[str, list[str]] = {}
         for entity_id in target_ids:
@@ -1155,6 +1227,15 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 )
             except HomeAssistantError:
                 failures.update(entity_ids)
+        if ac_steps:
+            result = await async_execute_registry_scene(
+                self._hass,
+                {"scene_id": f"room_activity:{room_id}", "entities": ac_steps},
+                context=context,
+            )
+            failures.update(
+                step["entity_id"] for step in result["results"] if not step["ok"]
+            )
         changed_ids: list[str] = []
         expected = "off" if action == "turn_off" else "on"
         for outcome in outcomes:
@@ -1163,7 +1244,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             if (
                 entity_id not in failures
                 and current is not None
-                and current.state == expected
+                and current.state == ac_expected.get(entity_id, expected)
             ):
                 outcome["outcome"] = "changed"
                 changed_ids.append(entity_id)
@@ -1176,7 +1257,15 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
             # Add to the capture rather than replace it: a repeated off finds
             # little still on and must not forget what the first one captured.
             restore_pending = await self._hass.async_add_executor_job(
-                now_data.extend_restore_set, room_id, changed_ids
+                now_data.extend_restore_set,
+                room_id,
+                [entity_id for entity_id in changed_ids if entity_id not in ac_levels],
+                None,
+                {
+                    entity_id: ac_levels[entity_id]
+                    for entity_id in changed_ids
+                    if entity_id in ac_levels
+                },
             )
             return {
                 "ok": not failed_ids,
@@ -1206,7 +1295,7 @@ class CasaSmartRoomActivityCommandView(CasaSmartRoomActivityPolicyView):
                 )
         # The plan's devices that are on now: switched on here, or already on
         # (not the ones that failed, are offline or left the room).
-        restored = len(plan.targets) - len(failed_ids)
+        restored = len(plan.targets) + len(plan.acs) - len(failed_ids)
         return {
             "ok": not not_on,
             "room_id": room_id,

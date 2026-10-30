@@ -1,23 +1,26 @@
 """One tap "on" for a room that is off: what it turns on, and from what.
 
 One tap turns on the lights and fans that were
-on last time, never plugs, heaters, ACs or covers. A wall relay (a switch)
+on last time, and an AC only from a fresh capture of the hub's own room off,
+never plugs, heaters or covers. A wall relay (a switch)
 counts as a light or fan when the installer typed it so
 (now_data.lighting_kind). The room command and the
-Now page ask the same question (plan_room_on), so the card says what the tap
+Now page ask the same question (plan_room), so the card says what the tap
 does. The sources, first one with a device that can come on wins:
 
 1. capture: what the hub's own room off switched off, if that was at most
    CAPTURE_MAX_AGE_SECONDS ago and the room hasn't been lit and gone dark
-   again since (now_data's restore set);
+   again since (now_data's restore set), with its ACs at the mode and target
+   they had (their steps: now_data.ac_restore_steps);
 2. last_on: the lights and fans that were on just before the room last went
    dark, whoever switched it off: a wall switch, Home Assistant, an
    automation or the hub (LastOnSets, kept by room_intel.recorder);
 3. start_profile: the lights and fans an installer chose for the room;
 4. none: there is nothing to turn on, and the app opens the room instead.
 
-Only lights and fans ever come on, whatever a source holds (ON_DOMAINS,
-and a switch only when the caller names it a typed wall relay: kinds).
+Only lights and fans ever come on from a set, whatever a source holds
+(ON_DOMAINS, and a switch only when the caller names it a typed wall relay:
+kinds). An AC comes on only as the capture's, so never at a guess.
 
 LastOnSets follows the state changes of the lights and fans the hub manages,
 in the order Home Assistant fires them, once the recorder is ready (10 minutes
@@ -92,6 +95,9 @@ class RoomOnPlan(NamedTuple):
     unavailable: list[str]
     # With no source: why (REASON_NOTHING_SAVED or REASON_UNAVAILABLE).
     reason: str | None = None
+    # The capture's ACs that are available (on or off): the ones that are off
+    # get their captured mode and target. Offline ones are in unavailable.
+    acs: tuple[str, ...] = ()
 
 
 def capture_is_fresh(captured_at: Any, now_t: float) -> bool:
@@ -136,26 +142,48 @@ def plan_room(
     devices: Mapping[str, str],
     now_t: float,
     kinds: Mapping[str, str] | None = None,
+    capture_acs: Mapping[str, str] | None = None,
 ) -> RoomOnPlan:
     """plan_room_on over a room's three sources.
 
     capture is the room's restore set and when it was made
     (NowDataEngine.restore_capture); one that doesn't count
-    (capture_counts) is passed empty.
+    (capture_counts) is passed empty. capture_acs are the capture's ACs that
+    can still come back (now_data.ac_restore_steps), by entity id, with their
+    state; they go with the capture, so an AC never comes back without one.
+    An available one makes the capture the source even with no light in it:
+    an off that found only the AC running brings back only the AC.
     """
     capture_ids, captured_at = capture
-    return plan_room_on(
+    counts = capture_counts(captured_at, last_on, now_t)
+    capture_lights = capture_ids if counts else []
+    acs = capture_acs if counts and capture_acs else {}
+    available = tuple(eid for eid, state in acs.items() if state not in _UNAVAILABLE)
+    offline = [eid for eid, state in acs.items() if state in _UNAVAILABLE]
+    if available:
+        present = present_ids(capture_lights, devices, kinds)
+        return RoomOnPlan(
+            SOURCE_CAPTURE,
+            [eid for eid in present if devices[eid] not in _UNAVAILABLE],
+            [*(eid for eid in present if devices[eid] in _UNAVAILABLE), *offline],
+            acs=available,
+        )
+    plan = plan_room_on(
         [
-            (
-                SOURCE_CAPTURE,
-                capture_ids if capture_counts(captured_at, last_on, now_t) else [],
-            ),
+            (SOURCE_CAPTURE, capture_lights),
             (SOURCE_LAST_ON, last_on.entity_ids if last_on is not None else []),
             (SOURCE_START_PROFILE, start_profile),
         ],
         devices,
         kinds,
     )
+    if not offline:
+        return plan
+    if plan.source is None:
+        return plan._replace(reason=REASON_UNAVAILABLE)
+    if plan.source == SOURCE_CAPTURE:
+        return plan._replace(unavailable=[*plan.unavailable, *offline])
+    return plan
 
 
 def present_ids(
@@ -175,7 +203,7 @@ def plan_room_on(
     devices: Mapping[str, str],
     kinds: Mapping[str, str] | None = None,
 ) -> RoomOnPlan:
-    """Pick what one tap "on" turns on.
+    """Pick the lights and fans one tap "on" turns on.
 
     sources are (source, entity ids) in priority order (a stale capture is
     passed empty). devices are the room's devices one tap may switch, by
@@ -209,7 +237,8 @@ def one_tap_summary(
 
     kinds maps a target to "light" or "fan" (now_data.lighting_kind), so a
     wall relay typed as a light counts as a light; a target without one
-    counts by its domain.
+    counts by its domain. ac_count is there only when the capture brings an
+    AC back.
     """
     if plan.source is None:
         return {"action": "open_room", "reason": plan.reason}
@@ -218,13 +247,16 @@ def one_tap_summary(
     def kind(entity_id: str) -> str:
         return kinds.get(entity_id) or entity_id.split(".", 1)[0]
 
-    return {
+    summary = {
         "action": "turn_on",
         "source": plan.source,
         "light_count": sum(kind(eid) == "light" for eid in plan.targets),
         "fan_count": sum(kind(eid) == "fan" for eid in plan.targets),
         "unavailable_count": len(plan.unavailable),
     }
+    if plan.acs:
+        summary["ac_count"] = len(plan.acs)
+    return summary
 
 
 # -- the last-on sets -----------------------------------------------------------
