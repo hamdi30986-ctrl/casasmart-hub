@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.core import callback
@@ -28,8 +28,30 @@ from .const import (
     EVENT_SUGGESTIONS_CHANGED,
 )
 from .filtering import in_scope, is_served
-from .generated_suggestions import digest, make_suggestion, window
-from .room_intel.ranking import async_rank_rooms
+from .generated_suggestions import (
+    HABIT_KINDS,
+    KIND_ROOM_ECO,
+    KIND_ROOM_OFF,
+    KIND_USUALLY_OFF_NOW,
+    KIND_USUALLY_ON_NOW,
+    KINDS,
+    USUAL_ROOMS,
+    Ask,
+    digest,
+    make_suggestion,
+    make_usual_off_suggestion,
+    make_usual_suggestion,
+    slot_id,
+    window,
+)
+from .now_data import AC_ON_MODES, KIND_AC, is_room_ac, room_light_kind, room_on_kind
+from .room_intel.off_rooms import (
+    JUST_OFF_WINDOW_SECONDS,
+    REASON_HABIT_NOW,
+    changed_at,
+)
+from .room_intel.ranking import async_rank_rooms, imported_controls
+from .runtime_lookup import loaded_runtime_data
 from .storage import StorageError
 from .suggestions import SuggestionError, evaluate, next_boundary, state_value
 
@@ -203,7 +225,7 @@ class SuggestionRuntime:
             if self._stopped:
                 return
             try:
-                context = await self.context()
+                context = await self.refresh_context()
                 if self._stopped:
                     return
                 data, _, states, now, zone = context
@@ -250,6 +272,10 @@ class SuggestionRuntime:
             if not self._stopped:
                 self._timer = self.hass.loop.call_later(delay, self._kick)
 
+    async def refresh_context(self):
+        """The context a refresh evaluates (every enabled rule)."""
+        return await self.context()
+
     def _seconds_to_boundary(self, data, now, zone):
         """Seconds until the next window opens or closes."""
         return max(
@@ -278,7 +304,11 @@ class SuggestionRuntime:
 class GeneratedSuggestionRuntime(SuggestionRuntime):
     """Generated room scenes, served on their own endpoint.
 
-    Clients opt in with the generated_room_suggestions_v1 capability.
+    Clients opt in with the generated_room_suggestions_v1 capability, to
+    usually_on_now with ?kinds= (generated_room_habit_suggestions_v1), to
+    usually_off_now the same way (generated_room_habit_off_suggestions_v1)
+    and to the habit kinds replacing the others once the habits are ready
+    with ?habits_only=1 (generated_room_habits_only_v1).
     """
 
     def __init__(self, hass, store, registry, now_data, *, clock=None):
@@ -292,58 +322,273 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
         """
         return await async_rank_rooms(self.hass, self.registry, self.now_data, scope)
 
-    async def context(self, scope=None):
+    def _read_stores(self):
+        rooms = self.registry.list_rooms()
+        policies = {
+            r["room_id"]: self.now_data.room_policy(r["room_id"]) for r in rooms
+        }
+        return rooms, policies, self.registry.list_user_devices()
+
+    async def context(self, scope=None, ask=None, member_id=None):
         """Plan this window's room scenes for the scope.
 
         The two busiest rooms are fixed for the two-hour window (persisted,
         so a restart keeps them); the first gets an off and an eco plan,
-        the second an off plan. Returns the same tuple shape as the rule
-        runtime, with the plans standing in for rules and scenes.
+        the second an off plan. Asked for usually_on_now (ask: the kinds,
+        and the household's habits or member_id's), up to USUAL_ROOMS rooms
+        that are off but usually on around now get an on plan each, unless
+        an Energy Saving level is active. Asked for usually_off_now, up to
+        USUAL_ROOMS rooms that are on get an off plan each for their devices
+        usually switched off by now, Energy Saving or not. Asked habits_only,
+        only the habit kinds once the caller's habits are ready
+        (_habits_ready), and only the others before then. Returns the same
+        tuple shape as the rule runtime, with the plans standing in for
+        rules and scenes.
         """
-        ranked, grouped, states = await self.room_context(scope)
+        ask = ask or Ask()
         now = self.clock()
-        scope_key = digest(
-            ["imported_controls_v1", sorted(scope) if scope is not None else None]
-        )
-        selected = await self.hass.async_add_executor_job(
-            self.store.select_generated_rooms,
-            scope_key,
-            window(now)[0],
-            [r["room_id"] for r in ranked if r["active_count"]],
-        )
-        rooms = {r["room_id"]: r for r in ranked}
+        runtime = learner = None
+        habit_kinds = ask.kinds & HABIT_KINDS
+        if habit_kinds or ask.habits_only:
+            runtime = loaded_runtime_data(self.hass)
+            learner = getattr(runtime, "room_habits", None)
+            energy = getattr(runtime, "energy", None)
+            if energy is not None and energy.active_level is not None:
+                # Nothing is turned on while Energy Saving is on; off may be.
+                habit_kinds -= {KIND_USUALLY_ON_NOW}
+                if not habit_kinds and not ask.habits_only:
+                    learner = None
+        habits = stores = None
+        if learner is not None:
+            # Ranked as the Now page ranks for this caller, every off room
+            # with its tier: usually_on_now goes only to a habit_now room.
+            habit_member = None if ask.household else member_id
+            habits = learner.query(habit_member)
+            stores = await self.hass.async_add_executor_job(self._read_stores)
+            ranked, grouped, states = await async_rank_rooms(
+                self.hass,
+                self.registry,
+                self.now_data,
+                scope,
+                activity=getattr(runtime, "room_activity", None),
+                member_id=habit_member,
+                now_t=now.timestamp(),
+                habits=habits,
+                stores=stores,
+                every_off_room=True,
+            )
+        else:
+            ranked, grouped, states = await self.room_context(scope)
         plans = []
-        for index, rid in enumerate(selected):
-            if rid not in rooms:
-                continue
-            for kind in ["room_off", "room_eco"] if index == 0 else ["room_off"]:
-                plan = make_suggestion(
-                    rooms[rid],
-                    kind,
-                    grouped[rid],
-                    now,
-                    temperature_unit=getattr(
-                        getattr(self.hass.config, "units", None),
-                        "temperature_unit",
-                        "°C",
-                    ),
-                )
-                if plan:
-                    plans.append(plan)
+        if ask.kinds & {KIND_ROOM_OFF, KIND_ROOM_ECO}:
+            scope_key = digest(
+                ["imported_controls_v1", sorted(scope) if scope is not None else None]
+            )
+            selected = await self.hass.async_add_executor_job(
+                self.store.select_generated_rooms,
+                scope_key,
+                window(now)[0],
+                [r["room_id"] for r in ranked if r["active_count"]],
+            )
+            rooms = {r["room_id"]: r for r in ranked}
+            for index, rid in enumerate(selected):
+                if rid not in rooms:
+                    continue
+                for kind in (
+                    [KIND_ROOM_OFF, KIND_ROOM_ECO] if index == 0 else [KIND_ROOM_OFF]
+                ):
+                    if kind not in ask.kinds:
+                        continue
+                    plan = make_suggestion(
+                        rooms[rid],
+                        kind,
+                        grouped[rid],
+                        now,
+                        temperature_unit=getattr(
+                            getattr(self.hass.config, "units", None),
+                            "temperature_unit",
+                            "°C",
+                        ),
+                    )
+                    if plan:
+                        plans.append(plan)
+        zone = ZoneInfo(self.hass.config.time_zone)
+        wake_t = None
+        if habits is not None and KIND_USUALLY_ON_NOW in habit_kinds:
+            plans.extend(
+                await self._usual_plans(ranked, grouped, stores, habits, now, zone)
+            )
+        if habits is not None and KIND_USUALLY_OFF_NOW in habit_kinds:
+            off_plans, wake_t = self._usual_off_plans(
+                ranked, grouped, stores, habits, now, zone
+            )
+            plans.extend(off_plans)
+        ready = None
+        if ask.habits_only:
+            ready = habits is not None and await self._habits_ready(
+                grouped, stores, habits
+            )
+            plans = [p for p in plans if (p["kind"] in HABIT_KINDS) == ready]
         data = await self.hass.async_add_executor_job(self.store.snapshot)
-        data = {**data, "rules": [], "_generated_plans": plans}
+        data = {
+            **data,
+            "rules": [],
+            "_generated_plans": plans,
+            "_generated_habits": habits is not None,
+            "_generated_wake_t": wake_t,
+            "_generated_habits_ready": ready,
+        }
         scenes = {
             p["scene_id"]: {
                 **p["scene"],
                 "entities": p["actions"],
-                "works_during_energy_saving": True,
+                # Turning a room on never runs while Energy Saving is on.
+                "works_during_energy_saving": p["kind"] != KIND_USUALLY_ON_NOW,
                 "generated_room_v1": True,
                 "room_id": p["room_id"],
                 "kind": p["kind"],
             }
             for p in plans
         }
-        return data, scenes, states, now, ZoneInfo(self.hass.config.time_zone)
+        return data, scenes, states, now, zone
+
+    async def _habits_ready(self, grouped, stores, habits):
+        """True once the caller's habits are ready for habit plans: past the
+        warm-up, a device of a room that takes part in room commands passes
+        the habit bar at some hour of today's day class, for coming on
+        (what _usual_plans may turn on) or for being off by then (what
+        _usual_off_plans may turn off) (HabitQuery.habits_ready). Every
+        hour of every device the first time a day: in the executor."""
+        _, policies, devices = stores
+        gang_types = imported_controls(devices)
+        on, off = {}, {}
+        for room_id, states in grouped.items():
+            policy = policies.get(room_id, {})
+            if not policy.get("participates"):
+                continue
+            on[room_id] = [
+                state.entity_id
+                for state in states
+                if room_light_kind(state, policy, gang_types) is not None
+                or is_room_ac(state)
+            ]
+            off[room_id] = [
+                state.entity_id
+                for state in states
+                if room_on_kind(state, policy, gang_types) is not None
+            ]
+        return await self.hass.async_add_executor_job(habits.habits_ready, on, off)
+
+    async def _usual_plans(self, ranked, grouped, stores, habits, now, zone):
+        """The usually_on_now plans, strongest habit first.
+
+        Only a room the ranking calls usually on around now (habit_now: off,
+        nothing still running, not just switched off) that takes part in
+        room commands, with its usual devices that are off: the lights and
+        fans one tap "on" may turn on (now_data.room_light_kind), and its
+        ACs (is_room_ac, as they count in every room), each at the level
+        last used around now (HabitQuery.async_levels; an AC only with one).
+        """
+        _, policies, devices = stores
+        gang_types = imported_controls(devices)
+        hour = now.astimezone(zone).hour
+        plans = []
+        for room in ranked:
+            policy = policies.get(room["room_id"], {})
+            if room["rank"]["reason"] != REASON_HABIT_NOW or not policy.get(
+                "participates"
+            ):
+                continue
+            usual = {
+                state.entity_id: state
+                for state in grouped[room["room_id"]]
+                if room_light_kind(state, policy, gang_types) is not None
+                or is_room_ac(state)
+            }
+            states = [
+                usual[entity_id]
+                for entity_id in habits.usual_devices(room["room_id"])
+                if entity_id in usual and usual[entity_id].state == "off"
+            ]
+            if not states:
+                continue
+            levels = await habits.async_levels(
+                room["room_id"], [state.entity_id for state in states], now.timestamp()
+            )
+            plan = make_usual_suggestion(
+                room,
+                states,
+                now,
+                layer=habits.summary["layer"],
+                hour=hour,
+                levels=levels,
+            )
+            if plan:
+                plans.append(plan)
+                if len(plans) == USUAL_ROOMS:
+                    break
+        return plans
+
+    def _usual_off_plans(self, ranked, grouped, stores, habits, now, zone):
+        """The usually_off_now plans, in the ranking's order (busiest first),
+        and when a device held back as just switched on stops being so (epoch
+        seconds; None: none is).
+
+        Only a room that is on and takes part in room commands, with its
+        devices that are on and usually switched off by now
+        (HabitQuery.usual_off_devices): what makes the room on
+        (now_data.room_on_kind: the lights, fans and wall relays room off
+        switches, and its ACs), so never a plug, an outlet, a heater, a
+        lock, a cover or a TV, nor a device left out of room activity. A
+        device switched on (or into another mode) less than
+        JUST_OFF_WINDOW_SECONDS ago is in use: left out until then.
+        """
+        _, policies, devices = stores
+        gang_types = imported_controls(devices)
+        hour = now.astimezone(zone).hour
+        now_t = now.timestamp()
+        plans = []
+        wake_t = None
+        for room in ranked:
+            policy = policies.get(room["room_id"], {})
+            if not room["rank"]["active"] or not policy.get("participates"):
+                continue
+            usual = habits.usual_off_devices(room["room_id"])
+            if not usual:
+                continue
+            on = {}
+            for state in grouped[room["room_id"]]:
+                kind = room_on_kind(state, policy, gang_types)
+                if kind is not None and (
+                    state.state in AC_ON_MODES
+                    if kind == KIND_AC
+                    else state.state == "on"
+                ):
+                    on[state.entity_id] = state
+            states = []
+            for entity_id in usual:
+                state = on.get(entity_id)
+                if state is None:
+                    continue
+                changed = changed_at(state)
+                if changed is not None and now_t < changed + JUST_OFF_WINDOW_SECONDS:
+                    until = changed + JUST_OFF_WINDOW_SECONDS
+                    wake_t = until if wake_t is None else min(wake_t, until)
+                    continue
+                states.append(state)
+            plan = make_usual_off_suggestion(
+                room, states, now, layer=habits.summary["layer"], hour=hour
+            )
+            if plan:
+                plans.append(plan)
+                if len(plans) == USUAL_ROOMS:
+                    break
+        return plans, wake_t
+
+    async def refresh_context(self):
+        """Every kind, on the household's habits: a change to what the shared
+        tablet would be offered tells clients to refetch."""
+        return await self.context(None, Ask(KINDS, household=True))
 
     def candidates(self, context, scope, *, policy_checks=True):
         """Yield each plan whose every device the caller can see."""
@@ -352,23 +597,56 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             if all(visible(a["entity_id"]) for a in plan["actions"]):
                 yield {}, dict(plan), "eligible"
 
+    @staticmethod
+    def _refresh_at(data, now, zone):
+        """When the plans may change by themselves: the end of the two-hour
+        window or, when habits made them, the next local hour if sooner (a
+        habit is an hour's), or when a device held back from usually_off_now
+        as just switched on stops being so, if sooner still."""
+        end = window(now)[1]
+        if not data["_generated_habits"]:
+            return end
+        hour = now.astimezone(zone).replace(minute=0, second=0, microsecond=0)
+        end = min(end, (hour + timedelta(hours=1)).astimezone(UTC))
+        wake_t = data.get("_generated_wake_t")
+        if wake_t is not None:
+            end = min(end, datetime.fromtimestamp(wake_t, UTC))
+        return end
+
     def _seconds_to_boundary(self, data, now, zone):
-        """The rule boundary or the end of the two-hour window, if sooner."""
+        """The rule boundary or _refresh_at, if sooner."""
         return min(
             super()._seconds_to_boundary(data, now, zone),
-            max(_MIN_DELAY_SECONDS, (window(now)[1] - now).total_seconds()),
+            max(
+                _MIN_DELAY_SECONDS,
+                (self._refresh_at(data, now, zone) - now).total_seconds(),
+            ),
         )
 
     def payload_from(self, context, member, scope):
-        """Every plan this member has not suppressed and nobody tried to run."""
-        data, _, _, now, _ = context
-        plans = []
-        for _, plan, _ in self.candidates(context, scope):
-            slot = plan["suppression_id"]
+        """Every plan this member has not suppressed and nobody tried to run.
+
+        A room_off is suppressed too while this member's dismissal or snooze
+        of the same room's usually_off_now lasts. Asked habits_only, the
+        answer says whether the habits were ready (habits_ready).
+        """
+        data, _, _, now, zone = context
+
+        def suppressed(slot):
             suppression = data["suppressions"].get(
                 self.store.suppression_key(member, slot)
             )
-            if suppression and datetime.fromisoformat(suppression["until"]) > now:
+            return bool(
+                suppression and datetime.fromisoformat(suppression["until"]) > now
+            )
+
+        plans = []
+        for _, plan, _ in self.candidates(context, scope):
+            slot = plan["suppression_id"]
+            if suppressed(slot) or (
+                plan["kind"] == KIND_ROOM_OFF
+                and suppressed(slot_id(plan["room_id"], KIND_USUALLY_OFF_NOW, now))
+            ):
                 continue
             # Any attempted execution blocks a changed version of this slot too.
             receipts = [
@@ -379,19 +657,25 @@ class GeneratedSuggestionRuntime(SuggestionRuntime):
             if receipts:
                 continue
             plans.append(plan)
-        return {
+        payload = {
             "version": 1,
             "source": "generated_room_v1",
             "status": "available" if plans else "no_match",
             "suggestion": plans[0] if plans else None,
             "suggestions": plans,
-            "refresh_at": window(now)[1].isoformat(),
+            "refresh_at": self._refresh_at(data, now, zone).isoformat(),
         }
+        if data["_generated_habits_ready"] is not None:
+            payload["habits_ready"] = data["_generated_habits_ready"]
+        return payload
 
-    async def payload(self, member, scope):
-        """payload_from for the caller's scope; "unavailable" on failure."""
+    async def payload(self, member, scope, ask=None):
+        """payload_from for the caller's scope and ask; "unavailable" on
+        failure."""
         try:
-            return self.payload_from(await self.context(scope), member, scope)
+            return self.payload_from(
+                await self.context(scope, ask, member), member, scope
+            )
         except (StorageError, sqlite3.Error, SuggestionError, ZoneInfoNotFoundError):
             return {
                 "version": 1,

@@ -33,6 +33,9 @@ class CapabilityContractTest(unittest.TestCase):
                 "member_camera_access_v1",
                 "now_room_habits_v1",
                 "now_room_one_tap_v1",
+                "generated_room_habit_suggestions_v1",
+                "generated_room_habit_off_suggestions_v1",
+                "generated_room_habits_only_v1",
             },
         )
         self.assertEqual(
@@ -51,6 +54,9 @@ class CapabilityContractTest(unittest.TestCase):
                 "member_camera_access_v1": True,
                 "now_room_habits_v1": True,
                 "now_room_one_tap_v1": True,
+                "generated_room_habit_suggestions_v1": True,
+                "generated_room_habit_off_suggestions_v1": True,
+                "generated_room_habits_only_v1": True,
             },
         )
         self.assertTrue(

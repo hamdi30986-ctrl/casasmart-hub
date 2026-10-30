@@ -62,6 +62,7 @@ class RoomActivityTableTests(unittest.TestCase):
                     "action": "off",
                     "source": "wall_switch",
                     "member_id": None,
+                    "level": None,
                 },
                 {
                     "id": 1,
@@ -72,6 +73,7 @@ class RoomActivityTableTests(unittest.TestCase):
                     "action": "on",
                     "source": "app",
                     "member_id": "mem-a",
+                    "level": None,
                 },
             ],
         )
@@ -415,6 +417,38 @@ class RoomActivityTableTests(unittest.TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 self.table.habit_rows(**bad)
+
+    def test_habit_rows_mask_the_off_hours_too(self):
+        # "usually off by now": per device and local date, the local hours
+        # with an "off", next to the hours with an "on".
+        fri = (FRI_00_UTC + RIYADH * 60) // 86400
+        self.table.append_many(
+            [
+                event(FRI_00_UTC + 16 * 3600),  # 19:00 on
+                event(FRI_00_UTC + 20 * 3600, action="off"),  # 23:00 off
+                event(FRI_00_UTC + 20 * 3600 + 900, action="off"),  # same hour
+                event(FRI_00_UTC + 18 * 3600, action="level"),  # 21:00, no hour
+                event(FRI_00_UTC + 3600, entity="climate.majlis", action="set"),
+                # Saturday 00:30 local: the next local date.
+                event(FRI_00_UTC + 21 * 3600 + 1800, action="off"),
+                event(FRI_00_UTC + 3600, entity="cover.majlis", action="close"),
+            ]
+        )
+        rows = self.table.habit_rows(
+            first_day=fri, last_day=fri + 1, sources=["wall_switch"]
+        )
+        self.assertEqual(
+            [
+                (r["entity_id"], r["local_day"], r["on_hours"], r["off_hours"])
+                for r in rows
+            ],
+            [
+                ("climate.majlis", fri, 0, 0),
+                ("cover.majlis", fri, 0, 0),
+                ("light.majlis", fri, 1 << 19, 1 << 23),
+                ("light.majlis", fri + 1, 0, 1 << 0),
+            ],
+        )
 
     def test_habit_rows_bucket_by_each_rows_own_offset_riyadh_has_no_dst(self):
         fri = (FRI_00_UTC + RIYADH * 60) // 86400

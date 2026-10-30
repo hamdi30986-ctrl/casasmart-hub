@@ -8,7 +8,10 @@ same day reuses them instead of reading the log again. The model is rebuilt
 when the date changes, when an admin changes what it learns from, when the
 devices that count change, and after a member's data is deleted. Each Now
 page request gets a HabitQuery for its layer; the all-off ranking asks it
-which of the caller's rooms are usually on around now.
+which of the caller's rooms are usually on around now, and the generated
+room suggestions which of their devices usually come on then, and at what
+level (async_levels: read from the log when asked, not kept in the model),
+and which are usually switched off by then.
 
 Each finished Ramadan is kept for the next one in kv now_ramadan_habits
 (key: its Hijri year): the log's rows of its dates, grouped per room, device,
@@ -37,11 +40,12 @@ import sqlite3
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..storage import StorageError
-from .activity import HUMAN_RETENTION_DAYS
+from .activity import HUMAN_RETENTION_DAYS, SOURCE_WALL_SWITCH
 from .habits import (
     HUMAN_SOURCES,
     LAYER_HOUSEHOLD,
@@ -65,6 +69,7 @@ from .habits import (
     profile_of,
     profile_window,
     signature,
+    weekday,
 )
 from .hijri import RamadanMonth, next_ramadan, ramadan_of, ramadans_before
 
@@ -74,10 +79,22 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _SETTINGS_KEY = "global"
-_RAMADAN_VERSION = 1
+# 2: rows carry off_hours too. A version 1 copy (no off_hours) is still read,
+# with no offs.
+_RAMADAN_VERSION = 2
 # A kept Ramadan's row: room_id, entity_id, source, member_id, local_day,
-# on_hours (habit_rows' fields, in that order).
-_ROW_FIELDS = ("room_id", "entity_id", "source", "member_id", "local_day", "on_hours")
+# on_hours, off_hours (habit_rows' fields, in that order).
+_ROW_FIELDS = (
+    "room_id",
+    "entity_id",
+    "source",
+    "member_id",
+    "local_day",
+    "on_hours",
+    "off_hours",
+)
+# A row's length in each copy version.
+_ROW_WIDTHS = {1: len(_ROW_FIELDS) - 1, _RAMADAN_VERSION: len(_ROW_FIELDS)}
 
 
 def _household_key(profile: str) -> str:
@@ -93,12 +110,13 @@ LearnedTier = Callable[[Mapping[str, Any]], tuple[str, dict, tuple] | None]
 
 
 class HabitQuery:
-    """One Now page request's view of the habits.
+    """One Now page (or generated suggestions) request's view of the habits.
 
     member_id None is the household layer (the shared tablet). After
     async_learned, summary says which layer answered and how far learning
     is: {"layer": ..., "status": "off" | "paused" | "warming_up" |
-    "learning" | "unavailable"}.
+    "learning" | "unavailable"}, usual_devices which devices usually come
+    on around now and usual_off_devices which are usually off by now.
     """
 
     def __init__(
@@ -111,6 +129,8 @@ class HabitQuery:
             "status": STATUS_UNAVAILABLE,
             "profile": profile,
         }
+        # The scorer that answered async_learned (None: no habits).
+        self._scorer: HabitScorer | None = None
 
     async def async_learned(
         self,
@@ -124,6 +144,43 @@ class HabitQuery:
         they are.
         """
         return await self._learner.async_learned(self, room_ids, counted, now_t)
+
+    def usual_devices(self, room_id: str) -> list[str]:
+        """After async_learned: the room's devices that usually come on
+        around now, strongest first (HabitScorer.usual_devices); none when
+        no habits answered."""
+        return [] if self._scorer is None else self._scorer.usual_devices(room_id)
+
+    def usual_off_devices(self, room_id: str) -> list[str]:
+        """After async_learned: the room's devices that are usually switched
+        off by now, strongest first (HabitScorer.usual_off_devices); none
+        when no habits answered."""
+        if self._scorer is None:
+            return []
+        return self._scorer.usual_off_devices(room_id)
+
+    def habits_ready(
+        self,
+        on: Mapping[str, Collection[str]],
+        off: Mapping[str, Collection[str]],
+    ) -> bool:
+        """After async_learned: True once these habits have learned something
+        a habit plan can switch (HabitScorer.any_habit; on and off: room id
+        -> the devices a plan may turn on, or off); False when no habits
+        answered (learning off, warming up, unavailable)."""
+        return self._scorer is not None and self._scorer.any_habit(on, off)
+
+    async def async_levels(
+        self,
+        room_id: str,
+        entity_ids: Collection[str],
+        now_t: float | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Each of the room's devices' level last used around now
+        (HabitLearner.async_levels); none when no habits answered."""
+        if self._scorer is None:
+            return {}
+        return await self._learner.async_levels(room_id, entity_ids, now_t)
 
 
 class HabitLearner:
@@ -152,6 +209,7 @@ class HabitLearner:
         self._model: HabitModel | None = None
         self._model_key: tuple | None = None
         self._read_failed = False
+        self._levels_failed = False
         # How many times the model was built from the log, and loaded from
         # its saved docs (for tests and the report's cost figures).
         self.builds = 0
@@ -192,6 +250,7 @@ class HabitLearner:
         settings = self._settings
         now_t = self._wall_clock() if now_t is None else now_t
         query.summary["profile"] = self.profile_at(now_t)
+        query._scorer = None
         if not settings.learning:
             query.summary["status"] = STATUS_OFF
             return None
@@ -206,7 +265,77 @@ class HabitLearner:
             query.summary["status"] = STATUS_WARMING_UP
         else:
             query.summary["status"] = STATUS_LEARNING
-        return scorer.learned if scorer.ready else None
+        if not scorer.ready:
+            return None
+        query._scorer = scorer
+        return scorer.learned
+
+    async def async_levels(
+        self,
+        room_id: str,
+        entity_ids: Collection[str],
+        now_t: float | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Each device's level last used at this local hour, by entity id.
+
+        The level of its newest row with one (on, set, level:
+        RoomActivityTable.level_rows) in this room, from a source the habits
+        learn from, at this hour on a day like today (a workday or the
+        weekend) in today's profile window or today; or, with none at this
+        hour, an hour either side. Wall switch rows of a device on its own
+        schedule, and dates learning was off, paused or before a reset don't
+        count. A device with none is left out. Read from the log (one query),
+        so today's last use counts at once; a failed read returns none.
+        """
+        settings = self._settings
+        ids = list(dict.fromkeys(entity_ids))
+        if not settings.learning or not ids:
+            return {}
+        now_t = self._wall_clock() if now_t is None else now_t
+        today, hour, offset = self._local_now(now_t)
+        usable = settings.usable_days(today, offset)
+        today_usable = not settings.blocked_days([today], offset)
+        first = min(usable.first, today)
+        weekend = weekday(today) in settings.weekend_days
+        scheduled = frozenset(settings.self_scheduled_entity_ids)
+        near = {(hour - 1) % 24, (hour + 1) % 24}
+        try:
+            rows = await self._hass.async_add_executor_job(
+                partial(
+                    self._activity.level_rows,
+                    [room_id],
+                    # A local day starts within a day of its UTC day.
+                    since_t=max(0, (first - 1) * 86400),
+                    local_hours=[hour, *near],
+                    sources=HUMAN_SOURCES,
+                    entity_ids=ids,
+                )
+            )
+        except (StorageError, sqlite3.Error, ValueError) as err:
+            log = _LOGGER.debug if self._levels_failed else _LOGGER.warning
+            log("Room habits: levels could not be read: %s", err)
+            self._levels_failed = True
+            return {}
+        self._levels_failed = False
+        at_hour: dict[str, dict[str, Any]] = {}
+        nearby: dict[str, dict[str, Any]] = {}
+        for row in rows:  # newest first
+            entity_id = row["entity_id"]
+            day = local_day(row["t"], row["utc_offset_min"])
+            if (
+                not (usable(day) or (day == today and today_usable))
+                or (weekday(day) in settings.weekend_days) != weekend
+                or (row["source"] == SOURCE_WALL_SWITCH and entity_id in scheduled)
+            ):
+                continue
+            local_hour = (row["t"] + row["utc_offset_min"] * 60) // 3600 % 24
+            found = at_hour if local_hour == hour else nearby
+            found.setdefault(entity_id, row["level"])
+        return {
+            entity_id: dict(level)
+            for entity_id in ids
+            if (level := at_hour.get(entity_id) or nearby.get(entity_id))
+        }
 
     # -- admin -----------------------------------------------------------------
 
@@ -324,11 +453,12 @@ class HabitLearner:
                             # leave anything of theirs behind in it.
                             del self._ramadans[key]
                             continue
+                        width = _ROW_WIDTHS.get(doc.get("v"))
                         kept = [
                             row
                             for row in rows
                             if isinstance(row, list)
-                            and len(row) == len(_ROW_FIELDS)
+                            and len(row) == width
                             and row[member] != member_id
                         ]
                         if len(kept) != len(rows):
@@ -599,22 +729,21 @@ def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
     isn't a copy of that Hijri year.
 
     Rows outside the month's dates are dropped, so a later correction of a
-    year in the Umm al-Qura table keeps the copy (minus a day at most).
+    year in the Umm al-Qura table keeps the copy (minus a day at most). A
+    version 1 copy's rows have no off_hours: 0.
     """
-    if (
-        not isinstance(doc, dict)
-        or doc.get("v") != _RAMADAN_VERSION
-        or doc.get("year") != month.year
-    ):
+    if not isinstance(doc, dict) or doc.get("year") != month.year:
         return None
+    width = _ROW_WIDTHS.get(doc.get("v"))
     rows = doc.get("rows")
-    if not isinstance(rows, list):
+    if width is None or not isinstance(rows, list):
         return None
     kept = []
     for row in rows:
-        if not isinstance(row, list) or len(row) != len(_ROW_FIELDS):
+        if not isinstance(row, list) or len(row) != width:
             return None
-        room_id, entity_id, source, member_id, day, on_hours = row
+        room_id, entity_id, source, member_id, day, on_hours, *rest = row
+        off_hours = rest[0] if rest else 0
         if not (
             isinstance(room_id, str)
             and isinstance(entity_id, str)
@@ -622,10 +751,27 @@ def _kept(doc: Any, month: RamadanMonth) -> list[dict[str, Any]] | None:
             and (member_id is None or isinstance(member_id, str))
             and _is_day(day)
             and _is_day(on_hours)
+            and _is_day(off_hours)
         ):
             return None
         if month.first <= day <= month.last:
-            kept.append(dict(zip(_ROW_FIELDS, row, strict=True)))
+            kept.append(
+                dict(
+                    zip(
+                        _ROW_FIELDS,
+                        (
+                            room_id,
+                            entity_id,
+                            source,
+                            member_id,
+                            day,
+                            on_hours,
+                            off_hours,
+                        ),
+                        strict=True,
+                    )
+                )
+            )
     return kept
 
 

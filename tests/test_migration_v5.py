@@ -148,10 +148,9 @@ class MigrationV5Tests(unittest.TestCase):
         storage.close()
         return _dump(self.db_path)
 
-    def test_v5_is_the_latest_step(self):
+    def test_v5_is_the_fifth_step(self):
         self.assertEqual(MIGRATIONS[4].version, 5)
-        self.assertEqual(MIGRATIONS[-1].version, 5)
-        self.assertEqual(LATEST_VERSION, 5)
+        self.assertGreaterEqual(LATEST_VERSION, 5)
 
     def test_schema_columns_and_indexes(self):
         with sqlite3.connect(":memory:") as conn:
@@ -195,7 +194,7 @@ class MigrationV5Tests(unittest.TestCase):
         before = self._lived_in_v4()
 
         storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
-        storage.open()
+        storage.open(MIGRATIONS[:5])
         self.assertEqual(storage.schema_version, 5)
         self.assertEqual(storage.room_activity().count(), 0)
         storage.close()
@@ -209,7 +208,7 @@ class MigrationV5Tests(unittest.TestCase):
         self.assertEqual(after["room_activity_events"], [])
         # Engines read the data back as written.
         reopened = HubStorage(self.db_path, backup_dir=self.backup_dir)
-        reopened.open()
+        reopened.open(MIGRATIONS[:5])
         self.addCleanup(reopened.close)
         for namespace, rows in V4_KV.items():
             self.assertEqual(dict(reopened.table(namespace).items()), rows)
@@ -223,24 +222,19 @@ class MigrationV5Tests(unittest.TestCase):
     def test_reopening_at_v5_is_a_no_op(self):
         self._lived_in_v4()
         storage = HubStorage(self.db_path, backup_dir=self.backup_dir)
-        storage.open()
-        storage.room_activity().append_many(
-            [
-                {
-                    "t": 1761200000,
-                    "utc_offset_min": 180,
-                    "room_id": "kitchen",
-                    "entity_id": "switch.kitchen_relay_left",
-                    "action": "on",
-                    "source": "wall_switch",
-                }
-            ]
+        storage.open(MIGRATIONS[:5])
+        storage._execute_write(
+            "INSERT INTO room_activity_events (t, utc_offset_min, room_id, "
+            "entity_id, action, source) VALUES (1761200000, 180, 'kitchen', "
+            "'switch.kitchen_relay_left', 'on', 'wall_switch')"
         )
         storage.close()
         snapshot = _dump(self.db_path)
         backups = sorted(self.backup_dir.glob("*.db"))
 
-        self.assertEqual(run_migrations(self.db_path, self.backup_dir), 5)
+        self.assertEqual(
+            run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:5]), 5
+        )
         self.assertEqual(_dump(self.db_path), snapshot)
         # No new backup: nothing ran.
         self.assertEqual(sorted(self.backup_dir.glob("*.db")), backups)
@@ -257,7 +251,9 @@ class MigrationV5Tests(unittest.TestCase):
             conn.commit()
             self.assertEqual(get_user_version(conn), 4)
 
-        self.assertEqual(run_migrations(self.db_path, self.backup_dir), 5)
+        self.assertEqual(
+            run_migrations(self.db_path, self.backup_dir, MIGRATIONS[:5]), 5
+        )
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(
                 conn.execute("SELECT COUNT(*) FROM room_activity_events").fetchone(),

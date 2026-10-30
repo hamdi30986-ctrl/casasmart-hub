@@ -7,7 +7,10 @@
 - POST /actions: dismiss or snooze (session.manage) or run (devices.control)
   the occurrence the caller was shown.
 - GET /generated and POST /generated/actions: the same for the generated
-  room scenes.
+  room scenes. ?kinds= picks the kinds the client shows (usually_on_now
+  and usually_off_now only when asked for) and ?habits=household|personal
+  whose habits they follow; an action sends the same query as the read
+  that showed it.
 
 Reading never runs a scene. Errors carry an "error" code and a readable
 "message"; the contracts are in docs/api/CONTEXTUAL_SUGGESTIONS_V1.md and
@@ -25,6 +28,7 @@ from homeassistant.components.http import HomeAssistantView
 from .auth_api import async_member_id, authenticate_request, json_body
 from .const import DOMAIN
 from .energy_runtime import energy_lockout_applies
+from .generated_suggestions import ask_from_query
 from .registry_api import async_execute_registry_scene
 from .room_intel.activity import SOURCE_SCENE
 from .runtime_lookup import command_context, loaded_runtime_data
@@ -225,7 +229,7 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                 return error
             member = await async_member_id(self.hass, claims)
             scope = claims.get("rooms")
-            context = await self.context(service, scope)
+            context = await self.context(service, request, scope, member)
             candidate = self.find(
                 service, context, scope, occurrence, policy_checks=False
             )
@@ -282,10 +286,10 @@ class CasaSmartSuggestionActionView(_SuggestionView):
                     )
                     return error
                 fresh_scope = fresh_claims.get("rooms")
-                fresh = await self.context(service, fresh_scope)
+                member_id = await async_member_id(self.hass, fresh_claims)
+                fresh = await self.context(service, request, fresh_scope, member_id)
                 if self.find(service, fresh, fresh_scope, occurrence) is None:
                     raise SuggestionError("occurrence_expired_or_ineligible", 409)
-                member_id = await async_member_id(self.hass, fresh_claims)
                 suppressed = fresh[0]["suppressions"].get(
                     service.store.suppression_key(
                         member_id, candidate.get("suppression_id", occurrence)
@@ -323,10 +327,11 @@ class CasaSmartSuggestionActionView(_SuggestionView):
 
         return await self.handle(request, "devices.read", operation)
 
-    async def context(self, service, scope):
-        """A fresh evaluation context; generated plans depend on the scope."""
+    async def context(self, service, request, scope, member):
+        """A fresh evaluation context; generated plans depend on the scope
+        and on what the request asks for (ask_from_query), for this member."""
         if self.generated:
-            return await service.context(scope)
+            return await service.context(scope, ask_from_query(request.query), member)
         return await service.context()
 
     @staticmethod
@@ -361,11 +366,22 @@ class CasaSmartSuggestionActionView(_SuggestionView):
 
 
 class CasaSmartGeneratedSuggestionsView(CasaSmartSuggestionsView):
-    """GET /api/casasmart/now/suggestions/generated."""
+    """GET /api/casasmart/now/suggestions/generated[?kinds=...&habits=...]."""
 
     generated = True
     url = f"/api/{DOMAIN}/now/suggestions/generated"
     name = f"api:{DOMAIN}:now:suggestions:generated"
+
+    async def get(self, request):
+        async def operation(service, claims):
+            ask = ask_from_query(request.query)
+            return self.json(
+                await service.payload(
+                    await async_member_id(self.hass, claims), claims.get("rooms"), ask
+                )
+            )
+
+        return await self.handle(request, "devices.read", operation)
 
 
 class CasaSmartGeneratedSuggestionActionView(CasaSmartSuggestionActionView):

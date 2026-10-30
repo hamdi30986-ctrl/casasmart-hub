@@ -338,6 +338,20 @@ class WallSwitchWeightTests(unittest.TestCase):
                 self.assertEqual(habit, half)
                 self.assertIsNone(s.learned({"room_id": "majlis"}))
 
+    def test_a_wall_only_rooms_light_is_usual_on_the_weekend_too(self):
+        # What the usually_on_now suggestion turns on: the majlis light, from
+        # wall presses only, on a Friday and a Saturday.
+        for today in (TODAY + 1, TODAY + 2):
+            with self.subTest(weekday=habits.weekday(today)):
+                self.assertIn(habits.weekday(today), (4, 5))
+                s, habit, _ = self.ask(today)
+                self.assertGreaterEqual(habit, habits.MIN_STRENGTH)
+                self.assertEqual(s.usual_devices("majlis"), ["light.majlis"])
+                # At the old half weight the light was never usual.
+                with mock.patch.dict(habits.SOURCE_WEIGHTS, {"wall_switch": 0.5}):
+                    s, _, _ = self.ask(today)
+                self.assertEqual(s.usual_devices("majlis"), [])
+
     def test_wall_presses_never_reach_a_persons_layer(self):
         days = workdays(25)
         rows = presence(days) + [row(day, [H]) for day in days]
@@ -490,25 +504,131 @@ class LayerTests(unittest.TestCase):
                 )
 
 
+class UsualDeviceTests(unittest.TestCase):
+    """Which of a room's devices usually come on around now (the
+    usually_on_now suggestion's devices)."""
+
+    COUNTED = COUNTED | {"light.majlis_spot", "light.bedroom_lamp",
+                         "light.bedroom_main"}  # fmt: skip
+
+    def setUp(self):
+        self.days = workdays(25)
+        rows = presence(self.days)
+        # At 20:00 the majlis light comes on every evening and its AC on 20
+        # of them (both at the wall); the spot only on 2.
+        rows += [row(day, [H]) for day in self.days]
+        rows += [row(day, [H], entity="climate.majlis") for day in self.days[:20]]
+        rows += [row(day, [H], entity="light.majlis_spot") for day in self.days[:2]]
+        # Member A taps the bedroom lamp on from the app every evening; the
+        # bedroom's main light gets a wall press on the same evenings.
+        for day in self.days:
+            rows.append(row(day, [H], room="bedroom", entity="light.bedroom_lamp",
+                            source="app", member="mem-a"))  # fmt: skip
+            rows.append(row(day, [H], room="bedroom", entity="light.bedroom_main"))
+        self.model = build(rows, counted=self.COUNTED)
+
+    def usual(self, room, **kwargs):
+        return scorer(self.model, ("majlis", "bedroom"), **kwargs).usual_devices(room)
+
+    def test_a_device_is_usual_when_its_own_votes_pass_the_bar(self):
+        # Strongest first; the spot (2 evenings) isn't usual, though the room is.
+        self.assertEqual(self.usual("majlis"), ["light.majlis", "climate.majlis"])
+        s = scorer(self.model, ("majlis",))
+        # The light is on every evening the room is: its strength is the room's.
+        self.assertEqual(
+            s._blend(self.model.household["majlis"].devices["light.majlis"], None),
+            s.score("majlis"),
+        )
+        self.assertLess(
+            s._blend(self.model.household["majlis"].devices["light.majlis_spot"],
+                     None)[0],
+            habits.MIN_STRENGTH,
+        )  # fmt: skip
+        # Not at another hour, nor in a room nothing is usual in.
+        self.assertEqual(self.usual("majlis", hour=H - 3), [])
+        self.assertEqual(self.usual("kitchen"), [])
+
+    def test_a_rooms_votes_are_its_devices_together(self):
+        majlis = self.model.household["majlis"]
+        self.assertEqual(
+            set(majlis.devices),
+            {"light.majlis", "climate.majlis", "light.majlis_spot"},
+        )
+        for day in self.days:
+            masks = [votes.full.get(day, 0) for votes in majlis.devices.values()]
+            self.assertEqual(majlis.full.get(day, 0), masks[0] | masks[1] | masks[2])
+
+    def test_the_household_gets_every_usual_device_a_member_their_own(self):
+        both = ["light.bedroom_lamp", "light.bedroom_main"]
+        self.assertEqual(self.usual("bedroom"), both)
+        # A's own taps are the lamp: the wall-pressed main light drops out
+        # for them (their layer weighs 25/35).
+        mine = scorer(self.model, ("majlis", "bedroom"), member="mem-a")
+        self.assertAlmostEqual(mine.personal_weight, 25 / 35)
+        self.assertEqual(mine.usual_devices("bedroom"), ["light.bedroom_lamp"])
+        # Someone with no app history gets the household's.
+        self.assertEqual(self.usual("bedroom", member="mem-b"), both)
+
+    def test_nothing_is_usual_before_two_weeks_of_observed_days(self):
+        days = workdays(13)
+        model = build(presence(days) + [row(day, [H]) for day in days])
+        s = scorer(model)
+        self.assertFalse(s.ready)
+        self.assertEqual(s.usual_devices("majlis"), [])
+
+
 class StorageShapeTests(unittest.TestCase):
     def test_a_layer_round_trips_through_json(self):
         model = build(
             presence(workdays(20))
             + [row(day, [H, 6]) for day in workdays(20)]
+            + [row(day, [H], entity="climate.majlis") for day in workdays(5)]
             + [row(workdays(2)[1], [H], source="app", member="mem-a")]
+        )
+        self.assertEqual(
+            set(model.household["majlis"].devices), {"light.majlis", "climate.majlis"}
         )
         for layer in (model.household, model.members["mem-a"]):
             doc = json.loads(json.dumps(habits.layer_to_doc(layer)))
             self.assertEqual(habits.layer_from_doc(doc), layer)
+        with mock.patch.dict(habits.SOURCE_WEIGHTS, {"wall_switch": 0.5}):
+            half = build([row(day, [H]) for day in workdays(3)]).household
+        self.assertEqual(
+            habits.layer_from_doc(json.loads(json.dumps(habits.layer_to_doc(half)))),
+            half,
+        )
+
+    def test_the_votes_are_saved_per_device(self):
+        day = workdays(1)[0]
+        doc = habits.layer_to_doc(build([row(day, [H])]).household)
+        self.assertEqual(
+            doc, {"majlis": {"seen": [day], "devices": {"light.majlis": [[day, 1 << H, 0]]},
+                             "offs": {}}}
+        )  # fmt: skip
 
     def test_a_malformed_layer_is_refused(self):
         for bad in (
             [],
             {"majlis": []},
             {"majlis": {"seen": [1]}},
-            {"majlis": {"seen": [-1], "on": []}},
-            {"majlis": {"seen": [], "on": [[1, 2]]}},
-            {"majlis": {"seen": [], "on": [[1, True, 0]]}},
+            # The room-level votes of a version 2 model.
+            {"majlis": {"seen": [1], "on": [[1, 2, 0]]}},
+            {"majlis": {"seen": [-1], "devices": {}, "offs": {}}},
+            {"majlis": {"seen": [], "devices": [], "offs": {}}},
+            {"majlis": {"seen": [], "devices": {"light.a": {}}, "offs": {}}},
+            {"majlis": {"seen": [], "devices": {"light.a": [[1, 2]]}, "offs": {}}},
+            {
+                "majlis": {
+                    "seen": [],
+                    "devices": {"light.a": [[1, True, 0]]},
+                    "offs": {},
+                }
+            },
+            # A version 3 model has no off votes.
+            {"majlis": {"seen": [], "devices": {}}},
+            {"majlis": {"seen": [], "devices": {}, "offs": []}},
+            {"majlis": {"seen": [], "devices": {}, "offs": {"light.a": [[1, 2]]}}},
+            {"majlis": {"seen": [], "devices": {}, "offs": {"light.a": [[1, -2, 0]]}}},
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 habits.layer_from_doc(bad)

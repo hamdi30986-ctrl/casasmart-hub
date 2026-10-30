@@ -10,8 +10,11 @@ Rows are buffered on the event loop and written in one transaction every few
 seconds, as Home Assistant's recorder commits. Nothing is logged until Home
 Assistant has started and settled (10 minutes), so restored states and
 devices catching up don't become events.
-The room ranking reads the latest events back with async_recent_events,
-buffered ones included. The recorder also follows the readings of the power
+Each row carries the level a device was switched on or set to, and a
+person's level change on a device that stays on is a row of its own (rules
+in room_intel.activity); a change that lands before its row is written
+updates it instead. The room ranking reads the latest events back with
+async_recent_events, buffered ones included. The recorder also follows the readings of the power
 meters on the hub's devices (held_meters), so a load that crossed 20 W stays
 running until it drops below 14 W, and which of the hub's lights and fans
 (wall relays the installer typed as a light or fan included) are on, for each
@@ -42,11 +45,18 @@ from ..filtering import area_id_of, is_served
 from ..now_data import LIGHT_RELAY_GANG_TYPES, lighting_kind
 from ..storage import StorageError
 from .activity import (
+    ACTION_LEVEL,
     HUB_SOURCES,
+    LEVEL_ACTIONS,
+    LEVEL_FOLLOW_SECONDS,
+    LEVEL_SOURCES,
     MAX_ROWS,
+    SOURCE_WALL_SWITCH,
     ChatterGuard,
     RecentIds,
     attribute,
+    level_change,
+    level_of,
     prune,
     transition,
 )
@@ -140,7 +150,12 @@ class ActivityRecorder:
         )
         self._service_contexts = RecentIds(_SERVICE_CONTEXT_TTL, _SERVICE_CONTEXT_MAX)
         self._chatter = ChatterGuard()
+        # Level rows have their own cap: a dimmer turned slowly must not use
+        # up its light's on/off events.
+        self._level_chatter = ChatterGuard()
         self._chatter_warned: dict[str, float] = {}
+        # Each device's last on or set: (monotonic time, source, member_id).
+        self._last_use: dict[str, tuple[float, str, str | None]] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -236,13 +251,24 @@ class ActivityRecorder:
         if old_state is None or new_state is None:
             return
         action = transition(entity_id, old_state.state, new_state.state)
+        level = None
         if action is None:
-            return
+            level = level_change(
+                entity_id,
+                old_state.state,
+                old_state.attributes,
+                new_state.state,
+                new_state.attributes,
+            )
+            if level is None:
+                return
+        elif action in LEVEL_ACTIONS:
+            level = level_of(entity_id, new_state.state, new_state.attributes)
         room_id = area_id_of(self._hass, entity_id, self._registry)
         if room_id not in self._rooms or not is_served(self._hass, entity_id):
             return
         now = self._clock()
-        if not self._chatter.allow(entity_id, now):
+        if action is not None and not self._chatter.allow(entity_id, now):
             self._warn_chatter(entity_id, now)
             return
         context = event.context
@@ -258,21 +284,68 @@ class ActivityRecorder:
             is not None,
         )
         t = event.time_fired_timestamp
-        self._buffer.append(
-            {
-                "t": int(t),
-                "utc_offset_min": self._utc_offset_min(t),
-                "room_id": room_id,
-                "entity_id": entity_id,
-                "action": action,
-                "source": source,
-                "member_id": member_id,
-            }
-        )
+        row = {
+            "t": int(t),
+            "utc_offset_min": self._utc_offset_min(t),
+            "room_id": room_id,
+            "entity_id": entity_id,
+            "action": action or ACTION_LEVEL,
+            "source": source,
+            "member_id": member_id,
+            "level": level,
+        }
+        if action is None:
+            if not self._queue_level(row, now):
+                return
+        else:
+            self._buffer.append(row)
+            if action in LEVEL_ACTIONS:
+                self._last_use[entity_id] = (now, source, member_id)
+            else:
+                self._last_use.pop(entity_id, None)
         if len(self._buffer) >= _FLUSH_ROWS:
             self._schedule_flush(0)
         elif self._cancel_flush is None:
             self._schedule_flush(_FLUSH_SECONDS)
+
+    @callback
+    def _queue_level(self, row: dict[str, Any], now: float) -> bool:
+        """Take a level change; True when it is a new row in the buffer.
+
+        A device's own report (a wall switch to attribute()) soon after it
+        was switched on or set is that use's. When the device's newest
+        queued row is of the same use (on, set or level, same source and
+        member), the change becomes its level: nothing new is written. Else
+        a level row, from a person only, within the level cap.
+        """
+        entity_id = row["entity_id"]
+        use = self._last_use.get(entity_id)
+        if (
+            row["source"] == SOURCE_WALL_SWITCH
+            and use is not None
+            and now - use[0] <= LEVEL_FOLLOW_SECONDS
+        ):
+            row["source"], row["member_id"] = use[1], use[2]
+        for queued in reversed(self._buffer):
+            if queued["entity_id"] != entity_id:
+                continue
+            if queued["action"] in LEVEL_ACTIONS and (
+                queued["source"],
+                queued["member_id"],
+            ) == (row["source"], row["member_id"]):
+                queued["level"] = row["level"]
+                if queued["action"] == ACTION_LEVEL:
+                    queued["t"] = row["t"]
+                    queued["utc_offset_min"] = row["utc_offset_min"]
+                return False
+            break
+        if row["source"] not in LEVEL_SOURCES:
+            return False
+        if not self._level_chatter.allow(entity_id, now):
+            self._warn_chatter(entity_id, now)
+            return False
+        self._buffer.append(row)
+        return True
 
     @callback
     def _on_run_started(self, event: Event) -> None:
@@ -414,6 +487,9 @@ class ActivityRecorder:
             self._buffer = [
                 row for row in self._buffer if row["member_id"] != member_id
             ]
+            self._last_use = {
+                eid: use for eid, use in self._last_use.items() if use[2] != member_id
+            }
             self._hub_contexts.discard_values(lambda origin: origin[1] == member_id)
             await self._hass.async_add_executor_job(
                 self._table.delete_member, member_id
@@ -431,6 +507,7 @@ class ActivityRecorder:
         self._stop_listening()
         async with self._flush_lock:
             self._buffer.clear()
+            self._last_use.clear()
             self.last_on.clear()
             self._hub_contexts.discard_values(lambda _origin: True)
 
@@ -472,6 +549,9 @@ class ActivityRecorder:
         }
         self._rooms = frozenset(room["room_id"] for room in rooms)
         self._chatter.forget_except(self._managed)
+        self._level_chatter.forget_except(self._managed)
+        for entity_id in [e for e in self._last_use if e not in self._managed]:
+            del self._last_use[entity_id]
         self._loads.forget_except(self._meters)
         # A deleted room's set goes with it (an imported room's id is an HA
         # area id and could come back).

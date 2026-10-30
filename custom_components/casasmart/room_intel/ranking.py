@@ -21,8 +21,9 @@ then just went dark, then usually on around now (room_intel.habits), then
 the rooms the viewer switched off themselves, then room order. Every room
 says why it is where it is (rank.reason). The Now page and the generated room
 suggestions use this one ranking (docs/api/NOW_ROOM_RANKING_V1.md,
-GENERATED_ROOM_SUGGESTIONS_V1.md); only the Now page passes the room activity
-log, which just_off needs, and the habits.
+GENERATED_ROOM_SUGGESTIONS_V1.md); the room activity log, which just_off
+needs, and the habits are passed by the Now page and by the generated
+suggestions when a client asks for usually_on_now.
 """
 
 from __future__ import annotations
@@ -356,6 +357,7 @@ def rank_rooms(
     activity: RecentActivity | None = None,
     learned: LearnedTier | None = None,
     held_meters: Container[str] = frozenset(),
+    every_off_room: bool = False,
 ) -> list[dict[str, Any]]:
     """Rank the (already scoped) rooms, the ones with something on first.
 
@@ -364,7 +366,9 @@ def rank_rooms(
     the just_off tier needs; without it no room is just_off. learned is the
     habit tier (None: no room is habit_now). held_meters are the meters
     holding a running load (off_rooms.LoadLatch; none: a meter runs from
-    RUNNING_LOAD_MIN_W only). Each ranked
+    RUNNING_LOAD_MIN_W only). every_off_room lists the off rooms that
+    fill no slot after the fillers, in their all-off order, as a home with
+    room policies always does. Each ranked
     room is its registry record plus active_count (what room off switches
     that is on), the eligible_entity_ids (the available devices room off
     switches) and a rank block: active, filler, on_count (active_count plus
@@ -464,9 +468,10 @@ def rank_rooms(
     fillers = fillers[: max(0, NOW_ROOM_SLOTS - len(on_rooms))]
     for room in fillers:
         room["rank"]["filler"] = True
-    if not configured:
+    if not configured and not every_off_room:
         return on_rooms + fillers
-    # Every participating room stays listed, as room commands need them.
+    # Every participating room stays listed, as room commands need them (and
+    # the usually_on_now suggestions, every off room's tier).
     return on_rooms + fillers + [r for r in off_rooms if not r["rank"]["filler"]]
 
 
@@ -481,6 +486,7 @@ async def async_rank_rooms(
     now_t: float | None = None,
     habits: HabitSource | None = None,
     stores: tuple[list[dict[str, Any]], dict[str, Any], list[Any]] | None = None,
+    every_off_room: bool = False,
 ) -> RoomRanking:
     """Rank the caller's rooms; scope is their room ids, None for every room.
 
@@ -493,7 +499,8 @@ async def async_rank_rooms(
     habits are served from memory (read from the log once a day). stores,
     when the caller already read them in its own executor job, are
     (registry.list_rooms(), each room's now_data.room_policy,
-    registry.list_user_devices()), unscoped.
+    registry.list_user_devices()), unscoped. every_off_room lists every
+    off room, not only those that fill a slot (rank_rooms).
     """
 
     def read_stores():
@@ -564,6 +571,7 @@ async def async_rank_rooms(
             activity=recent,
             learned=learned,
             held_meters=activity.held_meters() if activity is not None else (),
+            every_off_room=every_off_room,
         ),
         states_by_room,
         states,

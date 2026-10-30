@@ -242,6 +242,37 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+# The level columns v6 adds, named as Home Assistant's attributes and service
+# data: a light's brightness (1-255) and colour temperature, a fan's speed
+# (percentage), an AC's mode, target temperature and fan mode.
+_V6_LEVEL_COLUMNS = (
+    ("brightness", "INTEGER"),
+    ("color_temp_kelvin", "INTEGER"),
+    ("percentage", "INTEGER"),
+    ("hvac_mode", "TEXT"),
+    ("temperature", "REAL"),
+    ("fan_mode", "TEXT"),
+)
+
+
+def _migration_v6(conn: sqlite3.Connection) -> None:
+    """Levels on room activity events: what a device was switched on or set to.
+
+    One nullable column per level, so a v5 row reads as having none and adding
+    them rewrites no row (SQLite's ADD COLUMN only changes the schema). A
+    column the table already has is skipped, so the step is safe to run on a
+    file that has them.
+    """
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(room_activity_events)")
+    }
+    for name, sql_type in _V6_LEVEL_COLUMNS:
+        if name not in existing:
+            conn.execute(
+                f"ALTER TABLE room_activity_events ADD COLUMN {name} {sql_type}"
+            )
+
+
 #: Every migration, in order. Append new ones; never edit a shipped one.
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial kv table", _migration_v1),
@@ -249,6 +280,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(3, "fold flat gang maps into nested gangs", _migration_v3),
     Migration(4, "append-only energy events table", _migration_v4),
     Migration(5, "append-only room activity events table", _migration_v5),
+    Migration(6, "levels on room activity events", _migration_v6),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
