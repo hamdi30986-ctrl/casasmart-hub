@@ -2,6 +2,17 @@
 
 What changed in each version of CasaSmart Hub.
 
+## [2.3.5] - 2026-10-30
+- Turning a room off now switches off its AC too: off means everything is
+  off. A room with only an AC turns off with the same switch.
+- One tap turns the room back on, and the AC comes back at the mode and
+  temperature it had. That only happens within a day of the hub's own room
+  off; otherwise the AC stays off.
+- Plugs, heaters, curtains and TVs are left alone, as before, and so is any
+  AC set to stay out of room activity.
+- Older apps keep working. Update the apps to see a room with only an AC as
+  on, and to switch it off from its card.
+
 ## [2.3.4] - 2026-10-30
 - Suggestions now follow your habits: turn on a room you usually use at
   this time, or turn off what you usually have off by now.
