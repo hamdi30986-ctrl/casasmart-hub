@@ -88,6 +88,9 @@ def _load_now_api():
     filtering.serialize_device = lambda hass, state: {"entity_id": state.entity_id}
     registry = _module("casasmart.registry")
     registry.RegistryEngine = object
+    # These rooms have no ACs, the only devices that take the scene path.
+    registry_api = _module("casasmart.registry_api")
+    registry_api.async_execute_registry_scene = None
     storage = _module("casasmart.storage")
     storage.StorageError = type("StorageError", (Exception,), {})
 

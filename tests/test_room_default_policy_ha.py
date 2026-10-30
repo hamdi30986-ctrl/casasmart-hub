@@ -98,14 +98,20 @@ class RoomsTakePartByDefault(DefaultPolicyCase):
         self.assertEqual((status, off["ok"]), (200, True))
         self.assertEqual(
             sorted(o["entity_id"] for o in off["outcomes"]),
-            ["fan.majlis", "light.majlis_main", "light.majlis_spot"],
+            [
+                "climate.majlis_ac",
+                "fan.majlis",
+                "light.majlis_main",
+                "light.majlis_spot",
+            ],
         )
-        # The plug, the AC, the curtain, the TV and the lamp left out of
-        # room activity keep running.
-        self.assertEqual(self.states(*MAJLIS_OTHERS), MAJLIS_OTHERS)
+        # The plug, the curtain, the TV and the lamp left out of room
+        # activity keep running. Room off takes the AC.
+        others_after_off = {**MAJLIS_OTHERS, "climate.majlis_ac": "off"}
+        self.assertEqual(self.states(*MAJLIS_OTHERS), others_after_off)
         self.assertEqual(
             (await self.now_rooms())["majlis"],
-            (3, {**last_on(2, 1), "source": "capture"}),
+            (4, {**last_on(2, 1), "source": "capture", "ac_count": 1}),
         )
 
         status, on = await self.turn_on("majlis")
@@ -115,6 +121,7 @@ class RoomsTakePartByDefault(DefaultPolicyCase):
             [
                 ("light", "turn_on", ("light.majlis_main", "light.majlis_spot")),
                 ("fan", "turn_on", ("fan.majlis",)),
+                ("climate", "set_hvac_mode", ("climate.majlis_ac",)),
             ],
         )
         self.assertEqual(self.states(*MAJLIS_OTHERS), MAJLIS_OTHERS)
@@ -169,7 +176,8 @@ class RoomsTakePartByDefault(DefaultPolicyCase):
     async def test_nothing_known_or_nothing_to_turn_on_opens_the_room(self):
         rooms = await self.now_rooms()
         self.assertEqual(rooms["bedroom"], (0, NOTHING_SAVED))
-        # Only an AC and a plug: no ON button, ever.
+        # Only an AC and a plug, and no capture: no ON button, never an AC
+        # at a guess.
         self.assertEqual(rooms["server"], (0, NOTHING_SAVED))
         for room_id in ("bedroom", "server"):
             status, body = await self.turn_on(room_id)
@@ -178,11 +186,15 @@ class RoomsTakePartByDefault(DefaultPolicyCase):
                 (HTTPStatus.CONFLICT, "nothing_to_turn_on", True),
             )
         self.assertEqual(self.calls, [])
+        # Room off takes the AC, never the plug.
         status, off = await self.command("server", "turn_off")
-        self.assertEqual((status, off["outcomes"]), (200, []))
+        self.assertEqual(
+            (status, off["outcomes"]),
+            (200, [{"entity_id": "climate.server_ac", "outcome": "changed"}]),
+        )
         self.assertEqual(
             self.states("climate.server_ac", "switch.server_plug"),
-            {"climate.server_ac": "cool", "switch.server_plug": "on"},
+            {"climate.server_ac": "off", "switch.server_plug": "on"},
         )
 
     async def test_configured_room_count_counts_only_stored_policies(self):

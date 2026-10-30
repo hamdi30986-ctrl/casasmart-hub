@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _MODULE_PATH = (
@@ -22,6 +22,184 @@ class Table(dict):
 
 def make_engine():
     return _NOW.NowDataEngine(Table(), Table(), Table(), Table(), Table())
+
+
+AC_ATTRIBUTES = {
+    "hvac_modes": ["off", "cool", "dry"],
+    "temperature": 22,
+    "min_temp": 16,
+    "max_temp": 30,
+    "supported_features": 9,
+    "fan_mode": "high",
+    "fan_modes": ["low", "high"],
+}
+
+
+def ac_state(state="cool", **attributes):
+    return {
+        "entity_id": "climate.ac",
+        "state": state,
+        "attributes": {**AC_ATTRIBUTES, **attributes},
+    }
+
+
+class AcCaptureTest(unittest.TestCase):
+    def test_room_off_keeps_a_running_acs_mode_and_target(self) -> None:
+        self.assertEqual(
+            _NOW.ac_capture_level(ac_state()),
+            {"hvac_mode": "cool", "temperature": 22},
+        )
+
+    def test_an_ac_with_no_target_keeps_its_mode_alone(self) -> None:
+        for attributes in ({"temperature": None}, {"supported_features": 8}):
+            with self.subTest(attributes=attributes):
+                self.assertEqual(
+                    _NOW.ac_capture_level(ac_state("dry", **attributes)),
+                    {"hvac_mode": "dry"},
+                )
+
+    def test_only_a_running_ac_is_captured(self) -> None:
+        for state in (
+            ac_state("off"),
+            ac_state("unavailable"),
+            ac_state(casasmart_room_activity_exclude=True),
+            ac_state(hvac_modes=["off", "heat"]),
+            {"entity_id": "light.a", "state": "on", "attributes": {}},
+        ):
+            with self.subTest(state=state):
+                self.assertIsNone(_NOW.ac_capture_level(state))
+
+    def test_it_comes_back_by_mode_then_target_and_no_fan_step(self) -> None:
+        level = {"hvac_mode": "cool", "temperature": 22, "fan_mode": "high"}
+        self.assertEqual(
+            _NOW.ac_restore_steps(ac_state("off"), level),
+            [
+                {
+                    "entity_id": "climate.ac",
+                    "action": "set_hvac_mode",
+                    "data": {"hvac_mode": "cool"},
+                },
+                {
+                    "entity_id": "climate.ac",
+                    "action": "set_temperature",
+                    "data": {"temperature": 22},
+                },
+            ],
+        )
+        self.assertEqual(
+            _NOW.ac_restore_steps(ac_state("off"), {"hvac_mode": "dry"}),
+            [
+                {
+                    "entity_id": "climate.ac",
+                    "action": "set_hvac_mode",
+                    "data": {"hvac_mode": "dry"},
+                },
+            ],
+        )
+
+    def test_it_never_comes_back_at_a_guess(self) -> None:
+        for state, level in (
+            (ac_state("off"), {}),
+            (ac_state("off"), {"hvac_mode": "off"}),
+            # A mode or target it no longer takes.
+            (ac_state("off"), {"hvac_mode": "heat", "temperature": 22}),
+            (ac_state("off"), {"hvac_mode": "cool", "temperature": 12}),
+            (ac_state("off"), {"hvac_mode": "cool", "temperature": 31}),
+            (ac_state("off"), {"hvac_mode": "cool", "temperature": "22"}),
+            (
+                ac_state("off", supported_features=8),
+                {"hvac_mode": "cool", "temperature": 22},
+            ),
+            # Left out of room activity since.
+            (
+                ac_state("off", casasmart_room_activity_exclude=True),
+                {"hvac_mode": "cool", "temperature": 22},
+            ),
+        ):
+            with self.subTest(state=state, level=level):
+                self.assertEqual(_NOW.ac_restore_steps(state, level), [])
+
+
+class RestoreAcsTest(unittest.TestCase):
+    ROOM = "room-majlis"
+    COOL = {"hvac_mode": "cool", "temperature": 22}
+    AT = datetime(2026, 8, 24, 8, tzinfo=UTC)
+
+    def extend(self, engine, ids, acs=None, seconds=0):
+        return engine.extend_restore_set(
+            self.ROOM, ids, self.AT + timedelta(seconds=seconds), acs
+        )
+
+    def test_a_capture_with_only_an_ac_is_a_capture(self) -> None:
+        engine = make_engine()
+        self.assertEqual(
+            self.extend(engine, [], {"climate.ac": self.COOL}), ["climate.ac"]
+        )
+        self.assertEqual(engine.restore_set(self.ROOM), [])
+        self.assertEqual(engine.restore_acs(self.ROOM), {"climate.ac": self.COOL})
+        self.assertEqual(engine.restore_capture(self.ROOM)[1], self.AT.isoformat())
+
+    def test_a_second_off_adds_and_keeps_when_it_was_captured(self) -> None:
+        engine = make_engine()
+        self.extend(engine, ["light.a"], {"climate.ac": self.COOL})
+        # Finding nothing on leaves it as it is.
+        self.assertEqual(self.extend(engine, [], seconds=30), ["light.a", "climate.ac"])
+        dry = {"hvac_mode": "dry"}
+        self.assertEqual(
+            self.extend(
+                engine, ["light.b"], {"climate.ac": dry, "climate.b": self.COOL}, 60
+            ),
+            ["light.a", "light.b", "climate.ac", "climate.b"],
+        )
+        self.assertEqual(
+            engine.restore_acs(self.ROOM),
+            {"climate.ac": dry, "climate.b": self.COOL},
+        )
+        self.assertEqual(engine.restore_capture(self.ROOM)[1], self.AT.isoformat())
+
+    def test_a_second_off_finds_an_ac_only_capture_too(self) -> None:
+        engine = make_engine()
+        self.extend(engine, [], {"climate.ac": self.COOL})
+        self.assertEqual(
+            self.extend(engine, ["light.a"], seconds=60), ["light.a", "climate.ac"]
+        )
+        self.assertEqual(engine.restore_capture(self.ROOM)[1], self.AT.isoformat())
+
+    def test_a_later_off_replaces_the_acs_too(self) -> None:
+        engine = make_engine()
+        self.extend(engine, ["light.a"], {"climate.ac": self.COOL})
+        self.assertEqual(self.extend(engine, ["light.b"], seconds=600), ["light.b"])
+        self.assertEqual(engine.restore_acs(self.ROOM), {})
+
+    def test_what_didnt_come_back_stays_captured(self) -> None:
+        engine = make_engine()
+        self.extend(engine, ["light.a"], {"climate.ac": self.COOL, "climate.b": {}})
+        self.assertEqual(
+            engine.keep_in_restore_set(self.ROOM, ["climate.ac"]), ["climate.ac"]
+        )
+        self.assertEqual(engine.restore_set(self.ROOM), [])
+        self.assertEqual(engine.restore_acs(self.ROOM), {"climate.ac": self.COOL})
+        self.assertEqual(engine.restore_capture(self.ROOM)[1], self.AT.isoformat())
+        self.assertEqual(engine.keep_in_restore_set(self.ROOM, []), [])
+        self.assertEqual(engine.restore_acs(self.ROOM), {})
+
+    def test_a_consumed_or_forgotten_capture_takes_its_acs(self) -> None:
+        engine = make_engine()
+        self.extend(engine, [], {"climate.ac": self.COOL})
+        engine.consume_restore_set(self.ROOM)
+        self.assertEqual(engine.restore_acs(self.ROOM), {})
+        self.extend(engine, [], {"climate.ac": self.COOL})
+        engine.forget_room(self.ROOM)
+        self.assertEqual(engine.restore_acs(self.ROOM), {})
+
+    def test_a_capture_from_an_older_hub_has_no_acs(self) -> None:
+        engine = make_engine()
+        engine.save_restore_set(self.ROOM, ["light.a"])
+        self.assertEqual(engine.restore_acs(self.ROOM), {})
+        for record in ("junk", {"acs": "junk"}, {"acs": {"climate.ac": "junk"}}):
+            with self.subTest(record=record):
+                engine._restores[self.ROOM] = record
+                self.assertEqual(engine.restore_acs(self.ROOM), {})
 
 
 class NowDataEngineTest(unittest.TestCase):
@@ -134,9 +312,10 @@ class NowDataEngineTest(unittest.TestCase):
 
     def test_a_room_is_on_by_what_room_off_switches_and_a_running_ac(self) -> None:
         # room_on_kind is what makes a room on: what
-        # room_command_approves (room off switches), and an AC in any room,
-        # which room off never switches. room_light_kind (one tap) is always
-        # one of the devices room off switches, never an untyped relay.
+        # room_command_approves (what a policy decides), and an AC in any
+        # room, which no policy lists. room_light_kind (one tap's lights and
+        # fans) is always one of the devices a policy decides, never an
+        # untyped relay.
         gang_types = {
             "light.main": None,
             "fan.hood": None,
@@ -172,7 +351,7 @@ class NowDataEngineTest(unittest.TestCase):
             ],
             "default": False,
         }
-        # entity id -> ((room_on_kind, room_light_kind, room off switches it)
+        # entity id -> ((room_on_kind, room_light_kind, a policy approves it)
         # with no stored policy, the same under the stored list)
         expected = {
             "light.main": (("light", "light", True), ("light", "light", True)),
@@ -186,7 +365,8 @@ class NowDataEngineTest(unittest.TestCase):
             "switch.fridge": ((None, None, False), (None, None, False)),
             "switch.boiler": ((None, None, False), (None, None, False)),
             "switch.socket": ((None, None, False), (None, None, False)),
-            # An AC: on while it runs, in any room; room off never switches it.
+            # An AC: on while it runs, in any room; no policy decides it
+            # (room off switches it by is_room_ac).
             "climate.ac": (("ac", None, False), ("ac", None, False)),
             "climate.heat_only": ((None, None, False), (None, None, False)),
             # Not imported into the registry.
@@ -207,8 +387,8 @@ class NowDataEngineTest(unittest.TestCase):
                     self.assertIs(
                         _NOW.room_command_approves(item, policy, gang_types), switched
                     )
-                    # Everything room off switches counts; one tap only ever
-                    # turns on some of it.
+                    # Everything a policy approves counts; one tap's lights
+                    # and fans are only ever some of it.
                     self.assertIs(
                         switched,
                         on_kind is not None and on_kind != _NOW.KIND_AC,

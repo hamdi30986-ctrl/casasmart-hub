@@ -2,8 +2,8 @@
 
 A room's on devices (now_data.room_on_kind) are what room
 off switches that is on: its lights, fans and wall relays, typed as a light
-or fan or untyped (that number is active_count), plus every AC that runs,
-which room off leaves alone (ac_on_count). A plug, an outlet, a heater, a
+or fan or untyped (that number is active_count), plus every AC that runs
+(ac_on_count). A plug, an outlet, a heater, a
 cover or a TV never makes a room on. Only devices imported into the registry
 count. A room counts the devices its stored policy approves, or (without
 one, or when it doesn't take part) its lights, fans and wall relays; an AC
@@ -369,9 +369,9 @@ def rank_rooms(
     RUNNING_LOAD_MIN_W only). every_off_room lists the off rooms that
     fill no slot after the fillers, in their all-off order, as a home with
     room policies always does. Each ranked
-    room is its registry record plus active_count (what room off switches
-    that is on), the eligible_entity_ids (the available devices room off
-    switches) and a rank block: active, filler, on_count (active_count plus
+    room is its registry record plus active_count (the devices a policy can
+    hold, which room off switches, that are on), the eligible_entity_ids (the
+    available ones) and a rank block: active, filler, on_count (active_count plus
     ac_on_count), ac_on_count (running ACs), watts, watts_quality, reason
     and params.
     """

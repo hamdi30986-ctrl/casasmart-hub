@@ -35,6 +35,9 @@ ORBIT_CAPABILITIES: Final = (
     # profile (lights and fans only), 409 nothing_to_turn_on + open_room,
     # rank.one_tap on the Now page, /now/rooms/{id}/start-profile.
     "now_room_one_tap_v1",
+    # Room off also switches the room's running ACs, and one tap brings them
+    # back from a fresh capture: an AC-only room has a working room switch.
+    "now_room_off_ac_v1",
     # Generated usually_on_now plans (a room off now but usually on at this
     # hour, with its usual lights and fans) on ?kinds=usually_on_now, on the
     # household's habits with ?habits=household.
@@ -60,6 +63,7 @@ _IMPLEMENTED_CAPABILITIES: Final = frozenset(
         "member_camera_access_v1",
         "now_room_habits_v1",
         "now_room_one_tap_v1",
+        "now_room_off_ac_v1",
         "generated_room_habit_suggestions_v1",
         "generated_room_habit_off_suggestions_v1",
         "generated_room_habits_only_v1",

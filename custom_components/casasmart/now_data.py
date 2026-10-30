@@ -4,18 +4,20 @@ NowDataEngine keeps, each in its own table: each member's recently
 controlled devices (recorded after a command succeeds), each room's activity
 policy (a room without one takes part with its lights and fans), the Now
 configuration, recent room-command answers for idempotent retries, each
-room's restore set (what its last off switched off) and each room's start
-profile (the lights and fans an installer chose for one tap "on" when
-nothing else is known). The functions decide which devices may join
-a room command (room_command_approves: what room off switches), what makes a
-room on (room_on_kind: what room off switches, and a running AC, which room
-off leaves alone) and what one tap may turn back on (room_light_kind: the
-room's lights and fans). Storage methods are synchronous; now_api runs them
-in the executor.
+room's restore set (what its last off switched off, with each AC's mode and
+target) and each room's start profile (the lights and fans an installer chose
+for one tap "on" when nothing else is known). The functions decide which
+devices may join a room command (room_command_approves: the devices a room's
+policy can hold), what makes a room on (room_on_kind: those, and a running
+AC), what room off keeps of an AC and how it comes back (ac_capture_level,
+ac_restore_steps), and what one tap may turn back on without a capture
+(room_light_kind: the room's lights and fans). Storage methods are
+synchronous; now_api runs them in the executor.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from collections.abc import Iterable, Mapping
@@ -52,6 +54,8 @@ KIND_AC = "ac"
 # The HVAC modes an AC runs in: every mode but off (generated_suggestions
 # room_actions' set).
 AC_ON_MODES = frozenset({"cool", "heat", "auto", "heat_cool", "dry", "fan_only"})
+# Home Assistant's ClimateEntityFeature.TARGET_TEMPERATURE.
+_SUPPORT_TARGET_TEMPERATURE = 1
 
 
 class NowDataError(Exception):
@@ -131,6 +135,8 @@ def room_off_kind(state: Any, gang_type: str | None = None) -> str | None:
     a switch Home Assistant calls an outlet, one typed as
     an outlet, plug or heater, an AC, a cover, a TV, nor a device left out of
     room activity. While on, each of these makes its room on (room_on_kind).
+    Room off also switches the room's running ACs, which no policy lists
+    (is_room_ac).
     """
     kind = lighting_kind(state, gang_type)
     if kind is not None:
@@ -149,13 +155,88 @@ def room_off_kind(state: Any, gang_type: str | None = None) -> str | None:
 
 def is_room_ac(state: Any) -> bool:
     """True for an AC: a cooling-capable climate entity not left out of room
-    activity (generated_suggestions.room_actions' test for an AC)."""
+    activity (generated_suggestions.room_actions' test for an AC). Room off
+    switches one off while it runs, in any room that takes part, whatever its
+    policy lists; casasmart_room_activity_exclude is how a device stays out."""
     attributes = _state_attributes(state)
     return (
         _state_value(state, "entity_id", "").startswith("climate.")
         and "cool" in (attributes.get("hvac_modes") or [])
         and attributes.get("casasmart_room_activity_exclude") is not True
     )
+
+
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def ac_capture_level(state: Any) -> dict[str, Any] | None:
+    """What room off keeps of a running AC (is_room_ac), else None.
+
+    Its hvac_mode and, when it has one it takes, its target temperature. Some
+    ACs report no target in dry or fan mode: the mode alone is what they were.
+    """
+    if not is_room_ac(state):
+        return None
+    mode = _state_value(state, "state")
+    if mode not in AC_ON_MODES:
+        return None
+    attributes = _state_attributes(state)
+    target = attributes.get("temperature")
+    if int(
+        attributes.get("supported_features") or 0
+    ) & _SUPPORT_TARGET_TEMPERATURE and _is_number(target):
+        return {"hvac_mode": mode, "temperature": target}
+    return {"hvac_mode": mode}
+
+
+def ac_restore_steps(state: Any, level: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The scene steps that bring an AC back to its captured level: its mode,
+    then its target when it had one.
+
+    Never a fan step: an IR AC takes every climate call as a full-state
+    burst. None when it is no longer an AC of the room's (is_room_ac), or no
+    longer takes that mode or target: an AC never comes on at a guess.
+    """
+    attributes = _state_attributes(state)
+    mode = level.get("hvac_mode")
+    if (
+        not is_room_ac(state)
+        or mode not in AC_ON_MODES
+        or mode not in attributes["hvac_modes"]
+    ):
+        return []
+    entity_id = _state_value(state, "entity_id", "")
+    steps = [
+        {
+            "entity_id": entity_id,
+            "action": "set_hvac_mode",
+            "data": {"hvac_mode": mode},
+        }
+    ]
+    target = level.get("temperature")
+    if target is None:
+        return steps
+    minimum, maximum = attributes.get("min_temp"), attributes.get("max_temp")
+    if not (
+        int(attributes.get("supported_features") or 0) & _SUPPORT_TARGET_TEMPERATURE
+        and _is_number(target)
+        and (not _is_number(minimum) or minimum <= target)
+        and (not _is_number(maximum) or target <= maximum)
+    ):
+        return []
+    steps.append(
+        {
+            "entity_id": entity_id,
+            "action": "set_temperature",
+            "data": {"temperature": target},
+        }
+    )
+    return steps
 
 
 def is_room_activity_candidate(state: Any, gang_type: str | None = None) -> bool:
@@ -200,15 +281,16 @@ def room_command_approves(
 ) -> bool:
     """True when room commands in a room with this policy switch the device.
 
-    The one rule for what room off switches off. A stored policy approves
+    The one rule for the devices a policy decides. A stored policy approves
     the candidates on its list. A room without one (policy default) takes
     part with its default devices: its lights, fans and wall relays (typed
     as a light or fan, or untyped) imported into the registry
     (is_default_room_device). Either way only devices room_off_kind allows,
-    so never a plug, outlet, heater or AC. gang_types are the registry's
-    imported controls with their gang types (ranking.imported_controls). The
-    caller checks the device is in the room and served, and that the room
-    takes part.
+    so never a plug, outlet or heater, and never an AC: no policy lists one,
+    and room off takes the room's running ACs by is_room_ac. gang_types are
+    the registry's imported controls with their gang types
+    (ranking.imported_controls). The caller checks the device is in the room
+    and served, and that the room takes part.
     """
     entity_id = _state_value(state, "entity_id", "")
     if policy.get("default"):
@@ -244,7 +326,7 @@ def room_on_kind(
     "light", "fan" or "switch" for a device room commands switch there
     (room_command_approves, room_off_kind), so room off leaves none of them
     on. KIND_AC for an AC (is_room_ac) in any room, whatever its policy:
-    room off never switches one, but a running AC keeps its room on. Never
+    a running AC keeps its room on until room off switches it too. Never
     a plug, outlet, heater, cover or TV. The one rule for
     the Now page's room cards (room_intel.ranking: active rooms, the
     all-off tiers, the habits). An AC is on in AC_ON_MODES, anything else
@@ -533,7 +615,8 @@ class NowDataEngine:
             self._idempotency[member_id] = {"results": results}
 
     def restore_set(self, room_id: str) -> list[str]:
-        """What the room's last off switched off and on has not yet restored."""
+        """What the room's last off switched off and on has not yet restored,
+        its ACs apart (restore_acs)."""
         return self.restore_capture(room_id)[0]
 
     def restore_capture(self, room_id: str) -> tuple[list[str], str | None]:
@@ -550,6 +633,18 @@ class NowDataEngine:
             else [],
             captured_at if isinstance(captured_at, str) else None,
         )
+
+    def restore_acs(self, room_id: str) -> dict[str, dict[str, Any]]:
+        """The ACs in the room's capture, each with its level (ac_capture_level)."""
+        record = self._restores.get(room_id)
+        acs = record.get("acs") if isinstance(record, dict) else None
+        if not isinstance(acs, dict):
+            return {}
+        return {
+            entity_id: level
+            for entity_id, level in acs.items()
+            if isinstance(entity_id, str) and isinstance(level, dict)
+        }
 
     def save_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> None:
         """Replace the room's restore set; an empty set removes it."""
@@ -568,55 +663,70 @@ class NowDataEngine:
         room_id: str,
         entity_ids: Iterable[str],
         at: datetime | None = None,
+        acs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[str]:
-        """Take what a room off just switched off (at: now) and return the
-        room's restore set.
+        """Take what a room off just switched off (at: now) and return
+        everything in the room's capture: its restore set, then its ACs.
 
-        An off that switched nothing leaves the capture as it is. One within
-        _CAPTURE_EXTEND_SECONDS of the capture adds to it (ids keep their
-        first-captured order, each once) and keeps when it was captured, so
-        a repeated tap never makes an old capture new. A later one is what
-        the room had on last time: it replaces the capture.
+        acs are the ACs it switched off, each with its level
+        (ac_capture_level). An off that switched nothing leaves the capture as
+        it is. One within _CAPTURE_EXTEND_SECONDS of the capture adds to it
+        (ids keep their first-captured order, each once; an AC captured again
+        takes its newer level) and keeps when it was captured, so a repeated
+        tap never makes an old capture new. A later one is what the room had
+        on last time: it replaces the capture.
         """
         ids = list(dict.fromkeys(entity_ids))
+        levels = dict(acs or {})
         at = at or datetime.now(UTC)
         with self._lock:
-            if not ids:
-                return self.restore_set(room_id)
             current, captured_at = self.restore_capture(room_id)
-            if current and _within(captured_at, at, _CAPTURE_EXTEND_SECONDS):
-                self._restores[room_id] = {
-                    "entity_ids": list(dict.fromkeys([*current, *ids])),
-                    "captured_at": captured_at,
-                }
+            current_acs = self.restore_acs(room_id)
+            if not ids and not levels:
+                return [*current, *current_acs]
+            if (current or current_acs) and _within(
+                captured_at, at, _CAPTURE_EXTEND_SECONDS
+            ):
+                ids = list(dict.fromkeys([*current, *ids]))
+                levels = {**current_acs, **levels}
             else:
-                self._restores[room_id] = {
-                    "entity_ids": ids,
-                    "captured_at": _timestamp(at),
-                }
-            return self.restore_set(room_id)
+                captured_at = _timestamp(at)
+            record = {"entity_ids": ids, "captured_at": captured_at}
+            if levels:
+                record["acs"] = levels
+            self._restores[room_id] = record
+            return [*ids, *levels]
 
     def keep_in_restore_set(self, room_id: str, entity_ids: Iterable[str]) -> list[str]:
-        """Keep only these ids in the room's restore set and return what is left.
+        """Keep only these ids in the room's capture (its restore set and its
+        ACs) and return what is left.
 
-        They keep their captured order and the capture its captured_at; an
-        empty result removes the set.
+        They keep their captured order and levels, and the capture its
+        captured_at; an empty result removes the set.
         """
         keep = set(entity_ids)
         with self._lock:
             record = self._restores.get(room_id)
             ids = [item for item in self.restore_set(room_id) if item in keep]
-            if ids:
+            acs = {
+                entity_id: level
+                for entity_id, level in self.restore_acs(room_id).items()
+                if entity_id in keep
+            }
+            if ids or acs:
                 captured_at = (
                     record.get("captured_at") if isinstance(record, dict) else None
                 )
-                self._restores[room_id] = {
+                kept = {
                     "entity_ids": ids,
                     "captured_at": captured_at or _timestamp(),
                 }
+                if acs:
+                    kept["acs"] = acs
+                self._restores[room_id] = kept
             else:
                 self._restores.pop(room_id, None)
-            return ids
+            return [*ids, *acs]
 
     def consume_restore_set(self, room_id: str) -> list[str]:
         """Return the room's restore set and clear it."""

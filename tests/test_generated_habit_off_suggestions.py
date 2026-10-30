@@ -29,7 +29,7 @@ EVERY = {"kinds": "room_off,room_eco,usually_on_now,usually_off_now"}
 HOUSEHOLD = {**EVERY, "habits": "household"}
 COOLING = {**p2.AC, "hvac_modes": ["off", "cool", "heat", "fan_only"]}
 # entity: (room, state, attributes), next to the base and level fixtures' devices: what
-# room off never switches.
+# room off leaves alone.
 PROTECTED = {
     "switch.majlis_heater": ("majlis", "on", {}),
     "switch.kitchen_fridge": ("kitchen", "on", {}),

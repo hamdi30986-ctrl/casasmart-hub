@@ -3,10 +3,11 @@ a real Home Assistant.
 
 Most lights are on a wall switch, and a running AC is a room in use. So a room is
 on by what room off switches (lights, fans, wall relays typed as one and now
-untyped ones too) and by a running AC, which room off leaves alone exactly
-as before (it never switched one). Plugs, outlets, heaters, covers and
-TVs never count and are never switched. One tap "on" is unchanged:
-lights, fans and relays typed as one, never an untyped relay. Same fixture
+untyped ones too) and by a running AC, which room off switches as well
+(test_room_off_ac_ha). Plugs, outlets, heaters, covers and
+TVs never count and are never switched. One tap "on" is unchanged but for an
+AC in the hub's capture: lights, fans and relays typed as one, never an
+untyped relay. Same fixture
 as test_room_on_counts_room_off_ha (real core, recorder, views and stores,
 no stored policy; a Server room with only an AC and a plug). Real-HA
 environment only.
@@ -65,7 +66,7 @@ class RunningAcsCount(AcsAndWallSwitchesCase):
         )
         # Not hidden behind "Everything is off".
         self.assertEqual(mode, "on")
-        # Nothing for one tap to turn on: an AC never comes on.
+        # Nothing for one tap to turn on: an AC never comes on at a guess.
         self.assertEqual(lounge["rank"]["one_tap"], NOTHING_SAVED)
         # Any running mode counts; off doesn't.
         self.press("climate.lounge_ac", "dry")
@@ -86,10 +87,7 @@ class RunningAcsCount(AcsAndWallSwitchesCase):
             self.states("switch.server_plug"), {"switch.server_plug": "on"}
         )
 
-    async def test_room_off_never_switches_an_ac(self):
-        # Room off never switched an AC (room commands only
-        # take lights, fans and switches), and still doesn't; the AC keeps
-        # its room on.
+    async def test_room_off_switches_the_ac_and_leaves_its_room_off(self):
         self.press("climate.majlis_ac", "cool")
         self.press("light.majlis_main", "on")
         rooms, _ = await self.rooms()
@@ -97,31 +95,21 @@ class RunningAcsCount(AcsAndWallSwitchesCase):
         status, off = await self.command("majlis", "turn_off")
         self.assertEqual(
             (status, off["ok"], [o["entity_id"] for o in off["outcomes"]]),
-            (200, True, ["light.majlis_main"]),
+            (200, True, ["light.majlis_main", "climate.majlis_ac"]),
         )
-        self.assertEqual(self.climate_calls(), [])
-        self.assertEqual(
-            self.states("climate.majlis_ac"), {"climate.majlis_ac": "cool"}
-        )
+        self.assertEqual(self.states("climate.majlis_ac"), {"climate.majlis_ac": "off"})
         rooms, _ = await self.rooms()
-        self.assertEqual(self.on(rooms["majlis"]), (0, True, 1, 1))
-        # One tap brings the light back, never touches the AC.
-        status, on = await self.turn_on("majlis")
-        self.assertEqual((status, on["source"]), (200, "capture"))
-        self.assertEqual(self.calls, [("light", "turn_on", ("light.majlis_main",))])
-        # Not even an AC on an admin's list (stored by hand: the API refuses
-        # one) is ever switched.
+        self.assertEqual(self.on(rooms["majlis"]), (0, False, 0, 0))
+        # An AC on an admin's list (stored by hand: the API refuses one) is
+        # switched once, as the room's AC.
+        self.press("climate.majlis_ac", "cool")
         self.now_data.set_room_policy(
             "majlis", True, ["light.majlis_main", "climate.majlis_ac"]
         )
         status, off = await self.command("majlis", "turn_off")
         self.assertEqual(
             (status, [o["entity_id"] for o in off["outcomes"]]),
-            (200, ["light.majlis_main"]),
-        )
-        self.assertEqual(self.climate_calls(), [])
-        self.assertEqual(
-            self.states("climate.majlis_ac"), {"climate.majlis_ac": "cool"}
+            (200, ["climate.majlis_ac"]),
         )
 
 

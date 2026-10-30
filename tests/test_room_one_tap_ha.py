@@ -67,12 +67,15 @@ class OneTapCase(LastOnHubCase):
         self.now_data.set_room_policy("bedroom", True, ["light.bedroom"])
         # Anything the hub might wrongly switch is recorded too.
         for domain, services in (
-            ("climate", ("turn_on", "turn_off", "set_hvac_mode")),
+            ("climate", ("turn_on", "turn_off")),
             ("cover", ("open_cover", "close_cover")),
             ("media_player", ("turn_on", "turn_off")),
         ):
             for service in services:
                 self.hass.services.async_register(domain, service, self._record)
+        # An AC follows its commands, as the room's lights do.
+        for service in ("set_hvac_mode", "set_temperature"):
+            self.hass.services.async_register("climate", service, self._climate)
         self._keys = 0
         _, self.headers = H.session(self.runtime.auth, role="user", member_id="mem-a")
 
@@ -81,6 +84,21 @@ class OneTapCase(LastOnHubCase):
         self.calls.append(
             (call.domain, call.service, tuple([ids] if isinstance(ids, str) else ids))
         )
+
+    async def _climate(self, call):
+        await self._record(call)
+        ids = call.data["entity_id"]
+        for entity_id in [ids] if isinstance(ids, str) else ids:
+            state = self.hass.states.get(entity_id)
+            attributes = dict(state.attributes)
+            if "temperature" in call.data:
+                attributes["temperature"] = call.data["temperature"]
+            self.hass.states.async_set(
+                entity_id,
+                call.data.get("hvac_mode", state.state),
+                attributes,
+                context=call.context,
+            )
 
     async def command(self, room_id, action, *, headers=None):
         """(status, body) of a room command, with a new idempotency key."""
